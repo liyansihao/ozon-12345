@@ -1,0 +1,34 @@
+{
+  "flow_name": "flow_b",
+  "source": {
+    "ozon_store_scroll_required": true,
+    "maozierp_favorites_url": "https://ozon.maozierp.com/#/product/favorite"
+  },
+  "pricing": {
+    "selected_sale_price_rule": "min(ozon_current_sale_price, maozierp_follow_sell_lowest_price)",
+    "profit_rate_threshold_percent": 20,
+    "publish_when_profit_rate_is_strictly_greater_than_threshold": true,
+    "currency": "CNY"
+  },
+  "listing": {
+    "default_store": "JM-001",
+    "default_watermark": "鹿呦呦",
+    "show_all_sku": false,
+    "submit_button_text": "一键上架至OZON"
+  },
+  "logistics": {
+    "provider": "CEL",
+    "required_service_keywords": ["Economy", "陆运"]
+  },
+  "records": {
+    "published_links": "data/flow_b/published_links.csv",
+    "candidate_records": "data/flow_b/candidates.jsonl",
+    "blocked_records": "data/flow_b/blocked.jsonl"
+  },
+  "shared_1688": {
+    "script_env_var": "FLOW_B_1688_SCRIPT",
+    "default_script": "scripts/1688_image_median.py",
+    "reuse_existing_evidence": true,
+    "save_top10_evidence": true
+  }
+}
