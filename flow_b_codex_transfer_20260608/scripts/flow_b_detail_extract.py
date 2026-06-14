@@ -138,6 +138,8 @@ end tell
             results.append({**item, "detail_error": "detail page text unavailable"})
             continue
         detail = extract_detail(payload.get("text", ""), float(item["sell_price"]))
+        if not detail.get("mode") and item.get("mode"):
+            detail["mode"] = item.get("mode")
         results.append({**item, **detail, "detail_url": payload.get("url"), "detail_title": payload.get("title")})
         out_path.write_text(json.dumps(results, ensure_ascii=False, indent=2))
         print(

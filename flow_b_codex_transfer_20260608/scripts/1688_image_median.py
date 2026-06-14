@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search 1688 by image and print the median price of the top 3 by sales.
+"""Search 1688 by image and estimate procurement cost from first-page matches.
 
 This script intentionally uses the same 1688 H5 endpoints that the web image
 search page calls, via the lightweight `search1688api` package. It is meant for
@@ -43,6 +43,12 @@ BAD_ACCESSORY_HINTS = [
     "包装盒",
     "纸盒",
     "贴纸",
+    "配件",
+    "accessory",
+    "sticker",
+    "box",
+    "packaging",
+    "only",
     "自行车灯",
     "车前灯",
     "洗车刷",
@@ -186,6 +192,112 @@ def assess_match(rows: list[dict], expect_title: str, expect_model: str, expect_
     }
 
 
+def p70_index(count: int) -> int:
+    return max(0, min(count - 1, int(count * 0.7 + 0.999) - 1))
+
+
+def scored_similarity_rows(rows: list[dict], expect_title: str, expect_model: str, expect_category: str, match_top: int) -> list[dict]:
+    model_needles = model_tokens(expect_model)
+    title_needles = title_tokens(expect_title)
+    category_needles = category_tokens(expect_category)
+    weak_needles = [token for token in category_needles if token not in title_needles]
+    scored = []
+    for row in rows[:match_top]:
+        title = row.get("title", "")
+        model_hits = count_hits(title, model_needles)
+        title_hits = count_hits(title, title_needles)
+        category_hits = count_hits(title, weak_needles)
+        bad_hits = count_hits(title, BAD_ACCESSORY_HINTS)
+        score = model_hits * 3 + title_hits * 2 + category_hits - bad_hits * 3
+        if bad_hits:
+            level = "bad"
+        elif model_needles and model_hits:
+            level = "strong"
+        elif title_hits >= 1 or score >= 2:
+            level = "strong"
+        elif category_hits or score > 0:
+            level = "weak"
+        else:
+            level = "none"
+        scored.append({**row, "score": score, "level": level, "bad_hits": bad_hits})
+    return scored
+
+
+def first_page_p70_cost(
+    rows: list[dict],
+    *,
+    expect_title: str = "",
+    expect_model: str = "",
+    expect_category: str = "",
+    page_size: int = 10,
+) -> dict:
+    first_page = scored_similarity_rows(rows, expect_title, expect_model, expect_category, page_size)
+    first_page_prices = [row["price"] for row in first_page if row.get("price") is not None]
+    strong_exists = any(row["level"] == "strong" for row in first_page)
+    weak_exists = any(row["level"] == "weak" for row in first_page)
+    allowed_levels = {"strong", "weak"} if strong_exists else ({"weak"} if weak_exists else set())
+
+    raw_prices = sorted(float(row["price"]) for row in first_page if row.get("price") is not None and float(row["price"]) > 0)
+    raw_median = raw_prices[len(raw_prices) // 2] if raw_prices else None
+    filtered_rows = []
+    excluded_rows = []
+    for row in first_page:
+        price = row.get("price")
+        reason = ""
+        if price is None or float(price) <= 0:
+            reason = "missing or invalid price"
+        elif row.get("bad_hits"):
+            reason = "accessory or packaging title"
+        elif allowed_levels and row.get("level") not in allowed_levels:
+            reason = "not a same-product candidate"
+        elif raw_median and len(raw_prices) >= 3 and float(price) < raw_median * 0.25:
+            reason = "extreme low price"
+        elif raw_median and len(raw_prices) >= 5 and float(price) > raw_median * 8:
+            reason = "extreme high price"
+
+        if reason:
+            excluded_rows.append({**row, "exclude_reason": reason})
+        else:
+            filtered_rows.append(row)
+
+    filtered_prices = sorted(float(row["price"]) for row in filtered_rows if row.get("price") is not None)
+    if len(filtered_prices) < 3:
+        return {
+            "decision": "REVIEW",
+            "reason": "filtered first-page 1688 candidates fewer than 3",
+            "p70_cost": None,
+            "selected_offer_id": None,
+            "first_page_prices": first_page_prices,
+            "filtered_first_page_prices": filtered_prices,
+            "filtered_rows": filtered_rows,
+            "excluded_rows": excluded_rows,
+        }
+    if filtered_prices[0] <= 0 or filtered_prices[-1] / filtered_prices[0] > 5:
+        return {
+            "decision": "REVIEW",
+            "reason": f"filtered first-page price spread abnormal {filtered_prices}",
+            "p70_cost": None,
+            "selected_offer_id": None,
+            "first_page_prices": first_page_prices,
+            "filtered_first_page_prices": filtered_prices,
+            "filtered_rows": filtered_rows,
+            "excluded_rows": excluded_rows,
+        }
+
+    p70_cost = filtered_prices[p70_index(len(filtered_prices))]
+    selected = sorted(filtered_rows, key=lambda row: (abs(float(row["price"]) - p70_cost), -row.get("score", 0), row.get("title", "")))[0]
+    return {
+        "decision": "LIGHT_ACCEPT",
+        "reason": "filtered first-page similarity p70 cost",
+        "p70_cost": p70_cost,
+        "selected_offer_id": selected.get("offerId"),
+        "first_page_prices": first_page_prices,
+        "filtered_first_page_prices": filtered_prices,
+        "filtered_rows": filtered_rows,
+        "excluded_rows": excluded_rows,
+    }
+
+
 def load_session():
     try:
         from search1688api import Sync1688Session
@@ -247,7 +359,7 @@ def summarize_products(raw_products: list[dict]) -> list[dict]:
                 "url": data.get("linkUrl"),
             }
         )
-    return sorted(rows, key=lambda row: row["saleQuantity"], reverse=True)
+    return rows
 
 
 def main() -> int:
@@ -272,11 +384,28 @@ def main() -> int:
     rows = summarize_products(raw_products)
     top3 = rows[:3]
     median = statistics.median([row["price"] for row in top3]) if top3 else None
+    p70 = first_page_p70_cost(
+        rows,
+        expect_title=args.expect_title,
+        expect_model=args.expect_model,
+        expect_category=args.expect_category,
+        page_size=args.top,
+    )
 
     payload = {
         "image": str(image_path),
         "upload_image": str(upload_path),
         "note": note,
+        "decision": p70["decision"],
+        "reason": p70["reason"],
+        "selected_cost": p70["p70_cost"],
+        "selected_offer_id": p70["selected_offer_id"],
+        "cost_source": "search_first_page_p70_similarity_filtered",
+        "first_page_prices": p70["first_page_prices"],
+        "filtered_first_page_prices": p70["filtered_first_page_prices"],
+        "p70_cost": p70["p70_cost"],
+        "filtered_rows": p70["filtered_rows"],
+        "excluded_rows": p70["excluded_rows"],
         "valid_count": len(rows),
         "top3_prices": [row["price"] for row in top3],
         "median_cost": median,
@@ -293,12 +422,18 @@ def main() -> int:
     if note:
         print(f"NOTE {note}")
     print(f"VALID_COUNT {payload['valid_count']}")
+    print("DECISION", payload["decision"])
+    print("COST_SOURCE", payload["cost_source"])
+    print("REASON", payload["reason"])
     for index, row in enumerate(payload["top_rows"], 1):
         title = row["title"][:80]
         print(
             f"{index}. sale={row['saleQuantity']} price={row['price']} "
             f"offer={row['offerId']} shop={row.get('shop') or ''} title={title}"
         )
+    print("FIRST_PAGE_PRICES", payload["first_page_prices"])
+    print("FILTERED_FIRST_PAGE_PRICES", payload["filtered_first_page_prices"])
+    print("P70_COST", payload["p70_cost"])
     print("TOP3_PRICES", payload["top3_prices"])
     print("MEDIAN_COST", payload["median_cost"])
     if payload["match"]:
@@ -308,7 +443,7 @@ def main() -> int:
         print("MATCH_TITLE_TOKENS", payload["match"]["title_tokens"])
         print("MATCHED_PRICES", payload["match"]["matched_prices"])
         print("MATCHED_MEDIAN_COST", payload["match"]["matched_median_cost"])
-    return 0 if median is not None else 2
+    return 0 if payload["p70_cost"] is not None else 2
 
 
 if __name__ == "__main__":

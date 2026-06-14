@@ -10,7 +10,7 @@ Flow B is a separate Ozon one-click listing workflow. It must not modify, overwr
 
 - Flow A: the existing Ozon one-click listing workflow that was previously debugged.
 - Flow B: the new Ozon one-click listing workflow to be designed in this workspace.
-- Shared 1688 cost module: reusable scripts or functions for 1688 image search, Top3/Top10 evidence capture, median cost calculation, and cost reliability checks.
+- Shared 1688 cost module: reusable scripts or functions for 1688 image search, first-page/Top10 evidence capture, filtered first-page 70th percentile cost calculation, and cost reliability checks.
 
 ## Isolation Rules
 
@@ -34,7 +34,7 @@ Flow B may reuse the 1688 cost calculation capability:
 
 - Product image search on 1688
 - Saving full Top10 search evidence
-- Top3 high-sales median cost basis
+- Filtered first-page similarity-order 70th percentile cost basis
 - Mixed-family or abnormal-spread reliability checks
 - Image format conversion needed for reliable 1688 search
 

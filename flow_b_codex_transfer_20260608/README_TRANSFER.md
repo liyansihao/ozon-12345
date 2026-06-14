@@ -9,6 +9,7 @@ This pack contains the current Flow B scripts and records needed to continue Ozo
 - Skip food products.
 - Skip human mannequin/body model products.
 - Skip apparel/fashion and digital/3C products.
+- Skip obvious branded/high-risk products, especially premium tool brands, before 1688 cost estimation.
 - Skip FBO and mixed FBO,FBS products. Continue only with pure FBS.
 - Favorites limit is 1000. If Maozi favorites approach 1000, process favorites before more scanning.
 - Clear favorites only after every current favorite has been processed, published, skipped, or blocked.
@@ -24,6 +25,7 @@ Available route keys in `scripts/flow_b_process_batch.py`:
 - `auto`: JM-001 / 鹿呦呦
 - `unknown`: LILI / 粤泓
 - `yh`: LL-百货YH / YH百货
+- `yjm`: YJM / YJM
 
 For a simple fixed sequence, set:
 
@@ -32,6 +34,12 @@ FLOW_B_ROUTE_SEQUENCE=baby:100,yh:100
 ```
 
 Change this per the user's daily instruction.
+
+For YJM-only publishing, set:
+
+```bash
+FLOW_B_ROUTE_SEQUENCE=yjm:100
+```
 
 ## Typical Commands
 
@@ -63,6 +71,8 @@ FLOW_B_PROFIT_THRESHOLD=30 \
 FLOW_B_ROUTE_SEQUENCE=baby:100,yh:100 \
 python3 scripts/flow_b_process_batch.py "$RUN_DIR"
 ```
+
+1688 search-page cost estimates use the image-search similarity order, filter invalid first-page candidates, and use the filtered first-page 70th percentile price.
 
 ## Chrome/Maozi Requirements
 

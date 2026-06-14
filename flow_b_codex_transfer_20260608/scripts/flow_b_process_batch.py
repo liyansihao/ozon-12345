@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import datetime as dt
+import ast
 import json
 import os
 import re
@@ -116,6 +117,12 @@ FOOD_KEYWORDS = [
     "酱", "蜂蜜", "果酱", "婴儿食品", "奶粉", "宠物食品", "猫粮", "狗粮", "宠物零食",
 ]
 
+BRAND_RISK_KEYWORDS = [
+    "knipex", "wera", "wiha", "bosch", "makita", "dewalt", "milwaukee", "stanley",
+    "facom", "bahco", "gedore", "metabo", "hilti", "festool", "dremel",
+    "puma", "sokolov", "lenovo", "pandora", "zippo", "haval", "geely", "exeed",
+]
+
 HUMAN_MODEL_KEYWORDS = [
     "манекен", "манекены", "манекена", "манекенов", "торс", "торсы",
     "муляж тела", "модель тела", "анатомическ", "скелет человека", "части тела",
@@ -175,6 +182,14 @@ FLOW_B_DAILY_ROUTES = {
         "watermark_name": "YH百货",
         "daily_cap": 100,
     },
+    "yjm": {
+        "label": "YJM店铺",
+        "shop_id": 86890,
+        "shop_name": "YJM",
+        "watermark_id": 52054,
+        "watermark_name": "YJM",
+        "daily_cap": 100,
+    },
 }
 
 PROHIBITED_KEYWORDS = [
@@ -231,6 +246,8 @@ def direct_category_skip_reason(item: dict) -> str | None:
         return "direct skip: digital/3C category/title"
     if any(k.lower() in text for k in FOOD_KEYWORDS):
         return "direct skip: food category/title"
+    if any(k.lower() in text for k in BRAND_RISK_KEYWORDS):
+        return "direct skip: branded/high-risk title"
     if any(k.lower() in text for k in PROHIBITED_KEYWORDS):
         return "direct skip: prohibited/risky category/title"
     return None
@@ -310,12 +327,57 @@ window.__flowBBatchFav=null;
             direct_skips.append({**r, "skip_reason": reason})
         else:
             candidates.append(r)
+    if os.environ.get("FLOW_B_INCLUDE_SOURCE_CANDIDATES", "").lower() in {"1", "true", "yes"}:
+        source_candidates = load_source_candidates(
+            batch,
+            existing_skus={str(r.get("sku")) for r in candidates},
+            done_skus=done,
+        )
+        candidates.extend(source_candidates)
     (batch / "favorites_response.json").write_text(json.dumps(res, ensure_ascii=False, indent=2))
     (batch / "favorites.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
     (batch / "candidate_favorites.json").write_text(json.dumps(candidates, ensure_ascii=False, indent=2))
     (batch / "category_direct_skips_before_cost.json").write_text(json.dumps(direct_skips, ensure_ascii=False, indent=2))
     print("favorites", len(rows), "candidates", len(candidates), "direct category skips", len(direct_skips), flush=True)
     return candidates
+
+
+def load_source_candidates(batch: Path, existing_skus: set[str], done_skus: set[str]) -> list[dict]:
+    path = batch / "source_candidates.json"
+    if not path.exists():
+        (batch / "source_candidates_loaded.json").write_text("[]")
+        (batch / "source_candidates_direct_skips.json").write_text("[]")
+        return []
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    loaded, direct_skips = [], []
+    seen = set(existing_skus) | set(done_skus)
+    for row in rows:
+        sku = str(row.get("sku") or "")
+        if not sku or sku in seen:
+            continue
+        if not row.get("cover_image") or not row.get("sell_price"):
+            continue
+        reason = direct_category_skip_reason(row)
+        if reason:
+            direct_skips.append({**row, "skip_reason": reason})
+            seen.add(sku)
+            continue
+        normalized = {
+            **row,
+            "id": row.get("id") if row.get("id") is not None else -int(sku),
+            "uid": row.get("uid") or "source_deep_scan",
+            "sku": int(sku),
+            "rule_name": row.get("rule_name") or "source_deep_scan",
+            "rule_tag": row.get("rule_tag") or "source_deep_scan",
+            "is_imported": int(row.get("is_imported") or 0),
+            "source": row.get("source") or "source_deep_scan",
+        }
+        loaded.append(normalized)
+        seen.add(sku)
+    (batch / "source_candidates_loaded.json").write_text(json.dumps(loaded, ensure_ascii=False, indent=2))
+    (batch / "source_candidates_direct_skips.json").write_text(json.dumps(direct_skips, ensure_ascii=False, indent=2))
+    print("source candidates", len(loaded), "direct skips", len(direct_skips), flush=True)
+    return loaded
 
 
 def run_1688(batch: Path, items: list[dict]) -> None:
@@ -346,7 +408,7 @@ def run_1688(batch: Path, items: list[dict]) -> None:
         proc = run(["python3", "scripts/1688_image_median.py", str(img)], timeout=90)
         text = proc.stdout + ("\nSTDERR:\n" + proc.stderr if proc.stderr else "")
         out.write_text(text)
-        return [sku, "ok" if proc.returncode == 0 and "MEDIAN_COST" in text else "fail", text[-500:]]
+        return [sku, "ok" if proc.returncode == 0 and "P70_COST" in text else "fail", text[-500:]]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
         results = list(ex.map(one, items))
@@ -361,8 +423,12 @@ def parse_costs(batch: Path, candidates: list[dict]) -> list[dict]:
         text = (batch / "1688" / f"{sku}.out").read_text(errors="ignore")
         valid_m = re.search(r"VALID_COUNT\s+(\d+)", text)
         valid = int(valid_m.group(1)) if valid_m else 0
-        cost_m = re.search(r"MEDIAN_COST\s+([0-9.]+)", text)
+        cost_m = re.search(r"P70_COST\s+([0-9.]+)", text) or re.search(r"MEDIAN_COST\s+([0-9.]+)", text)
         cost = float(cost_m.group(1)) if cost_m else None
+        source_m = re.search(r"COST_SOURCE\s+(.+)", text)
+        cost_source = source_m.group(1).strip() if source_m else ("legacy_median" if re.search(r"MEDIAN_COST\s+([0-9.]+)", text) else "")
+        first_page_prices = parse_float_list_from_line(text, "FIRST_PAGE_PRICES")
+        filtered_first_page_prices = parse_float_list_from_line(text, "FILTERED_FIRST_PAGE_PRICES")
         top3_m = re.search(r"TOP3_PRICES\s+\[([^\]]+)\]", text)
         top3: list[float] = []
         if top3_m:
@@ -380,11 +446,17 @@ def parse_costs(batch: Path, candidates: list[dict]) -> list[dict]:
         reason = "ok"
         if cost is None:
             reliable = False; reason = "no 1688 cost"
-        elif valid < 3 or len(top3) < 3:
+        elif cost_source == "search_first_page_p70_similarity_filtered" and len(filtered_first_page_prices) < 3:
+            reliable = False; reason = f"filtered first-page insufficient {len(filtered_first_page_prices)}"
+        elif cost_source == "search_first_page_p70_similarity_filtered" and min(filtered_first_page_prices) <= 0:
+            reliable = False; reason = f"invalid filtered first-page prices {filtered_first_page_prices}"
+        elif cost_source == "search_first_page_p70_similarity_filtered" and max(filtered_first_page_prices) / min(filtered_first_page_prices) > 5:
+            reliable = False; reason = f"filtered first-page price spread abnormal {filtered_first_page_prices}"
+        elif cost_source != "search_first_page_p70_similarity_filtered" and (valid < 3 or len(top3) < 3):
             reliable = False; reason = f"valid_count/top3 insufficient {valid}/{len(top3)}"
-        elif min(top3) <= 0:
+        elif cost_source != "search_first_page_p70_similarity_filtered" and min(top3) <= 0:
             reliable = False; reason = f"invalid top3 prices {top3}"
-        elif max(top3) / min(top3) > 5:
+        elif cost_source != "search_first_page_p70_similarity_filtered" and max(top3) / min(top3) > 5:
             reliable = False; reason = f"top3 price spread abnormal {top3}"
         elif cost >= float(cand.get("sell_price") or 0) * 0.85:
             reliable = False; reason = "1688 cost too close to sale price"
@@ -392,6 +464,9 @@ def parse_costs(batch: Path, candidates: list[dict]) -> list[dict]:
             "sku": sku, "title": cand.get("title"), "sell_price": cand.get("sell_price"), "weight": cand.get("weight"),
             "favorite_id": cand.get("id"), "cover_image": cand.get("cover_image"), "rule_tag": cand.get("rule_tag"),
             "cost": cost, "valid_count": valid, "top3_prices": top3, "top_titles": titles[:5],
+            "first_page_prices": first_page_prices, "filtered_first_page_prices": filtered_first_page_prices,
+            "p70_cost": cost if cost_source == "search_first_page_p70_similarity_filtered" else None,
+            "cost_source": cost_source,
             "reliable": reliable, "reason": reason,
         })
     reliable_items = [x for x in parsed if x["reliable"]]
@@ -401,6 +476,25 @@ def parse_costs(batch: Path, candidates: list[dict]) -> list[dict]:
     (batch / "cost_blocked_items.json").write_text(json.dumps(blocked, ensure_ascii=False, indent=2))
     print("cost reliable", len(reliable_items), "blocked", len(blocked), flush=True)
     return reliable_items
+
+
+def parse_float_list_from_line(text: str, label: str) -> list[float]:
+    match = re.search(rf"{re.escape(label)}\s+(\[[^\]]*\])", text)
+    if not match:
+        return []
+    try:
+        value = ast.literal_eval(match.group(1))
+    except (SyntaxError, ValueError):
+        return []
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        try:
+            result.append(float(item))
+        except (TypeError, ValueError):
+            pass
+    return result
 
 
 def detail_extract(batch: Path, items: list[dict]) -> list[dict]:
@@ -438,13 +532,20 @@ def detail_extract(batch: Path, items: list[dict]) -> list[dict]:
             category_skips.append({"sku": x.get("sku"), "title": x.get("title"), "mode": x.get("mode"), "reason": reason})
         else:
             category_ok.append(x)
-    pure = [x for x in category_ok if x.get("mode") == "FBS"]
-    skips = [{"sku": x.get("sku"), "title": x.get("title"), "mode": x.get("mode"), "reason": "non-pure-FBS-or-unknown-mode"} for x in category_ok if x.get("mode") != "FBS"]
+    pure = [x for x in category_ok if is_allowed_fbs_mode(x.get("mode"))]
+    skips = [{"sku": x.get("sku"), "title": x.get("title"), "mode": x.get("mode"), "reason": "non-FBS-or-unknown-mode"} for x in category_ok if not is_allowed_fbs_mode(x.get("mode"))]
     (batch / "calc_input_items.json").write_text(json.dumps(pure, ensure_ascii=False, indent=2))
     (batch / "detail_mode_skips.json").write_text(json.dumps(skips, ensure_ascii=False, indent=2))
     (batch / "category_direct_skips_after_detail.json").write_text(json.dumps(category_skips, ensure_ascii=False, indent=2))
     print("pure FBS", len(pure), "mode skips", len(skips), "direct category skips", len(category_skips), flush=True)
     return pure
+
+
+def is_allowed_fbs_mode(mode: str | None) -> bool:
+    if not mode:
+        return False
+    parts = {part.strip().upper() for part in str(mode).split(",") if part.strip()}
+    return "FBS" in parts
 
 
 def calc_profit(batch: Path, items: list[dict]) -> list[dict]:
@@ -607,6 +708,7 @@ window.__flowBBatchPublish=null;
 
 
 def publish(batch: Path, items: list[dict]) -> list[str]:
+    items = filter_unpublished_items(items, published_skus())
     routed: dict[str, list[dict]] = {key: [] for key in FLOW_B_DAILY_ROUTES}
     forced_route = os.environ.get("FLOW_B_FORCE_ROUTE")
     if forced_route and forced_route not in FLOW_B_DAILY_ROUTES:
@@ -681,6 +783,10 @@ def publish(batch: Path, items: list[dict]) -> list[str]:
         route_dir = batch / f"publish_{key}_{route['shop_id']}"
         published.extend(publish_one_route(route_dir, group, key, route))
     return published
+
+
+def filter_unpublished_items(items: list[dict], done_skus: set[str]) -> list[dict]:
+    return [item for item in items if str(item.get("sku") or "") not in done_skus]
 
 
 def main() -> int:

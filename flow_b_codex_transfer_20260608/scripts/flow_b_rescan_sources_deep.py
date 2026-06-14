@@ -11,6 +11,51 @@ import time
 from pathlib import Path
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def auto_favorite_config_from_env() -> dict:
+    return {
+        "enabled": env_bool("FLOW_B_MAOZI_AUTOFAVORITE", True),
+        "initial_wait": float(os.environ.get("FLOW_B_MAOZI_INITIAL_WAIT", "25")),
+        "after_scan_wait": float(os.environ.get("FLOW_B_MAOZI_AFTER_SCAN_WAIT", "15")),
+    }
+
+
+def make_record(
+    url: str,
+    final_url: str,
+    title: str,
+    blocked: bool,
+    stop_reason: str,
+    start: float,
+    collected: dict[str, str],
+    favorite_before: int | None = None,
+    favorite_after: int | None = None,
+    seconds_override: float | None = None,
+) -> dict:
+    delta = None
+    if favorite_before is not None and favorite_after is not None:
+        delta = favorite_after - favorite_before
+    return {
+        "source_url": url,
+        "final_url": final_url,
+        "title": title,
+        "blocked": blocked,
+        "stop_reason": stop_reason,
+        "seconds": round(seconds_override if seconds_override is not None else time.time() - start, 1),
+        "favorite_count_before": favorite_before,
+        "favorite_count_after": favorite_after,
+        "favorite_count_delta": delta,
+        "cumulative_product_link_count": len(collected),
+        "links": [{"href": href, "text": text} for href, text in sorted(collected.items())],
+    }
+
+
 def run_js(js: str) -> str:
     script = """
 on run argv
@@ -36,6 +81,64 @@ end run
     raise RuntimeError(last_error)
 
 
+def run_maozi_js(js: str) -> str:
+    script = """
+on run argv
+  set js_code to item 1 of argv
+  with timeout of 120 seconds
+    tell application "Google Chrome"
+      if (count of windows) = 0 then make new window
+      tell front window
+        set oldActiveTabIndex to active tab index
+        repeat with i from 1 to count of tabs
+          if URL of tab i contains "ozon.maozierp.com" then
+            tell tab i to set js_result to execute javascript js_code
+            set active tab index to oldActiveTabIndex
+            return js_result
+          end if
+        end repeat
+        set newTab to make new tab with properties {URL:"https://ozon.maozierp.com/#/product/favorite"}
+        set active tab index to (count of tabs)
+        delay 4
+        tell active tab to set js_result to execute javascript js_code
+        set active tab index to oldActiveTabIndex
+        return js_result
+      end tell
+    end tell
+  end timeout
+end run
+"""
+    proc = subprocess.run(["osascript", "-", js], input=script, text=True, capture_output=True, timeout=150)
+    if proc.returncode:
+        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
+    return proc.stdout.strip()
+
+
+def favorite_count_js() -> str:
+    return """
+JSON.stringify((() => {
+  const token = JSON.parse(localStorage.getItem('maozierp-core-access') || '{}').accessToken;
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', 'https://api.maozierp.com/api.product.favorite/lists?page=1&page_size=1', false);
+  xhr.setRequestHeader('Accept-Language', 'zh-CN');
+  xhr.setRequestHeader('Client', 'pc');
+  if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+  xhr.send(null);
+  const res = JSON.parse(xhr.responseText || '{}');
+  return {total: Number(res && res.data && res.data.total || 0)};
+})())
+"""
+
+
+def fetch_favorite_count() -> int | None:
+    try:
+        raw = run_maozi_js(favorite_count_js())
+        return int(json.loads(raw).get("total") or 0)
+    except Exception as exc:
+        print(f"  favorite count unavailable: {exc}", flush=True)
+        return None
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: flow_b_rescan_sources_deep.py URLS_TXT OUT_JSON", file=sys.stderr)
@@ -46,7 +149,8 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     max_steps = int(os.environ.get("FLOW_B_MAX_SCROLL_STEPS", "140"))
     scroll_ratio = float(os.environ.get("FLOW_B_SCROLL_RATIO", "0.85"))
-    scroll_delay = float(os.environ.get("FLOW_B_SCROLL_DELAY", "1.0"))
+    scroll_delay = float(os.environ.get("FLOW_B_SCROLL_DELAY", "2.5"))
+    auto_fav = auto_favorite_config_from_env()
     ordered: list[str] = []
     seen: set[str] = set()
     for url in urls:
@@ -56,25 +160,16 @@ def main() -> int:
 
     records = []
 
-    def make_record(url: str, final_url: str, title: str, blocked: bool, stop_reason: str, start: float, collected: dict[str, str]) -> dict:
-        return {
-            "source_url": url,
-            "final_url": final_url,
-            "title": title,
-            "blocked": blocked,
-            "stop_reason": stop_reason,
-            "seconds": round(time.time() - start, 1),
-            "cumulative_product_link_count": len(collected),
-            "links": [{"href": href, "text": text} for href, text in sorted(collected.items())],
-        }
-
     def save_checkpoint(record: dict) -> None:
         tmp = records + [record]
         out_path.write_text(json.dumps(tmp, ensure_ascii=False, indent=2))
     for idx, url in enumerate(ordered, 1):
         print(f"[{idx}/{len(ordered)}] {url}", flush=True)
+        favorite_before = fetch_favorite_count() if auto_fav["enabled"] else None
         run_js(f"location.href={json.dumps(url)}; 'navigating';")
-        time.sleep(8)
+        initial_wait = auto_fav["initial_wait"] if auto_fav["enabled"] else 8
+        print(f"  waiting_for_maozi_auto_favorite={initial_wait:g}s before scan", flush=True)
+        time.sleep(initial_wait)
         run_js("window.scrollTo(0, 0); 'top';")
         time.sleep(1)
         collected: dict[str, str] = {}
@@ -146,7 +241,7 @@ JSON.stringify((() => {
                 last_y = y
                 if step % 10 == 0:
                     print(f"  step={step} cumulative={len(collected)} y={y} h={height}", flush=True)
-                    save_checkpoint(make_record(url, final_url, title, blocked, "checkpoint", start, collected))
+                    save_checkpoint(make_record(url, final_url, title, blocked, "checkpoint", start, collected, favorite_before=favorite_before))
                 if stable_rounds >= 8:
                     stop_reason = "stable_bottom"
                     break
@@ -165,7 +260,11 @@ JSON.stringify((() => {
         except Exception as exc:
             stop_reason = f"error_checkpoint: {exc}"
             print(f"  scan error after cumulative={len(collected)}: {exc}", flush=True)
-        record = make_record(url, final_url, title, blocked, stop_reason, start, collected)
+        if auto_fav["enabled"]:
+            print(f"  waiting_for_maozi_auto_favorite_after_scan={auto_fav['after_scan_wait']:g}s", flush=True)
+            time.sleep(auto_fav["after_scan_wait"])
+        favorite_after = fetch_favorite_count() if auto_fav["enabled"] else None
+        record = make_record(url, final_url, title, blocked, stop_reason, start, collected, favorite_before=favorite_before, favorite_after=favorite_after)
         records.append(record)
         out_path.write_text(json.dumps(records, ensure_ascii=False, indent=2))
         print(
