@@ -99,6 +99,40 @@ def wait_for_page(seconds: float = 5.0) -> None:
     time.sleep(seconds)
 
 
+def wait_for_product_page(timeout: float = 20.0, min_wait: float = 4.0) -> dict:
+    time.sleep(min_wait)
+    start = time.time()
+    last_state: dict = {}
+    while time.time() - start < timeout:
+        raw = run_js(
+            """
+JSON.stringify((() => {
+  const body = String(document.body && document.body.innerText || '');
+  const sellerLinks = Array.from(document.querySelectorAll('a[href*="/seller/"]')).length;
+  return {
+    url: String(location.href),
+    title: String(document.title || ''),
+    readyState: String(document.readyState || ''),
+    bodyLength: body.length,
+    sellerLinks,
+    shopTextSeen: /Магазин|Перейти|О магазине/i.test(body)
+  };
+})())
+"""
+        )
+        try:
+            last_state = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            last_state = {}
+        ready = last_state.get("readyState") == "complete"
+        has_product_content = int(last_state.get("bodyLength") or 0) > 1200
+        has_seller_signal = int(last_state.get("sellerLinks") or 0) > 0 or bool(last_state.get("shopTextSeen"))
+        if ready and has_product_content and has_seller_signal:
+            return last_state
+        time.sleep(1)
+    return last_state
+
+
 def price_filter_url(highlight_url: str, min_price: float) -> str:
     parsed = urlparse(highlight_url)
     query = f"currency_price={float(min_price):.3f}%3B"
@@ -292,7 +326,7 @@ def collect_seller_sources(products: list[dict], limit: int, min_price: float) -
         result = {"product_url": product_url, "price": product.get("price"), "seller_url": None}
         try:
             run_js(f"location.href={json.dumps(product_url)}; 'navigating';")
-            wait_for_page(6)
+            result["load_state"] = wait_for_product_page()
             seller = extract_seller_from_current_product(min_price=min_price)
             if seller.get("seller_url"):
                 result.update(seller)

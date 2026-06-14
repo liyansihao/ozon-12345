@@ -506,7 +506,8 @@ def detail_extract(batch: Path, items: list[dict]) -> list[dict]:
     in_path = batch / "detail_input.json"
     out_path = batch / "detail_facts.json"
     in_path.write_text(json.dumps(detail_items, ensure_ascii=False, indent=2))
-    proc = run(["python3", "scripts/flow_b_detail_extract.py", str(in_path), str(out_path)], timeout=900)
+    detail_timeout = int(os.environ.get("FLOW_B_DETAIL_EXTRACT_TIMEOUT", "2400"))
+    proc = run(["python3", "scripts/flow_b_detail_extract.py", str(in_path), str(out_path)], timeout=detail_timeout)
     if proc.stdout:
         print(proc.stdout, end="", flush=True)
     if proc.returncode and out_path.exists():
@@ -515,7 +516,7 @@ def detail_extract(batch: Path, items: list[dict]) -> list[dict]:
         rem_path = batch / "detail_input_remaining.json"
         rem_out = batch / "detail_facts_remaining.json"
         rem_path.write_text(json.dumps(remaining, ensure_ascii=False, indent=2))
-        proc2 = run(["python3", "scripts/flow_b_detail_extract.py", str(rem_path), str(rem_out)], timeout=900)
+        proc2 = run(["python3", "scripts/flow_b_detail_extract.py", str(rem_path), str(rem_out)], timeout=detail_timeout)
         if proc2.stdout:
             print(proc2.stdout, end="", flush=True)
         merged = json.loads(out_path.read_text()) + (json.loads(rem_out.read_text()) if rem_out.exists() else [])
