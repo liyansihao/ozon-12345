@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 
 DEFAULT_HIGHLIGHT_URL = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/"
@@ -79,17 +79,24 @@ end run
 """
     last_error = ""
     for attempt in range(3):
-        proc = subprocess.run(
-            ["osascript", "-", js],
-            input=script,
-            text=True,
-            capture_output=True,
-            timeout=timeout + 30,
-        )
+        try:
+            proc = subprocess.run(
+                ["osascript", "-", js],
+                input=script,
+                text=True,
+                capture_output=True,
+                timeout=timeout + 30,
+            )
+        except OSError as exc:
+            last_error = str(exc)
+            if "Resource temporarily unavailable" not in last_error:
+                raise
+            time.sleep(2 + attempt * 3)
+            continue
         if proc.returncode == 0:
             return proc.stdout.strip()
         last_error = proc.stderr.strip() or proc.stdout.strip()
-        if "-1712" not in last_error and "超时" not in last_error:
+        if "-1712" not in last_error and "超时" not in last_error and "temporarily unavailable" not in last_error:
             break
         time.sleep(2 + attempt * 2)
     raise RuntimeError(last_error)
@@ -135,7 +142,9 @@ JSON.stringify((() => {
 
 def price_filter_url(highlight_url: str, min_price: float) -> str:
     parsed = urlparse(highlight_url)
-    query = f"currency_price={float(min_price):.3f}%3B"
+    query_items = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "currency_price"]
+    query_items.append(("currency_price", f"{float(min_price):.3f};"))
+    query = urlencode(query_items)
     return urlunparse((parsed.scheme or "https", parsed.netloc or "www.ozon.ru", parsed.path, "", query, ""))
 
 

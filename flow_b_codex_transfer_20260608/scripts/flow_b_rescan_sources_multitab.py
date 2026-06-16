@@ -14,10 +14,23 @@ from flow_b_rescan_sources_deep import fetch_favorite_count
 
 
 def run_applescript(script: str, *args: str, timeout: int = 180) -> str:
-    proc = subprocess.run(["osascript", "-", *args], input=script, text=True, capture_output=True, timeout=timeout)
-    if proc.returncode:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip())
-    return proc.stdout.strip()
+    last_error = ""
+    for attempt in range(3):
+        try:
+            proc = subprocess.run(["osascript", "-", *args], input=script, text=True, capture_output=True, timeout=timeout)
+        except OSError as exc:
+            last_error = str(exc)
+            if "Resource temporarily unavailable" not in last_error:
+                raise
+            time.sleep(2 + attempt * 3)
+            continue
+        if not proc.returncode:
+            return proc.stdout.strip()
+        last_error = proc.stderr.strip() or proc.stdout.strip()
+        if "-1712" not in last_error and "超时" not in last_error and "temporarily unavailable" not in last_error:
+            break
+        time.sleep(2 + attempt * 3)
+    raise RuntimeError(last_error)
 
 
 def chrome_js_on_tab(tab_index: int, js: str) -> str:
@@ -35,7 +48,7 @@ on run argv
   end timeout
 end run
 """
-    return run_applescript(script, str(tab_index), js, timeout=150)
+    return run_applescript(script, str(tab_index), js, timeout=240)
 
 
 def open_tabs(urls: list[str]) -> list[int]:
@@ -67,9 +80,10 @@ def wait_tab_loaded(tab_index: int, min_wait: float, timeout: float = 18.0) -> d
     start = time.time()
     last_state: dict = {}
     while time.time() - start < timeout:
-        raw = chrome_js_on_tab(
-            tab_index,
-            """
+        try:
+            raw = chrome_js_on_tab(
+                tab_index,
+                """
 JSON.stringify((() => {
   const anchors = Array.from(document.querySelectorAll('a[href*="/product/"]'));
   const body = String(document.body && document.body.innerText || '');
@@ -82,7 +96,11 @@ JSON.stringify((() => {
   };
 })())
 """,
-        )
+            )
+        except RuntimeError as exc:
+            last_state = {"load_error": str(exc)}
+            time.sleep(1)
+            continue
         try:
             last_state = json.loads(raw) if raw else {}
         except json.JSONDecodeError:
@@ -106,9 +124,10 @@ def scan_tab(tab_index: int, steps: int, scroll_ratio: float, delay: float) -> d
         raw = ""
         state = None
         for attempt in range(3):
-            raw = chrome_js_on_tab(
-                tab_index,
-                f"""
+            try:
+                raw = chrome_js_on_tab(
+                    tab_index,
+                    f"""
 JSON.stringify((() => {{
   const anchors = Array.from(document.querySelectorAll('a[href*="/product/"]'));
   const links = anchors.map(a => ({{
@@ -129,7 +148,9 @@ JSON.stringify((() => {{
   return state;
 }})())
 """,
-            )
+                )
+            except RuntimeError:
+                raw = ""
             if raw:
                 try:
                     state = json.loads(raw)
@@ -183,12 +204,15 @@ def main() -> int:
     urls = [u.strip() for u in Path(sys.argv[1]).read_text().splitlines() if u.strip()]
     out_path = Path(sys.argv[2])
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    workers = max(1, int(os.environ.get("FLOW_B_TAB_WORKERS", "3")))
-    steps = int(os.environ.get("FLOW_B_MAX_SCROLL_STEPS", "18"))
-    scroll_ratio = float(os.environ.get("FLOW_B_SCROLL_RATIO", "0.95"))
-    delay = float(os.environ.get("FLOW_B_SCROLL_DELAY", "0.25"))
-    tab_load_wait = float(os.environ.get("FLOW_B_TAB_LOAD_WAIT", "3"))
-    after_wait = float(os.environ.get("FLOW_B_MAOZI_AFTER_SCAN_WAIT", "6"))
+    workers = max(1, int(os.environ.get("FLOW_B_TAB_WORKERS", "4")))
+    steps = int(os.environ.get("FLOW_B_MAX_SCROLL_STEPS", "24"))
+    scroll_ratio = float(os.environ.get("FLOW_B_SCROLL_RATIO", "0.82"))
+    delay = float(os.environ.get("FLOW_B_SCROLL_DELAY", "0.65"))
+    tab_load_wait = float(os.environ.get("FLOW_B_TAB_LOAD_WAIT", "4.5"))
+    after_wait = float(os.environ.get("FLOW_B_MAOZI_AFTER_SCAN_WAIT", "10"))
+    low_delta_threshold = int(os.environ.get("FLOW_B_LOW_DELTA_THRESHOLD", "5"))
+    low_delta_batch_limit = int(os.environ.get("FLOW_B_LOW_DELTA_BATCH_LIMIT", "0"))
+    low_delta_batches = 0
     records = []
     done_urls = set()
     if out_path.exists():
@@ -231,6 +255,17 @@ def main() -> int:
         print(f"  favorite {favorite_before} -> {favorite_after} delta={delta}", flush=True)
         if favorite_after is not None and favorite_after >= int(os.environ.get("FLOW_B_TARGET_FAVORITES", "1000")):
             break
+        if low_delta_batch_limit > 0:
+            if delta is None or delta < low_delta_threshold:
+                low_delta_batches += 1
+            else:
+                low_delta_batches = 0
+            if low_delta_batches >= low_delta_batch_limit:
+                print(
+                    f"  stop low-yield batches: {low_delta_batches} batches below {low_delta_threshold}",
+                    flush=True,
+                )
+                break
     return 0
 
 

@@ -13,16 +13,47 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FLOW_B_PROFIT_THRESHOLD = float(os.environ.get("FLOW_B_PROFIT_THRESHOLD", "30"))
+SOURCE_TRACE_FIELDS = [
+    "source_key",
+    "source_segment",
+    "source_category",
+    "source_highlight_url",
+    "source_highlight_category",
+    "source_min_price",
+    "source_seller_url",
+    "source_seller_title",
+    "source_final_url",
+    "source_product_url",
+    "source_product_text",
+    "source_scan_file",
+    "source_trace_count",
+]
+
+HIGHLIGHT_CATEGORY_LABELS = {
+    "13812": "models",
+    "7000": "kids_toys",
+    "15500": "electronics",
+}
 
 
 def run(cmd: list[str], *, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout)
+    last_error = ""
+    for attempt in range(3):
+        try:
+            return subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True, timeout=timeout)
+        except OSError as exc:
+            last_error = str(exc)
+            if "Resource temporarily unavailable" not in last_error:
+                raise
+            time.sleep(2 + attempt * 3)
+    return subprocess.CompletedProcess(cmd, 1, "", last_error)
 
 
 def chrome_js(batch: Path, name: str, js: str) -> str:
@@ -87,6 +118,105 @@ def published_skus() -> set[str]:
             if m:
                 skus.add(m.group(1))
     return skus
+
+
+def product_sku_from_url(url: str | None) -> str | None:
+    text = str(url or "")
+    parsed = urlparse(text)
+    match = re.search(r"/product/(?:[^/?#]*?-)?(\d+)(?:[/?#]|$)", parsed.path)
+    if match:
+        return match.group(1)
+    match = re.search(r"/product/(\d+)(?:[/?#]|$)", parsed.path)
+    return match.group(1) if match else None
+
+
+def source_key_from_scan_dir(path: Path) -> str:
+    name = path.name
+    match = re.match(r"find_\d+_(.+)", name)
+    return match.group(1) if match else name
+
+
+def source_category_from_highlight_url(url: str | None) -> tuple[str, str]:
+    category = ""
+    if url:
+        query = parse_qs(urlparse(str(url)).query)
+        values = query.get("category") or []
+        category = str(values[0]) if values else ""
+    return category, HIGHLIGHT_CATEGORY_LABELS.get(category, category or "unknown")
+
+
+def compact_source_trace(item: dict) -> dict:
+    return {key: item.get(key) for key in SOURCE_TRACE_FIELDS if item.get(key) not in (None, "")}
+
+
+def build_source_trace_index(batch: Path) -> dict[str, dict]:
+    index: dict[str, dict] = {}
+    for scan_path in sorted(batch.glob("**/source_deep_scan*.json")):
+        try:
+            rows = json.loads(scan_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(rows, list):
+            continue
+        config_path = scan_path.parent / "source_config.json"
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            config = {}
+        source_key = source_key_from_scan_dir(scan_path.parent)
+        highlight_url = config.get("highlight_url") or ""
+        highlight_category, source_category = source_category_from_highlight_url(highlight_url)
+        try:
+            scan_file = str(scan_path.relative_to(batch))
+        except ValueError:
+            scan_file = str(scan_path)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            links = row.get("links") or []
+            if not isinstance(links, list):
+                continue
+            base = {
+                "source_key": source_key,
+                "source_segment": source_key,
+                "source_category": source_category,
+                "source_highlight_url": highlight_url,
+                "source_highlight_category": highlight_category,
+                "source_min_price": config.get("min_price"),
+                "source_seller_url": row.get("source_url"),
+                "source_seller_title": row.get("title"),
+                "source_final_url": row.get("final_url"),
+                "source_scan_file": scan_file,
+            }
+            for link in links:
+                if isinstance(link, dict):
+                    href = link.get("href") or link.get("url")
+                    text = link.get("text") or link.get("title")
+                else:
+                    href = str(link)
+                    text = ""
+                sku = product_sku_from_url(href)
+                if not sku:
+                    continue
+                trace = {
+                    **base,
+                    "source_product_url": str(href).split("?")[0],
+                    "source_product_text": text,
+                    "source_trace_count": 1,
+                }
+                if sku in index:
+                    index[sku]["source_trace_count"] = int(index[sku].get("source_trace_count") or 1) + 1
+                else:
+                    index[sku] = compact_source_trace(trace)
+    return index
+
+
+def with_source_trace(row: dict, source_index: dict[str, dict]) -> dict:
+    sku = str(row.get("sku") or "")
+    trace = source_index.get(sku)
+    if trace:
+        return {**row, **trace}
+    return {**row, "source_key": row.get("source_key") or "unknown_source", "source_segment": row.get("source_segment") or "unknown_source"}
 
 
 APPAREL_KEYWORDS = [
@@ -282,10 +412,12 @@ def fetch_favorites(batch: Path) -> list[dict]:
 window.__flowBBatchFav=null;
 (async()=>{
  const token=JSON.parse(localStorage.getItem('maozierp-core-access')||'{}').accessToken;
+ if(!token) throw new Error('maozierp token missing');
  const h={'Accept-Language':'zh-CN','Client':'pc','Authorization':'Bearer '+token};
  const rows=[]; let page=1; let last=1;
  while(page<=30){
   const res=await fetch(`https://api.maozierp.com/api.product.favorite/lists?page=${page}&page_size=50&is_imported=0`,{headers:h}).then(r=>r.json());
+  if(res.code!==1) throw new Error(res.msg || 'favorite list fetch failed');
   const data=res.data || {}; const list=Array.isArray(data.data)?data.data:[];
   last=Number(data.last_page||1); rows.push(...list);
   if(page>=last || !list.length) break; page++;
@@ -320,13 +452,15 @@ window.__flowBBatchFav=null;
         and str(r.get("sku")) not in done
         and int(r.get("is_imported") or 0) == 0
     ]
+    source_index = build_source_trace_index(batch)
     candidates, direct_skips = [], []
     for r in raw_candidates:
-        reason = direct_category_skip_reason(r)
+        traced = with_source_trace(r, source_index)
+        reason = direct_category_skip_reason(traced)
         if reason:
-            direct_skips.append({**r, "skip_reason": reason})
+            direct_skips.append({**traced, "skip_reason": reason})
         else:
-            candidates.append(r)
+            candidates.append(traced)
     if os.environ.get("FLOW_B_INCLUDE_SOURCE_CANDIDATES", "").lower() in {"1", "true", "yes"}:
         source_candidates = load_source_candidates(
             batch,
@@ -338,6 +472,16 @@ window.__flowBBatchFav=null;
     (batch / "favorites.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
     (batch / "candidate_favorites.json").write_text(json.dumps(candidates, ensure_ascii=False, indent=2))
     (batch / "category_direct_skips_before_cost.json").write_text(json.dumps(direct_skips, ensure_ascii=False, indent=2))
+    source_counts: dict[str, int] = {}
+    for row in candidates:
+        key = str(row.get("source_key") or "unknown_source")
+        source_counts[key] = source_counts.get(key, 0) + 1
+    (batch / "source_trace_index_summary.json").write_text(json.dumps({
+        "indexed_skus": len(source_index),
+        "candidate_count": len(candidates),
+        "candidate_source_counts": source_counts,
+        "unknown_source_candidates": source_counts.get("unknown_source", 0),
+    }, ensure_ascii=False, indent=2))
     print("favorites", len(rows), "candidates", len(candidates), "direct category skips", len(direct_skips), flush=True)
     return candidates
 
@@ -372,7 +516,7 @@ def load_source_candidates(batch: Path, existing_skus: set[str], done_skus: set[
             "is_imported": int(row.get("is_imported") or 0),
             "source": row.get("source") or "source_deep_scan",
         }
-        loaded.append(normalized)
+        loaded.append({**normalized, **compact_source_trace(row)})
         seen.add(sku)
     (batch / "source_candidates_loaded.json").write_text(json.dumps(loaded, ensure_ascii=False, indent=2))
     (batch / "source_candidates_direct_skips.json").write_text(json.dumps(direct_skips, ensure_ascii=False, indent=2))
@@ -405,12 +549,23 @@ def run_1688(batch: Path, items: list[dict]) -> None:
         sku = str(item["sku"])
         img = imgdir / f"{sku}.jpg"
         out = outdir / f"{sku}.out"
-        proc = run(["python3", "scripts/1688_image_median.py", str(img)], timeout=90)
-        text = proc.stdout + ("\nSTDERR:\n" + proc.stderr if proc.stderr else "")
+        if out.exists():
+            existing = out.read_text(errors="ignore")
+            if "P70_COST" in existing:
+                return [sku, "ok", existing[-500:]]
+        timeout = int(os.environ.get("FLOW_B_1688_ITEM_TIMEOUT", "90"))
+        try:
+            proc = run(["python3", "scripts/1688_image_median.py", str(img)], timeout=timeout)
+            text = proc.stdout + ("\nSTDERR:\n" + proc.stderr if proc.stderr else "")
+        except subprocess.TimeoutExpired as exc:
+            text = f"TIMEOUT after {timeout}s\nSTDOUT:\n{exc.stdout or ''}\nSTDERR:\n{exc.stderr or ''}"
+            out.write_text(text)
+            return [sku, "fail", text[-500:]]
         out.write_text(text)
         return [sku, "ok" if proc.returncode == 0 and "P70_COST" in text else "fail", text[-500:]]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+    workers = max(1, int(os.environ.get("FLOW_B_1688_WORKERS", "3")))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
         results = list(ex.map(one, items))
     (batch / "1688_results.json").write_text(json.dumps(results, ensure_ascii=False, indent=2))
     print("1688_ok", sum(1 for r in results if r[1] == "ok"), "/", len(results), flush=True)
@@ -461,6 +616,7 @@ def parse_costs(batch: Path, candidates: list[dict]) -> list[dict]:
         elif cost >= float(cand.get("sell_price") or 0) * 0.85:
             reliable = False; reason = "1688 cost too close to sale price"
         parsed.append({
+            **compact_source_trace(cand),
             "sku": sku, "title": cand.get("title"), "sell_price": cand.get("sell_price"), "weight": cand.get("weight"),
             "favorite_id": cand.get("id"), "cover_image": cand.get("cover_image"), "rule_tag": cand.get("rule_tag"),
             "cost": cost, "valid_count": valid, "top3_prices": top3, "top_titles": titles[:5],
@@ -507,23 +663,69 @@ def detail_extract(batch: Path, items: list[dict]) -> list[dict]:
     out_path = batch / "detail_facts.json"
     in_path.write_text(json.dumps(detail_items, ensure_ascii=False, indent=2))
     detail_timeout = int(os.environ.get("FLOW_B_DETAIL_EXTRACT_TIMEOUT", "2400"))
-    proc = run(["python3", "scripts/flow_b_detail_extract.py", str(in_path), str(out_path)], timeout=detail_timeout)
-    if proc.stdout:
-        print(proc.stdout, end="", flush=True)
-    if proc.returncode and out_path.exists():
-        done = {str(x.get("sku")) for x in json.loads(out_path.read_text()) if not x.get("detail_error")}
-        remaining = [x for x in detail_items if str(x["sku"]) not in done]
-        rem_path = batch / "detail_input_remaining.json"
-        rem_out = batch / "detail_facts_remaining.json"
-        rem_path.write_text(json.dumps(remaining, ensure_ascii=False, indent=2))
-        proc2 = run(["python3", "scripts/flow_b_detail_extract.py", str(rem_path), str(rem_out)], timeout=detail_timeout)
-        if proc2.stdout:
-            print(proc2.stdout, end="", flush=True)
-        merged = json.loads(out_path.read_text()) + (json.loads(rem_out.read_text()) if rem_out.exists() else [])
-        by_sku = {str(x["sku"]): x for x in merged}
-        details = list(by_sku.values())
-    else:
-        details = json.loads(out_path.read_text()) if out_path.exists() else []
+    batch_size = max(1, int(os.environ.get("FLOW_B_DETAIL_BATCH_SIZE", "40")))
+    max_rounds = max(1, int(os.environ.get("FLOW_B_DETAIL_RETRY_ROUNDS", "4")))
+    details_by_sku: dict[str, dict] = {}
+    attempts = []
+    remaining = list(detail_items)
+    for round_index in range(1, max_rounds + 1):
+        if not remaining:
+            break
+        round_remaining = []
+        for chunk_index, start in enumerate(range(0, len(remaining), batch_size), 1):
+            chunk = remaining[start:start + batch_size]
+            chunk_in = batch / f"detail_input_round{round_index:02d}_chunk{chunk_index:03d}.json"
+            chunk_out = batch / f"detail_facts_round{round_index:02d}_chunk{chunk_index:03d}.json"
+            chunk_in.write_text(json.dumps(chunk, ensure_ascii=False, indent=2))
+            if chunk_out.exists():
+                chunk_out.unlink()
+            try:
+                proc = run(["python3", "scripts/flow_b_detail_extract.py", str(chunk_in), str(chunk_out)], timeout=detail_timeout)
+                returncode = proc.returncode
+                stdout = proc.stdout
+                stderr = proc.stderr
+            except subprocess.TimeoutExpired as exc:
+                returncode = -1
+                stdout = exc.stdout or ""
+                stderr = exc.stderr or f"detail extract timed out after {detail_timeout}s"
+            if stdout:
+                print(stdout, end="", flush=True)
+            rows = []
+            if chunk_out.exists():
+                try:
+                    loaded = json.loads(chunk_out.read_text())
+                    rows = loaded if isinstance(loaded, list) else []
+                except json.JSONDecodeError:
+                    rows = []
+            done_skus = set()
+            for row in rows:
+                sku = str(row.get("sku") or "")
+                if sku and not row.get("detail_error"):
+                    details_by_sku[sku] = row
+                    done_skus.add(sku)
+            missing = [x for x in chunk if str(x["sku"]) not in done_skus]
+            round_remaining.extend(missing)
+            attempts.append({
+                "round": round_index,
+                "chunk": chunk_index,
+                "input_count": len(chunk),
+                "output_count": len(rows),
+                "done_count": len(done_skus),
+                "missing_count": len(missing),
+                "returncode": returncode,
+                "stderr": (stderr or "")[-1000:],
+            })
+        remaining = round_remaining
+        (batch / "detail_input_remaining.json").write_text(json.dumps(remaining, ensure_ascii=False, indent=2))
+        (batch / "detail_facts_all.json").write_text(json.dumps(list(details_by_sku.values()), ensure_ascii=False, indent=2))
+    (batch / "detail_extract_attempts.json").write_text(json.dumps(attempts, ensure_ascii=False, indent=2))
+    if remaining:
+        raise RuntimeError(
+            f"detail extraction incomplete: {len(details_by_sku)}/{len(detail_items)} done; "
+            f"remaining skus: {[str(x.get('sku')) for x in remaining[:20]]}"
+        )
+    details = [details_by_sku[str(x["sku"])] for x in detail_items]
+    out_path.write_text(json.dumps(details, ensure_ascii=False, indent=2))
     (batch / "detail_facts_all.json").write_text(json.dumps(details, ensure_ascii=False, indent=2))
     category_skips = []
     category_ok = []
@@ -552,7 +754,7 @@ def is_allowed_fbs_mode(mode: str | None) -> bool:
 def calc_profit(batch: Path, items: list[dict]) -> list[dict]:
     mini = []
     for x in items:
-        y = {k: x.get(k) for k in ["sku", "title", "favorite_id", "cover_image", "weight", "rule_tag", "mode", "current_price", "follow_min", "selected_price", "detail_url", "top3_prices", "top_titles"]}
+        y = {k: x.get(k) for k in ["sku", "title", "favorite_id", "cover_image", "weight", "rule_tag", "mode", "current_price", "follow_min", "selected_price", "detail_url", "top3_prices", "top_titles", *SOURCE_TRACE_FIELDS]}
         y["sell_price"] = x.get("selected_price") or x.get("sell_price")
         y["purchase_price"] = x.get("purchase_price") or x.get("cost")
         y["original_sell_price"] = x.get("sell_price")
@@ -620,7 +822,7 @@ def classify(batch: Path, calc_results: list[dict]) -> list[dict]:
         sku = str(r["sku"])
         local = items.get(sku, {})
         pl = (r.get("economy") or {}).get("price_list") or {}
-        merged = {**r, **{k: local.get(k) for k in ["title", "top_titles", "top3_prices", "cover_image", "favorite_id", "rule_tag", "detail_url", "mode"]}, "price_list": pl}
+        merged = {**r, **{k: local.get(k) for k in ["title", "top_titles", "top3_prices", "cover_image", "favorite_id", "rule_tag", "detail_url", "mode", *SOURCE_TRACE_FIELDS]}, "price_list": pl}
         pr = pl.get("profit_rate")
         cf = pl.get("cate_fee") or 0
         cr = pl.get("cate_rate") or 0
@@ -702,7 +904,7 @@ window.__flowBBatchPublish=null;
                     "cost": pl.get("purchase_price"), "logistics": (item.get("economy") or {}).get("title"),
                     "route": route_key, "category_label": route["label"], "shop_id": route["shop_id"],
                     "shop_name": route["shop_name"], "watermark_id": route["watermark_id"],
-                    "watermark_name": route["watermark_name"],
+                    "watermark_name": route["watermark_name"], **compact_source_trace(item),
                 }, ensure_ascii=False) + "\n")
     print("published", route["shop_name"], route["watermark_name"], len(published), published, flush=True)
     return published
@@ -716,9 +918,13 @@ def publish(batch: Path, items: list[dict]) -> list[str]:
         raise RuntimeError(f"unknown FLOW_B_FORCE_ROUTE: {forced_route}")
     route_sequence_raw = [x.strip() for x in os.environ.get("FLOW_B_ROUTE_SEQUENCE", "").split(",") if x.strip()]
     route_sequence: list[tuple[str, int | None]] = []
+    route_cap_overrides: dict[str, int] = {}
     for token in route_sequence_raw:
         key, _, cap_text = token.partition(":")
-        route_sequence.append((key, int(cap_text) if cap_text else None))
+        cap_override = int(cap_text) if cap_text else None
+        route_sequence.append((key, cap_override))
+        if cap_override is not None:
+            route_cap_overrides[key] = cap_override
     if route_sequence:
         unknown_routes = [key for key, _ in route_sequence if key not in FLOW_B_DAILY_ROUTES]
         if unknown_routes:
@@ -751,7 +957,7 @@ def publish(batch: Path, items: list[dict]) -> list[str]:
     deferred: dict[str, list[dict]] = {}
     for key, route in FLOW_B_DAILY_ROUTES.items():
         group = routed.get(key, [])
-        cap = int(route["daily_cap"])
+        cap = int(route_cap_overrides.get(key, route["daily_cap"]))
         publish_now[key] = group[:cap]
         deferred[key] = group[cap:]
 
@@ -762,7 +968,7 @@ def publish(batch: Path, items: list[dict]) -> list[str]:
             "shop_name": route["shop_name"],
             "watermark_id": route["watermark_id"],
             "watermark_name": route["watermark_name"],
-            "daily_cap": route["daily_cap"],
+            "daily_cap": int(route_cap_overrides.get(key, route["daily_cap"])),
             "publish_now": len(publish_now[key]),
             "deferred_next_day": len(deferred[key]),
             "skus_now": [str(x.get("sku")) for x in publish_now[key]],
