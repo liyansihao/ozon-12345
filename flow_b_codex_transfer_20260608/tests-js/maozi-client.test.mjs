@@ -129,7 +129,7 @@ test("client finds published SKUs through the favorites endpoint", async () => {
     "/api.product.favorite/lists": (path, request) => {
       assert.equal(request.query.page, 1);
       assert.equal(request.query.page_size, 10);
-      assert.equal(request.query.is_imported, 0);
+      assert.equal(request.query.is_imported, 1);
       assert.equal(request.query.sku, "123");
       return { status: 200, json: { code: 1, data: { data: [{ sku: 123, title: "done" }], last_page: 1 } } };
     },

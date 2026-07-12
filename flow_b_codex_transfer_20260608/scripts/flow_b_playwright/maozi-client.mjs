@@ -123,7 +123,7 @@ export function createMaoziClient({ transport }) {
     async findPublishedSku(sku) {
       const response = await transport(ENDPOINTS.favorites, {
         method: "GET",
-        query: { page: 1, page_size: 10, is_imported: 0, sku: String(sku) },
+        query: { page: 1, page_size: 10, is_imported: 1, sku: String(sku) },
       });
       const data = requireSuccess(response, "favorites lookup");
       const rows = listRows(data, "favorites lookup");
