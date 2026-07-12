@@ -54,6 +54,16 @@ test("cluster-filtered sources retain the existing spread behavior", () => {
   assert.equal(result.ok, true);
 });
 
+test("malformed bare price tokens invalidate the evidence", () => {
+  const result = parseCostOutput([
+    "P70_COST 12",
+    "COST_SOURCE search_first_page_p70_similarity_filtered",
+    "FILTERED_FIRST_PAGE_PRICES [10, foo, 12, 14]",
+  ].join("\n"), 100);
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /insufficient|invalid/i);
+});
+
 test("estimate reuses parseable cached output without redownloading or rerunning", async () => {
   await withTempDir(async (runDir) => {
     const imagesDir = path.join(runDir, "images");

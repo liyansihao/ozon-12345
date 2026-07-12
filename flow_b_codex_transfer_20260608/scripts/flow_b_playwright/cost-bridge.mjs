@@ -19,7 +19,12 @@ function parsePrices(value) {
     return Array.isArray(parsed) ? parsed.map(Number).filter(Number.isFinite) : [];
   } catch {
     const match = String(value || "").match(/^\[([^\]]*)\]$/);
-    return match ? match[1].split(",").map((part) => Number(part.trim())).filter(Number.isFinite) : [];
+    if (!match) return [];
+    const parts = match[1].split(",").map((part) => part.trim()).filter(Boolean);
+    const numeric = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
+    if (!parts.length || parts.some((part) => !numeric.test(part))) return [];
+    const prices = parts.map(Number);
+    return prices.every(Number.isFinite) ? prices : [];
   }
 }
 
