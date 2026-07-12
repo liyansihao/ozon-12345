@@ -105,4 +105,75 @@ final class CodexSessionLocatorTests: XCTestCase {
 
         XCTAssertNil(snapshot)
     }
+
+    func testQuotaReaderSkipsDisappearingNewestFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let missing = root.appendingPathComponent("disappeared.jsonl")
+        let older = root.appendingPathComponent("older.jsonl")
+        try validSnapshotLine.write(to: older, atomically: true, encoding: .utf8)
+
+        let snapshot = try CodexQuotaReader(locator: RecordingLocator(files: [missing, older])).readLatest()
+
+        XCTAssertEqual(snapshot?.limitID, "codex")
+    }
+
+    func testQuotaReaderSkipsNewestCandidateThatCannotBeOpenedAsAFile() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let unreadable = root.appendingPathComponent("directory.jsonl")
+        let older = root.appendingPathComponent("older.jsonl")
+        try FileManager.default.createDirectory(at: unreadable, withIntermediateDirectories: true)
+        try validSnapshotLine.write(to: older, atomically: true, encoding: .utf8)
+
+        let snapshot = try CodexQuotaReader(locator: RecordingLocator(files: [unreadable, older])).readLatest()
+
+        XCTAssertEqual(snapshot?.limitID, "codex")
+    }
+
+    func testQuotaReaderThrowsWhenEveryCandidateFailsToRead() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let first = root.appendingPathComponent("first.jsonl")
+        let second = root.appendingPathComponent("second.jsonl")
+
+        XCTAssertThrowsError(
+            try CodexQuotaReader(locator: RecordingLocator(files: [first, second])).readLatest()
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("first.jsonl") || error.localizedDescription.contains("second.jsonl"))
+        }
+    }
+
+    func testDateLayoutStopsAfterBoundedRecentDayDirectories() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for day in 1...60 {
+            let directory = root.appendingPathComponent(String(format: "2026/01/%02d", day))
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data().write(to: directory.appendingPathComponent("session.jsonl"))
+        }
+
+        let files = try CodexSessionLocator(root: root).recentSessionFiles(limit: 100)
+
+        XCTAssertEqual(files.first?.deletingLastPathComponent().lastPathComponent, "60")
+        XCTAssertLessThan(files.count, 60)
+    }
+
+    func testDateLayoutFindsNestedNewestFilesAndObeysLimit() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let day = root.appendingPathComponent("2026/07/12")
+        try FileManager.default.createDirectory(at: day.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        let old = day.appendingPathComponent("old.jsonl")
+        let newest = day.appendingPathComponent("nested/newest.jsonl")
+        try Data().write(to: old)
+        try Data().write(to: newest)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: old.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 2)], ofItemAtPath: newest.path)
+
+        let files = try CodexSessionLocator(root: root).recentSessionFiles(limit: 1)
+
+        XCTAssertEqual(files.map(\.lastPathComponent), ["newest.jsonl"])
+    }
 }
