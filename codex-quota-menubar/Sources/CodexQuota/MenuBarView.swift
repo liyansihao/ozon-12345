@@ -71,6 +71,7 @@ private struct UnavailableView: View {
 
 struct MenuBarView: View {
     @ObservedObject var store: QuotaStore
+    @ObservedObject var widgetController: DesktopWidgetController
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -115,6 +116,9 @@ struct MenuBarView: View {
                     Task { await store.refresh() }
                 }
                 .keyboardShortcut("r")
+                Button(widgetController.isVisible ? "隐藏桌面卡片" : "显示桌面卡片") {
+                    widgetController.toggle()
+                }
                 Spacer()
                 Button("退出") {
                     NSApplication.shared.terminate(nil)

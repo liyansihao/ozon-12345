@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 @MainActor
 final class AutomaticRefreshOwner {
@@ -7,22 +8,38 @@ final class AutomaticRefreshOwner {
     }
 }
 
-@main
-struct CodexQuotaApp: App {
-    @StateObject private var store: QuotaStore
-    private let automaticRefreshOwner: AutomaticRefreshOwner
+@MainActor
+final class CodexQuotaAppModel: ObservableObject {
+    let store: QuotaStore
+    let automaticRefreshOwner: AutomaticRefreshOwner
+    let widgetController: DesktopWidgetController
+
+    private var storeChanges: AnyCancellable?
 
     init() {
         let store = QuotaStore()
-        _store = StateObject(wrappedValue: store)
+        self.store = store
         automaticRefreshOwner = AutomaticRefreshOwner(store: store)
+        widgetController = DesktopWidgetController(quotaStore: store)
+        storeChanges = store.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+    }
+}
+
+@main
+struct CodexQuotaApp: App {
+    @StateObject private var model: CodexQuotaAppModel
+
+    init() {
+        _model = StateObject(wrappedValue: CodexQuotaAppModel())
     }
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(store: store)
+            MenuBarView(store: model.store, widgetController: model.widgetController)
         } label: {
-            switch store.state {
+            switch model.store.state {
             case let .available(snapshot, _):
                 Label(
                     "\(Int(snapshot.mostConstrainedRemainingPercent.rounded()))%",
