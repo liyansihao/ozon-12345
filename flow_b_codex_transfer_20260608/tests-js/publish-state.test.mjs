@@ -232,3 +232,32 @@ test("CSV seeding discards an unterminated quoted record", async () => {
     assert.equal(state.hasPublished("incomplete"), false);
   });
 });
+
+test("load reconciles newer published history into the persisted summary", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+    await state.recordPublished({ sku: "first" });
+    assert.deepEqual(state.summary(100), { published: 1, failed: 0, skipped: 0, remaining: 99 });
+
+    const secondEvent = {
+      sku: "second",
+      status: "published",
+      data: { link: canonicalProductUrl("second") },
+      timestamp: new Date().toISOString(),
+    };
+    await fs.appendFile(path.join(dir, "sku_states.jsonl"), `${JSON.stringify(secondEvent)}\n`);
+    await fs.appendFile(path.join(dir, "published.jsonl"), `${JSON.stringify({
+      ...secondEvent,
+      link: canonicalProductUrl("second"),
+    })}\n`);
+    await fs.appendFile(csv, `${canonicalProductUrl("second")}\n`);
+
+    const restored = createPublishState({ runDir: dir, publishedCsv: csv });
+    await restored.load();
+
+    const expected = { published: 2, failed: 0, skipped: 0, remaining: 98 };
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, "summary.json"), "utf8")), expected);
+    assert.deepEqual(restored.summary(100), expected);
+  });
+});

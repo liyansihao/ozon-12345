@@ -266,6 +266,7 @@ export function createPublishState({ runDir, publishedCsv }) {
         states.set(sku, { status: "published", data: { link: canonicalProductUrl(sku), source: "csv" } });
       }
       loaded = true;
+      if (summaryTarget !== undefined) writeSummary(summaryTarget);
       return api;
     })();
     try {
