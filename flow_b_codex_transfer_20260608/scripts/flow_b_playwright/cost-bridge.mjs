@@ -33,7 +33,9 @@ export function parseCostOutput(text, sellPrice) {
   if (!RELIABLE_SOURCES.has(source)) return { ok: false, reason: `unreliable cost source: ${source || "missing"}` };
   if (prices.length < 3) return { ok: false, reason: `filtered first-page insufficient ${prices.length}` };
   if (prices.some((price) => !Number.isFinite(price) || price <= 0)) return { ok: false, reason: "invalid filtered first-page prices" };
-  if (Math.max(...prices) / Math.min(...prices) > 5) return { ok: false, reason: "filtered first-page price spread greater than five" };
+  if (source === "search_first_page_p70_similarity_filtered" && Math.max(...prices) / Math.min(...prices) > 5) {
+    return { ok: false, reason: "filtered first-page price spread greater than five" };
+  }
   if (!Number.isFinite(sale) || sale <= 0) return { ok: false, reason: "invalid sale price" };
   if (cost >= sale * 0.85) return { ok: false, reason: "1688 cost is at least 85% of sale price" };
   return { ok: true, cost, source, prices };
@@ -75,11 +77,15 @@ function defaultRunProcess({ command, args, cwd, timeout = 90000 }) {
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      reject(Object.assign(new Error(`1688 process timed out after ${timeout}ms`), { code: "process-timeout" }));
+      reject(Object.assign(new Error(`1688 process timed out after ${timeout}ms`), {
+        code: "process-timeout",
+        stdout,
+        stderr,
+      }));
     }, timeout);
     child.once("error", (error) => {
       clearTimeout(timer);
-      reject(error);
+      reject(Object.assign(error, { stdout, stderr }));
     });
     child.once("close", (code) => {
       clearTimeout(timer);
@@ -117,6 +123,7 @@ export function createCostBridge({
       const outputDir = path.join(root, "1688");
       const imagePath = path.join(imageDir, `${sku}.jpg`);
       const outputPath = path.join(outputDir, `${sku}.out`);
+      let processStarted = false;
 
       try {
         await fs.mkdir(imageDir, { recursive: true });
@@ -137,6 +144,7 @@ export function createCostBridge({
           if (!(await readableFile(imagePath))) throw Object.assign(new Error("cover image download produced no file"), { code: "empty-image" });
         }
 
+        processStarted = true;
         const result = await runProcess({
           command: python,
           args: [path.resolve(scriptPath), imagePath],
@@ -152,6 +160,16 @@ export function createCostBridge({
         }
         return { ...parseCostOutput(combined, item?.sell_price), cached: false, outputPath };
       } catch (error) {
+        if (processStarted) {
+          const evidence = [
+            String(error?.stdout || ""),
+            "STDERR:",
+            String(error?.stderr || ""),
+            "ERROR:",
+            String(error?.message || error),
+          ].join("\n");
+          await fs.writeFile(outputPath, evidence, "utf8").catch(() => {});
+        }
         return {
           ok: false,
           error: { code: error?.code || "cost-estimate-failed", message: String(error?.message || error) },

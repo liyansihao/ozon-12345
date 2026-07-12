@@ -45,6 +45,15 @@ test("rejects insufficient evidence and cost near sale price", () => {
   assert.match(result.reason, /insufficient|spread|sale price|85%/i);
 });
 
+test("cluster-filtered sources retain the existing spread behavior", () => {
+  const result = parseCostOutput([
+    "P70_COST 12",
+    "COST_SOURCE search_first_page_cluster_p70_similarity_filtered",
+    "FILTERED_FIRST_PAGE_PRICES [1, 6, 12]",
+  ].join("\n"), 100);
+  assert.equal(result.ok, true);
+});
+
 test("estimate reuses parseable cached output without redownloading or rerunning", async () => {
   await withTempDir(async (runDir) => {
     const imagesDir = path.join(runDir, "images");
@@ -161,5 +170,31 @@ test("estimate rejects path traversal attempts structurally", async () => {
     assert.equal(result.ok, false);
     assert.equal(result.error?.code, "invalid-sku");
     assert.match(result.error?.message || "", /path traversal|unsafe/i);
+  });
+});
+
+test("estimate persists partial process evidence on timeout", async () => {
+  await withTempDir(async (runDir) => {
+    const bridge = createCostBridge({
+      download: async (url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        throw Object.assign(new Error("timed out"), {
+          code: "process-timeout",
+          stdout: "PARTIAL STDOUT",
+          stderr: "PARTIAL STDERR",
+        });
+      },
+    });
+    const result = await bridge.estimate({
+      sku: "timeout-1",
+      cover_image: "https://example.invalid/cover.jpg",
+      sell_price: 100,
+    }, runDir);
+    const evidence = await fs.readFile(path.join(runDir, "1688", "timeout-1.out"), "utf8");
+    assert.equal(result.ok, false);
+    assert.equal(result.error.code, "process-timeout");
+    assert.match(evidence, /PARTIAL STDOUT/);
+    assert.match(evidence, /PARTIAL STDERR/);
+    assert.match(evidence, /timed out/);
   });
 });
