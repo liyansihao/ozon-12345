@@ -322,6 +322,13 @@ export function createPublishState({ runDir, publishedCsv }) {
     return sku !== null && publishedSkus.has(sku);
   }
 
+  function statusOf(skuValue) {
+    const sku = normalizeSku(skuValue);
+    if (sku === null) return null;
+    if (publishedSkus.has(sku)) return "published";
+    return states.get(sku)?.status ?? null;
+  }
+
   function summary(target) {
     return writeSummary(target);
   }
@@ -339,6 +346,6 @@ export function createPublishState({ runDir, publishedCsv }) {
     return operation;
   }
 
-  const api = { load, transition, hasPublished, summary, recordPublished };
+  const api = { load, transition, hasPublished, statusOf, summary, recordPublished };
   return api;
 }

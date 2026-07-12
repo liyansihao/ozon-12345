@@ -55,6 +55,18 @@ test("failed state remains retryable", async () => {
   });
 });
 
+test("restored state exposes the latest SKU status for reconciliation", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+    await state.transition("retry-me", "failed", { error: "timeout" });
+    const restored = createPublishState({ runDir: dir, publishedCsv: csv });
+    await restored.load();
+    assert.equal(restored.statusOf("retry-me"), "failed");
+    assert.equal(restored.statusOf("unknown"), null);
+  });
+});
+
 test("CSV history seeds published SKUs from valid links and ignores malformed rows", async () => {
   await withTempDir(async (dir) => {
     const csv = path.join(dir, "published.csv");
