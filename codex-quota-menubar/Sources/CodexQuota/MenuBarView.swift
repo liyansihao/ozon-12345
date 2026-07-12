@@ -123,8 +123,5 @@ struct MenuBarView: View {
         }
         .padding(16)
         .frame(width: 330)
-        .task {
-            store.startAutomaticRefresh()
-        }
     }
 }

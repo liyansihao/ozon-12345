@@ -1,8 +1,22 @@
 import SwiftUI
 
+@MainActor
+final class AutomaticRefreshOwner {
+    init(store: QuotaStore) {
+        store.startAutomaticRefresh()
+    }
+}
+
 @main
 struct CodexQuotaApp: App {
-    @StateObject private var store = QuotaStore()
+    @StateObject private var store: QuotaStore
+    private let automaticRefreshOwner: AutomaticRefreshOwner
+
+    init() {
+        let store = QuotaStore()
+        _store = StateObject(wrappedValue: store)
+        automaticRefreshOwner = AutomaticRefreshOwner(store: store)
+    }
 
     var body: some Scene {
         MenuBarExtra {

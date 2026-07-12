@@ -14,6 +14,32 @@ final class QuotaStoreTests: XCTestCase {
             count += 1
             return count
         }
+
+        var current: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return count
+        }
+    }
+
+    func testLaunchRefreshOwnerStartsImmediatelyAndRemainsIdempotent() async {
+        let firstRead = expectation(description: "automatic refresh starts at launch")
+        let calls = CallCounter()
+        let store = QuotaStore(reader: {
+            _ = calls.next()
+            firstRead.fulfill()
+            return nil
+        }, refreshInterval: 60)
+
+        let firstOwner = AutomaticRefreshOwner(store: store)
+        let secondOwner = AutomaticRefreshOwner(store: store)
+
+        await fulfillment(of: [firstRead], timeout: 1)
+        try? await Task.sleep(for: .milliseconds(50))
+
+        withExtendedLifetime((firstOwner, secondOwner)) {
+            XCTAssertEqual(calls.current, 1)
+        }
     }
 
     private final class OverlappingReader: @unchecked Sendable {
