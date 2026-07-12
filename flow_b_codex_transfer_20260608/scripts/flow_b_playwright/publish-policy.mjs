@@ -21,10 +21,22 @@ export function isPureFbs(mode) {
   return parts.length === 1 && parts[0] === "FBS";
 }
 
+function isCelEconomyResult(result) {
+  return result !== null
+    && typeof result === "object"
+    && typeof result.title === "string"
+    && result.title.toLowerCase().includes("cel economy")
+    && result.price_list !== null
+    && typeof result.price_list === "object"
+    && result.price_list.logistics_name === "CEL"
+    && result.price_list.logistics_speed === "economy";
+}
+
 export function preflightSkipReason(item) {
   const text = `${item.title ?? ""} ${item.category ?? ""}`;
   if (!isPureFbs(item.mode)) return "non-pure-fbs";
-  return PROHIBITED.find((pattern) => pattern.test(text)) ? "prohibited-category" : null;
+  if (PROHIBITED.find((pattern) => pattern.test(text))) return "prohibited-category";
+  return isCelEconomyResult(item.economy) ? null : "missing-cel-economy";
 }
 
 export function profitSkipReason(calc, threshold = 30) {

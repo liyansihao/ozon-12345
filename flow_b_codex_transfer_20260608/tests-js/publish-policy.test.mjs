@@ -5,6 +5,7 @@ import {
   selectNamedResource,
   selectSalePrice,
   isPureFbs,
+  preflightSkipReason,
   profitSkipReason,
 } from "../scripts/flow_b_playwright/publish-policy.mjs";
 
@@ -27,6 +28,27 @@ test("only pure FBS mode is accepted", () => {
   assert.equal(isPureFbs("FBS"), true);
   assert.equal(isPureFbs("FBO,FBS"), false);
   assert.equal(isPureFbs(undefined), false);
+});
+
+test("preflight rejects prohibited categories", () => {
+  assert.equal(preflightSkipReason({ mode: "FBS", title: "food storage", category: "" }), "prohibited-category");
+});
+
+test("preflight rejects a calculation without a CEL Economy result", () => {
+  const item = { mode: "FBS", title: "wooden toy", category: "toys" };
+  assert.equal(preflightSkipReason(item), "missing-cel-economy");
+});
+
+test("preflight accepts the explicit CEL Economy result contract", () => {
+  assert.equal(preflightSkipReason({
+    mode: "FBS",
+    title: "wooden toy",
+    category: "toys",
+    economy: {
+      title: "CEL Economy Small",
+      price_list: { logistics_name: "CEL", logistics_speed: "economy" },
+    },
+  }), null);
 });
 
 test("profit gate is strict and requires category commission", () => {
