@@ -3,10 +3,6 @@ import AppKit
 final class DesktopWidgetPanel: NSPanel {
     var onDragEnded: ((NSRect) -> Void)?
 
-    private var dragStartMouseLocation: NSPoint?
-    private var dragStartFrameOrigin: NSPoint?
-    private var didDrag = false
-
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
@@ -27,38 +23,21 @@ final class DesktopWidgetPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    override func sendEvent(_ event: NSEvent) {
-        switch event.type {
-        case .leftMouseDown:
-            dragStartMouseLocation = NSEvent.mouseLocation
-            dragStartFrameOrigin = frame.origin
-            didDrag = false
-
-        case .leftMouseDragged:
-            if let startMouseLocation = dragStartMouseLocation,
-               let startFrameOrigin = dragStartFrameOrigin {
-                let currentMouseLocation = NSEvent.mouseLocation
-                let newOrigin = NSPoint(
-                    x: startFrameOrigin.x + currentMouseLocation.x - startMouseLocation.x,
-                    y: startFrameOrigin.y + currentMouseLocation.y - startMouseLocation.y
-                )
-                setFrameOrigin(newOrigin)
-                didDrag = true
-            }
-
-        case .leftMouseUp:
-            let shouldNotify = didDrag
-            dragStartMouseLocation = nil
-            dragStartFrameOrigin = nil
-            didDrag = false
-            if shouldNotify {
-                onDragEnded?(frame)
-            }
-
-        default:
-            break
+    func performWidgetDrag(with event: NSEvent) {
+        let initialOrigin = frame.origin
+        performDrag(with: event)
+        if frame.origin != initialOrigin {
+            onDragEnded?(frame)
         }
+    }
+}
 
-        super.sendEvent(event)
+final class DesktopWidgetDragRegionView: NSView {
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        (window as? DesktopWidgetPanel)?.performWidgetDrag(with: event)
     }
 }
