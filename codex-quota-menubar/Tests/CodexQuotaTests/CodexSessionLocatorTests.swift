@@ -145,19 +145,22 @@ final class CodexSessionLocatorTests: XCTestCase {
         }
     }
 
-    func testDateLayoutStopsAfterBoundedRecentDayDirectories() throws {
+    func testRecentDateDirectoriesAreDirectCalendarPathsWithoutRootEnumeration() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        for day in 1...60 {
-            let directory = root.appendingPathComponent(String(format: "2026/01/%02d", day))
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try Data().write(to: directory.appendingPathComponent("session.jsonl"))
-        }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = Date(timeIntervalSince1970: 1_767_225_600) // 2026-01-01T00:00:00Z
 
-        let files = try CodexSessionLocator(root: root).recentSessionFiles(limit: 100)
+        let directories = CodexSessionLocator.recentDateDirectories(
+            below: root,
+            now: now,
+            calendar: calendar
+        )
 
-        XCTAssertEqual(files.first?.deletingLastPathComponent().lastPathComponent, "60")
-        XCTAssertLessThan(files.count, 60)
+        XCTAssertEqual(directories.count, 32)
+        XCTAssertEqual(directories[0], root.appendingPathComponent("2026/01/01"))
+        XCTAssertEqual(directories[1], root.appendingPathComponent("2025/12/31"))
+        XCTAssertEqual(directories.last, root.appendingPathComponent("2025/12/01"))
     }
 
     func testDateLayoutFindsNestedNewestFilesAndObeysLimit() throws {
@@ -175,5 +178,25 @@ final class CodexSessionLocatorTests: XCTestCase {
         let files = try CodexSessionLocator(root: root).recentSessionFiles(limit: 1)
 
         XCTAssertEqual(files.map(\.lastPathComponent), ["newest.jsonl"])
+    }
+
+    func testFallbackTraversalHasTotalEntryBudget() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for index in 0..<4_200 {
+            try Data().write(to: root.appendingPathComponent(String(format: "%04d.jsonl", index)))
+        }
+
+        let files = try CodexSessionLocator(root: root).recentSessionFiles(limit: 5_000)
+
+        XCTAssertEqual(files.count, 4_096)
+    }
+
+    func testMissingFallbackRootPropagatesTraversalError() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+
+        XCTAssertThrowsError(try CodexSessionLocator(root: root).recentSessionFiles(limit: 1))
     }
 }

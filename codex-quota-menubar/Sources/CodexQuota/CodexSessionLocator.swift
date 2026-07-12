@@ -19,73 +19,103 @@ struct CodexSessionLocator: CodexSessionLocating {
 
     func recentSessionFiles(limit: Int) throws -> [URL] {
         guard limit > 0 else { return [] }
-        let manager = FileManager.default
-        let children = try manager.contentsOfDirectory(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        )
-        let years = try directoryChildren(in: children, matchingDigits: 4)
-        if !years.isEmpty {
-            var dayDirectories: [URL] = []
-            for year in years.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
-                let months = try directoryChildren(
-                    in: manager.contentsOfDirectory(at: year, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]),
-                    matchingDigits: 2
-                )
-                for month in months.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }) {
-                    let days = try directoryChildren(
-                        in: manager.contentsOfDirectory(at: month, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]),
-                        matchingDigits: 2
-                    )
-                    dayDirectories.append(contentsOf: days.sorted(by: { $0.lastPathComponent > $1.lastPathComponent }))
-                    if dayDirectories.count >= Self.maximumDateDirectories { break }
-                }
-                if dayDirectories.count >= Self.maximumDateDirectories { break }
-            }
+        if root.standardizedFileURL == Self.defaultRoot.standardizedFileURL {
             return try newestFiles(
-                below: Array(dayDirectories.prefix(Self.maximumDateDirectories)),
+                below: Self.recentDateDirectories(below: root),
                 limit: limit,
-                entryBudget: Self.maximumScannedEntries
+                entryBudget: Self.maximumScannedEntries,
+                missingRootsAreExpected: true
             )
         }
 
-        return try newestFiles(below: [root], limit: limit, entryBudget: Self.maximumScannedEntries)
+        return try newestFiles(
+            below: [root],
+            limit: limit,
+            entryBudget: Self.maximumScannedEntries,
+            missingRootsAreExpected: false
+        )
     }
 
-    private func directoryChildren(in urls: [URL], matchingDigits count: Int) throws -> [URL] {
-        try urls.filter { url in
-            let name = url.lastPathComponent
-            guard name.count == count, name.allSatisfy(\.isNumber) else { return false }
-            return try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true
+    private static var defaultRoot: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex/sessions")
+    }
+
+    static func recentDateDirectories(
+        below root: URL,
+        now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> [URL] {
+        (0..<maximumDateDirectories).compactMap { offset in
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: now) else {
+                return nil
+            }
+            let parts = calendar.dateComponents([.year, .month, .day], from: date)
+            guard let year = parts.year, let month = parts.month, let day = parts.day else {
+                return nil
+            }
+            return root.appendingPathComponent(String(format: "%04d/%02d/%02d", year, month, day))
         }
     }
 
-    private func newestFiles(below roots: [URL], limit: Int, entryBudget: Int) throws -> [URL] {
+    private func newestFiles(
+        below roots: [URL],
+        limit: Int,
+        entryBudget: Int,
+        missingRootsAreExpected: Bool
+    ) throws -> [URL] {
         let manager = FileManager.default
         var examined = 0
         var candidates: [(url: URL, modified: Date)] = []
+        var firstAccessError: Error?
         for root in roots where examined < entryBudget {
+            do {
+                guard try root.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
+                    continue
+                }
+            } catch {
+                if !(missingRootsAreExpected && Self.isMissingFileError(error)), firstAccessError == nil {
+                    firstAccessError = error
+                }
+                continue
+            }
             guard let enumerator = manager.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
                 options: [.skipsHiddenFiles],
-                errorHandler: { _, _ in true }
+                errorHandler: { _, error in
+                    if firstAccessError == nil { firstAccessError = error }
+                    return true
+                }
             ) else {
-                if roots.count == 1 { throw CocoaError(.fileNoSuchFile) }
+                if firstAccessError == nil { firstAccessError = CocoaError(.fileReadUnknown) }
                 continue
             }
             while examined < entryBudget, let url = enumerator.nextObject() as? URL {
                 examined += 1
-                let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
-                if values.isRegularFile == true, url.pathExtension == "jsonl" {
-                    candidates.append((url, values.contentModificationDate ?? .distantPast))
-                    candidates.sort { $0.modified > $1.modified }
-                    if candidates.count > limit { candidates.removeLast() }
+                do {
+                    let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey])
+                    if values.isRegularFile == true, url.pathExtension == "jsonl" {
+                        candidates.append((url, values.contentModificationDate ?? .distantPast))
+                        candidates.sort { $0.modified > $1.modified }
+                        if candidates.count > limit { candidates.removeLast() }
+                    }
+                } catch {
+                    if !Self.isMissingFileError(error), firstAccessError == nil {
+                        firstAccessError = error
+                    }
                 }
             }
         }
+        if candidates.isEmpty, let firstAccessError { throw firstAccessError }
         return candidates.map(\.url)
+    }
+
+    private static func isMissingFileError(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == NSCocoaErrorDomain && (
+            error.code == CocoaError.fileNoSuchFile.rawValue ||
+                error.code == CocoaError.fileReadNoSuchFile.rawValue
+        )
     }
 }
 
