@@ -4,6 +4,7 @@ import path from "node:path";
 
 const TERMINAL_STATUSES = new Set(["published", "failed", "skipped"]);
 const VALID_STATUSES = new Set(["processing", ...TERMINAL_STATUSES]);
+const CANONICAL_LINK_HEADERS = new Set(["product_link", "canonical_product_link"]);
 const PRODUCT_URL_PATTERN = /https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s]+)/iu;
 
 function normalizeSku(value) {
@@ -46,6 +47,15 @@ function parseJsonLines(text) {
   return events;
 }
 
+function parseJsonObject(text) {
+  try {
+    const value = JSON.parse(String(text ?? "").trim());
+    return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function eventFromHistory(value) {
   const sku = normalizeSku(value.sku ?? value.id);
   const status = String(value.status ?? "");
@@ -56,10 +66,67 @@ function eventFromHistory(value) {
   return { sku, status, data };
 }
 
+function parseCsvRecords(text) {
+  const records = [];
+  let record = [];
+  let field = "";
+  let quoted = false;
+  const source = String(text ?? "");
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (quoted) {
+      if (character === '"') {
+        if (source[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          quoted = false;
+        }
+      } else {
+        field += character;
+      }
+    } else if (character === '"' && field.length === 0) {
+      quoted = true;
+    } else if (character === ",") {
+      record.push(field);
+      field = "";
+    } else if (character === "\n") {
+      record.push(field);
+      records.push(record);
+      record = [];
+      field = "";
+    } else if (character === "\r") {
+      if (source[index + 1] === "\n") index += 1;
+      record.push(field);
+      records.push(record);
+      record = [];
+      field = "";
+    } else {
+      field += character;
+    }
+  }
+
+  if (field.length > 0 || record.length > 0) {
+    record.push(field);
+    records.push(record);
+  }
+  return records;
+}
+
+function normalizeHeader(value) {
+  return String(value ?? "").replace(/^\uFEFF/u, "").trim().toLowerCase();
+}
+
 function csvPublishedSkus(text) {
   const skus = new Set();
-  for (const match of String(text ?? "").matchAll(/https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s]+)/giu)) {
-    const sku = normalizeSku(match[1]);
+  const records = parseCsvRecords(text);
+  const headers = records[0] ?? [];
+  const linkColumn = headers.findIndex((header) => CANONICAL_LINK_HEADERS.has(normalizeHeader(header)));
+  if (linkColumn < 0) return skus;
+
+  for (const record of records.slice(1)) {
+    const sku = canonicalSkuFromUrl(record[linkColumn]);
     if (sku) skus.add(sku);
   }
   return skus;
@@ -82,8 +149,9 @@ export function createPublishState({ runDir, publishedCsv }) {
   const publishedSkus = new Set();
   let loaded = false;
   let loading = null;
-  let summaryTarget = 0;
+  let summaryTarget;
   let writeChain = Promise.resolve();
+  let recordPublishedChain = Promise.resolve();
 
   function queueWrite(task) {
     const queued = writeChain.then(task);
@@ -170,6 +238,10 @@ export function createPublishState({ runDir, publishedCsv }) {
     if (loading) return loading;
     loading = (async () => {
       await fs.mkdir(runDir, { recursive: true });
+      const persistedSummary = parseJsonObject(await readTextIfPresent(summaryPath));
+      if (persistedSummary && Number.isFinite(Number(persistedSummary.published)) && Number.isFinite(Number(persistedSummary.remaining))) {
+        summaryTarget = Math.max(0, Number(persistedSummary.published) + Number(persistedSummary.remaining));
+      }
       const stateEvents = parseJsonLines(await readTextIfPresent(statePath));
       for (const event of stateEvents) applyLoadedEvent(event);
 
@@ -187,7 +259,6 @@ export function createPublishState({ runDir, publishedCsv }) {
         states.set(sku, { status: "published", data: { link: canonicalProductUrl(sku), source: "csv" } });
       }
       loaded = true;
-      writeSummary(summaryTarget);
       return api;
     })();
     try {
@@ -225,7 +296,7 @@ export function createPublishState({ runDir, publishedCsv }) {
     } else if (status === "skipped") {
       await appendJsonl(skippedPath, event);
     }
-    writeSummary(summaryTarget);
+    writeSummary(summaryTarget ?? 0);
     return true;
   }
 
@@ -239,13 +310,17 @@ export function createPublishState({ runDir, publishedCsv }) {
   }
 
   async function recordPublished(item) {
-    const sku = normalizeSku(item?.sku ?? item?.id);
-    if (!sku) throw new TypeError("published item sku is required");
-    if (hasPublished(sku)) {
-      await load();
-      return false;
-    }
-    return transition(sku, "published", { ...(item ?? {}), link: canonicalProductUrl(sku) });
+    const operation = recordPublishedChain.then(async () => {
+      const sku = normalizeSku(item?.sku ?? item?.id);
+      if (!sku) throw new TypeError("published item sku is required");
+      if (hasPublished(sku)) {
+        await load();
+        return false;
+      }
+      return transition(sku, "published", { ...(item ?? {}), link: canonicalProductUrl(sku) });
+    });
+    recordPublishedChain = operation.catch(() => {});
+    return operation;
   }
 
   const api = { load, transition, hasPublished, summary, recordPublished };

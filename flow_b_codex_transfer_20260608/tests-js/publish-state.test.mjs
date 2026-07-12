@@ -127,3 +127,59 @@ test("recordPublished writes one canonical URL per SKU", async () => {
     assert.equal(csvText.includes("example.invalid"), false);
   });
 });
+
+test("concurrent recordPublished calls commit exactly one canonical success", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+
+    const results = await Promise.all([
+      state.recordPublished({ sku: "race", link: "https://example.invalid/one" }),
+      state.recordPublished({ sku: "race", link: "https://example.invalid/two" }),
+    ]);
+
+    assert.deepEqual([...results].sort(), [false, true]);
+    assert.equal((await fs.readFile(path.join(dir, "sku_states.jsonl"), "utf8")).trim().split("\n").length, 1);
+    assert.equal((await fs.readFile(path.join(dir, "published.jsonl"), "utf8")).trim().split("\n").length, 1);
+    const publishedEvent = JSON.parse(await fs.readFile(path.join(dir, "published.jsonl"), "utf8"));
+    assert.equal(publishedEvent.link, canonicalProductUrl("race"));
+    const csvText = await fs.readFile(csv, "utf8");
+    assert.equal((csvText.match(/https:\/\/www\.ozon\.ru\/product\/race/g) ?? []).length, 1);
+  });
+});
+
+test("reload preserves the persisted summary target", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+    await state.recordPublished({ sku: "summary-target" });
+    assert.deepEqual(state.summary(100), { published: 1, failed: 0, skipped: 0, remaining: 99 });
+
+    const restored = createPublishState({ runDir: dir, publishedCsv: csv });
+    await restored.load();
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, "summary.json"), "utf8")), {
+      published: 1,
+      failed: 0,
+      skipped: 0,
+      remaining: 99,
+    });
+    assert.deepEqual(restored.summary(100), { published: 1, failed: 0, skipped: 0, remaining: 99 });
+  });
+});
+
+test("CSV seeding only reads the product_link field, not quoted note fields", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    const quote = String.fromCharCode(34);
+    await fs.writeFile(csv, [
+      "product_link,note",
+      `https://www.ozon.ru/product/real,${quote}note https://www.ozon.ru/product/note${quote}`,
+    ].join("\n"));
+
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+    await state.load();
+
+    assert.equal(state.hasPublished("real"), true);
+    assert.equal(state.hasPublished("note"), false);
+  });
+});
