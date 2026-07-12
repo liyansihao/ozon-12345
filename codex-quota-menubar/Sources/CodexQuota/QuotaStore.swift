@@ -9,6 +9,7 @@ final class QuotaStore: ObservableObject {
     private let refreshInterval: TimeInterval
     private var timerTask: Task<Void, Never>?
     private var lastSnapshot: QuotaSnapshot?
+    private var refreshGeneration = 0
 
     init(
         reader: @escaping @Sendable () throws -> QuotaSnapshot? = {
@@ -25,11 +26,16 @@ final class QuotaStore: ObservableObject {
     }
 
     func refresh() async {
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
+
         do {
             let read = reader
             let result = try await Task.detached(priority: .utility) {
                 try read()
             }.value
+
+            guard generation == refreshGeneration else { return }
 
             guard let snapshot = result else {
                 state = lastSnapshot.map {
@@ -41,6 +47,8 @@ final class QuotaStore: ObservableObject {
             lastSnapshot = snapshot
             state = .available(snapshot, isStale: false)
         } catch {
+            guard generation == refreshGeneration else { return }
+
             state = lastSnapshot.map {
                 .available($0, isStale: true)
             } ?? .failed(error.localizedDescription)
