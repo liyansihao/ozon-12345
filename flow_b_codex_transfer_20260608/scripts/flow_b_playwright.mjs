@@ -39,12 +39,12 @@ function required(value, name) {
   return value;
 }
 
-function profileDir(runDir) {
-  return process.env.FLOW_B_PW_PROFILE || path.join(runDir, "playwright_profile");
+function profileDir() {
+  return process.env.FLOW_B_PW_PROFILE || path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
 }
 
 async function openContext(runDir) {
-  const profile = profileDir(runDir);
+  const profile = profileDir();
   const options = resolveBrowserOptions({ ...process.env, FLOW_B_PW_PROFILE: profile });
   const context = await launchFlowContext(options);
   return { context, profile };
@@ -220,15 +220,15 @@ async function scanSellers(args) {
   const lowDeltaBatchLimit = envNumber("FLOW_B_LOW_DELTA_BATCH_LIMIT", 2);
   let lowDeltaBatches = 0;
   const { context, profile } = await openContext(runDir);
-  const maozi = await pageFor(context, "https://ozon.maozierp.com/#/product/favorite");
-  await waitForContent(maozi, 15000);
-  await assertMaoziLogin(maozi);
-  let favoriteState = await favoriteCount(maozi);
-  if (process.env.FLOW_B_MAOZI_AUTOFAVORITE !== "0" && (!favoriteState || !favoriteState.authenticated)) {
-    throw new Error("Maozi favorite count is unavailable or the Playwright profile is not logged in; run setup and log in first.");
-  }
-  let favoriteBefore = favoriteState?.total ?? null;
   try {
+    const maozi = await pageFor(context, "https://ozon.maozierp.com/#/product/favorite");
+    await waitForContent(maozi, 15000);
+    await assertMaoziLogin(maozi);
+    let favoriteState = await favoriteCount(maozi);
+    if (process.env.FLOW_B_MAOZI_AUTOFAVORITE !== "0" && (!favoriteState || !favoriteState.authenticated)) {
+      throw new Error("Maozi favorite count is unavailable or the Playwright profile is not logged in; run setup and log in first.");
+    }
+    let favoriteBefore = favoriteState?.total ?? null;
     for (let start = 0; start < pending.length; start += workers) {
       const batch = pending.slice(start, start + workers); console.log(`batch ${start + 1}-${start + batch.length} / ${pending.length}`);
       const pages = await Promise.all(batch.map(() => context.newPage()));
@@ -254,10 +254,14 @@ async function scanSellers(args) {
 
 async function setup(runDir) {
   const { context, profile } = await openContext(runDir);
-  const maozi = context.pages()[0] || await context.newPage(); await maozi.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded" });
-  const ozon = await context.newPage(); await ozon.goto("https://www.ozon.ru/", { waitUntil: "domcontentloaded" });
-  console.log(JSON.stringify({ ok: true, profile, message: "请在打开的 Playwright 浏览器中完成 Ozon/Maozi 登录；不要绕过验证码。登录完成后按 Ctrl+C 结束 setup。" }, null, 2));
-  await new Promise(() => {});
+  try {
+    const maozi = context.pages()[0] || await context.newPage(); await maozi.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded" });
+    const ozon = await context.newPage(); await ozon.goto("https://www.ozon.ru/", { waitUntil: "domcontentloaded" });
+    console.log(JSON.stringify({ ok: true, profile, message: "请在打开的 Playwright 浏览器中完成 Ozon/Maozi 登录；不要绕过验证码。登录完成后按 Ctrl+C 结束 setup。" }, null, 2));
+    await new Promise(() => {});
+  } finally {
+    await context.close().catch(() => {});
+  }
 }
 
 const [command, ...args] = process.argv.slice(2);
