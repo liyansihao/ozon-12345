@@ -83,7 +83,9 @@ struct CodexSessionLocator: CodexSessionLocating {
                 includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
                 options: [.skipsHiddenFiles],
                 errorHandler: { _, error in
-                    if firstAccessError == nil { firstAccessError = error }
+                    if Self.shouldRecordEnumeratorError(error), firstAccessError == nil {
+                        firstAccessError = error
+                    }
                     return true
                 }
             ) else {
@@ -116,6 +118,10 @@ struct CodexSessionLocator: CodexSessionLocating {
             error.code == CocoaError.fileNoSuchFile.rawValue ||
                 error.code == CocoaError.fileReadNoSuchFile.rawValue
         )
+    }
+
+    static func shouldRecordEnumeratorError(_ error: Error) -> Bool {
+        !isMissingFileError(error)
     }
 }
 

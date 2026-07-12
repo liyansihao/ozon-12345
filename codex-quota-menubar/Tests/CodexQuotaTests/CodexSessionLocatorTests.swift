@@ -199,4 +199,15 @@ final class CodexSessionLocatorTests: XCTestCase {
 
         XCTAssertThrowsError(try CodexSessionLocator(root: root).recentSessionFiles(limit: 1))
     }
+
+    func testEnumeratorCallbackIgnoresDisappearingPath() {
+        XCTAssertFalse(CodexSessionLocator.shouldRecordEnumeratorError(CocoaError(.fileNoSuchFile)))
+        XCTAssertFalse(CodexSessionLocator.shouldRecordEnumeratorError(CocoaError(.fileReadNoSuchFile)))
+    }
+
+    func testEnumeratorCallbackRecordsPermissionError() {
+        let denied = CocoaError(.fileReadNoPermission)
+
+        XCTAssertTrue(CodexSessionLocator.shouldRecordEnumeratorError(denied))
+    }
 }

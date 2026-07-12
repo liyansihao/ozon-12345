@@ -71,3 +71,30 @@ All commands below ran in `/Users/mac/.codex/worktrees/3b6c/ozon/codex-quota-men
 ### Remaining concern
 
 - The deliberate 32-calendar-day and 4,096-entry caps mean a JSONL file outside both windows is not inspected. This is the intended bounded-work tradeoff. Unrelated dirty worktree content remains untouched and excluded from the commit.
+
+## Enumerator disappearance callback fix (2026-07-12 19:53 Asia/Shanghai)
+
+### Changes
+
+- The `FileManager` enumerator callback now treats Cocoa `fileNoSuchFile` and `fileReadNoSuchFile` errors as recoverable disappearance races, matching per-entry resource-value handling. These errors are not retained or thrown when no candidates remain.
+- Permission and other genuine traversal errors are still retained and thrown when no candidate is available.
+- Added deterministic callback-policy tests for both missing-file Cocoa codes and for `fileReadNoPermission`; existing integration tests still cover missing-root propagation and successful traversal.
+
+### Exact verification evidence
+
+All commands below ran in `/Users/mac/.codex/worktrees/3b6c/ozon/codex-quota-menubar`.
+
+1. TDD red: `swift test --filter CodexSessionLocatorTests/testEnumeratorCallback` exited 1 because `CodexSessionLocator` had no `shouldRecordEnumeratorError` member.
+2. Initial focused green: the same command exited 0; 2 tests executed, 0 failures.
+3. Locator focused suite: `swift test --filter CodexSessionLocatorTests` exited 0; 13 tests executed, 0 failures.
+4. Full suite: `swift test` exited 0; 22 tests executed, 0 failures.
+5. Release build: `swift build -c release` exited 0; production compile and link completed.
+6. Packaging: `./scripts/build-app.sh` exited 0; it built and ad-hoc signed `/Users/mac/.codex/worktrees/3b6c/ozon/codex-quota-menubar/dist/Codex Quota.app`.
+7. Plist syntax: `plutil -lint 'dist/Codex Quota.app/Contents/Info.plist'` exited 0 with `OK`.
+8. Plist values: PlistBuddy printed `com.lihuohuo.codexquota`, `CodexQuota`, and `true` for `CFBundleIdentifier`, `CFBundleExecutable`, and `LSUIElement`.
+9. Signature: `codesign --verify --deep --strict --verbose=2 'dist/Codex Quota.app'` exited 0 with `valid on disk` and `satisfies its Designated Requirement`.
+10. Scoped whitespace validation exited 0 with no output.
+
+### Remaining concern
+
+- `FileManager.DirectoryEnumerator` does not expose an injectable callback seam, so the disappearance callback policy is tested through the smallest internal classifier. Existing filesystem integration coverage verifies traversal, missing-root propagation, and reader recovery. Unrelated dirty worktree content remains untouched and excluded from this commit.
