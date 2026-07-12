@@ -183,3 +183,52 @@ test("CSV seeding only reads the product_link field, not quoted note fields", as
     assert.equal(state.hasPublished("note"), false);
   });
 });
+
+test("concurrent published transitions reserve one success across public transition calls", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+
+    const results = await Promise.all([
+      state.transition("transition-race", "published", { source: "one" }),
+      state.transition("transition-race", "published", { source: "two" }),
+    ]);
+
+    assert.deepEqual([...results].sort(), [false, true]);
+    assert.equal((await fs.readFile(path.join(dir, "sku_states.jsonl"), "utf8")).trim().split("\n").length, 1);
+    assert.equal((await fs.readFile(path.join(dir, "published.jsonl"), "utf8")).trim().split("\n").length, 1);
+    assert.equal(((await fs.readFile(csv, "utf8")).match(/https:\/\/www\.ozon\.ru\/product\/transition-race/g) ?? []).length, 1);
+  });
+});
+
+test("mixed recordPublished and published transition calls share one reservation", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+
+    const results = await Promise.all([
+      state.recordPublished({ sku: "mixed-race", source: "record" }),
+      state.transition("mixed-race", "published", { source: "transition" }),
+    ]);
+
+    assert.deepEqual([...results].sort(), [false, true]);
+    assert.equal((await fs.readFile(path.join(dir, "sku_states.jsonl"), "utf8")).trim().split("\n").length, 1);
+    assert.equal((await fs.readFile(path.join(dir, "published.jsonl"), "utf8")).trim().split("\n").length, 1);
+    assert.equal(((await fs.readFile(csv, "utf8")).match(/https:\/\/www\.ozon\.ru\/product\/mixed-race/g) ?? []).length, 1);
+  });
+});
+
+test("CSV seeding discards an unterminated quoted record", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    await fs.writeFile(csv, [
+      "product_link,note",
+      '"https://www.ozon.ru/product/incomplete,unterminated',
+    ].join("\n"));
+
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+    await state.load();
+
+    assert.equal(state.hasPublished("incomplete"), false);
+  });
+});

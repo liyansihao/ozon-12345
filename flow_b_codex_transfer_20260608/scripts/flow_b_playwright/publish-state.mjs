@@ -107,6 +107,7 @@ function parseCsvRecords(text) {
     }
   }
 
+  if (quoted) return records;
   if (field.length > 0 || record.length > 0) {
     record.push(field);
     records.push(record);
@@ -151,11 +152,17 @@ export function createPublishState({ runDir, publishedCsv }) {
   let loading = null;
   let summaryTarget;
   let writeChain = Promise.resolve();
-  let recordPublishedChain = Promise.resolve();
+  let publishedTransitionChain = Promise.resolve();
 
   function queueWrite(task) {
     const queued = writeChain.then(task);
     writeChain = queued.catch(() => {});
+    return queued;
+  }
+
+  function enqueuePublishedTransition(task) {
+    const queued = publishedTransitionChain.then(task);
+    publishedTransitionChain = queued.catch(() => {});
     return queued;
   }
 
@@ -268,7 +275,7 @@ export function createPublishState({ runDir, publishedCsv }) {
     }
   }
 
-  async function transition(skuValue, status, data = {}) {
+  async function transitionInternal(skuValue, status, data = {}) {
     const sku = normalizeSku(skuValue);
     if (!sku) throw new TypeError("sku is required");
     if (!VALID_STATUSES.has(status)) throw new TypeError(`unsupported status: ${status}`);
@@ -300,6 +307,15 @@ export function createPublishState({ runDir, publishedCsv }) {
     return true;
   }
 
+  async function transition(skuValue, status, data = {}) {
+    if (status === "published") {
+      const sku = normalizeSku(skuValue);
+      if (!sku) throw new TypeError("sku is required");
+      return enqueuePublishedTransition(() => transitionInternal(sku, status, data));
+    }
+    return transitionInternal(skuValue, status, data);
+  }
+
   function hasPublished(skuValue) {
     const sku = normalizeSku(skuValue);
     return sku !== null && publishedSkus.has(sku);
@@ -310,16 +326,15 @@ export function createPublishState({ runDir, publishedCsv }) {
   }
 
   async function recordPublished(item) {
-    const operation = recordPublishedChain.then(async () => {
+    const operation = enqueuePublishedTransition(async () => {
       const sku = normalizeSku(item?.sku ?? item?.id);
       if (!sku) throw new TypeError("published item sku is required");
       if (hasPublished(sku)) {
         await load();
         return false;
       }
-      return transition(sku, "published", { ...(item ?? {}), link: canonicalProductUrl(sku) });
+      return transitionInternal(sku, "published", { ...(item ?? {}), link: canonicalProductUrl(sku) });
     });
-    recordPublishedChain = operation.catch(() => {});
     return operation;
   }
 
