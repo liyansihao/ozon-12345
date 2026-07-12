@@ -56,7 +56,7 @@ export function createMaoziClient({ transport }) {
       seenPages.add(page);
       const response = await transport(ENDPOINTS.favorites, {
         method: "GET",
-        query: { ...query, page, page_size: pageSize },
+        query: { is_imported: 0, ...query, page, page_size: pageSize },
       });
       const data = requireSuccess(response, "favorites");
       const batch = listRows(data, "favorites");
@@ -88,6 +88,8 @@ export function createMaoziClient({ transport }) {
     listWatermarks,
 
     async resolvePublishTarget({ storeNeedle, watermarkNeedle }) {
+      if (!String(storeNeedle || "").trim()) throw new Error("store needle is required");
+      if (!String(watermarkNeedle || "").trim()) throw new Error("watermark needle is required");
       const [shops, watermarks] = await Promise.all([listShops(), listWatermarks()]);
       return {
         store: selectNamedResource(shops, storeNeedle, "store"),

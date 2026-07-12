@@ -39,13 +39,25 @@ test("client paginates favorites and resolves the first normalized publish targe
   );
 
   assert.deepEqual(
-    transport.calls.map(([path, request]) => [path, request.query?.page, request.query?.page_size]),
+    transport.calls.map(([path, request]) => [path, request.query?.page, request.query?.page_size, request.query?.is_imported]),
     [
-      ["/api.product.favorite/lists", 1, 50],
-      ["/api.product.favorite/lists", 2, 50],
-      ["/api.shop/lists", undefined, undefined],
-      ["/api.watermark/templates", undefined, undefined],
+      ["/api.product.favorite/lists", 1, 50, 0],
+      ["/api.product.favorite/lists", 2, 50, 0],
+      ["/api.shop/lists", undefined, undefined, undefined],
+      ["/api.watermark/templates", undefined, undefined, undefined],
     ],
+  );
+});
+
+test("publish target rejects empty store or watermark needles", async () => {
+  const client = createMaoziClient({ transport: async () => { throw new Error("must not request resources"); } });
+  await assert.rejects(
+    () => client.resolvePublishTarget({ storeNeedle: "", watermarkNeedle: "lysh" }),
+    /store.*required/i,
+  );
+  await assert.rejects(
+    () => client.resolvePublishTarget({ storeNeedle: "丽丽1号", watermarkNeedle: "  " }),
+    /watermark.*required/i,
   );
 });
 
