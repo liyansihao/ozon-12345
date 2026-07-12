@@ -70,6 +70,55 @@ final class DesktopWidgetControllerTests: XCTestCase {
         )
     }
 
+    func testOffscreenDragClampsLivePanelAndPersistsClampedPlacement() {
+        let placementStore = MemoryPlacementStore(isVisible: true)
+        let panel = FakeWidgetPanel()
+        let controller = makeController(placementStore: placementStore, screens: { [main] in [main] }, panel: panel)
+
+        panel.onDragEnded?(CGRect(x: 2_000, y: -500, width: 300, height: 150))
+
+        let expected = CGRect(x: 1_140, y: 0, width: 300, height: 150)
+        XCTAssertEqual(panel.frame, expected)
+        XCTAssertTrue(main.visibleFrame.contains(panel.frame))
+        XCTAssertEqual(
+            placementStore.placement,
+            WidgetPlacement.normalized(frame: expected, visibleFrame: main.visibleFrame, screenID: main.id)
+        )
+        withExtendedLifetime(controller) {}
+    }
+
+    func testStableScreenIDPrefersDisplayUUIDAndFallsBack() {
+        XCTAssertEqual(
+            DesktopWidgetController.stableScreenID(displayID: 42, fallback: "42", uuidProvider: { _ in "durable-uuid" }),
+            "durable-uuid"
+        )
+        XCTAssertEqual(
+            DesktopWidgetController.stableScreenID(displayID: 42, fallback: "42", uuidProvider: { _ in nil }),
+            "42"
+        )
+    }
+
+    func testPanelCallbacksRefreshSharedStoreAndHideController() async {
+        let quotaStore = QuotaStore(reader: { nil })
+        let placementStore = MemoryPlacementStore(isVisible: true)
+        let panel = FakeWidgetPanel()
+        let controller = makeController(
+            quotaStore: quotaStore,
+            placementStore: placementStore,
+            screens: { [main] in [main] },
+            panel: panel
+        )
+
+        panel.onRefresh?()
+        for _ in 0..<100 where quotaStore.state == .loading { await Task.yield() }
+        XCTAssertEqual(quotaStore.state, .empty("等待 Codex 新数据"))
+
+        panel.onHide?()
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertFalse(placementStore.isVisible)
+        XCTAssertEqual(panel.hideCount, 1)
+    }
+
     func testMissingScreenFallsBackToMainDefaultAndScreenChangeClamps() {
         let placementStore = MemoryPlacementStore(
             placement: WidgetPlacement(screenID: "disconnected", x: 0.5, y: 0.5),
@@ -116,8 +165,10 @@ final class DesktopWidgetControllerTests: XCTestCase {
             quotaStore: quotaStore,
             placementStore: placementStore,
             screens: screens,
-            panelFactory: { _, receivedStore, _, _ in
+            panelFactory: { _, receivedStore, onRefresh, onHide in
                 XCTAssertTrue(receivedStore === quotaStore)
+                panel.onRefresh = onRefresh
+                panel.onHide = onHide
                 return panel
             },
             notificationCenter: nil
@@ -143,6 +194,8 @@ private final class MemoryPlacementStore: WidgetPlacementStoring {
 private final class FakeWidgetPanel: DesktopWidgetPaneling {
     private(set) var frame: CGRect = .zero
     var onDragEnded: ((CGRect) -> Void)?
+    var onRefresh: (() -> Void)?
+    var onHide: (() -> Void)?
     private(set) var showCount = 0
     private(set) var hideCount = 0
 

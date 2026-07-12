@@ -1,4 +1,5 @@
 import AppKit
+import ColorSync
 import Combine
 import SwiftUI
 
@@ -77,7 +78,7 @@ final class DesktopWidgetController: ObservableObject, DesktopWidgetControlling 
         panel.setFrame(initialFrame)
 
         panel.onDragEnded = { [weak self] frame in
-            self?.save(frame: frame)
+            self?.dragDidEnd(frame: frame)
         }
 
         if let notificationCenter {
@@ -131,13 +132,15 @@ final class DesktopWidgetController: ObservableObject, DesktopWidgetControlling 
         save(frame: panel.frame, on: target)
     }
 
-    private func save(frame: CGRect) {
+    private func dragDidEnd(frame: CGRect) {
         let availableScreens = screens()
         let target = availableScreens.first(where: { $0.visibleFrame.contains(frame.center) })
             ?? availableScreens.first(where: \WidgetScreen.isMain)
             ?? availableScreens.first
         guard let target else { return }
-        save(frame: WidgetPlacement.clamped(frame: frame, visibleFrame: target.visibleFrame), on: target)
+        let clampedFrame = WidgetPlacement.clamped(frame: frame, visibleFrame: target.visibleFrame)
+        panel.setFrame(clampedFrame)
+        save(frame: clampedFrame, on: target)
     }
 
     private func save(frame: CGRect, on screen: WidgetScreen) {
@@ -169,12 +172,29 @@ final class DesktopWidgetController: ObservableObject, DesktopWidgetControlling 
         let main = NSScreen.main
         return NSScreen.screens.map { screen in
             let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+            let displayID = number.map(CGDirectDisplayID.init(truncating:))
             return WidgetScreen(
-                id: number?.stringValue ?? String(describing: screen),
+                id: displayID.map {
+                    stableScreenID(displayID: $0, fallback: number?.stringValue ?? String(describing: screen))
+                } ?? String(describing: screen),
                 visibleFrame: screen.visibleFrame,
                 isMain: screen === main
             )
         }
+    }
+
+    static func stableScreenID(
+        displayID: CGDirectDisplayID,
+        fallback: String,
+        uuidProvider: @MainActor (CGDirectDisplayID) -> String? = displayUUID
+    ) -> String {
+        uuidProvider(displayID) ?? fallback
+    }
+
+    private static func displayUUID(for displayID: CGDirectDisplayID) -> String? {
+        guard let reference = CGDisplayCreateUUIDFromDisplayID(displayID) else { return nil }
+        let uuid = reference.takeRetainedValue()
+        return CFUUIDCreateString(nil, uuid) as String?
     }
 
     private static func makePanel(
