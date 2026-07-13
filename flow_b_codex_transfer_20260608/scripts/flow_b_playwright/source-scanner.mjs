@@ -49,6 +49,10 @@ export function favoriteRetryDelay(error, attempt) {
   return null;
 }
 
+export function isFavoriteCapacityReached(error) {
+  return /收藏数量已达上限|favorite.*(?:limit|capacity)/i.test(String(error?.message || error || ""));
+}
+
 export function isOzonSoftBlock(value) {
   return /похоже, нет(?:\s|\u00a0)+соединения|выключите VPN|incident:\s*[a-z0-9_]+/i.test(String(value || ""));
 }
@@ -265,8 +269,14 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           await record({ status: "favorited", sku: productInfo.sku, url: item.href, total: observedTotal });
           log(`favorite SKU ${productInfo.sku} total=${observedTotal}/${target}`);
         } catch (error) {
-          await record({ status: "failed", sku: item.sku, url: item.href, error: String(error?.message || error) });
-          log(`favorite failed SKU ${item.sku}: ${error?.message || error}`);
+          if (isFavoriteCapacityReached(error)) {
+            total = target;
+            await record({ status: "capacity_reached", sku: item.sku, url: item.href, message: String(error?.message || error) });
+            log(`favorite capacity reached; ending collection at configured target ${target}`);
+          } else {
+            await record({ status: "failed", sku: item.sku, url: item.href, error: String(error?.message || error) });
+            log(`favorite failed SKU ${item.sku}: ${error?.message || error}`);
+          }
         } finally {
           inFlight -= 1;
         }

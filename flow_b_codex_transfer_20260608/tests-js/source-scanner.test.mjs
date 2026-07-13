@@ -5,6 +5,7 @@ import {
   canClaimFavorite,
   favoriteRetryDelay,
   isFavoriteSessionAuthenticated,
+  isFavoriteCapacityReached,
   isOzonSoftBlock,
   ozonRetryDelay,
   prioritizeFavoriteLinks,
@@ -82,4 +83,9 @@ test("favorite collection prioritizes proven lightweight product families stably
     "ordinary",
     "ordinary-2",
   ]);
+});
+
+test("Maozi favorite capacity is a batch terminal condition", () => {
+  assert.equal(isFavoriteCapacityReached(new Error("收藏数量已达上限（1000个），请先删除部分收藏")), true);
+  assert.equal(isFavoriteCapacityReached(new Error("商品信息不完整")), false);
 });
