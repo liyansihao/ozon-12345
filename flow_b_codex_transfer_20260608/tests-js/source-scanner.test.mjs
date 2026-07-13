@@ -72,6 +72,7 @@ test("Ozon no-connection incident pages are retried with a longer cooldown", () 
 test("favorite collection prioritizes proven lightweight product families stably", () => {
   const links = [
     { href: "ordinary", text: "Большая картина" },
+    { href: "proven-seller", text: "Обычный товар", source_url: "https://www.ozon.ru/seller/xiangyu01/" },
     { href: "toy", text: "Детская игрушка" },
     { href: "underwear", text: "Комплект трусов" },
     { href: "hat", text: "Панама шляпа для девочек" },
@@ -79,6 +80,7 @@ test("favorite collection prioritizes proven lightweight product families stably
     { href: "ordinary-2", text: "Кухонная посуда" },
   ];
   assert.deepEqual(prioritizeFavoriteLinks(links).map((link) => link.href), [
+    "proven-seller",
     "underwear",
     "hat",
     "strap",

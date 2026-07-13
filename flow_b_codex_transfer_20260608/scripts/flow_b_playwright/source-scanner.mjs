@@ -70,7 +70,9 @@ export function productTitlePriority(value) {
 }
 
 function favoriteLinkPriority(link) {
-  return productTitlePriority(link?.text);
+  const source = String(link?.source_url || "");
+  const provenSeller = /\/seller\/(?:nuanniu|miaowu|yishao|alisa-3673390|vash-vybor-3332584|xiangyu01|kshunby|xzx-a02|fabrika-ulichnogo-stilya|linkworld-2709304|dretd)(?:[/?]|$)/i.test(source);
+  return (provenSeller ? 1000 : 0) + productTitlePriority(link?.text);
 }
 
 export function prioritizeFavoriteLinks(links) {
@@ -424,7 +426,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     let favoriteBefore = favoriteState.authenticated ? favoriteState.total : null;
 
     if (favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
-      const retainedLinks = records.flatMap((row) => Array.isArray(row.links) ? row.links : []);
+      const retainedLinks = records.flatMap((row) => Array.isArray(row.links)
+        ? row.links.map((link) => ({ ...link, source_url: row.source_url }))
+        : []);
       log(`collecting favorites from ${retainedLinks.length} retained product links`);
       favoriteBefore = await collectFavorites({
         context,
@@ -451,7 +455,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         favoriteBefore = await collectFavorites({
           context,
           maozi,
-          links: batchRows.flatMap((row) => row.links || []),
+          links: batchRows.flatMap((row, index) => (row.links || [])
+            .map((link) => ({ ...link, source_url: batch[index] }))),
           target: targetFavorites,
           currentTotal: favoriteBefore,
           env,
