@@ -5,6 +5,8 @@ import {
   canClaimFavorite,
   favoriteRetryDelay,
   isFavoriteSessionAuthenticated,
+  isOzonSoftBlock,
+  ozonRetryDelay,
   parseFavoriteProductSnapshot,
   requiresFavoriteSession,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
@@ -55,4 +57,11 @@ test("Maozi rate limits and transient network failures use bounded backoff", () 
   assert.equal(favoriteRetryDelay(new Error("HTTP 429"), 3), 60_000);
   assert.equal(favoriteRetryDelay(new Error("Failed to fetch"), 0), 2_000);
   assert.equal(favoriteRetryDelay(new Error("validation failed"), 0), null);
+});
+
+test("Ozon no-connection incident pages are retried with a longer cooldown", () => {
+  assert.equal(isOzonSoftBlock("Похоже, нет соединения Выключите VPN"), true);
+  assert.equal(isOzonSoftBlock("ordinary product page"), false);
+  assert.equal(ozonRetryDelay(0), 60_000);
+  assert.equal(ozonRetryDelay(2), 180_000);
 });

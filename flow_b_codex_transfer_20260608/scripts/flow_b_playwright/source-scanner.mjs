@@ -49,6 +49,14 @@ export function favoriteRetryDelay(error, attempt) {
   return null;
 }
 
+export function isOzonSoftBlock(value) {
+  return /похоже, нет(?:\s|\u00a0)+соединения|выключите VPN|incident:\s*[a-z0-9_]+/i.test(String(value || ""));
+}
+
+export function ozonRetryDelay(attempt) {
+  return Math.min(180_000, 60_000 * (2 ** Math.max(0, attempt)));
+}
+
 function skuFromProductUrl(value) {
   return String(value || "").match(/\/product\/(?:[^/?#]*-)?(\d+)(?:[/?#]|$)/)?.[1] || "";
 }
@@ -140,6 +148,9 @@ async function extractFavoriteProduct(page, url, timeout) {
       priceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
       pageText: (document.body?.innerText || "").slice(0, 1000),
     })).catch(() => null);
+    if (isOzonSoftBlock(`${snapshot?.title || ""} ${snapshot?.pageText || ""}`)) {
+      throw new Error(`Ozon detail soft blocked: ${url}`);
+    }
     if (/доступ ограничен|access denied|captcha/i.test(`${snapshot?.title || ""} ${snapshot?.pageText || ""}`)) {
       throw new Error(`Ozon detail is blocked: ${url}`);
     }
@@ -168,8 +179,35 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   let inFlight = 0;
   let nextApiAt = 0;
   let apiChain = Promise.resolve();
+  let nextDetailAt = 0;
+  let detailBlockedUntil = 0;
+  let detailGate = Promise.resolve();
   const apiInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_INTERVAL_MS", 750));
   const maxRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_RETRIES", 5));
+  const detailInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS", 1500));
+  const detailRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_RETRIES", 3));
+  const reserveDetailSlot = () => {
+    const operation = detailGate.then(async () => {
+      const wait = Math.max(0, Math.max(nextDetailAt, detailBlockedUntil) - Date.now());
+      if (wait) await sleep(wait);
+      nextDetailAt = Date.now() + detailInterval;
+    });
+    detailGate = operation.catch(() => {});
+    return operation;
+  };
+  const loadProduct = async (page, item) => {
+    for (let attempt = 0; ; attempt += 1) {
+      await reserveDetailSlot();
+      try {
+        return await extractFavoriteProduct(page, item.href, timeout);
+      } catch (error) {
+        if (!/Ozon detail soft blocked/i.test(String(error?.message || error)) || attempt >= detailRetries) throw error;
+        const retryDelay = ozonRetryDelay(attempt);
+        detailBlockedUntil = Math.max(detailBlockedUntil, Date.now() + retryDelay);
+        log(`Ozon detail retry SKU ${item.sku} attempt=${attempt + 1} wait=${retryDelay}ms`);
+      }
+    }
+  };
   const callFavorite = (productInfo) => {
     const operation = apiChain.then(async () => {
       for (let attempt = 0; ; attempt += 1) {
@@ -204,7 +242,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         if (!item) break;
         inFlight += 1;
         try {
-          const productInfo = await extractFavoriteProduct(page, item.href, timeout);
+          const productInfo = await loadProduct(page, item);
           await callFavorite(productInfo);
           existing.add(productInfo.sku);
           total += 1;
