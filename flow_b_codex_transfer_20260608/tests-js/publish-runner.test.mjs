@@ -66,7 +66,8 @@ function clientFor(items, overrides = {}) {
 
 test("publish candidates prioritize proven product titles independently of API order", () => {
   const items = [
-    { sku: "ordinary", title: "Воздушные шары из фольги" },
+    { sku: "ordinary-low", title: "Воздушные шары из фольги", sell_price: 10 },
+    { sku: "ordinary-high", title: "Рюкзак", sell_price: 60 },
     { sku: "toy", title: "Детская игрушка" },
     { sku: "hat", title: "Панама для девочек" },
     { sku: "underwear", title: "Комплект трусов" },
@@ -75,7 +76,8 @@ test("publish candidates prioritize proven product titles independently of API o
     "hat",
     "underwear",
     "toy",
-    "ordinary",
+    "ordinary-high",
+    "ordinary-low",
   ]);
 });
 

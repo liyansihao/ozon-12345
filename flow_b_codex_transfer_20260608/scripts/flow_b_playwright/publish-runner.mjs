@@ -35,8 +35,15 @@ function rounded(value) {
 
 export function prioritizePublishCandidates(items) {
   return [...items]
-    .map((item, index) => ({ item, index, priority: productTitlePriority(item?.title) }))
-    .sort((left, right) => right.priority - left.priority || left.index - right.index)
+    .map((item, index) => ({
+      item,
+      index,
+      priority: productTitlePriority(item?.title),
+      salePrice: Number(item?.sell_price ?? item?.price ?? item?.price_info?.sell_price) || 0,
+    }))
+    .sort((left, right) => right.priority - left.priority
+      || right.salePrice - left.salePrice
+      || left.index - right.index)
     .map(({ item }) => item);
 }
 
