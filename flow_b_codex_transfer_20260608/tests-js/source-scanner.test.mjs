@@ -74,11 +74,13 @@ test("favorite collection prioritizes proven lightweight product families stably
     { href: "ordinary", text: "Большая картина" },
     { href: "toy", text: "Детская игрушка" },
     { href: "underwear", text: "Комплект трусов" },
+    { href: "hat", text: "Панама шляпа для девочек" },
     { href: "strap", text: "Ремешок для часов" },
     { href: "ordinary-2", text: "Кухонная посуда" },
   ];
   assert.deepEqual(prioritizeFavoriteLinks(links).map((link) => link.href), [
     "underwear",
+    "hat",
     "strap",
     "toy",
     "ordinary",

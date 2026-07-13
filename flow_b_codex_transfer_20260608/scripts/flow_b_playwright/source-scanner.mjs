@@ -63,7 +63,7 @@ export function ozonRetryDelay(attempt) {
 
 function favoriteLinkPriority(link) {
   const text = String(link?.text || "");
-  if (/трус|нижн(?:ее|его|ем)?\s+бель|бюст|лифчик/i.test(text)) return 300;
+  if (/трус|нижн(?:ее|его|ем)?\s+бель|бюст|лифчик|шляп|панам|кепк|козыр|докер|косынк|головн.*убор/i.test(text)) return 300;
   if (/носк|перчат|заколк|резинк|брелок|подвеск|наклейк|чехол|ремеш|браслет|кулон/i.test(text)) return 200;
   if (/кукл|игруш/i.test(text)) return 100;
   return 0;
