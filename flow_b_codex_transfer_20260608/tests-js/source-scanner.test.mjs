@@ -7,12 +7,18 @@ import {
   isFavoriteSessionAuthenticated,
   isFavoriteCapacityReached,
   isOzonSoftBlock,
+  isProvenSellerSource,
   ozonRetryDelay,
   prioritizeFavoriteLinks,
   parseFavoriteProductSnapshot,
   requiresFavoriteSession,
   terminalSkusFromJsonl,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+
+test("proven seller source recognition is explicit", () => {
+  assert.equal(isProvenSellerSource("https://www.ozon.ru/seller/xiangyu01/?currency_price=150"), true);
+  assert.equal(isProvenSellerSource("https://www.ozon.ru/seller/dm/?currency_price=150"), false);
+});
 
 test("favorite session rejects stale tokens and login-page state", () => {
   assert.equal(isFavoriteSessionAuthenticated({ hasToken: true, httpOk: true, code: 1, pageText: "收藏商品" }), true);

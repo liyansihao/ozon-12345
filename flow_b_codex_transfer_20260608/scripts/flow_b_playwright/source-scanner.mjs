@@ -70,9 +70,12 @@ export function productTitlePriority(value) {
 }
 
 function favoriteLinkPriority(link) {
-  const source = String(link?.source_url || "");
-  const provenSeller = /\/seller\/(?:nuanniu|miaowu|yishao|alisa-3673390|vash-vybor-3332584|xiangyu01|kshunby|xzx-a02|fabrika-ulichnogo-stilya|linkworld-2709304|dretd)(?:[/?]|$)/i.test(source);
+  const provenSeller = isProvenSellerSource(link?.source_url);
   return (provenSeller ? 1000 : 0) + productTitlePriority(link?.text);
+}
+
+export function isProvenSellerSource(value) {
+  return /\/seller\/(?:nuanniu|miaowu|yishao|alisa-3673390|vash-vybor-3332584|xiangyu01|kshunby|xzx-a02|fabrika-ulichnogo-stilya|linkworld-2709304|dretd)(?:[/?]|$)/i.test(String(value || ""));
 }
 
 export function prioritizeFavoriteLinks(links) {
@@ -426,7 +429,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     let favoriteBefore = favoriteState.authenticated ? favoriteState.total : null;
 
     if (favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
-      const retainedLinks = records.flatMap((row) => Array.isArray(row.links)
+      const retainedRows = env.FLOW_B_RETAINED_PROVEN_ONLY === "1"
+        ? records.filter((row) => isProvenSellerSource(row.source_url))
+        : records;
+      const retainedLinks = retainedRows.flatMap((row) => Array.isArray(row.links)
         ? row.links.map((link) => ({ ...link, source_url: row.source_url }))
         : []);
       log(`collecting favorites from ${retainedLinks.length} retained product links`);
