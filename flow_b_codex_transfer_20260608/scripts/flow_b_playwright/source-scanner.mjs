@@ -456,9 +456,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     let favoriteBefore = favoriteState.authenticated ? favoriteState.total : null;
 
     if (favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
-      const retainedRows = env.FLOW_B_RETAINED_PROVEN_ONLY === "1"
-        ? records.filter((row) => isProvenSellerSource(row.source_url))
-        : records;
+      const retainedRows = env.FLOW_B_SKIP_RETAINED === "1"
+        ? []
+        : env.FLOW_B_RETAINED_PROVEN_ONLY === "1"
+          ? records.filter((row) => isProvenSellerSource(row.source_url))
+          : records;
       const retainedLinks = retainedRows.flatMap((row) => Array.isArray(row.links)
         ? row.links.map((link) => ({ ...link, source_url: row.source_url }))
         : []);
