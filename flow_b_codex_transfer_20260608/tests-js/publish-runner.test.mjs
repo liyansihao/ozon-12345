@@ -195,3 +195,24 @@ test("historical duplicates do not consume target but resumed run successes do",
   assert.equal(resumed.published, 1);
   assert.equal(publishCalls, 0);
 });
+
+test("resumed skipped candidates are terminal and are not recalculated", async () => {
+  const state = fakeState({ 20: "skipped" });
+  let detailCalls = 0;
+  const client = clientFor([{ id: 20, sku: 20 }, { id: 21, sku: 21 }], {
+    getProductDetail: async (sku) => {
+      detailCalls += 1;
+      return { sku, mode: "FBS", title: "safe", current_price: 100, follow_min: 90 };
+    },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(detailCalls, 1);
+  assert.equal(state.records[0].sku, "21");
+});

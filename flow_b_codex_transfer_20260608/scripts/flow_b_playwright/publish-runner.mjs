@@ -189,6 +189,7 @@ export function createPublishRunner({
       if (state.hasPublished(sku)) continue;
 
       const restoredStatus = state.statusOf?.(sku);
+      if (restoredStatus === "skipped") continue;
       if (restoredStatus === "processing" || restoredStatus === "failed") {
         try {
           const existing = await client.findPublishedSku(sku);
