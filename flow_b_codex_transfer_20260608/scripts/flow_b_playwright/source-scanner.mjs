@@ -38,6 +38,17 @@ export function canClaimFavorite({ total, inFlight, target }) {
   return Number(total) + Number(inFlight) < Number(target);
 }
 
+export function favoriteRetryDelay(error, attempt) {
+  const message = String(error?.message || error || "");
+  if (/HTTP 429|too many requests|rate.?limit/i.test(message)) {
+    return Math.min(60_000, 15_000 * (2 ** Math.max(0, attempt)));
+  }
+  if (/failed to fetch|network|ECONN|ETIMEDOUT|timeout/i.test(message)) {
+    return Math.min(15_000, 2_000 * (2 ** Math.max(0, attempt)));
+  }
+  return null;
+}
+
 function skuFromProductUrl(value) {
   return String(value || "").match(/\/product\/(?:[^/?#]*-)?(\d+)(?:[/?#]|$)/)?.[1] || "";
 }
@@ -155,6 +166,31 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   let cursor = 0;
   let total = currentTotal;
   let inFlight = 0;
+  let nextApiAt = 0;
+  let apiChain = Promise.resolve();
+  const apiInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_INTERVAL_MS", 750));
+  const maxRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_RETRIES", 5));
+  const callFavorite = (productInfo) => {
+    const operation = apiChain.then(async () => {
+      for (let attempt = 0; ; attempt += 1) {
+        const gateWait = Math.max(0, nextApiAt - Date.now());
+        if (gateWait) await sleep(gateWait);
+        try {
+          const result = await favoriteProduct(maozi, productInfo);
+          nextApiAt = Date.now() + apiInterval;
+          return result;
+        } catch (error) {
+          nextApiAt = Date.now() + apiInterval;
+          const retryDelay = favoriteRetryDelay(error, attempt);
+          if (retryDelay === null || attempt >= maxRetries) throw error;
+          log(`favorite API retry SKU ${productInfo.sku} attempt=${attempt + 1} wait=${retryDelay}ms: ${error?.message || error}`);
+          await sleep(retryDelay);
+        }
+      }
+    });
+    apiChain = operation.catch(() => {});
+    return operation;
+  };
   let writeChain = Promise.resolve();
   const record = (row) => {
     writeChain = writeChain.then(() => fs.appendFile(logFile, `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`));
@@ -169,7 +205,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         inFlight += 1;
         try {
           const productInfo = await extractFavoriteProduct(page, item.href, timeout);
-          await favoriteProduct(maozi, productInfo);
+          await callFavorite(productInfo);
           existing.add(productInfo.sku);
           total += 1;
           const observedTotal = total;

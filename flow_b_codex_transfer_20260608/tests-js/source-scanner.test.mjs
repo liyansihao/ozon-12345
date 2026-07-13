@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   canClaimFavorite,
+  favoriteRetryDelay,
   isFavoriteSessionAuthenticated,
   parseFavoriteProductSnapshot,
   requiresFavoriteSession,
@@ -47,4 +48,11 @@ test("favorite workers reserve capacity without exceeding the target", () => {
   assert.equal(canClaimFavorite({ total: 4, inFlight: 0, target: 5 }), true);
   assert.equal(canClaimFavorite({ total: 4, inFlight: 1, target: 5 }), false);
   assert.equal(canClaimFavorite({ total: 5, inFlight: 0, target: 5 }), false);
+});
+
+test("Maozi rate limits and transient network failures use bounded backoff", () => {
+  assert.equal(favoriteRetryDelay(new Error("HTTP 429"), 0), 15_000);
+  assert.equal(favoriteRetryDelay(new Error("HTTP 429"), 3), 60_000);
+  assert.equal(favoriteRetryDelay(new Error("Failed to fetch"), 0), 2_000);
+  assert.equal(favoriteRetryDelay(new Error("validation failed"), 0), null);
 });
