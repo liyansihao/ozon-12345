@@ -60,6 +60,7 @@ function buildPayload(item, detail, economy, targetConfig, now) {
 
 export function createPublishRunner({
   client,
+  detailProvider = client,
   costBridge,
   state,
   policy = defaultPolicy,
@@ -71,6 +72,9 @@ export function createPublishRunner({
   watermarkNeedle = "lysh",
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
+  if (!detailProvider || typeof detailProvider.getProductDetail !== "function") {
+    throw new TypeError("Playwright Ozon detailProvider.getProductDetail is required");
+  }
   const targetCount = Number(target);
   const profitThreshold = Number(threshold);
   if (!Number.isInteger(targetCount) || targetCount < 0) throw new TypeError("target must be a non-negative integer");
@@ -86,7 +90,7 @@ export function createPublishRunner({
     try {
       await state.transition(sku, "processing", { started_at: now().toISOString() });
       const [detailResult, categoryData] = await Promise.all([
-        typeof client.getProductDetail === "function" ? client.getProductDetail(sku) : Promise.resolve({}),
+        detailProvider.getProductDetail(sku, item),
         client.getCategoryBySku(sku),
       ]);
       const detail = { ...item, ...(detailResult || {}) };
