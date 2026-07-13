@@ -30,6 +30,10 @@ export function isFavoriteSessionAuthenticated({ hasToken, httpOk, code, pageTex
     && !/登录|手机号|验证码|密码|login/i.test(String(pageText || ""));
 }
 
+export function requiresFavoriteSession(env = process.env) {
+  return env.FLOW_B_MAOZI_AUTOFAVORITE !== "0";
+}
+
 async function favoriteCount(page) {
   const result = await page.evaluate(async () => {
     let token = "";
@@ -137,8 +141,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     await waitForContent(maozi, 15000);
     await assertMaoziLogin(maozi);
     let favoriteState = await favoriteCount(maozi);
-    if (!favoriteState.authenticated) throw new Error("Maozi profile token is stale or the session is not logged in");
-    let favoriteBefore = favoriteState.total;
+    if (requiresFavoriteSession(env) && !favoriteState.authenticated) throw new Error("Maozi profile token is stale or the session is not logged in");
+    let favoriteBefore = favoriteState.authenticated ? favoriteState.total : null;
 
     for (let start = 0; start < pending.length; start += workers) {
       const batch = pending.slice(start, start + workers);
@@ -150,8 +154,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       const afterWait = envNumber(env, "FLOW_B_MAOZI_AFTER_SCAN_WAIT", 10) * 1000;
       if (afterWait) await sleep(afterWait);
       favoriteState = await favoriteCount(maozi);
-      const favoriteAfter = favoriteState.total;
-      const delta = favoriteAfter - favoriteBefore;
+      const favoriteAfter = favoriteState.authenticated ? favoriteState.total : null;
+      const delta = favoriteBefore !== null && favoriteAfter !== null ? favoriteAfter - favoriteBefore : null;
       records.push(...batchRows.map((row, index) => ({
         source_url: batch[index],
         ...row,
@@ -163,9 +167,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       await fs.writeFile(outputPath, JSON.stringify(records, null, 2));
       log(`favorite ${favoriteBefore} -> ${favoriteAfter} delta=${delta}`);
       favoriteBefore = favoriteAfter;
-      if (favoriteAfter >= envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000)) break;
+      if (favoriteAfter !== null && favoriteAfter >= envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000)) break;
       if (lowDeltaBatchLimit > 0) {
-        lowDeltaBatches = delta < lowDeltaThreshold ? lowDeltaBatches + 1 : 0;
+        lowDeltaBatches = delta === null || delta < lowDeltaThreshold ? lowDeltaBatches + 1 : 0;
         if (lowDeltaBatches >= lowDeltaBatchLimit) break;
       }
     }
