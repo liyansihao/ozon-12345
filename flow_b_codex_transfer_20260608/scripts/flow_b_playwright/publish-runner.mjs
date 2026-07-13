@@ -71,6 +71,7 @@ export function createPublishRunner({
   runDir = process.cwd(),
   storeNeedle = "丽丽1号",
   watermarkNeedle = "lysh",
+  concurrency = 1,
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
   if (!detailProvider || typeof detailProvider.getProductDetail !== "function") {
@@ -80,7 +81,16 @@ export function createPublishRunner({
   const profitThreshold = Number(threshold);
   if (!Number.isInteger(targetCount) || targetCount < 0) throw new TypeError("target must be a non-negative integer");
   if (!Number.isFinite(profitThreshold)) throw new TypeError("threshold must be numeric");
+  const workerCount = Number(concurrency);
+  if (!Number.isInteger(workerCount) || workerCount <= 0) throw new TypeError("concurrency must be a positive integer");
   let cnyRubRate = 10.4672;
+  let publishChain = Promise.resolve();
+
+  function publishSerial(payload) {
+    const operation = publishChain.then(() => client.publish(payload));
+    publishChain = operation.catch(() => {});
+    return operation;
+  }
 
   async function skip(item, reason, data = {}) {
     const sku = asSku(item);
@@ -155,7 +165,7 @@ export function createPublishRunner({
       if (profitReason) return skip(item, profitReason, { profit });
 
       const payload = buildPayload(item, detail, economy, targetConfig, now);
-      const publishResult = await client.publish(payload);
+      const publishResult = await publishSerial(payload);
       if (!publishResult?.ok) {
         await state.transition(sku, "failed", { reason: "publish-not-confirmed", publish_result: publishResult ?? null });
         return { status: "failed", sku, reason: "publish-not-confirmed" };
@@ -194,10 +204,9 @@ export function createPublishRunner({
     let skipped = 0;
     let attempted = 0;
 
-    for (const item of candidates) {
-      if (published >= targetCount) break;
+    async function handleCandidate(item) {
       const sku = asSku(item);
-      if (state.hasPublished(sku)) continue;
+      if (state.hasPublished(sku)) return { status: "ignored", sku };
 
       const restoredStatus = state.statusOf?.(sku);
       if (restoredStatus === "skipped") {
@@ -205,30 +214,39 @@ export function createPublishRunner({
           await client.deleteFavorite(item);
         } catch (error) {
           await state.transition(sku, "failed", { reason: "favorite-delete-failed", error: String(error?.message || error) }).catch(() => {});
-          failed += 1;
+          return { status: "failed", sku, reason: "favorite-delete-failed" };
         }
-        continue;
+        return { status: "ignored", sku };
       }
       if (restoredStatus === "processing" || restoredStatus === "failed") {
         try {
           const existing = await client.findPublishedSku(sku);
           if (existing) {
             await state.recordPublished({ ...item, ...existing, sku, reconciled: true, reconciled_at: now().toISOString() });
-            published += 1;
-            continue;
+            return { status: "published", sku, reconciled: true };
           }
         } catch (error) {
           await state.transition(sku, "failed", { reason: "reconciliation-check-failed", error: String(error?.message || error) }).catch(() => {});
-          failed += 1;
-          continue;
+          return { status: "failed", sku, reason: "reconciliation-check-failed" };
         }
       }
 
-      attempted += 1;
-      const result = await processItem(item, targetConfig);
-      if (result.status === "published") published += 1;
-      else if (result.status === "failed") failed += 1;
-      else if (result.status === "skipped") skipped += 1;
+      return { ...await processItem(item, targetConfig), attempted: true };
+    }
+
+    let cursor = 0;
+    while (cursor < candidates.length && published < targetCount) {
+      const nearTarget = published >= targetCount - (workerCount - 1);
+      const width = nearTarget ? 1 : workerCount;
+      const batch = candidates.slice(cursor, cursor + width);
+      cursor += batch.length;
+      const results = await Promise.all(batch.map(handleCandidate));
+      for (const result of results) {
+        if (result.attempted) attempted += 1;
+        if (result.status === "published") published += 1;
+        else if (result.status === "failed") failed += 1;
+        else if (result.status === "skipped") skipped += 1;
+      }
     }
 
     return {

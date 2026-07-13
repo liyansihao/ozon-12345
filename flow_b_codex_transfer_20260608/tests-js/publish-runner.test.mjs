@@ -220,3 +220,42 @@ test("resumed skipped candidates are terminal and are not recalculated", async (
   assert.equal(state.records[0].sku, "21");
   assert.ok(deleted.includes("20"));
 });
+
+test("parallel preflight serializes publishing and never exceeds the exact target", async () => {
+  const state = fakeState();
+  let activePublishes = 0;
+  let maxActivePublishes = 0;
+  let activeDetails = 0;
+  let maxActiveDetails = 0;
+  let publishCalls = 0;
+  const items = Array.from({ length: 8 }, (_, index) => ({ id: index + 1, sku: index + 1 }));
+  const client = clientFor(items, {
+    getProductDetail: async (sku) => {
+      activeDetails += 1;
+      maxActiveDetails = Math.max(maxActiveDetails, activeDetails);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      activeDetails -= 1;
+      return { sku, mode: "FBS", title: "safe", current_price: 100, follow_min: 90 };
+    },
+    publish: async () => {
+      activePublishes += 1;
+      maxActivePublishes = Math.max(maxActivePublishes, activePublishes);
+      publishCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      activePublishes -= 1;
+      return { ok: true, response: { code: 1 } };
+    },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 5,
+    concurrency: 4,
+  }).run();
+
+  assert.equal(result.published, 5);
+  assert.equal(publishCalls, 5);
+  assert.equal(maxActivePublishes, 1);
+  assert.ok(maxActiveDetails > 1);
+});

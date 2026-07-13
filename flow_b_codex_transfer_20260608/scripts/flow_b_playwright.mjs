@@ -99,6 +99,7 @@ async function publishWithContext(context, options, env) {
       threshold: options.threshold,
       storeNeedle: options.storeNeedle,
       watermarkNeedle: options.watermarkNeedle,
+      concurrency: Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 4),
     });
     return runner.run();
   } finally {
