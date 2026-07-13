@@ -126,8 +126,14 @@ test("runner requires an explicit CEL Economy result and positive category fee",
 test("runner builds the exact one-row payload and stops at target", async () => {
   const state = fakeState();
   const payloads = [];
+  let calculatedCate;
   const items = [{ id: 71, sku: 700001, title: "source title", cover_image: "cover.jpg", link: "https://www.ozon.ru/product/700001" }, { id: 72, sku: 700002 }];
-  const client = clientFor(items, { publish: async (payload) => { payloads.push(payload); return { ok: true, response: { code: 1 } }; } });
+  const client = clientFor(items, {
+    getCategoryBySku: async () => ({ cate: [11, 22, 999], product_info: { weight: 100 } }),
+    listCategoryCommissions: async () => [{ cate_id: 11, children: [{ cate_id: 22, children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }] }] }],
+    calculateProfit: async (input) => { calculatedCate = input.cate; return economy(); },
+    publish: async (payload) => { payloads.push(payload); return { ok: true, response: { code: 1 } }; },
+  });
   const runner = createPublishRunner({
     client,
     costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
@@ -139,6 +145,7 @@ test("runner builds the exact one-row payload and stops at target", async () => 
   });
   const result = await runner.run();
   assert.equal(result.published, 1);
+  assert.deepEqual(calculatedCate, [11, 22, "1,12.00"]);
   assert.equal(payloads.length, 1);
   assert.deepEqual(payloads[0], {
     scene: "erp",

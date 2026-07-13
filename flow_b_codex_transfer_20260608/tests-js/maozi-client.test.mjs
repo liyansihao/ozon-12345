@@ -151,6 +151,15 @@ test("client reads exactly one favorite page for verification", async () => {
   });
 });
 
+test("client reads the Ozon category commission tree", async () => {
+  const client = createMaoziClient({ transport: async (endpoint, request) => {
+    assert.equal(endpoint, "/api.config/get_ozon_cate_commission");
+    assert.deepEqual(request, { method: "GET" });
+    return { status: 200, json: { code: 1, data: [{ cate_id: 10 }] } };
+  } });
+  assert.deepEqual(await client.listCategoryCommissions(), [{ cate_id: 10 }]);
+});
+
 test("client rejects malformed list responses before continuing", async () => {
   const client = createMaoziClient({
     transport: async () => ({ status: 200, json: { code: 1, data: { data: "oops" } } }),

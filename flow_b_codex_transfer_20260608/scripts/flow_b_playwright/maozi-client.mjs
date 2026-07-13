@@ -7,6 +7,7 @@ const ENDPOINTS = Object.freeze({
   category: "/api.tool/get_category_by_sku",
   profit: "/api.tool/calc_profit",
   publish: "/api.selection.follow/import",
+  commissions: "/api.config/get_ozon_cate_commission",
 });
 
 function successResponse(response) {
@@ -102,6 +103,12 @@ export function createMaoziClient({ transport }) {
     listFavorites,
     listShops,
     listWatermarks,
+
+    async listCategoryCommissions() {
+      const data = requireSuccess(await transport(ENDPOINTS.commissions, { method: "GET" }), "category commissions");
+      if (!Array.isArray(data)) throw new Error("Maozi category commissions response does not contain a valid list");
+      return data;
+    },
 
     async resolvePublishTarget({ storeNeedle, watermarkNeedle }) {
       if (!String(storeNeedle || "").trim()) throw new Error("store needle is required");

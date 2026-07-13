@@ -1,5 +1,6 @@
 import * as defaultPolicy from "./publish-policy.mjs";
 import { canonicalProductUrl } from "./publish-state.mjs";
+import { mapOzonCategory } from "./category-commission.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -79,6 +80,7 @@ export function createPublishRunner({
   const profitThreshold = Number(threshold);
   if (!Number.isInteger(targetCount) || targetCount < 0) throw new TypeError("target must be a non-negative integer");
   if (!Number.isFinite(profitThreshold)) throw new TypeError("threshold must be numeric");
+  let cnyRubRate = 10.4672;
 
   async function skip(sku, reason, data = {}) {
     await state.transition(sku, "skipped", { reason, ...data });
@@ -106,6 +108,12 @@ export function createPublishRunner({
       if (!cost?.ok) return skip(sku, cost?.reason || cost?.error?.code || "unreliable-1688-cost", { cost });
 
       const productInfo = categoryData?.product_info || {};
+      const category = mapOzonCategory(
+        categoryData?.cate,
+        targetConfig.commissionTree,
+        salePrice,
+        cnyRubRate,
+      );
       const calc = await client.calculateProfit({
         sku,
         sell_price: salePrice,
@@ -120,8 +128,9 @@ export function createPublishRunner({
         logistics: "CEL",
         profit_value: profitThreshold,
         profit_type: "percentage",
-        cate: Array.isArray(categoryData?.cate) ? categoryData.cate : [],
+        cate: category.mapped,
       });
+      if (Number(calc?.cnyrub_rate) > 0) cnyRubRate = Number(calc.cnyrub_rate);
       const economy = economyResult(calc);
       const preflightReason = policy.preflightSkipReason({ ...detail, economy });
       if (preflightReason) return skip(sku, preflightReason);
@@ -163,7 +172,10 @@ export function createPublishRunner({
 
   async function run() {
     await state.load?.();
-    const targetConfig = await client.resolvePublishTarget({ storeNeedle, watermarkNeedle });
+    const targetConfig = {
+      ...await client.resolvePublishTarget({ storeNeedle, watermarkNeedle }),
+      commissionTree: typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [],
+    };
     const candidates = await client.listFavorites();
     let published = 0;
     let failed = 0;
