@@ -85,7 +85,10 @@ async function publishWithContext(context, options, env) {
       python: env.FLOW_B_PYTHON || "python3",
       scriptPath: env.FLOW_B_1688_SCRIPT || path.join(ROOT, "scripts/1688_image_median.py"),
     });
-    const detailProvider = createOzonDetailProvider({ context });
+    const detailProvider = createOzonDetailProvider({
+      context,
+      timeout: Math.max(1000, Number(env.FLOW_B_OZON_DETAIL_TIMEOUT_MS) || 10000),
+    });
     const runner = createPublishRunner({
       client,
       detailProvider,
