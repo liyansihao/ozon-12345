@@ -11,6 +11,7 @@ import {
   prioritizeFavoriteLinks,
   parseFavoriteProductSnapshot,
   requiresFavoriteSession,
+  terminalSkusFromJsonl,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("favorite session rejects stale tokens and login-page state", () => {
@@ -88,4 +89,16 @@ test("favorite collection prioritizes proven lightweight product families stably
 test("Maozi favorite capacity is a batch terminal condition", () => {
   assert.equal(isFavoriteCapacityReached(new Error("收藏数量已达上限（1000个），请先删除部分收藏")), true);
   assert.equal(isFavoriteCapacityReached(new Error("商品信息不完整")), false);
+});
+
+test("rolling collection excludes only latest terminal skipped or published SKUs", () => {
+  const text = [
+    JSON.stringify({ sku: "1", status: "skipped" }),
+    JSON.stringify({ sku: "2", status: "failed" }),
+    JSON.stringify({ sku: "2", status: "published" }),
+    JSON.stringify({ sku: "3", status: "skipped" }),
+    JSON.stringify({ sku: "3", status: "processing" }),
+    "malformed",
+  ].join("\n");
+  assert.deepEqual([...terminalSkusFromJsonl(text)].sort(), ["1", "2"]);
 });

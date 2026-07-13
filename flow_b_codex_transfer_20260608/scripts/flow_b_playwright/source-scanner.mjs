@@ -76,6 +76,39 @@ export function prioritizeFavoriteLinks(links) {
     .map(({ link }) => link);
 }
 
+export function terminalSkusFromJsonl(text) {
+  const latest = new Map();
+  for (const line of String(text || "").split(/\r?\n/)) {
+    try {
+      const event = JSON.parse(line);
+      const sku = String(event?.sku ?? "").trim();
+      if (sku) latest.set(sku, String(event?.status || ""));
+    } catch {}
+  }
+  return new Set([...latest].filter(([, status]) => status === "skipped" || status === "published").map(([sku]) => sku));
+}
+
+async function loadExcludedSkus(outputPath, env) {
+  const excluded = new Set();
+  try {
+    const stateText = await fs.readFile(path.join(path.dirname(outputPath), "sku_states.jsonl"), "utf8");
+    for (const sku of terminalSkusFromJsonl(stateText)) excluded.add(sku);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const publishedCsv = path.resolve(env.FLOW_B_PUBLISHED_CSV || path.join(import.meta.dirname, "../../data/flow_b/published_links.csv"));
+  try {
+    const csvText = await fs.readFile(publishedCsv, "utf8");
+    for (const line of csvText.split(/\r?\n/)) {
+      const sku = skuFromProductUrl(line);
+      if (sku) excluded.add(sku);
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  return excluded;
+}
+
 function skuFromProductUrl(value) {
   return String(value || "").match(/\/product\/(?:[^/?#]*-)?(\d+)(?:[/?#]|$)/)?.[1] || "";
 }
@@ -373,7 +406,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const lowDeltaBatchLimit = envNumber(env, "FLOW_B_LOW_DELTA_BATCH_LIMIT", 2);
   let lowDeltaBatches = 0;
   const targetFavorites = envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000);
-  const attempted = new Set();
+  const attempted = await loadExcludedSkus(outputPath, env);
+  log(`favorite exclusions loaded: ${attempted.size}`);
   const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const maozi = await openMaoziPage(context);
   try {
