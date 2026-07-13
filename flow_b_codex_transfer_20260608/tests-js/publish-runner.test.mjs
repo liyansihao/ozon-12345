@@ -276,3 +276,23 @@ test("parallel preflight serializes publishing and never exceeds the exact targe
   assert.equal(maxActivePublishes, 1);
   assert.ok(maxActiveDetails > 1);
 });
+
+test("runner ends a dry candidate tail at the configured limit", async () => {
+  const state = fakeState();
+  const items = Array.from({ length: 5 }, (_, index) => ({ id: index + 1, sku: index + 1 }));
+  const client = clientFor(items, {
+    getProductDetail: async (sku) => ({ sku, mode: "FBO", title: "dry item", current_price: 100 }),
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    concurrency: 1,
+    dryCandidateLimit: 2,
+  }).run();
+
+  assert.equal(result.published, 0);
+  assert.equal(result.attempted, 2);
+  assert.equal(result.dry_candidates, 2);
+});

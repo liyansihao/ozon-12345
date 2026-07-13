@@ -87,6 +87,7 @@ export function createPublishRunner({
   storeNeedle = "丽丽1号",
   watermarkNeedle = "lysh",
   concurrency = 1,
+  dryCandidateLimit = 0,
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
   if (!detailProvider || typeof detailProvider.getProductDetail !== "function") {
@@ -98,6 +99,8 @@ export function createPublishRunner({
   if (!Number.isFinite(profitThreshold)) throw new TypeError("threshold must be numeric");
   const workerCount = Number(concurrency);
   if (!Number.isInteger(workerCount) || workerCount <= 0) throw new TypeError("concurrency must be a positive integer");
+  const dryLimit = Number(dryCandidateLimit);
+  if (!Number.isInteger(dryLimit) || dryLimit < 0) throw new TypeError("dryCandidateLimit must be a non-negative integer");
   let cnyRubRate = 10.4672;
   let publishChain = Promise.resolve();
 
@@ -218,6 +221,7 @@ export function createPublishRunner({
     let failed = 0;
     let skipped = 0;
     let attempted = 0;
+    let dryCandidates = 0;
 
     async function handleCandidate(item) {
       const sku = asSku(item);
@@ -250,7 +254,9 @@ export function createPublishRunner({
     }
 
     let cursor = 0;
-    while (cursor < candidates.length && published < targetCount) {
+    while (cursor < candidates.length
+      && published < targetCount
+      && (dryLimit === 0 || dryCandidates < dryLimit)) {
       const nearTarget = published >= targetCount - (workerCount - 1);
       const width = nearTarget ? 1 : workerCount;
       const batch = candidates.slice(cursor, cursor + width);
@@ -258,9 +264,14 @@ export function createPublishRunner({
       const results = await Promise.all(batch.map(handleCandidate));
       for (const result of results) {
         if (result.attempted) attempted += 1;
-        if (result.status === "published") published += 1;
-        else if (result.status === "failed") failed += 1;
-        else if (result.status === "skipped") skipped += 1;
+        if (result.status === "published") {
+          published += 1;
+          dryCandidates = 0;
+        } else {
+          if (result.attempted) dryCandidates += 1;
+          if (result.status === "failed") failed += 1;
+          else if (result.status === "skipped") skipped += 1;
+        }
       }
     }
 
@@ -269,6 +280,7 @@ export function createPublishRunner({
       failed,
       skipped,
       attempted,
+      dry_candidates: dryCandidates,
       target: targetCount,
       state_summary: state.summary?.(targetCount),
     };

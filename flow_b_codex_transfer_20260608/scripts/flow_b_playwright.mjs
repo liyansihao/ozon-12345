@@ -100,6 +100,7 @@ async function publishWithContext(context, options, env) {
       storeNeedle: options.storeNeedle,
       watermarkNeedle: options.watermarkNeedle,
       concurrency: Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 4),
+      dryCandidateLimit: Math.max(0, Number(env.FLOW_B_MAX_DRY_CANDIDATES) || 0),
     });
     return runner.run();
   } finally {
