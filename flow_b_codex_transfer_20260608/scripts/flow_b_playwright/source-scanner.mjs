@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureMaoziLogin, openMaoziPage } from "./browser-context.mjs";
+import { isPureFbs } from "./publish-policy.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -57,6 +58,11 @@ export function effectiveFavoriteTotal({ claimedTotal, observedTotal, target }) 
   return Number(claimedTotal) >= Number(target) ? Number(target) : Number(observedTotal);
 }
 
+export function favoriteModeSkipReason(mode) {
+  if (!String(mode || "").trim()) return "missing-shipping-mode";
+  return isPureFbs(mode) ? null : "non-pure-fbs";
+}
+
 export function isOzonSoftBlock(value) {
   return /похоже, нет(?:\s|\u00a0)+соединения|выключите VPN|incident:\s*[a-z0-9_]+/i.test(String(value || ""));
 }
@@ -106,6 +112,17 @@ async function loadExcludedSkus(outputPath, env) {
   try {
     const stateText = await fs.readFile(path.join(path.dirname(outputPath), "sku_states.jsonl"), "utf8");
     for (const sku of terminalSkusFromJsonl(stateText)) excluded.add(sku);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  try {
+    const favoriteText = await fs.readFile(path.join(path.dirname(outputPath), "favorite_collection.jsonl"), "utf8");
+    for (const line of favoriteText.split(/\r?\n/)) {
+      try {
+        const event = JSON.parse(line);
+        if (event?.status === "rejected" && event?.sku) excluded.add(String(event.sku));
+      } catch {}
+    }
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
@@ -211,6 +228,7 @@ async function extractFavoriteProduct(page, url, timeout) {
       ogTitle: document.querySelector('meta[property="og:title"]')?.content || "",
       ogImage: document.querySelector('meta[property="og:image"]')?.content || "",
       priceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
+      mode: (document.body?.innerText || "").match(/发货模式：\s*([^\n]+)/)?.[1]?.trim() || "",
       pageText: (document.body?.innerText || "").slice(0, 1000),
     })).catch(() => null);
     if (isOzonSoftBlock(`${snapshot?.title || ""} ${snapshot?.pageText || ""}`)) {
@@ -219,10 +237,12 @@ async function extractFavoriteProduct(page, url, timeout) {
     if (/доступ ограничен|access denied|captcha/i.test(`${snapshot?.title || ""} ${snapshot?.pageText || ""}`)) {
       throw new Error(`Ozon detail is blocked: ${url}`);
     }
-    if (snapshot?.ogImage && snapshot?.priceText) break;
+    if (snapshot?.ogImage && snapshot?.priceText && snapshot?.mode) break;
     if (Date.now() >= deadline) break;
     await sleep(500);
   } while (true);
+  const modeReason = favoriteModeSkipReason(snapshot?.mode);
+  if (modeReason) throw new Error(`${modeReason}: SKU ${skuFromProductUrl(snapshot?.url || url)}`);
   return parseFavoriteProductSnapshot(snapshot || { url });
 }
 
@@ -319,6 +339,9 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             total = target;
             await record({ status: "capacity_reached", sku: item.sku, url: item.href, message: String(error?.message || error) });
             log(`favorite capacity reached; ending collection at configured target ${target}`);
+          } else if (/^non-pure-fbs:/i.test(String(error?.message || error))) {
+            await record({ status: "rejected", reason: "non-pure-fbs", sku: item.sku, url: item.href });
+            log(`favorite rejected SKU ${item.sku}: non-pure-fbs`);
           } else {
             await record({ status: "failed", sku: item.sku, url: item.href, error: String(error?.message || error) });
             log(`favorite failed SKU ${item.sku}: ${error?.message || error}`);

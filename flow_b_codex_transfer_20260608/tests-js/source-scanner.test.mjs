@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   canClaimFavorite,
   favoriteRetryDelay,
+  favoriteModeSkipReason,
   effectiveFavoriteTotal,
   isFavoriteSessionAuthenticated,
   isFavoriteCapacityReached,
@@ -46,6 +47,12 @@ test("Ozon detail metadata becomes a complete Maozi favorite payload", () => {
     price_info: { sell_price: 151.1, currency: "CNY" },
     title: "Light pan",
   });
+});
+
+test("favorite preflight accepts only an explicit pure FBS mode", () => {
+  assert.equal(favoriteModeSkipReason("FBS"), null);
+  assert.equal(favoriteModeSkipReason("FBS, RFBS"), "non-pure-fbs");
+  assert.equal(favoriteModeSkipReason(null), "missing-shipping-mode");
 });
 
 test("favorite payload parser rejects incomplete Ozon details", () => {
