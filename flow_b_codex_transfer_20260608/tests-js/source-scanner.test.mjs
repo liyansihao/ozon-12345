@@ -7,6 +7,7 @@ import {
   isFavoriteSessionAuthenticated,
   isOzonSoftBlock,
   ozonRetryDelay,
+  prioritizeFavoriteLinks,
   parseFavoriteProductSnapshot,
   requiresFavoriteSession,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
@@ -64,4 +65,21 @@ test("Ozon no-connection incident pages are retried with a longer cooldown", () 
   assert.equal(isOzonSoftBlock("ordinary product page"), false);
   assert.equal(ozonRetryDelay(0), 60_000);
   assert.equal(ozonRetryDelay(2), 180_000);
+});
+
+test("favorite collection prioritizes proven lightweight product families stably", () => {
+  const links = [
+    { href: "ordinary", text: "Большая картина" },
+    { href: "toy", text: "Детская игрушка" },
+    { href: "underwear", text: "Комплект трусов" },
+    { href: "strap", text: "Ремешок для часов" },
+    { href: "ordinary-2", text: "Кухонная посуда" },
+  ];
+  assert.deepEqual(prioritizeFavoriteLinks(links).map((link) => link.href), [
+    "underwear",
+    "strap",
+    "toy",
+    "ordinary",
+    "ordinary-2",
+  ]);
 });

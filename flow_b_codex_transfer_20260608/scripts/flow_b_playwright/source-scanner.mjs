@@ -57,6 +57,21 @@ export function ozonRetryDelay(attempt) {
   return Math.min(180_000, 60_000 * (2 ** Math.max(0, attempt)));
 }
 
+function favoriteLinkPriority(link) {
+  const text = String(link?.text || "");
+  if (/трус|нижн(?:ее|его|ем)?\s+бель|бюст|лифчик/i.test(text)) return 300;
+  if (/носк|перчат|заколк|резинк|брелок|подвеск|наклейк|чехол|ремеш|браслет|кулон/i.test(text)) return 200;
+  if (/кукл|игруш/i.test(text)) return 100;
+  return 0;
+}
+
+export function prioritizeFavoriteLinks(links) {
+  return [...links]
+    .map((link, index) => ({ link, index, priority: favoriteLinkPriority(link) }))
+    .sort((left, right) => right.priority - left.priority || left.index - right.index)
+    .map(({ link }) => link);
+}
+
 function skuFromProductUrl(value) {
   return String(value || "").match(/\/product\/(?:[^/?#]*-)?(\d+)(?:[/?#]|$)/)?.[1] || "";
 }
@@ -165,7 +180,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   if (currentTotal >= target || !links.length) return currentTotal;
   const existing = new Set(await favoriteSkus(maozi));
   const queue = [];
-  for (const link of links) {
+  for (const link of prioritizeFavoriteLinks(links)) {
     const href = typeof link === "string" ? link : link?.href;
     const sku = skuFromProductUrl(href);
     if (!sku || existing.has(sku) || attempted.has(sku)) continue;
