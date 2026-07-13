@@ -85,7 +85,8 @@ test("CSV history seeds published SKUs from valid links and ignores malformed ro
     assert.equal(state.hasPublished("321"), true);
     assert.equal(state.hasPublished("654"), true);
     assert.equal(state.hasPublished("999"), false);
-    assert.deepEqual(state.summary(5), { published: 2, failed: 0, skipped: 0, remaining: 3 });
+    assert.deepEqual(state.summary(5), { published: 0, failed: 0, skipped: 0, remaining: 5 });
+    assert.equal(state.runPublishedCount(), 0);
   });
 });
 
@@ -271,5 +272,20 @@ test("load reconciles newer published history into the persisted summary", async
     const expected = { published: 2, failed: 0, skipped: 0, remaining: 98 };
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir, "summary.json"), "utf8")), expected);
     assert.deepEqual(restored.summary(100), expected);
+  });
+});
+
+test("historical CSV prevents duplicates without consuming this run target", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    await fs.writeFile(csv, `product_link\n${canonicalProductUrl("historic")}\n`);
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+    await state.load();
+
+    assert.equal(state.hasPublished("historic"), true);
+    assert.equal(state.runPublishedCount(), 0);
+    await state.recordPublished({ sku: "new-in-this-run" });
+    assert.equal(state.runPublishedCount(), 1);
+    assert.deepEqual(state.summary(100), { published: 1, failed: 0, skipped: 0, remaining: 99 });
   });
 });

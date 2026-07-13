@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { createPublishRunner } from "../scripts/flow_b_playwright/publish-runner.mjs";
 
-function fakeState(initial = {}) {
+function fakeState(initial = {}, initialRunPublished = 0) {
   const statuses = new Map(Object.entries(initial));
   const transitions = [];
   const records = [];
@@ -11,6 +11,7 @@ function fakeState(initial = {}) {
     transitions,
     records,
     load: async () => {},
+    runPublishedCount: () => initialRunPublished + records.length,
     hasPublished: (sku) => statuses.get(String(sku)) === "published",
     statusOf: (sku) => statuses.get(String(sku)) || null,
     transition: async (sku, status, data) => {
@@ -169,4 +170,28 @@ test("runner builds the exact one-row payload and stops at target", async () => 
       source_currency: "CNY",
     }],
   });
+});
+
+test("historical duplicates do not consume target but resumed run successes do", async () => {
+  const historicalState = fakeState({ 1: "published" }, 0);
+  const client = clientFor([{ id: 1, sku: 1 }, { id: 2, sku: 2 }]);
+  const first = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state: historicalState,
+    target: 1,
+  }).run();
+  assert.equal(first.published, 1);
+  assert.equal(historicalState.records[0].sku, "2");
+
+  const resumedState = fakeState({ 9: "published" }, 1);
+  let publishCalls = 0;
+  const resumed = await createPublishRunner({
+    client: clientFor([{ id: 10, sku: 10 }], { publish: async () => { publishCalls += 1; return { ok: true }; } }),
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state: resumedState,
+    target: 1,
+  }).run();
+  assert.equal(resumed.published, 1);
+  assert.equal(publishCalls, 0);
 });

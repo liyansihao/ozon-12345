@@ -172,12 +172,13 @@ export function createPublishRunner({
 
   async function run() {
     await state.load?.();
+    state.summary?.(targetCount);
     const targetConfig = {
       ...await client.resolvePublishTarget({ storeNeedle, watermarkNeedle }),
       commissionTree: typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [],
     };
     const candidates = await client.listFavorites();
-    let published = 0;
+    let published = Number(state.runPublishedCount?.() ?? 0);
     let failed = 0;
     let skipped = 0;
     let attempted = 0;

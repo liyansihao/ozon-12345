@@ -148,6 +148,7 @@ export function createPublishState({ runDir, publishedCsv }) {
   const summaryPath = path.join(runDir, "summary.json");
   const states = new Map();
   const publishedSkus = new Set();
+  const runPublishedSkus = new Set();
   let loaded = false;
   let loading = null;
   let summaryTarget;
@@ -201,10 +202,10 @@ export function createPublishState({ runDir, publishedCsv }) {
       if (value.status === "skipped") skipped += 1;
     }
     return {
-      published: publishedSkus.size,
+      published: runPublishedSkus.size,
       failed,
       skipped,
-      remaining: Math.max(0, numericTarget - publishedSkus.size),
+      remaining: Math.max(0, numericTarget - runPublishedSkus.size),
     };
   }
 
@@ -232,6 +233,7 @@ export function createPublishState({ runDir, publishedCsv }) {
     const { sku, status, data } = parsed;
     if (status === "published") {
       publishedSkus.add(sku);
+      runPublishedSkus.add(sku);
       states.set(sku, { status, data: { ...data, link: canonicalProductUrl(sku) } });
       return;
     }
@@ -263,7 +265,9 @@ export function createPublishState({ runDir, publishedCsv }) {
 
       for (const sku of csvPublishedSkus(await readTextIfPresent(publishedCsv))) {
         publishedSkus.add(sku);
-        states.set(sku, { status: "published", data: { link: canonicalProductUrl(sku), source: "csv" } });
+        if (!runPublishedSkus.has(sku)) {
+          states.set(sku, { status: "published", data: { link: canonicalProductUrl(sku), source: "csv" } });
+        }
       }
       loaded = true;
       if (summaryTarget !== undefined) writeSummary(summaryTarget);
@@ -297,6 +301,7 @@ export function createPublishState({ runDir, publishedCsv }) {
 
     if (status === "published") {
       publishedSkus.add(sku);
+      runPublishedSkus.add(sku);
       await appendJsonl(publishedPath, { ...event, link: canonicalProductUrl(sku) });
       await appendPublishedCsv(sku);
     } else if (status === "failed") {
@@ -329,6 +334,10 @@ export function createPublishState({ runDir, publishedCsv }) {
     return states.get(sku)?.status ?? null;
   }
 
+  function runPublishedCount() {
+    return runPublishedSkus.size;
+  }
+
   function summary(target) {
     return writeSummary(target);
   }
@@ -346,6 +355,6 @@ export function createPublishState({ runDir, publishedCsv }) {
     return operation;
   }
 
-  const api = { load, transition, hasPublished, statusOf, summary, recordPublished };
+  const api = { load, transition, hasPublished, statusOf, runPublishedCount, summary, recordPublished };
   return api;
 }
