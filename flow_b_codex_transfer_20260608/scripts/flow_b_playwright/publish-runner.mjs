@@ -82,8 +82,19 @@ export function createPublishRunner({
   if (!Number.isFinite(profitThreshold)) throw new TypeError("threshold must be numeric");
   let cnyRubRate = 10.4672;
 
-  async function skip(sku, reason, data = {}) {
-    await state.transition(sku, "skipped", { reason, ...data });
+  async function skip(item, reason, data = {}) {
+    const sku = asSku(item);
+    try {
+      await client.deleteFavorite(item);
+    } catch (error) {
+      await state.transition(sku, "failed", {
+        reason: "favorite-delete-failed",
+        skip_reason: reason,
+        error: String(error?.message || error),
+      });
+      return { status: "failed", sku, reason: "favorite-delete-failed" };
+    }
+    await state.transition(sku, "skipped", { reason, favorite_deleted: true, ...data });
     return { status: "skipped", sku, reason };
   }
 
@@ -99,13 +110,13 @@ export function createPublishRunner({
 
       // Reuse the central policy for mode/category checks before paying the 1688 cost.
       const earlyReason = policy.preflightSkipReason({ ...detail, economy: ECONOMY_SENTINEL });
-      if (earlyReason) return skip(sku, earlyReason);
+      if (earlyReason) return skip(item, earlyReason);
 
       const salePrice = policy.selectSalePrice(detail);
-      if (!(Number(salePrice) > 0)) return skip(sku, "missing-sale-price");
+      if (!(Number(salePrice) > 0)) return skip(item, "missing-sale-price");
 
       const cost = await costBridge.estimate({ ...detail, sell_price: salePrice }, runDir);
-      if (!cost?.ok) return skip(sku, cost?.reason || cost?.error?.code || "unreliable-1688-cost", { cost });
+      if (!cost?.ok) return skip(item, cost?.reason || cost?.error?.code || "unreliable-1688-cost", { cost });
 
       const productInfo = categoryData?.product_info || {};
       const category = mapOzonCategory(
@@ -133,7 +144,7 @@ export function createPublishRunner({
       if (Number(calc?.cnyrub_rate) > 0) cnyRubRate = Number(calc.cnyrub_rate);
       const economy = economyResult(calc);
       const preflightReason = policy.preflightSkipReason({ ...detail, economy });
-      if (preflightReason) return skip(sku, preflightReason);
+      if (preflightReason) return skip(item, preflightReason);
 
       const profit = {
         ...economy.price_list,
@@ -141,7 +152,7 @@ export function createPublishRunner({
         sell_price: economy.price_list.sell_price ?? salePrice,
       };
       const profitReason = policy.profitSkipReason(profit, profitThreshold);
-      if (profitReason) return skip(sku, profitReason, { profit });
+      if (profitReason) return skip(item, profitReason, { profit });
 
       const payload = buildPayload(item, detail, economy, targetConfig, now);
       const publishResult = await client.publish(payload);
@@ -189,7 +200,15 @@ export function createPublishRunner({
       if (state.hasPublished(sku)) continue;
 
       const restoredStatus = state.statusOf?.(sku);
-      if (restoredStatus === "skipped") continue;
+      if (restoredStatus === "skipped") {
+        try {
+          await client.deleteFavorite(item);
+        } catch (error) {
+          await state.transition(sku, "failed", { reason: "favorite-delete-failed", error: String(error?.message || error) }).catch(() => {});
+          failed += 1;
+        }
+        continue;
+      }
       if (restoredStatus === "processing" || restoredStatus === "failed") {
         try {
           const existing = await client.findPublishedSku(sku);

@@ -124,6 +124,28 @@ test("client only treats explicit Maozi publish success as success", async () =>
   assert.equal((await badShape.publish({ rows: [] })).ok, false);
 });
 
+test("client deletes a favorite through the plugin toggle contract", async () => {
+  const transport = makeTransport({
+    "/api.product.favorite/toggle": (path, request) => {
+      assert.deepEqual(request, {
+        method: "POST",
+        body: {
+          productInfo: {
+            sku: "123",
+            coverImage: "cover.jpg",
+            price_info: { sell_price: 19.9, currency: "CNY" },
+            title: "sample",
+          },
+          status: false,
+        },
+      });
+      return { status: 200, json: { code: 1, msg: "取消收藏成功", data: [] } };
+    },
+  });
+  const client = createMaoziClient({ transport });
+  assert.equal(await client.deleteFavorite({ sku: 123, cover_image: "cover.jpg", sell_price: 19.9, title: "sample" }), true);
+});
+
 test("client finds published SKUs through the favorites endpoint", async () => {
   const transport = makeTransport({
     "/api.product.favorite/lists": (path, request) => {

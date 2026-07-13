@@ -2,6 +2,7 @@ import { selectNamedResource } from "./publish-policy.mjs";
 
 const ENDPOINTS = Object.freeze({
   favorites: "/api.product.favorite/lists",
+  favoriteToggle: "/api.product.favorite/toggle",
   shops: "/api.shop/lists",
   watermarks: "/api.watermark/templates",
   category: "/api.tool/get_category_by_sku",
@@ -141,6 +142,23 @@ export function createMaoziClient({ transport }) {
         status: response?.status ?? 0,
         response: response?.json ?? null,
       };
+    },
+
+    async deleteFavorite(item) {
+      const productInfo = {
+        sku: String(item?.sku ?? item?.id ?? ""),
+        coverImage: item?.cover_image ?? item?.coverImage ?? null,
+        price_info: {
+          sell_price: Number(item?.sell_price ?? item?.price ?? 0),
+          currency: String(item?.currency ?? "CNY"),
+        },
+        title: String(item?.title ?? ""),
+      };
+      requireSuccess(await transport(ENDPOINTS.favoriteToggle, {
+        method: "POST",
+        body: { productInfo, status: false },
+      }), "favorite deletion");
+      return true;
     },
 
     async findPublishedSku(sku) {

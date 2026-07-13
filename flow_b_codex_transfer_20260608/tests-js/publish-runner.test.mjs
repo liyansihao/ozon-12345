@@ -58,6 +58,7 @@ function clientFor(items, overrides = {}) {
     getCategoryBySku: async () => ({ cate: [11, 22, "1,12.00"], product_info: { weight: 100, depth: 20, width: 10, height: 5 } }),
     calculateProfit: async () => economy(),
     publish: async () => ({ ok: true, response: { code: 1 } }),
+    deleteFavorite: async () => true,
     findPublishedSku: async () => null,
     ...overrides,
   };
@@ -199,7 +200,9 @@ test("historical duplicates do not consume target but resumed run successes do",
 test("resumed skipped candidates are terminal and are not recalculated", async () => {
   const state = fakeState({ 20: "skipped" });
   let detailCalls = 0;
+  const deleted = [];
   const client = clientFor([{ id: 20, sku: 20 }, { id: 21, sku: 21 }], {
+    deleteFavorite: async (item) => { deleted.push(String(item.sku)); return true; },
     getProductDetail: async (sku) => {
       detailCalls += 1;
       return { sku, mode: "FBS", title: "safe", current_price: 100, follow_min: 90 };
@@ -215,4 +218,5 @@ test("resumed skipped candidates are terminal and are not recalculated", async (
   assert.equal(result.published, 1);
   assert.equal(detailCalls, 1);
   assert.equal(state.records[0].sku, "21");
+  assert.ok(deleted.includes("20"));
 });
