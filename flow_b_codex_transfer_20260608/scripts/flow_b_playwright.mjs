@@ -50,7 +50,7 @@ export function parseCli(argv, env = process.env) {
   }
   if (command === "run") {
     const runDir = required(rest[0], "RUN_DIR");
-    return { command, runDir, urlsFile: required(rest[1], "URLS.txt"), outFile: path.join(runDir, "source_scan.json"), ...defaults };
+    return { command, runDir, urlsFile: required(rest[1], "URLS.txt"), outFile: path.join(runDir, "source_deep_scan.json"), ...defaults };
   }
   throw new Error(`unknown command: ${command}`);
 }
@@ -62,10 +62,11 @@ function browserOptions(env) {
   });
 }
 
-async function createRunDir(runDir) {
+async function createRunDir(runDir, sourceConfig) {
   await fs.mkdir(runDir, { recursive: true });
   const startFile = path.join(runDir, "start_time.txt");
   try { await fs.access(startFile); } catch { await fs.writeFile(startFile, `${new Date().toISOString()}\n`); }
+  if (sourceConfig) await fs.writeFile(path.join(runDir, "source_config.json"), `${JSON.stringify(sourceConfig, null, 2)}\n`);
 }
 
 async function publishWithContext(context, options, env) {
@@ -148,7 +149,14 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   }
   if (options.command === "run") {
     return withContext(env, async (context) => {
-      await createRunDir(options.runDir);
+      await createRunDir(options.runDir, {
+        mode: "playwright-run",
+        browser: "playwright-chrome-for-testing",
+        urls_file: options.urlsFile,
+        scan_output: options.outFile,
+        profit_threshold: options.threshold,
+        publish_target: options.target,
+      });
       const scan = await scanSources({ context, urlsFile: options.urlsFile, outFile: options.outFile, env });
       const publish = await publishWithContext(context, options, env);
       return { scan, publish };

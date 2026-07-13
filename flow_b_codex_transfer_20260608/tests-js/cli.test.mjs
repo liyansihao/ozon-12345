@@ -24,6 +24,7 @@ test("CLI accepts setup, scan, and run shapes", () => {
   assert.equal(run.command, "run");
   assert.equal(run.runDir, "/tmp/run");
   assert.equal(run.urlsFile, path.resolve("urls.txt"));
+  assert.equal(run.outFile, "/tmp/run/source_deep_scan.json");
 });
 
 test("CLI validates numbers, commands, and required paths without launching", () => {

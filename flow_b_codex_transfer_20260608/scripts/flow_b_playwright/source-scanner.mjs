@@ -23,16 +23,30 @@ async function waitForContent(page, timeout = 20000) {
   return null;
 }
 
+export function isFavoriteSessionAuthenticated({ hasToken, httpOk, code, pageText }) {
+  return Boolean(hasToken)
+    && Boolean(httpOk)
+    && Number(code) === 1
+    && !/登录|手机号|验证码|密码|login/i.test(String(pageText || ""));
+}
+
 async function favoriteCount(page) {
-  return page.evaluate(async () => {
+  const result = await page.evaluate(async () => {
     let token = "";
     try { token = JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || ""; } catch {}
     const headers = { "Accept-Language": "zh-CN", Client: "pc" };
     if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch("https://api.maozierp.com/api.product.favorite/lists?page=1&page_size=1&is_imported=0", { headers });
     const body = await response.json();
-    return { total: Number(body?.data?.total || 0), authenticated: Boolean(token) };
+    return {
+      total: Number(body?.data?.total || 0),
+      hasToken: Boolean(token),
+      httpOk: response.ok,
+      code: body?.code,
+      pageText: (document.body?.innerText || "").slice(0, 1000),
+    };
   });
+  return { total: result.total, authenticated: isFavoriteSessionAuthenticated(result) };
 }
 
 async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSteps }) {
@@ -123,7 +137,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     await waitForContent(maozi, 15000);
     await assertMaoziLogin(maozi);
     let favoriteState = await favoriteCount(maozi);
-    if (env.FLOW_B_MAOZI_AUTOFAVORITE !== "0" && !favoriteState.authenticated) throw new Error("Maozi profile is not logged in");
+    if (!favoriteState.authenticated) throw new Error("Maozi profile token is stale or the session is not logged in");
     let favoriteBefore = favoriteState.total;
 
     for (let start = 0; start < pending.length; start += workers) {
