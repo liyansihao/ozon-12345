@@ -138,6 +138,19 @@ test("client finds published SKUs through the favorites endpoint", async () => {
   assert.deepEqual(await client.findPublishedSku("123"), { sku: 123, title: "done" });
 });
 
+test("client reads exactly one favorite page for verification", async () => {
+  const transport = makeTransport({
+    "/api.product.favorite/lists": (path, request) => {
+      assert.deepEqual(request.query, { page: 2, page_size: 3, is_imported: 0 });
+      return { status: 200, json: { code: 1, data: { data: [{ sku: 9 }], total: 21, last_page: 7 } } };
+    },
+  });
+  const client = createMaoziClient({ transport });
+  assert.deepEqual(await client.getFavoritePage({ page: 2, pageSize: 3, isImported: 0 }), {
+    rows: [{ sku: 9 }], total: 21, page: 2, lastPage: 7,
+  });
+});
+
 test("client rejects malformed list responses before continuing", async () => {
   const client = createMaoziClient({
     transport: async () => ({ status: 200, json: { code: 1, data: { data: "oops" } } }),
@@ -180,4 +193,12 @@ test("browser page transport includes Maozi headers and safely parses non-JSON e
   assert.equal(requests[0].headers["Accept-Language"], "zh-CN");
   assert.equal(requests[0].headers.Client, "pc");
   assert.equal(requests[0].headers.Authorization, "Bearer abc123");
+});
+
+test("browser transport retries on the replacement Maozi page after SSO closes", async () => {
+  const first = { evaluate: async () => { throw new Error("Target page, context or browser has been closed"); }, isClosed: () => true, url: () => "about:blank" };
+  const second = { evaluate: async () => ({ status: 200, json: { code: 1 } }), isClosed: () => false, url: () => "https://ozon.maozierp.com/#/dashboard" };
+  const context = { pages: () => [first, second] };
+  const transport = createMaoziPageTransport({ page: first, context });
+  assert.deepEqual(await transport("/api.shop/lists"), { status: 200, json: { code: 1 } });
 });

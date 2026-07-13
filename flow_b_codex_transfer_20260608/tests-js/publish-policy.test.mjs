@@ -15,6 +15,11 @@ test("normalized substring matching selects the first resource", () => {
   assert.deepEqual(selectNamedResource(rows, "丽丽1号", "store"), rows[1]);
 });
 
+test("resource matching includes watermark content aliases", () => {
+  const rows = [{ id: 8, name: "1号", content: "lysh" }];
+  assert.deepEqual(selectNamedResource(rows, "LYSH", "watermark"), rows[0]);
+});
+
 test("missing resource throws a global configuration error", () => {
   assert.throws(() => selectNamedResource([{ id: 1, name: "其他" }], "lysh", "watermark"), /watermark not found/);
 });

@@ -48,6 +48,21 @@ function stringQuery(input) {
 export function createMaoziClient({ transport }) {
   if (typeof transport !== "function") throw new TypeError("Maozi transport must be a function");
 
+  async function getFavoritePage({ page = 1, pageSize = 50, isImported = 0 } = {}) {
+    const response = await transport(ENDPOINTS.favorites, {
+      method: "GET",
+      query: { page, page_size: pageSize, is_imported: isImported },
+    });
+    const data = requireSuccess(response, "favorites");
+    const rows = listRows(data, "favorites");
+    return {
+      rows,
+      total: Number(data?.total ?? rows.length),
+      page: Number(page),
+      lastPage: Number(data?.last_page ?? data?.last ?? data?.pages ?? 1),
+    };
+  }
+
   async function listFavorites({ pageSize = 50, query = {} } = {}) {
     const rows = [];
     const seenPages = new Set();
@@ -83,6 +98,7 @@ export function createMaoziClient({ transport }) {
   }
 
   return {
+    getFavoritePage,
     listFavorites,
     listShops,
     listWatermarks,
@@ -132,27 +148,27 @@ export function createMaoziClient({ transport }) {
   };
 }
 
-export function createMaoziPageTransport({ page, baseUrl = "https://api.maozierp.com" }) {
+export function createMaoziPageTransport({ page, context, baseUrl = "https://api.maozierp.com" }) {
   if (!page || typeof page.evaluate !== "function") throw new TypeError("A Playwright Maozi page is required");
-  return async (endpoint, { method = "GET", query, body } = {}) => page.evaluate(async (request) => {
+  const evaluate = (activePage, request) => activePage.evaluate(async (input) => {
     let token = "";
     try {
       token = JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "";
     } catch {}
-    request.headers["Accept-Language"] = "zh-CN";
-    request.headers.Client = "pc";
-    if (token) request.headers.Authorization = `Bearer ${token}`;
+    input.headers["Accept-Language"] = "zh-CN";
+    input.headers.Client = "pc";
+    if (token) input.headers.Authorization = `Bearer ${token}`;
 
-    const url = new URL(request.endpoint, request.baseUrl);
-    for (const [key, value] of Object.entries(request.query || {})) {
+    const url = new URL(input.endpoint, input.baseUrl);
+    for (const [key, value] of Object.entries(input.query || {})) {
       for (const entry of Array.isArray(value) ? value : [value]) {
         if (entry !== undefined && entry !== null) url.searchParams.append(key, String(entry));
       }
     }
-    const init = { method: request.method, headers: request.headers };
-    if (request.body !== undefined && request.body !== null && request.method !== "GET") {
+    const init = { method: input.method, headers: input.headers };
+    if (input.body !== undefined && input.body !== null && input.method !== "GET") {
       init.headers["Content-Type"] = "application/json";
-      init.body = JSON.stringify(request.body);
+      init.body = JSON.stringify(input.body);
     }
 
     try {
@@ -168,12 +184,45 @@ export function createMaoziPageTransport({ page, baseUrl = "https://api.maozierp
     } catch (error) {
       return { status: 0, json: { error: String(error?.message || error) } };
     }
-  }, {
-    baseUrl,
-    endpoint,
-    method: String(method || "GET").toUpperCase(),
-    query: query || {},
-    body,
-    headers: {},
-  });
+  }, request);
+  return async (endpoint, { method = "GET", query, body } = {}) => {
+    const request = {
+      baseUrl,
+      endpoint,
+      method: String(method || "GET").toUpperCase(),
+      query: query || {},
+      body,
+      headers: {},
+    };
+    let lastError;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await evaluate(page, { ...request, headers: {} });
+      } catch (error) {
+        lastError = error;
+        if (!context || !/target page|context or browser has been closed/i.test(String(error?.message || error))) throw error;
+        const previous = page;
+        let replacement = null;
+        for (let poll = 0; poll < 20 && !replacement; poll += 1) {
+          replacement = context.pages().find((candidate) => {
+            try {
+              return candidate !== previous
+                && (!candidate.isClosed || !candidate.isClosed())
+                && String(candidate.url()).startsWith("https://ozon.maozierp.com/");
+            } catch {
+              return false;
+            }
+          });
+          if (!replacement) await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        if (!replacement) {
+          replacement = await context.newPage();
+          await replacement.goto("https://ozon.maozierp.com/#/dashboard", { waitUntil: "domcontentloaded", timeout: 60000 });
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        page = replacement;
+      }
+    }
+    throw lastError;
+  };
 }

@@ -16,6 +16,7 @@ test("publish CLI uses strict production defaults", () => {
 
 test("CLI accepts setup, scan, and run shapes", () => {
   assert.equal(parseCli(["setup"], {}).command, "setup");
+  assert.equal(parseCli(["verify"], {}).command, "verify");
   assert.deepEqual(
     Object.keys(parseCli(["scan", "urls.txt", "out.json"], {})).filter((key) => ["command", "urlsFile", "outFile"].includes(key)),
     ["command", "urlsFile", "outFile"],

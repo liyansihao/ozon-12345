@@ -5,13 +5,14 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-import { assertMaoziLogin, launchFlowContext, resolveBrowserOptions } from "./flow_b_playwright/browser-context.mjs";
+import { ensureMaoziLogin, launchFlowContext, openMaoziPage, resolveBrowserOptions } from "./flow_b_playwright/browser-context.mjs";
 import { createCostBridge } from "./flow_b_playwright/cost-bridge.mjs";
 import { createMaoziClient, createMaoziPageTransport } from "./flow_b_playwright/maozi-client.mjs";
 import { createOzonDetailProvider } from "./flow_b_playwright/ozon-detail.mjs";
 import { createPublishRunner } from "./flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "./flow_b_playwright/publish-state.mjs";
 import { scanSources } from "./flow_b_playwright/source-scanner.mjs";
+import { runReadOnlyVerification } from "./flow_b_playwright/verification.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_RUN_DIR = path.join(ROOT, "runs/flow_b/playwright_target100");
@@ -42,6 +43,7 @@ export function parseCli(argv, env = process.env) {
   if (command === "setup") {
     return { command, runDir: path.resolve(rest[0] || path.join(ROOT, "runs/flow_b/playwright_setup")), ...defaults };
   }
+  if (command === "verify") return { command, ...defaults };
   if (command === "scan") {
     return { command, urlsFile: required(rest[0], "URLS.txt"), outFile: required(rest[1], "OUT.json"), ...defaults };
   }
@@ -71,11 +73,10 @@ async function createRunDir(runDir, sourceConfig) {
 
 async function publishWithContext(context, options, env) {
   await createRunDir(options.runDir);
-  const maoziPage = await context.newPage();
+  const maoziPage = await openMaoziPage(context);
   try {
-    await maoziPage.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded", timeout: 60000 });
-    await assertMaoziLogin(maoziPage);
-    const client = createMaoziClient({ transport: createMaoziPageTransport({ page: maoziPage }) });
+    await ensureMaoziLogin(maoziPage, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
+    const client = createMaoziClient({ transport: createMaoziPageTransport({ page: maoziPage, context }) });
     const state = createPublishState({
       runDir: options.runDir,
       publishedCsv: path.join(ROOT, "data/flow_b/published_links.csv"),
@@ -111,12 +112,28 @@ async function withContext(env, operation) {
   }
 }
 
+async function verifyWithContext(context, options, env) {
+  const page = await openMaoziPage(context);
+  try {
+    await ensureMaoziLogin(page, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
+    const client = createMaoziClient({ transport: createMaoziPageTransport({ page, context }) });
+    const manifest = JSON.parse(await fs.readFile(path.join(browserOptions(env).extensionDir, "manifest.json"), "utf8"));
+    return runReadOnlyVerification({
+      client,
+      extensionVersion: manifest.version,
+      storeNeedle: options.storeNeedle,
+      watermarkNeedle: options.watermarkNeedle,
+    });
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 async function setup(options, env) {
   await createRunDir(options.runDir);
   const context = await launchFlowContext(browserOptions(env));
   try {
-    const maozi = context.pages()[0] || await context.newPage();
-    await maozi.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded", timeout: 60000 });
+    await openMaoziPage(context);
     const ozon = await context.newPage();
     await ozon.goto("https://www.ozon.ru/", { waitUntil: "domcontentloaded", timeout: 60000 });
     console.log(JSON.stringify({ ok: true, profile: browserOptions(env).profileDir, message: "请完成 Ozon/Maozi 登录，完成后按 Ctrl+C。" }, null, 2));
@@ -129,6 +146,7 @@ async function setup(options, env) {
 function printHelp() {
   console.log(`Usage:
   flow_b_playwright.mjs setup [RUN_DIR]
+  flow_b_playwright.mjs verify
   flow_b_playwright.mjs scan URLS.txt OUT.json
   flow_b_playwright.mjs publish RUN_DIR
   flow_b_playwright.mjs run RUN_DIR URLS.txt
@@ -141,6 +159,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const options = parseCli(argv, env);
   if (options.command === "help") { printHelp(); return { ok: true, command: "help" }; }
   if (options.command === "setup") return setup(options, env);
+  if (options.command === "verify") {
+    return withContext(env, (context) => verifyWithContext(context, options, env));
+  }
   if (options.command === "scan") {
     return withContext(env, (context) => scanSources({ context, urlsFile: options.urlsFile, outFile: options.outFile, env }));
   }

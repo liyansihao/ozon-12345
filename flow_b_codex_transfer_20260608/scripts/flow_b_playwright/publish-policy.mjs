@@ -6,7 +6,8 @@ export function normalizeName(value) {
 
 export function selectNamedResource(rows, needle, label) {
   const normalized = normalizeName(needle);
-  const found = rows.find((row) => normalizeName(row.name ?? row.title).includes(normalized));
+  const found = normalized && rows.find((row) => [row.name, row.title, row.content, row.label]
+    .some((value) => normalizeName(value).includes(normalized)));
   if (!found) throw new Error(`${label} not found: ${needle}`);
   return found;
 }

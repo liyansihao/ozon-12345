@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { assertMaoziLogin } from "./browser-context.mjs";
+import { ensureMaoziLogin, openMaoziPage } from "./browser-context.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -135,11 +135,12 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const lowDeltaThreshold = envNumber(env, "FLOW_B_LOW_DELTA_THRESHOLD", 1);
   const lowDeltaBatchLimit = envNumber(env, "FLOW_B_LOW_DELTA_BATCH_LIMIT", 2);
   let lowDeltaBatches = 0;
-  const maozi = await context.newPage();
+  const maozi = await openMaoziPage(context);
   try {
-    await maozi.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded", timeout: 60000 });
     await waitForContent(maozi, 15000);
-    await assertMaoziLogin(maozi);
+    if (requiresFavoriteSession(env)) {
+      await ensureMaoziLogin(maozi, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
+    }
     let favoriteState = await favoriteCount(maozi);
     if (requiresFavoriteSession(env) && !favoriteState.authenticated) throw new Error("Maozi profile token is stale or the session is not logged in");
     let favoriteBefore = favoriteState.authenticated ? favoriteState.total : null;

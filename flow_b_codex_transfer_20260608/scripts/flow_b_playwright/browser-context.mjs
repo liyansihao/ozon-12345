@@ -98,6 +98,21 @@ export async function launchFlowContext(options) {
   }
 }
 
+export async function openMaoziPage(context, { settleMs = 1000 } = {}) {
+  const available = () => context.pages().filter((page) => typeof page.isClosed !== "function" || !page.isClosed());
+  let page = available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
+  if (!page) {
+    page = available()[0] || await context.newPage();
+    await page.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded", timeout: 60000 });
+  }
+  if (settleMs > 0) await delay(settleMs);
+  if (typeof page.isClosed === "function" && page.isClosed()) {
+    page = available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
+  }
+  if (!page) throw new Error("Maozi SSO page closed without leaving an authenticated ERP page");
+  return page;
+}
+
 export async function assertMaoziLogin(page) {
   const token = await page.evaluate(() => {
     try {
@@ -109,4 +124,23 @@ export async function assertMaoziLogin(page) {
   const normalized = String(token || "").trim();
   if (!normalized) throw new Error("Maozi profile is not logged in: maozierp-core-access.accessToken is empty");
   return normalized;
+}
+
+export async function ensureMaoziLogin(page, { continueDeviceLogin = false, timeout = 30000 } = {}) {
+  try {
+    return await assertMaoziLogin(page);
+  } catch (error) {
+    if (!continueDeviceLogin) throw error;
+    const button = page.getByRole("button", { name: "继续登录", exact: true });
+    if (await button.count() !== 1) throw error;
+    await button.click();
+    await page.waitForFunction(() => {
+      try {
+        return Boolean(JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken);
+      } catch {
+        return false;
+      }
+    }, null, { timeout });
+    return assertMaoziLogin(page);
+  }
 }
