@@ -53,6 +53,10 @@ export function isFavoriteCapacityReached(error) {
   return /收藏数量已达上限|favorite.*(?:limit|capacity)/i.test(String(error?.message || error || ""));
 }
 
+export function effectiveFavoriteTotal({ claimedTotal, observedTotal, target }) {
+  return Number(claimedTotal) >= Number(target) ? Number(target) : Number(observedTotal);
+}
+
 export function isOzonSoftBlock(value) {
   return /похоже, нет(?:\s|\u00a0)+соединения|выключите VPN|incident:\s*[a-z0-9_]+/i.test(String(value || ""));
 }
@@ -474,7 +478,12 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       const afterWait = envNumber(env, "FLOW_B_MAOZI_AFTER_SCAN_WAIT", 10) * 1000;
       if (afterWait) await sleep(afterWait);
       favoriteState = await favoriteCount(maozi);
-      const favoriteAfter = favoriteState.authenticated ? favoriteState.total : null;
+      const observedFavoriteAfter = favoriteState.authenticated ? favoriteState.total : null;
+      const favoriteAfter = observedFavoriteAfter === null ? null : effectiveFavoriteTotal({
+        claimedTotal: favoriteBefore,
+        observedTotal: observedFavoriteAfter,
+        target: targetFavorites,
+      });
       const delta = favoriteBefore !== null && favoriteAfter !== null ? favoriteAfter - favoriteBefore : null;
       records.push(...batchRows.map((row, index) => ({
         source_url: batch[index],

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   canClaimFavorite,
   favoriteRetryDelay,
+  effectiveFavoriteTotal,
   isFavoriteSessionAuthenticated,
   isFavoriteCapacityReached,
   isOzonSoftBlock,
@@ -99,6 +100,8 @@ test("favorite collection prioritizes proven lightweight product families stably
 test("Maozi favorite capacity is a batch terminal condition", () => {
   assert.equal(isFavoriteCapacityReached(new Error("收藏数量已达上限（1000个），请先删除部分收藏")), true);
   assert.equal(isFavoriteCapacityReached(new Error("商品信息不完整")), false);
+  assert.equal(effectiveFavoriteTotal({ claimedTotal: 1000, observedTotal: 962, target: 1000 }), 1000);
+  assert.equal(effectiveFavoriteTotal({ claimedTotal: 900, observedTotal: 905, target: 1000 }), 905);
 });
 
 test("rolling collection excludes only latest terminal skipped or published SKUs", () => {
