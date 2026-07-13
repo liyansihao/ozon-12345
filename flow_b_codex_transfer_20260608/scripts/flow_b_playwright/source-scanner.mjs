@@ -61,12 +61,16 @@ export function ozonRetryDelay(attempt) {
   return Math.min(180_000, 60_000 * (2 ** Math.max(0, attempt)));
 }
 
-function favoriteLinkPriority(link) {
-  const text = String(link?.text || "");
+export function productTitlePriority(value) {
+  const text = String(value || "");
   if (/трус|нижн(?:ее|его|ем)?\s+бель|бюст|лифчик|шляп|панам|кепк|козыр|докер|косынк|головн.*убор/i.test(text)) return 300;
   if (/носк|перчат|заколк|резинк|брелок|подвеск|наклейк|чехол|ремеш|браслет|кулон/i.test(text)) return 200;
   if (/кукл|игруш/i.test(text)) return 100;
   return 0;
+}
+
+function favoriteLinkPriority(link) {
+  return productTitlePriority(link?.text);
 }
 
 export function prioritizeFavoriteLinks(links) {

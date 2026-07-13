@@ -1,6 +1,7 @@
 import * as defaultPolicy from "./publish-policy.mjs";
 import { canonicalProductUrl } from "./publish-state.mjs";
 import { mapOzonCategory } from "./category-commission.mjs";
+import { productTitlePriority } from "./source-scanner.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -30,6 +31,13 @@ function offerDate(date) {
 
 function rounded(value) {
   return Math.round(Number(value) * 100) / 100;
+}
+
+export function prioritizePublishCandidates(items) {
+  return [...items]
+    .map((item, index) => ({ item, index, priority: productTitlePriority(item?.title) }))
+    .sort((left, right) => right.priority - left.priority || left.index - right.index)
+    .map(({ item }) => item);
 }
 
 function buildPayload(item, detail, economy, targetConfig, now) {
@@ -198,7 +206,7 @@ export function createPublishRunner({
       ...await client.resolvePublishTarget({ storeNeedle, watermarkNeedle }),
       commissionTree: typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [],
     };
-    const candidates = await client.listFavorites();
+    const candidates = prioritizePublishCandidates(await client.listFavorites());
     let published = Number(state.runPublishedCount?.() ?? 0);
     let failed = 0;
     let skipped = 0;

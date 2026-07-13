@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createPublishRunner } from "../scripts/flow_b_playwright/publish-runner.mjs";
+import { createPublishRunner, prioritizePublishCandidates } from "../scripts/flow_b_playwright/publish-runner.mjs";
 
 function fakeState(initial = {}, initialRunPublished = 0) {
   const statuses = new Map(Object.entries(initial));
@@ -63,6 +63,21 @@ function clientFor(items, overrides = {}) {
     ...overrides,
   };
 }
+
+test("publish candidates prioritize proven product titles independently of API order", () => {
+  const items = [
+    { sku: "ordinary", title: "Воздушные шары из фольги" },
+    { sku: "toy", title: "Детская игрушка" },
+    { sku: "hat", title: "Панама для девочек" },
+    { sku: "underwear", title: "Комплект трусов" },
+  ];
+  assert.deepEqual(prioritizePublishCandidates(items).map((item) => item.sku), [
+    "hat",
+    "underwear",
+    "toy",
+    "ordinary",
+  ]);
+});
 
 test("runner records a failed SKU and continues until confirmed success target", async () => {
   const state = fakeState();
