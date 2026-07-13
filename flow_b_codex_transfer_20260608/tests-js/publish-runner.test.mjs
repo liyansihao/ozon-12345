@@ -81,6 +81,17 @@ test("publish candidates prioritize proven product titles independently of API o
   ]);
 });
 
+test("publish candidates put collection-preflight FBS SKUs first", () => {
+  const items = [
+    { sku: "hat", title: "Панама", sell_price: 50 },
+    { sku: "pure", title: "Обычный товар", sell_price: 20 },
+  ];
+  assert.deepEqual(
+    prioritizePublishCandidates(items, new Set(["pure"])).map((item) => item.sku),
+    ["pure", "hat"],
+  );
+});
+
 test("runner records a failed SKU and continues until confirmed success target", async () => {
   const state = fakeState();
   const detailCalls = [];

@@ -332,7 +332,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           existing.add(productInfo.sku);
           total += 1;
           const observedTotal = total;
-          await record({ status: "favorited", sku: productInfo.sku, url: item.href, total: observedTotal });
+          await record({ status: "favorited", preflight_mode: "FBS", sku: productInfo.sku, url: item.href, total: observedTotal });
           log(`favorite SKU ${productInfo.sku} total=${observedTotal}/${target}`);
         } catch (error) {
           if (isFavoriteCapacityReached(error)) {

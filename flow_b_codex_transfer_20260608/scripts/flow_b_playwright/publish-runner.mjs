@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import * as defaultPolicy from "./publish-policy.mjs";
 import { canonicalProductUrl } from "./publish-state.mjs";
 import { mapOzonCategory } from "./category-commission.mjs";
@@ -33,18 +36,38 @@ function rounded(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
-export function prioritizePublishCandidates(items) {
+export function prioritizePublishCandidates(items, preflightPureSkus = new Set()) {
   return [...items]
     .map((item, index) => ({
       item,
       index,
+      purePreflight: preflightPureSkus.has(String(item?.sku ?? item?.id ?? "")) ? 1 : 0,
       priority: productTitlePriority(item?.title),
       salePrice: Number(item?.sell_price ?? item?.price ?? item?.price_info?.sell_price) || 0,
     }))
-    .sort((left, right) => right.priority - left.priority
+    .sort((left, right) => right.purePreflight - left.purePreflight
+      || right.priority - left.priority
       || right.salePrice - left.salePrice
       || left.index - right.index)
     .map(({ item }) => item);
+}
+
+async function loadPreflightPureSkus(runDir) {
+  const result = new Set();
+  try {
+    const text = await fs.readFile(path.join(runDir, "favorite_collection.jsonl"), "utf8");
+    for (const line of text.split(/\r?\n/)) {
+      try {
+        const event = JSON.parse(line);
+        if (event?.status === "favorited" && event?.preflight_mode === "FBS" && event?.sku) {
+          result.add(String(event.sku));
+        }
+      } catch {}
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  return result;
 }
 
 function buildPayload(item, detail, economy, targetConfig, now) {
@@ -216,7 +239,7 @@ export function createPublishRunner({
       ...await client.resolvePublishTarget({ storeNeedle, watermarkNeedle }),
       commissionTree: typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [],
     };
-    const candidates = prioritizePublishCandidates(await client.listFavorites());
+    const candidates = prioritizePublishCandidates(await client.listFavorites(), await loadPreflightPureSkus(runDir));
     let published = Number(state.runPublishedCount?.() ?? 0);
     let failed = 0;
     let skipped = 0;
