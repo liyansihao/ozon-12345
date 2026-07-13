@@ -1,18 +1,30 @@
 {
+  "flow": "B",
   "flow_name": "flow_b",
+  "profit": {
+    "profit_rate_threshold_percent": 30,
+    "publish_when_profit_rate_is_strictly_greater_than_threshold": true
+  },
+  "target": {
+    "published_count": 100
+  },
+  "publish_target": {
+    "store_name_contains": "丽丽1号",
+    "watermark_name_contains": "lysh"
+  },
   "source": {
     "ozon_store_scroll_required": true,
     "maozierp_favorites_url": "https://ozon.maozierp.com/#/product/favorite"
   },
   "pricing": {
     "selected_sale_price_rule": "min(ozon_current_sale_price, maozierp_follow_sell_lowest_price)",
-    "profit_rate_threshold_percent": 20,
+    "profit_rate_threshold_percent": 30,
     "publish_when_profit_rate_is_strictly_greater_than_threshold": true,
     "currency": "CNY"
   },
   "listing": {
-    "default_store": "JM-001",
-    "default_watermark": "鹿呦呦",
+    "default_store": "丽丽1号",
+    "default_watermark": "lysh",
     "show_all_sku": false,
     "submit_button_text": "一键上架至OZON"
   },
