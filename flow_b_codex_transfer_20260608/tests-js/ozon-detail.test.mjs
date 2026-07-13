@@ -33,6 +33,17 @@ test("detail parser ignores a ruble-like current price and supports Russian foll
   assert.equal(detail.selected_price, 79.9);
 });
 
+test("visible Ozon price overrides ruble sales revenue stored as favorite fallback", () => {
+  const detail = parseOzonDetailText([
+    "月销售额：₽7283.02 ≈ ¥649.65",
+    "发货模式： FBS",
+    "跟卖最低价：¥8.76",
+  ].join("\n"), 7283.02, "10,62 ¥\nС банками");
+  assert.equal(detail.current_price, 10.62);
+  assert.equal(detail.current_price_rub_suspect, true);
+  assert.equal(detail.selected_price, 8.76);
+});
+
 test("Playwright detail provider closes its page and returns parsed facts", async () => {
   let closed = false;
   const page = {
@@ -50,4 +61,23 @@ test("Playwright detail provider closes its page and returns parsed facts", asyn
   assert.equal(detail.follow_min, 80);
   assert.equal(detail.detail_url, "https://www.ozon.ru/product/test-123/");
   assert.equal(closed, true);
+});
+
+test("detail provider waits for Maozi mode instead of accepting a long bare Ozon body", async () => {
+  let calls = 0;
+  const page = {
+    goto: async () => {},
+    evaluate: async () => {
+      calls += 1;
+      return calls === 1
+        ? { url: "https://www.ozon.ru/product/321/", title: "loading", text: "x".repeat(5000), webPriceText: "10 ¥" }
+        : { url: "https://www.ozon.ru/product/321/", title: "ready", text: "发货模式： FBS", webPriceText: "10 ¥" };
+    },
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({ context: { newPage: async () => page }, timeout: 50, pollInterval: 1 });
+  const detail = await provider.getProductDetail("321", { sell_price: 7283 });
+  assert.equal(calls, 2);
+  assert.equal(detail.mode, "FBS");
+  assert.equal(detail.selected_price, 10);
 });

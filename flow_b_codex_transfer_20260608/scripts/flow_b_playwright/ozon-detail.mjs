@@ -15,7 +15,7 @@ function rounded(value) {
   return value === null ? null : Math.round(value * 100) / 100;
 }
 
-export function parseOzonDetailText(text, fallbackPrice) {
+export function parseOzonDetailText(text, fallbackPrice, webPriceText = "") {
   const source = String(text || "");
   const mode = source.match(/发货模式：\s*([^\n]+)/)?.[1]?.trim() || null;
 
@@ -25,10 +25,14 @@ export function parseOzonDetailText(text, fallbackPrice) {
   }
 
   const head = source.split("选品标签：", 1)[0];
-  const currentPrice = head.split(/\r?\n/).filter((line) => line.includes("¥")).map(money).find((value) => value !== null) ?? null;
+  const visiblePrice = String(webPriceText || "").includes("¥") ? money(webPriceText) : null;
+  const currentPrice = visiblePrice
+    ?? head.split(/\r?\n/).filter((line) => line.includes("¥") && !line.includes("₽")).map(money).find((value) => value !== null)
+    ?? null;
   const fallback = money(fallbackPrice);
-  const rubSuspect = currentPrice !== null && fallback !== null && currentPrice > fallback * 3;
-  const selectedBasis = rubSuspect ? [fallback, followMin] : [fallback, currentPrice, followMin];
+  const rubSuspect = currentPrice !== null && fallback !== null
+    && (currentPrice > fallback * 3 || fallback > currentPrice * 3);
+  const selectedBasis = [fallback, currentPrice, followMin];
   const selectedValues = selectedBasis.filter((value) => value !== null);
 
   return {
@@ -58,17 +62,18 @@ export function createOzonDetailProvider({ context, timeout = 20000, pollInterva
             url: location.href,
             title: document.title,
             text: document.body?.innerText || "",
+            webPriceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
           })).catch(() => null);
           const diagnostic = `${payload?.title || ""} ${payload?.text?.slice(0, 1000) || ""}`;
           if (/доступ ограничен|access denied|captcha/i.test(diagnostic)) throw new Error(`Ozon detail is blocked for SKU ${sku}`);
-          if (payload?.text && (/发货模式：/.test(payload.text) || payload.text.length > 1000)) break;
+          if (payload?.text && /发货模式：/.test(payload.text)) break;
           if (Date.now() >= deadline) break;
           await delay(Math.max(1, pollInterval));
         } while (true);
         if (!payload?.text) throw new Error(`Ozon detail text unavailable for SKU ${sku}`);
         const fallback = item.sell_price ?? item.current_price ?? item.price;
         return {
-          ...parseOzonDetailText(payload.text, fallback),
+          ...parseOzonDetailText(payload.text, fallback, payload.webPriceText),
           detail_url: payload.url,
           detail_title: payload.title,
         };
