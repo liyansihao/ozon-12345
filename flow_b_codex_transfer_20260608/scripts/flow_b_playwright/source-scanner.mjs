@@ -34,6 +34,37 @@ export function requiresFavoriteSession(env = process.env) {
   return env.FLOW_B_MAOZI_AUTOFAVORITE !== "0";
 }
 
+export function canClaimFavorite({ total, inFlight, target }) {
+  return Number(total) + Number(inFlight) < Number(target);
+}
+
+function skuFromProductUrl(value) {
+  return String(value || "").match(/\/product\/(?:[^/?#]*-)?(\d+)(?:[/?#]|$)/)?.[1] || "";
+}
+
+export function parseFavoriteProductSnapshot({ url, title, ogTitle, ogImage, priceText }) {
+  const sku = skuFromProductUrl(url);
+  if (!sku) throw new Error("Ozon product SKU is missing");
+  const coverImage = String(ogImage || "").trim();
+  if (!coverImage) throw new Error(`Ozon cover image is missing for SKU ${sku}`);
+  const source = String(priceText || "");
+  const rawPrice = source.match(/[0-9][0-9\s\u00a0\u2009\u202f]*(?:[,.][0-9]+)?/)?.[0] || "";
+  const sellPrice = Number(rawPrice.replace(/[\s\u00a0\u2009\u202f]/g, "").replace(",", "."));
+  if (!Number.isFinite(sellPrice) || sellPrice <= 0) throw new Error(`Ozon sell price is missing for SKU ${sku}`);
+  const currency = source.includes("¥") ? "CNY" : source.includes("₸") ? "KZT" : "RUB";
+  const productTitle = String(ogTitle || title || "")
+    .replace(/\s+купить на OZON.*$/i, "")
+    .replace(/\s*\(\d+\)\s*$/, "")
+    .trim();
+  if (!productTitle) throw new Error(`Ozon title is missing for SKU ${sku}`);
+  return {
+    sku,
+    coverImage,
+    price_info: { sell_price: sellPrice, currency },
+    title: productTitle,
+  };
+}
+
 async function favoriteCount(page) {
   const result = await page.evaluate(async () => {
     let token = "";
@@ -51,6 +82,113 @@ async function favoriteCount(page) {
     };
   });
   return { total: result.total, authenticated: isFavoriteSessionAuthenticated(result) };
+}
+
+async function favoriteSkus(page) {
+  return page.evaluate(async () => {
+    let token = "";
+    try { token = JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || ""; } catch {}
+    const headers = { "Accept-Language": "zh-CN", Client: "pc" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch("https://api.maozierp.com/api.product.favorite/skus", { headers });
+    const body = await response.json();
+    if (!response.ok || Number(body?.code) !== 1 || !Array.isArray(body?.data)) {
+      throw new Error(body?.msg || "Unable to load Maozi favorite SKUs");
+    }
+    return body.data.map(String);
+  });
+}
+
+async function favoriteProduct(page, productInfo) {
+  return page.evaluate(async (payload) => {
+    let token = "";
+    try { token = JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || ""; } catch {}
+    const headers = { "Accept-Language": "zh-CN", Client: "pc", "Content-Type": "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch("https://api.maozierp.com/api.product.favorite/toggle", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ productInfo: payload, status: true }),
+    });
+    const body = await response.json();
+    if (!response.ok || Number(body?.code) !== 1) throw new Error(body?.msg || `HTTP ${response.status}`);
+    return body;
+  }, productInfo);
+}
+
+async function extractFavoriteProduct(page, url, timeout) {
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  const deadline = Date.now() + timeout;
+  let snapshot;
+  do {
+    snapshot = await page.evaluate(() => ({
+      url: location.href,
+      title: document.title,
+      ogTitle: document.querySelector('meta[property="og:title"]')?.content || "",
+      ogImage: document.querySelector('meta[property="og:image"]')?.content || "",
+      priceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
+      pageText: (document.body?.innerText || "").slice(0, 1000),
+    })).catch(() => null);
+    if (/доступ ограничен|access denied|captcha/i.test(`${snapshot?.title || ""} ${snapshot?.pageText || ""}`)) {
+      throw new Error(`Ozon detail is blocked: ${url}`);
+    }
+    if (snapshot?.ogImage && snapshot?.priceText) break;
+    if (Date.now() >= deadline) break;
+    await sleep(500);
+  } while (true);
+  return parseFavoriteProductSnapshot(snapshot || { url });
+}
+
+async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log }) {
+  if (currentTotal >= target || !links.length) return currentTotal;
+  const existing = new Set(await favoriteSkus(maozi));
+  const queue = [];
+  for (const link of links) {
+    const href = typeof link === "string" ? link : link?.href;
+    const sku = skuFromProductUrl(href);
+    if (!sku || existing.has(sku) || attempted.has(sku)) continue;
+    attempted.add(sku);
+    queue.push({ sku, href });
+  }
+  const workerCount = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_WORKERS", envNumber(env, "FLOW_B_TAB_WORKERS", 4)));
+  const timeout = envNumber(env, "FLOW_B_FAVORITE_DETAIL_TIMEOUT", 15000);
+  let cursor = 0;
+  let total = currentTotal;
+  let inFlight = 0;
+  let writeChain = Promise.resolve();
+  const record = (row) => {
+    writeChain = writeChain.then(() => fs.appendFile(logFile, `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`));
+    return writeChain;
+  };
+  const workers = Array.from({ length: Math.min(workerCount, queue.length) }, async () => {
+    const page = await context.newPage();
+    try {
+      while (canClaimFavorite({ total, inFlight, target })) {
+        const item = queue[cursor++];
+        if (!item) break;
+        inFlight += 1;
+        try {
+          const productInfo = await extractFavoriteProduct(page, item.href, timeout);
+          await favoriteProduct(maozi, productInfo);
+          existing.add(productInfo.sku);
+          total += 1;
+          const observedTotal = total;
+          await record({ status: "favorited", sku: productInfo.sku, url: item.href, total: observedTotal });
+          log(`favorite SKU ${productInfo.sku} total=${observedTotal}/${target}`);
+        } catch (error) {
+          await record({ status: "failed", sku: item.sku, url: item.href, error: String(error?.message || error) });
+          log(`favorite failed SKU ${item.sku}: ${error?.message || error}`);
+        } finally {
+          inFlight -= 1;
+        }
+      }
+    } finally {
+      await page.close().catch(() => {});
+    }
+  });
+  await Promise.all(workers);
+  await writeChain;
+  return total;
 }
 
 async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSteps }) {
@@ -129,12 +267,15 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     steps: envNumber(env, "FLOW_B_MAX_SCROLL_STEPS", 24),
     ratio: envNumber(env, "FLOW_B_SCROLL_RATIO", 0.82),
     delay: envNumber(env, "FLOW_B_SCROLL_DELAY", 0.65) * 1000,
-    initialWait: envNumber(env, "FLOW_B_MAOZI_INITIAL_WAIT", env.FLOW_B_MAOZI_AUTOFAVORITE === "0" ? 8 : 25) * 1000,
+    initialWait: envNumber(env, "FLOW_B_MAOZI_INITIAL_WAIT", 8) * 1000,
     maxNoNewSteps: envNumber(env, "FLOW_B_MAX_NO_NEW_LINK_STEPS", 45),
   };
   const lowDeltaThreshold = envNumber(env, "FLOW_B_LOW_DELTA_THRESHOLD", 1);
   const lowDeltaBatchLimit = envNumber(env, "FLOW_B_LOW_DELTA_BATCH_LIMIT", 2);
   let lowDeltaBatches = 0;
+  const targetFavorites = envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000);
+  const attempted = new Set();
+  const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const maozi = await openMaoziPage(context);
   try {
     await waitForContent(maozi, 15000);
@@ -145,13 +286,43 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     if (requiresFavoriteSession(env) && !favoriteState.authenticated) throw new Error("Maozi profile token is stale or the session is not logged in");
     let favoriteBefore = favoriteState.authenticated ? favoriteState.total : null;
 
+    if (favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
+      const retainedLinks = records.flatMap((row) => Array.isArray(row.links) ? row.links : []);
+      log(`collecting favorites from ${retainedLinks.length} retained product links`);
+      favoriteBefore = await collectFavorites({
+        context,
+        maozi,
+        links: retainedLinks,
+        target: targetFavorites,
+        currentTotal: favoriteBefore,
+        env,
+        attempted,
+        logFile: favoriteLog,
+        log,
+      });
+    }
+
     for (let start = 0; start < pending.length; start += workers) {
+      if (favoriteBefore !== null && favoriteBefore >= targetFavorites) break;
       const batch = pending.slice(start, start + workers);
       log(`batch ${start + 1}-${start + batch.length} / ${pending.length}`);
       const pages = await Promise.all(batch.map(() => context.newPage()));
       const batchRows = await Promise.all(pages.map((page, index) => scanOne(page, batch[index], options)
         .catch((error) => ({ source_url: batch[index], blocked: false, stop_reason: `error: ${error.message}`, links: [], cumulative_product_link_count: 0 }))));
       await Promise.all(pages.map((page) => page.close().catch(() => {})));
+      if (favoriteBefore !== null) {
+        favoriteBefore = await collectFavorites({
+          context,
+          maozi,
+          links: batchRows.flatMap((row) => row.links || []),
+          target: targetFavorites,
+          currentTotal: favoriteBefore,
+          env,
+          attempted,
+          logFile: favoriteLog,
+          log,
+        });
+      }
       const afterWait = envNumber(env, "FLOW_B_MAOZI_AFTER_SCAN_WAIT", 10) * 1000;
       if (afterWait) await sleep(afterWait);
       favoriteState = await favoriteCount(maozi);
@@ -168,7 +339,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       await fs.writeFile(outputPath, JSON.stringify(records, null, 2));
       log(`favorite ${favoriteBefore} -> ${favoriteAfter} delta=${delta}`);
       favoriteBefore = favoriteAfter;
-      if (favoriteAfter !== null && favoriteAfter >= envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000)) break;
+      if (favoriteAfter !== null && favoriteAfter >= targetFavorites) break;
       if (lowDeltaBatchLimit > 0) {
         lowDeltaBatches = delta === null || delta < lowDeltaThreshold ? lowDeltaBatches + 1 : 0;
         if (lowDeltaBatches >= lowDeltaBatchLimit) break;
