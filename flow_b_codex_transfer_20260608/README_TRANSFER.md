@@ -54,7 +54,37 @@ export FLOW_B_TARGET_PUBLISH_COUNT=600 FLOW_B_SKIP_RETAINED=1
 scripts/run_acceptance_supervised.sh runs/flow_b/acceptance_2h runs/flow_b/source_urls.txt
 ```
 
-24 小时连续运行时仅将 `FLOW_B_ACCEPTANCE_SECONDS` 改为 `86400`、`FLOW_B_ACCEPTANCE_TARGET` 改为 `600`，并使用新的独立运行目录。每个 SKU 的错误会落盘后继续；设备已满时会走页面提供的设备接管流程，但不会绕过验证码或其他安全校验。
+2026-07-14 的固定两小时窗口用以下生产参数确认 52 个有效唯一 SKU（26 个/小时）。24 小时连续运行沿用同一安全配置，将验收目标设为 600、发布上限留出到 720，并使用新的独立运行目录：
+
+```bash
+export FLOW_B_EXTENSION_DIR=/Users/mac/Downloads/maozi-plugin-3.0.9/maozi-plugin-3.0.9
+export FLOW_B_MAOZI_CONTINUE_LOGIN=1
+export FLOW_B_STORE_ID=104965 FLOW_B_WATERMARK_ID=60822
+export FLOW_B_STORE_NEEDLE=丽丽1号 FLOW_B_WATERMARK_NEEDLE=lysh
+export FLOW_B_ACCEPTANCE_SECONDS=86400 FLOW_B_ACCEPTANCE_TARGET=600
+export FLOW_B_TARGET_PUBLISH_COUNT=720 FLOW_B_EXCLUDED_SKUS=2815247918
+export FLOW_B_PUBLISH_WORKERS=8 FLOW_B_MAX_PUBLISH_WORKERS=12
+export FLOW_B_TAB_WORKERS=6 FLOW_B_MAX_TAB_WORKERS=10 FLOW_B_FAVORITE_WORKERS=6
+export FLOW_B_TARGET_FAVORITES=1000 FLOW_B_MAX_LINKS_PER_SOURCE=12
+export FLOW_B_POLL_INTERVAL_MS=5000 FLOW_B_PRODUCER_INTERVAL_MS=10000
+export FLOW_B_SKIP_RETAINED=1 FLOW_B_LOW_DELTA_BATCH_LIMIT=0
+export FLOW_B_FAVORITE_DETAIL_INTERVAL_MS=1000 FLOW_B_FAVORITE_API_INTERVAL_MS=500
+export FLOW_B_FAVORITE_DETAIL_RETRIES=0 FLOW_B_FAVORITE_DETAIL_TIMEOUT=8000
+export FLOW_B_OZON_DETAIL_TIMEOUT_MS=12000 FLOW_B_1688_ITEM_TIMEOUT=60
+export FLOW_B_RESTART_DELAY_SECONDS=5
+
+RUN_DIR=runs/flow_b/$(date +%Y%m%d_%H%M%S)_ozon_24h
+SEED_DIR=runs/flow_b/20260714_135000_ozon500_acceptance_2h_v2
+export FLOW_B_SOURCE_YIELD_SEED_FILES="$SEED_DIR/source_yield.jsonl"
+export FLOW_B_STATE_SEED_FILES="$SEED_DIR/sku_states.jsonl"
+export FLOW_B_FAVORITE_SEED_FILES="$SEED_DIR/favorite_collection.jsonl"
+
+scripts/run_acceptance_supervised.sh \
+  "$RUN_DIR" \
+  runs/flow_b/20260623_131244_gap_to_maozi/source_urls_priority_for_1000.txt
+```
+
+采集端会按最新发布收益把已扫描来源切成 60 条反馈小批，复用未尝试链接；成功批次自动提高来源优先级。`Failed to fetch`、HTTP 0、超时或 Ozon 软拦截会触发并发降级与 60/120/180 秒移动冷却。每个 SKU 的错误会落盘后继续；设备已满时会走页面提供的设备接管流程，但不会绕过验证码或其他安全校验。
 
 可覆盖参数：
 
