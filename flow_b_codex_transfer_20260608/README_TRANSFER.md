@@ -37,6 +37,15 @@ npm run flow:b:scan -- runs/flow_b/source_urls.txt runs/flow_b/source_deep_scan.
 npm run flow:b:publish -- runs/flow_b/20260713_playwright_publish
 ```
 
+把一个运行中已通过严格利润、FBS、图片、标题和同款校验的指定 CSV 清单定向转到另一家已验证店铺：
+
+```bash
+FLOW_B_STORE_ID=106637 FLOW_B_STORE_NEEDLE=丽丽二号 \
+npm run flow:b:transfer -- SOURCE_RUN SOURCE_RUN/submitted_pending.csv TARGET_RUN
+```
+
+该入口只处理 CSV 中的 SKU，先查询目标店铺的精确 `offer_id` 与导入记录，避免目标店重复提交；ERP 接收、导入中和最终 `selling && stock>0` 分开记录。
+
 使用一个浏览器上下文完成扫描并上架：
 
 ```bash
