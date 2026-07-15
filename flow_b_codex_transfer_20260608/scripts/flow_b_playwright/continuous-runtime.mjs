@@ -17,6 +17,7 @@ export function mergeCandidateFacts(favorite = {}, fact = {}) {
   const mode = String(favorite?.mode || favorite?.shipping_mode || fact?.shipping_mode || fact?.mode || "").trim() || null;
   const sourceUrl = String(favorite?.source_url || fact?.source_url || "").trim() || null;
   const productUrl = String(favorite?.link || favorite?.detail_url || fact?.source_url_product || fact?.link || "").trim() || null;
+  const sourceCurrency = String(favorite?.source_currency || fact?.source_currency || "").trim().toUpperCase() || null;
   return {
     ...favorite,
     sku,
@@ -26,6 +27,7 @@ export function mergeCandidateFacts(favorite = {}, fact = {}) {
     cover_image: coverImage,
     mode,
     shipping_mode: mode,
+    source_currency: sourceCurrency,
     source_url: sourceUrl,
     link: productUrl,
   };
@@ -54,6 +56,7 @@ export function hasReusableCandidateFacts(item) {
     String(item?.title || "").trim()
       && /^https?:\/\//i.test(String(item?.cover_image || ""))
       && positive(item?.sale_price ?? item?.sell_price)
+      && String(item?.source_currency || "").toUpperCase() === "CNY"
       && String(item?.shipping_mode ?? item?.mode ?? "").trim().toUpperCase() === "FBS",
   );
 }

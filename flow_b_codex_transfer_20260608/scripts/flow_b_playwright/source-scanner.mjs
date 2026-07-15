@@ -129,7 +129,15 @@ export function favoriteFailureDisposition(error) {
   const message = String(error?.message || error || "");
   if (/^non-pure-fbs:/i.test(message)) return { status: "rejected", reason: "non-pure-fbs" };
   if (/^missing-shipping-mode:/i.test(message)) return { status: "rejected", reason: "missing-shipping-mode" };
+  if (/^non-cny-sale-price:/i.test(message)) return { status: "rejected", reason: "non-cny-sale-price" };
+  if (/^source-price-above-limit:/i.test(message)) return { status: "rejected", reason: "source-price-above-limit" };
   return { status: "failed", reason: null };
+}
+
+export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
+  if (String(productInfo?.price_info?.currency || "").toUpperCase() !== "CNY") return "non-cny-sale-price";
+  if (Number(productInfo?.price_info?.sell_price) > Math.max(0, Number(maxPrice) || 0)) return "source-price-above-limit";
+  return null;
 }
 
 export function effectiveFavoriteTotal({ claimedTotal, observedTotal, target }) {
@@ -843,6 +851,8 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         inFlight += 1;
         try {
           const productInfo = await loadProduct(page, item);
+          const priceReason = favoritePriceSkipReason(productInfo, envNumber(env, "FLOW_B_MAX_SOURCE_PRICE_CNY", 1000));
+          if (priceReason) throw new Error(`${priceReason}: SKU ${item.sku}`);
           const favoritePayload = { ...productInfo };
           delete favoritePayload.seller_url;
           await callFavorite(favoritePayload);
@@ -859,6 +869,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             source_url: item.source_url || null,
             seller_url: productInfo.seller_url || null,
             sale_price: productInfo.price_info?.sell_price ?? null,
+            source_currency: productInfo.price_info?.currency ?? null,
             title: productInfo.title,
             cover_image: productInfo.coverImage,
             total: observedTotal,

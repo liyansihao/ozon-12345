@@ -83,3 +83,20 @@ test("detail provider waits for Maozi mode instead of accepting a long bare Ozon
   assert.equal(detail.mode, "FBS");
   assert.equal(detail.selected_price, 10);
 });
+
+test("detail provider never treats an untyped favorite fallback as CNY revenue", async () => {
+  const page = {
+    goto: async () => {},
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/product/999/",
+      title: "local product",
+      text: "发货模式： FBS\n19 114 ₽",
+      webPriceText: "19 114 ₽",
+    }),
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({ context: { newPage: async () => page }, timeout: 1, pollInterval: 1 });
+  const detail = await provider.getProductDetail("999", { sell_price: 19114 });
+  assert.equal(detail.selected_price, null);
+  await provider.close();
+});

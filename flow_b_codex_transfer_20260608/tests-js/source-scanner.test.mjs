@@ -33,6 +33,7 @@ import {
   productTitlePriority,
   createScannerLogger,
   favoriteFailureDisposition,
+  favoritePriceSkipReason,
   softBlockCooldownState,
   sourceBatchCooldownState,
   collectionRuntimeState,
@@ -385,6 +386,16 @@ test("missing shipping mode is a deterministic rejection, not an infinite retry"
   assert.deepEqual(favoriteFailureDisposition(new Error("Ozon detail soft blocked")), {
     status: "failed",
     reason: null,
+  });
+});
+
+test("collection accepts bounded CNY source prices and rejects RUB or implausibly expensive rows", () => {
+  assert.equal(favoritePriceSkipReason({ price_info: { currency: "CNY", sell_price: 88 } }, 1000), null);
+  assert.equal(favoritePriceSkipReason({ price_info: { currency: "RUB", sell_price: 19114 } }, 1000), "non-cny-sale-price");
+  assert.equal(favoritePriceSkipReason({ price_info: { currency: "CNY", sell_price: 1200 } }, 1000), "source-price-above-limit");
+  assert.deepEqual(favoriteFailureDisposition(new Error("non-cny-sale-price: SKU 42")), {
+    status: "rejected",
+    reason: "non-cny-sale-price",
   });
 });
 

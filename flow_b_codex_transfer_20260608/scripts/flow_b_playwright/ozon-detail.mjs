@@ -116,7 +116,9 @@ export function createOzonDetailProvider({
           await delay(Math.max(1, pollInterval));
         } while (true);
         if (!payload?.text) throw new Error(`Ozon detail text unavailable for SKU ${sku}`);
-        const fallback = item.sell_price ?? item.current_price ?? item.price;
+        const fallback = String(item.source_currency || "").toUpperCase() === "CNY"
+          ? (item.sell_price ?? item.current_price ?? item.price)
+          : null;
         const result = {
           ...parseOzonDetailText(payload.text, fallback, payload.webPriceText),
           detail_url: payload.url,
