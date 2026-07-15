@@ -106,6 +106,22 @@ function isEffectiveOnlineProduct(product) {
     && Number(product?.stock) > 0;
 }
 
+function hasTerminalModerationDecline(product) {
+  return Array.isArray(product?.errors) && product.errors.some((error) => {
+    const level = String(error?.level || "").toUpperCase();
+    const state = String(error?.state || "").toLowerCase();
+    const code = String(error?.code || "").toUpperCase();
+    return level === "ERROR_LEVEL_ERROR" || state === "declined" || code.endsWith("_DECLINE");
+  });
+}
+
+function isTerminalSubmittedFailure(entry) {
+  const data = entry?.data || entry || {};
+  if (["daily-product-limit", "import-failed", "online-product-rejected", "reconciliation-store-not-configured"]
+    .includes(String(data.reason || ""))) return true;
+  return hasTerminalModerationDecline(data?.final_result?.online_product || data?.online_product);
+}
+
 export function prioritizePublishCandidates(items, preflightPureSkus = new Set()) {
   return [...items]
     .map((item, index) => ({
@@ -296,6 +312,9 @@ export function createPublishRunner({
         const onlineProduct = await client.findOnlineProduct({ shopId: targetConfig.store.id, offerId: confirmedOfferId });
         lastOnlineProduct = onlineProduct || lastOnlineProduct;
         if (isEffectiveOnlineProduct(onlineProduct)) return { ok: true, import_log: importLog, online_product: onlineProduct };
+        if (hasTerminalModerationDecline(onlineProduct)) {
+          return { ok: false, reason: "online-product-rejected", import_log: importLog, online_product: onlineProduct };
+        }
         const stockAttemptKey = String(onlineProduct?.id || confirmedOfferId);
         if (targetWarehouseId > 0
           && Number(onlineProduct?.sku) > 0
@@ -710,6 +729,7 @@ export function createPublishRunner({
     while (!freshSubmissionsPaused) {
       const stalledPending = restoredEntries.filter((entry) => {
         if (!["processing", "failed"].includes(entry.status)) return false;
+        if (entry.status === "failed" && isTerminalSubmittedFailure(entry)) return false;
         if (Number(entry.data?.store_id) !== Number(targetConfig.store.id)) return false;
         if (entry.data?.submitted !== true && entry.data?.submission_pending !== true) return false;
         const submittedAt = Date.parse(entry.data?.prepared_at || entry.data?.selected_at || entry.data?.submitted_at || "");
@@ -746,6 +766,7 @@ export function createPublishRunner({
     const favoriteSkus = new Set(favorites.map((item) => String(item?.sku ?? item?.id ?? "")));
     const delayedSubmissions = restoredEntries
       .filter((entry) => ["processing", "failed"].includes(entry.status)
+        && !(entry.status === "failed" && isTerminalSubmittedFailure(entry))
         && !favoriteSkus.has(String(entry.sku))
         && (entry.data?.submitted === true
           || entry.data?.submission_pending === true
@@ -783,6 +804,10 @@ export function createPublishRunner({
       if (state.hasPublished(sku)) return { status: "ignored", sku };
 
       const restoredStatus = state.statusOf?.(sku);
+      const restoredEntry = restoredBySku.get(String(sku));
+      if (restoredStatus === "failed" && isTerminalSubmittedFailure(restoredEntry)) {
+        return { status: "ignored", sku, reason: "terminal-submission-failure" };
+      }
       if (restoredStatus === "skipped") {
         try {
           await client.deleteFavorite(item);

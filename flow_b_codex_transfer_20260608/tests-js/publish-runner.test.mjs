@@ -901,6 +901,90 @@ test("runner resolves one original store only once while reconciling many delaye
   assert.equal(targetCalls.get(106637), 1);
 });
 
+test("runner classifies an explicit Ozon moderation decline as a terminal online rejection", async () => {
+  const state = fakeState({
+    rejected: { status: "processing", data: { store_id: 106637, submitted: true, offer_id: "mz-rejected", profit_rate: 45 } },
+  });
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async ({ offerId }) => ({
+      sku: 0,
+      offer_id: offerId,
+      online_status: "unknown",
+      stock: 0,
+      errors: [{ code: "DESCRIPTION_DECLINE", level: "ERROR_LEVEL_ERROR", state: "declined" }],
+    }),
+  });
+
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [{ id: 106637, needle: "丽丽二号", requireWarehouse: false }],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.ok(state.transitions.some((event) => event.status === "failed" && event.data.reason === "online-product-rejected"));
+});
+
+test("runner does not retry or stall on restored terminal Ozon moderation rejections", async () => {
+  const terminal = (index) => ({
+    status: "failed",
+    data: {
+      store_id: 106637,
+      submitted: true,
+      offer_id: `mz-terminal-${index}`,
+      profit_rate: 45,
+      reason: "online-product-not-selling",
+      final_result: {
+        online_product: {
+          sku: 0,
+          online_status: "unknown",
+          errors: [{ code: "DESCRIPTION_DECLINE", level: "ERROR_LEVEL_ERROR", state: "declined" }],
+        },
+      },
+    },
+  });
+  const state = fakeState({ terminal1: terminal(1), terminal2: terminal(2), terminal3: terminal(3) });
+  const shopIds = [];
+  let importChecks = 0;
+  const client = clientFor([{ id: 909, sku: 909 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽1号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    findImportLog: async ({ sku }) => {
+      importChecks += 1;
+      return { sku, offer_id: `mz-test-${sku}`, import_status: "all_imported" };
+    },
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 104965, needle: "丽丽1号", requireWarehouse: false },
+    ],
+    pendingStoreStallCount: 3,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(shopIds, [106637]);
+  assert.equal(importChecks, 1);
+});
+
 test("runner syncs every original store represented by delayed submissions", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-multi-store-sync-"));
   const state = fakeState({
