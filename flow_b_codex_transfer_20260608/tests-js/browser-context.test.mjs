@@ -9,6 +9,7 @@ import {
   assertMaoziLogin,
   assertPluginLoaded,
   ensureMaoziLogin,
+  ensureMaoziPluginLogin,
   openMaoziPage,
   resolveBrowserOptions,
 } from "../scripts/flow_b_playwright/browser-context.mjs";
@@ -34,6 +35,34 @@ test("browser options require an unpacked extension and use Chrome for Testing",
   ]);
   assert.deepEqual(options.ignoreDefaultArgs, ["--disable-extensions"]);
   assert.equal(options.headless, false);
+});
+
+test("empty extension token is repaired through the plugin's own login button", async () => {
+  let authenticated = false;
+  let clicked = false;
+  const worker = {
+    url: () => "chrome-extension://abc/background.js",
+    evaluate: async () => authenticated,
+  };
+  const button = {
+    waitFor: async () => {},
+    count: async () => 1,
+    click: async () => { clicked = true; authenticated = true; },
+  };
+  const page = {
+    url: () => "about:blank",
+    isClosed: () => false,
+    goto: async () => {},
+    getByRole: () => button,
+    close: async () => {},
+  };
+  const context = {
+    serviceWorkers: () => [worker],
+    pages: () => [page],
+    newPage: async () => page,
+  };
+  assert.equal(await ensureMaoziPluginLogin(context, { timeout: 100 }), true);
+  assert.equal(clicked, true);
 });
 
 test("device-full continuation only clicks when explicitly enabled", async () => {

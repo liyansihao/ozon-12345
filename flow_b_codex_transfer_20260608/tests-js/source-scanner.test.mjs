@@ -18,6 +18,10 @@ import {
   prioritizeSourceUrls,
   parseFavoriteProductSnapshot,
   requiresFavoriteSession,
+  retainedReplayLimit,
+  scanSourceWithPage,
+  classifyFreshSourceUrls,
+  expandFreshSellerSourceUrls,
   retryMaoziPageFetch,
   retainedRowsForCollection,
   orderRowsBySourceYield,
@@ -25,7 +29,50 @@ import {
   shouldYieldAfterRetained,
   terminalSkusFromJsonl,
   limitLinksPerSource,
+  productTitleFamily,
+  productTitlePriority,
+  createScannerLogger,
+  favoriteFailureDisposition,
+  softBlockCooldownState,
+  sourceBatchCooldownState,
+  collectionRuntimeState,
+  collectionDeadlineMs,
+  isCollectionDeadlineReached,
+  withTimeout,
+  deriveSearchSourceUrls,
+  verifiedSellerSourceUrls,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+
+test("collection deadline stops an in-flight producer tranche", () => {
+  const env = { FLOW_B_DEADLINE_AT: "2026-07-14T22:00:29.809Z" };
+  assert.equal(collectionDeadlineMs(env), Date.parse(env.FLOW_B_DEADLINE_AT));
+  assert.equal(isCollectionDeadlineReached(env, Date.parse("2026-07-14T22:00:29.808Z")), false);
+  assert.equal(isCollectionDeadlineReached(env, Date.parse("2026-07-14T22:00:29.809Z")), true);
+  assert.equal(collectionDeadlineMs({}), Number.POSITIVE_INFINITY);
+});
+
+test("one hung source page times out without blocking the batch", async () => {
+  await assert.rejects(
+    withTimeout(new Promise(() => {}), 10, "source scan"),
+    /source scan timed out after 10ms/,
+  );
+  assert.equal(await withTimeout(Promise.resolve("ok"), 100, "source scan"), "ok");
+});
+
+test("source page creation is included in the lifecycle timeout", async () => {
+  const context = { newPage: async () => new Promise(() => {}) };
+  await assert.rejects(
+    scanSourceWithPage({
+      context,
+      url: "https://www.ozon.ru/search/?text=test",
+      options: {},
+      timeoutMs: 10,
+      closeTimeoutMs: 5,
+      scan: async () => ({ links: [] }),
+    }),
+    /source page lifecycle .* timed out after 10ms/,
+  );
+});
 
 test("source scan prioritizes proven sellers, Global China, and target families stably", () => {
   const ordinary = "https://www.ozon.ru/seller/ordinary/";
@@ -35,6 +82,25 @@ test("source scan prioritizes proven sellers, Global China, and target families 
   assert.deepEqual(prioritizeSourceUrls([ordinary, apparel, global, proven]), [proven, global, apparel, ordinary]);
 });
 
+test("fresh seller files are verified discovery while keyword files remain exploration", () => {
+  const seller = "https://www.ozon.ru/seller/new-store/";
+  const search = "https://www.ozon.ru/search/?text=kids&is_global=true";
+  assert.deepEqual(classifyFreshSourceUrls([search, seller]), {
+    verifiedSellerUrls: [seller],
+    explorationUrls: [search],
+  });
+});
+
+test("fresh sellers expand into bounded price and sorting variants", () => {
+  const seller = "https://www.ozon.ru/seller/new-store/";
+  const expanded = expandFreshSellerSourceUrls([seller]);
+  assert.equal(expanded[0], seller);
+  assert.equal(expanded.length, 9);
+  assert.equal(new Set(expanded).size, expanded.length);
+  assert.ok(expanded.some((url) => new URL(url).searchParams.get("currency_price") === "500.000;"
+    && new URL(url).searchParams.get("sorting") === "discount"));
+});
+
 test("published sources expand into prioritized sorting variants without duplicates", () => {
   const successful = "https://www.ozon.ru/seller/example/?currency_price=50.000%3B";
   const ordinary = "https://www.ozon.ru/seller/ordinary/";
@@ -42,19 +108,147 @@ test("published sources expand into prioritized sorting variants without duplica
   const expanded = expandHighYieldSourceUrls([ordinary, successful], rows);
   const prioritized = prioritizeSourceUrls(expanded, { highYieldSources: [successful] });
   assert.equal(prioritized[0], successful);
-  assert.deepEqual(prioritized.slice(1, 4).map((value) => new URL(value).searchParams.get("sorting")), ["rating", "price", "discount"]);
+  assert.equal(new URL(prioritized[1]).searchParams.get("sorting"), "rating");
+  assert.equal(prioritized[2], ordinary);
   assert.ok(prioritized.some((value) => new URL(value).searchParams.get("currency_price") === "500.000;"
     && new URL(value).searchParams.get("sorting") === "discount"));
   assert.equal(new Set(prioritized).size, prioritized.length);
-  assert.equal(prioritized.at(-1), ordinary);
 });
 
-test("source fairness caps each large source before combining batches", () => {
+test("strict publications derive fresh Global search sources from useful title terms", () => {
+  const urls = deriveSearchSourceUrls([
+    { status: "published", title: "Носки для девочек, 5 пар" },
+    { status: "published", title: "Конструктор Двенадцать знаков зодиака Лошадь" },
+    { status: "skipped", title: "Бесполезный источник" },
+  ]);
+  assert.ok(urls.length >= 4);
+  assert.ok(urls.some((url) => new URL(url).searchParams.get("text") === "носки девочек"));
+  assert.ok(urls.every((url) => new URL(url).searchParams.get("is_global") === "true"));
+  assert.ok(urls.some((url) => new URL(url).searchParams.get("text") === "конструктор двенадцать"));
+  assert.ok(urls.some((url) => new URL(url).searchParams.get("text") === "двенадцать знаков"));
+  assert.ok(urls.every((url) => !decodeURIComponent(url).includes("бесполезный")));
+});
+
+test("derived search budget uses the most recent strict publications first", () => {
+  const urls = deriveSearchSourceUrls([
+    { status: "published", title: "Старый товар источник" },
+    { status: "published", title: "Новый успешный товар" },
+  ], 1);
+  assert.equal(new URL(urls[0]).searchParams.get("text"), "новый успешный товар");
+});
+
+test("derived search discovery can be disabled with a zero budget", () => {
+  assert.deepEqual(deriveSearchSourceUrls([{ status: "published", title: "Новый успешный товар" }], 0), []);
+});
+
+test("repeated publication yield outranks a merely proven seller", () => {
+  const proven = "https://www.ozon.ru/seller/nuanniu/";
+  const productive = "https://www.ozon.ru/seller/chestnost-2336398/";
+  assert.deepEqual(prioritizeSourceUrls([proven, productive], {
+    highYieldSources: [proven, productive, productive, productive],
+  }), [productive, proven]);
+});
+
+test("full-funnel source yield penalizes exhausted high-volume sources", () => {
+  const fresh = "https://www.ozon.ru/seller/fresh/";
+  const exhausted = "https://www.ozon.ru/seller/exhausted/";
+  const rows = [
+    ...Array.from({ length: 3 }, (_, i) => ({ source_url: fresh, sku: `f-${i}`, status: "published" })),
+    ...Array.from({ length: 10 }, (_, i) => ({ source_url: exhausted, sku: `e-p-${i}`, status: "published" })),
+    ...Array.from({ length: 90 }, (_, i) => ({ source_url: exhausted, sku: `e-r-${i}`, status: "rejected" })),
+  ];
+  assert.deepEqual(prioritizeSourceUrls([exhausted, fresh], { yieldRows: rows }), [fresh, exhausted]);
+});
+
+test("derived search discovery is explored before exhausted historical sources", () => {
+  const known = "https://www.ozon.ru/seller/known/";
+  const fresh = "https://www.ozon.ru/search/?text=fresh&is_global=true";
+  const yieldRows = Array.from({ length: 8 }, (_, i) => ({ source_url: known, sku: `k-${i}`, status: i < 3 ? "published" : "rejected" }));
+  assert.deepEqual(prioritizeSourceUrls([known, fresh], { yieldRows, freshSourceUrls: [fresh] }), [fresh, known]);
+});
+
+test("verified fresh sellers outrank derived keyword exploration", () => {
+  const seller = "https://www.ozon.ru/seller/fresh-store/";
+  const search = "https://www.ozon.ru/search/?text=fresh&is_global=true";
+  assert.deepEqual(prioritizeSourceUrls([search, seller], {
+    freshSourceUrls: [search],
+    verifiedFreshSourceUrls: [seller],
+  }), [seller, search]);
+});
+
+test("verified source variants finish their tier before ordinary sources", () => {
+  const verified = "https://www.ozon.ru/search/?text=winner&is_global=true";
+  const verifiedVariant = `${verified}&sorting=rating`;
+  const ordinary = "https://www.ozon.ru/seller/ordinary/";
+  assert.deepEqual(prioritizeSourceUrls([verified, verifiedVariant, ordinary], {
+    verifiedFreshSourceUrls: [verified],
+  }), [verified, verifiedVariant, ordinary]);
+});
+
+test("source variants use a bounded two-item burst before rotating families", () => {
+  const urls = [
+    "https://www.ozon.ru/seller/a/",
+    "https://www.ozon.ru/seller/a/?sorting=rating",
+    "https://www.ozon.ru/seller/b/",
+    "https://www.ozon.ru/seller/b/?sorting=rating",
+  ];
+  assert.deepEqual(prioritizeSourceUrls(urls, {
+    highYieldSources: [urls[0], urls[0], urls[0], urls[2], urls[2]],
+  }), [urls[0], urls[1], urls[2], urls[3]]);
+});
+
+test("source fairness caps and round-robins sources before combining batches", () => {
   const rows = [
     { source_url: "a", links: Array.from({ length: 5 }, (_, index) => ({ href: `a-${index}`, text: "" })) },
     { source_url: "b", links: Array.from({ length: 5 }, (_, index) => ({ href: `b-${index}`, text: "" })) },
   ];
-  assert.deepEqual(limitLinksPerSource(rows, 2).map((row) => row.href), ["a-0", "a-1", "b-0", "b-1"]);
+  assert.deepEqual(limitLinksPerSource(rows, 2).map((row) => row.href), ["a-0", "b-0", "a-1", "b-1"]);
+});
+
+test("one source does not enqueue numeric variants of the same title family", () => {
+  const rows = [{
+    source_url: "a",
+    links: [
+      { href: "a-1", text: "Минифигурка рыцарь модель 1" },
+      { href: "a-2", text: "Минифигурка рыцарь модель 2" },
+      { href: "a-3", text: "Носки для девочек" },
+    ],
+  }];
+  assert.deepEqual(limitLinksPerSource(rows, 3).map((row) => row.href), ["a-3", "a-1"]);
+});
+
+test("title dedup retains the variant with plugin-confirmed FBS telemetry", () => {
+  const rows = [{
+    source_url: "a",
+    links: [
+      { href: "ambiguous", text: "Бейсболка", card_text: "发货模式：--" },
+      { href: "pure-fbs", text: "Бейсболка", card_text: "发货模式：FBS" },
+    ],
+  }];
+  assert.deepEqual(limitLinksPerSource(rows, 2).map((row) => row.href), ["pure-fbs"]);
+});
+
+test("title dedup retains the higher-priced pure-FBS variant", () => {
+  const rows = [{
+    source_url: "a",
+    links: [
+      { href: "low-price", text: "Бейсболка", card_text: "7,38 ¥\n发货模式：FBS" },
+      { href: "viable-price", text: "Бейсболка", card_text: "31,17 ¥\n发货模式：FBS" },
+    ],
+  }];
+  assert.deepEqual(limitLinksPerSource(rows, 2).map((row) => row.href), ["viable-price"]);
+});
+
+test("each source round is globally ordered by observed title-family yield", () => {
+  const rows = [
+    { source_url: "a", links: [{ href: "a-other", text: "Кухонная посуда" }, { href: "a-case", text: "Чехол для телефона" }] },
+    { source_url: "b", links: [{ href: "b-underwear", text: "Комплект трусов" }] },
+  ];
+  assert.deepEqual(limitLinksPerSource(rows, 2).map((row) => row.href), [
+    "b-underwear",
+    "a-other",
+    "a-case",
+  ]);
 });
 
 test("skip-retained still resumes persisted high-yield sources", () => {
@@ -85,9 +279,40 @@ test("retained source rows prefer observed publications over file order", () => 
   ]);
 });
 
+test("retained source rows also use verified pure-FBS collection evidence", () => {
+  const rows = [
+    { source_url: "https://www.ozon.ru/seller/unknown/" },
+    { source_url: "https://www.ozon.ru/seller/fbs-winner/" },
+  ];
+  assert.deepEqual(orderRowsBySourceYield(rows, [
+    { source_url: rows[1].source_url, status: "favorited" },
+  ]).map((row) => row.source_url), [rows[1].source_url, rows[0].source_url]);
+});
+
+test("final publications outweigh FBS-only source evidence", () => {
+  const published = { source_url: "https://www.ozon.ru/seller/final-winner/" };
+  const fbsOnly = { source_url: "https://www.ozon.ru/seller/fbs-only/" };
+  assert.deepEqual(orderRowsBySourceYield([fbsOnly, published], [
+    ...Array.from({ length: 5 }, () => ({ source_url: fbsOnly.source_url, status: "favorited" })),
+    { source_url: published.source_url, status: "published" },
+  ]).map((row) => row.source_url), [published.source_url, fbsOnly.source_url]);
+});
+
+test("equal-yield retained variants prefer the higher price floor", () => {
+  const low = { source_url: "https://www.ozon.ru/seller/example/?currency_price=50.000%3B" };
+  const high = { source_url: "https://www.ozon.ru/seller/example/?currency_price=500.000%3B" };
+  assert.deepEqual(orderRowsBySourceYield([low, high], []).map((row) => row.source_url), [high.source_url, low.source_url]);
+});
+
 test("retained collection yields to the producer loop for fresh source feedback", () => {
   assert.equal(shouldYieldAfterRetained({ retainedLinks: 60, pendingSources: 400 }), true);
   assert.equal(shouldYieldAfterRetained({ retainedLinks: 0, pendingSources: 400 }), false);
+});
+
+test("retained replay uses a small bounded tranche by default", () => {
+  assert.equal(retainedReplayLimit({}), 12);
+  assert.equal(retainedReplayLimit({ FLOW_B_MAX_RETAINED_LINKS: "6" }), 6);
+  assert.equal(retainedReplayLimit({ FLOW_B_MAX_RETAINED_LINKS: "0" }), 0);
 });
 
 test("proven seller source recognition is explicit", () => {
@@ -114,18 +339,41 @@ test("Ozon detail metadata becomes a complete Maozi favorite payload", () => {
     ogTitle: "Light pan ",
     ogImage: "https://ir.ozone.ru/image.jpg",
     priceText: "151,10\u2009¥\nС банками\n158,97\u2009¥",
+    sellerUrl: "https://www.ozon.ru/seller/light-store/?miniapp=1",
   }), {
     sku: "1467551655",
     coverImage: "https://ir.ozone.ru/image.jpg",
     price_info: { sell_price: 151.1, currency: "CNY" },
     title: "Light pan",
+    seller_url: "https://www.ozon.ru/seller/light-store/",
   });
+});
+
+test("verified FBS seller feedback becomes a unique next-round source", () => {
+  assert.deepEqual(verifiedSellerSourceUrls([
+    { status: "favorited", seller_url: "https://www.ozon.ru/seller/b/?miniapp=1" },
+    { status: "published", sku: "a-1", seller_url: "https://www.ozon.ru/seller/a/" },
+    { status: "published", sku: "a-2", seller_url: "https://www.ozon.ru/seller/a/?miniapp=1" },
+    { status: "published", sku: "b-1", seller_url: "https://www.ozon.ru/seller/b/" },
+    { status: "rejected", seller_url: "https://www.ozon.ru/seller/c/" },
+  ]), ["https://www.ozon.ru/seller/a/"]);
 });
 
 test("favorite preflight accepts only an explicit pure FBS mode", () => {
   assert.equal(favoriteModeSkipReason("FBS"), null);
   assert.equal(favoriteModeSkipReason("FBS, RFBS"), "non-pure-fbs");
   assert.equal(favoriteModeSkipReason(null), "missing-shipping-mode");
+});
+
+test("missing shipping mode is a deterministic rejection, not an infinite retry", () => {
+  assert.deepEqual(favoriteFailureDisposition(new Error("missing-shipping-mode: SKU 42")), {
+    status: "rejected",
+    reason: "missing-shipping-mode",
+  });
+  assert.deepEqual(favoriteFailureDisposition(new Error("Ozon detail soft blocked")), {
+    status: "failed",
+    reason: null,
+  });
 });
 
 test("favorite payload parser rejects incomplete Ozon details", () => {
@@ -184,16 +432,57 @@ test("detail gate rechecks a cooldown deadline extended while waiting", async ()
 test("Ozon no-connection incident pages are retried with a longer cooldown", () => {
   assert.equal(isOzonSoftBlock("Похоже, нет соединения Выключите VPN"), true);
   assert.equal(isOzonSoftBlock("ordinary product page"), false);
-  assert.equal(ozonRetryDelay(0), 60_000);
-  assert.equal(ozonRetryDelay(2), 180_000);
+  assert.equal(ozonRetryDelay(0), 600_000);
+  assert.equal(ozonRetryDelay(2), 1_800_000);
   assert.deepEqual(ozonDetailFailurePolicy(new Error("Ozon detail soft blocked"), 0, 0), {
     softBlocked: true,
     retry: false,
-    delay: 60_000,
+    delay: 600_000,
+  });
+  assert.deepEqual(ozonDetailFailurePolicy(new Error("page.goto: net::ERR_FAILED at https://www.ozon.ru/product/42"), 0, 0), {
+    softBlocked: true,
+    retry: false,
+    delay: 600_000,
   });
 });
 
-test("favorite collection prioritizes proven lightweight product families stably", () => {
+test("concurrent pages coalesce one Ozon incident instead of escalating to 180 seconds", () => {
+  const first = softBlockCooldownState({ streak: 0, lastBlockedAt: 0, now: 100_000 });
+  const concurrent = softBlockCooldownState({ streak: first.streak, lastBlockedAt: first.lastBlockedAt, now: 102_000 });
+  const laterIncident = softBlockCooldownState({ streak: concurrent.streak, lastBlockedAt: concurrent.lastBlockedAt, now: 165_000 });
+  assert.deepEqual(first, { streak: 1, lastBlockedAt: 100_000, delay: 600_000 });
+  assert.deepEqual(concurrent, { streak: 1, lastBlockedAt: 102_000, delay: 600_000 });
+  assert.deepEqual(laterIncident, { streak: 2, lastBlockedAt: 165_000, delay: 900_000 });
+  assert.equal(ozonRetryDelay(3), 1_800_000);
+});
+
+test("one blocked source batch creates one shared cooldown incident", () => {
+  const state = { detailSoftBlockStreak: 0, lastDetailSoftBlockAt: 0, detailBlockedUntil: 0 };
+  const result = sourceBatchCooldownState([
+    { blocked: true, stop_reason: "blocked_or_empty" },
+    { blocked: true, stop_reason: "blocked_or_empty" },
+    { blocked: true, stop_reason: "blocked_or_empty" },
+  ], state, 10_000);
+  assert.equal(result.blocked, true);
+  assert.equal(state.detailSoftBlockStreak, 1);
+  assert.equal(state.detailBlockedUntil, 610_000);
+  sourceBatchCooldownState([{ blocked: false, stop_reason: "max_steps" }], state, 80_000);
+  assert.equal(state.detailSoftBlockStreak, 0);
+});
+
+test("collection pacing and cooldown state persists across producer tranches", () => {
+  const key = `run-${Date.now()}-${Math.random()}`;
+  const first = collectionRuntimeState(key);
+  first.detailSoftBlockStreak = 3;
+  first.detailBlockedUntil = 12345;
+  const resumed = collectionRuntimeState(key);
+  assert.equal(resumed, first);
+  assert.equal(resumed.detailSoftBlockStreak, 3);
+  assert.equal(resumed.detailBlockedUntil, 12345);
+  assert.notEqual(collectionRuntimeState(`${key}-other`), first);
+});
+
+test("favorite collection prioritizes observed profitable title families stably", () => {
   const links = [
     { href: "ordinary", text: "Большая картина" },
     { href: "proven-seller", text: "Обычный товар", source_url: "https://www.ozon.ru/seller/xiangyu01/" },
@@ -207,11 +496,64 @@ test("favorite collection prioritizes proven lightweight product families stably
     "proven-seller",
     "underwear",
     "hat",
-    "strap",
-    "toy",
     "ordinary",
     "ordinary-2",
+    "strap",
+    "toy",
   ]);
+});
+
+test("listing cards with explicit cross-border delivery outrank ambiguous titles", () => {
+  const links = [
+    { href: "underwear", text: "Комплект трусов", card_text: "Доставка завтра" },
+    { href: "global", text: "Обычный товар", card_text: "Доставка из Китая" },
+  ];
+  assert.deepEqual(prioritizeFavoriteLinks(links).map((link) => link.href), ["global", "underwear"]);
+});
+
+test("listing plugin pure-FBS telemetry receives first detail-page quota", () => {
+  const links = [
+    { href: "proven", text: "Обычный товар", source_url: "https://www.ozon.ru/seller/xiangyu01/", card_text: "发货模式：--" },
+    { href: "underwear", text: "Комплект трусов", card_text: "发货模式：rFBS" },
+    { href: "pure-fbs", text: "Обычный товар", card_text: "月销量：8\n发货模式：FBS\n退货取消率：1.2%" },
+  ];
+  assert.deepEqual(prioritizeFavoriteLinks(links).map((link) => link.href), ["pure-fbs", "proven", "underwear"]);
+});
+
+test("title family priority follows observed strict-publication conversion", () => {
+  assert.equal(productTitleFamily("Трансформер Оптимус из игры PVZ"), "pvz_transformer");
+  assert.equal(productTitleFamily("Плюшевая игрушка Sprunki"), "plush");
+  assert.equal(productTitleFamily("Фигурка героя"), "figure");
+  assert.equal(productTitleFamily("Летняя кепка для кошек"), "pet");
+  assert.equal(productTitleFamily("Детский игровой столик для игр с водой"), "bulky_kids");
+  assert.ok(productTitlePriority("Носки для девочек") > productTitlePriority("Плюшевая игрушка Sprunki"));
+  assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Фигурка героя"));
+  assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Браслет с кулоном"));
+  assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Летняя кепка для кошек"));
+  assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Детский игровой столик для игр с водой"));
+});
+
+test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {
+  const messages = [];
+  const log = createScannerLogger((message) => messages.push(message), "summary");
+  log("favorite rejected SKU 1: non-pure-fbs");
+  log("favorite failed SKU 2: Ozon detail soft blocked");
+  log("favorite 0 -> 0 delta=0");
+  log("favorite 8 -> 10 delta=2");
+  log("batch 1-8 / 120 concurrency=8");
+  log("favorite collection summary attempted=24 favorited=6 rejected=12 failed=6");
+  assert.deepEqual(messages, [
+    "favorite 8 -> 10 delta=2",
+    "batch 1-8 / 120 concurrency=8",
+    "favorite collection summary attempted=24 favorited=6 rejected=12 failed=6",
+  ]);
+});
+
+test("summary scanner logging truncates stack traces and oversized telemetry", () => {
+  const messages = [];
+  const log = createScannerLogger((message) => messages.push(message), "summary");
+  log(`favorite count telemetry unavailable: Failed to fetch\n${"stack".repeat(200)}`);
+  assert.deepEqual(messages, ["favorite count telemetry unavailable: Failed to fetch"]);
 });
 
 test("Maozi favorite capacity is a batch terminal condition", () => {
@@ -219,6 +561,7 @@ test("Maozi favorite capacity is a batch terminal condition", () => {
   assert.equal(isFavoriteCapacityReached(new Error("商品信息不完整")), false);
   assert.equal(effectiveFavoriteTotal({ claimedTotal: 1000, observedTotal: 962, target: 1000 }), 1000);
   assert.equal(effectiveFavoriteTotal({ claimedTotal: 900, observedTotal: 905, target: 1000 }), 905);
+  assert.equal(effectiveFavoriteTotal({ claimedTotal: 37, observedTotal: null, target: 1000 }), 37);
 });
 
 test("rolling collection excludes only latest terminal skipped or published SKUs", () => {
@@ -242,8 +585,9 @@ test("cross-run seeds skip deterministic outcomes but retry transient favorite f
     ].join("\n")],
     favoriteTexts: [[
       JSON.stringify({ sku: "non-fbs", status: "rejected", reason: "non-pure-fbs" }),
+      JSON.stringify({ sku: "missing-mode", status: "failed", error: "missing-shipping-mode: SKU missing-mode" }),
       JSON.stringify({ sku: "soft-block", status: "failed", error: "Ozon detail soft blocked" }),
     ].join("\n")],
   });
-  assert.deepEqual([...excluded].sort(), ["non-fbs", "published", "unprofitable"]);
+  assert.deepEqual([...excluded].sort(), ["missing-mode", "non-fbs", "published", "unprofitable"]);
 });

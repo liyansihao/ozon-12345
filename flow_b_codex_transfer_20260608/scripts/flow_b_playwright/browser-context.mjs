@@ -147,3 +147,40 @@ export async function ensureMaoziLogin(page, { continueDeviceLogin = false, time
     return assertMaoziLogin(page);
   }
 }
+
+async function hasMaoziPluginToken(context) {
+  const worker = context.serviceWorkers().find((candidate) => targetUrl(candidate).startsWith("chrome-extension://"));
+  if (!worker) return false;
+  return Boolean(await worker.evaluate(() => new Promise((resolve) => {
+    chrome.storage.local.get("maozierp-token", (data) => resolve(Boolean(data?.["maozierp-token"])));
+  })));
+}
+
+export async function ensureMaoziPluginLogin(context, { timeout = 60000, continueDeviceLogin = true } = {}) {
+  if (await hasMaoziPluginToken(context)) return true;
+  const existing = context.pages().find((candidate) => /^https:\/\/www\.ozon\.(?:ru|kz|by)\//i.test(targetUrl(candidate)));
+  const page = existing || await context.newPage();
+  if (!existing) await page.goto("https://www.ozon.ru/", { waitUntil: "domcontentloaded", timeout });
+  const login = page.getByRole("button", { name: "请登录", exact: true });
+  if (typeof login.waitFor === "function") await login.waitFor({ state: "visible", timeout }).catch(() => {});
+  if (await login.count() !== 1) throw new Error("Maozi extension token is empty and the plugin login button is unavailable");
+  await login.click();
+
+  const deadline = Date.now() + timeout;
+  const continuedPages = new Set();
+  while (Date.now() < deadline) {
+    if (await hasMaoziPluginToken(context)) return true;
+    if (continueDeviceLogin) {
+      for (const candidate of context.pages()) {
+        if (continuedPages.has(candidate)) continue;
+        const button = candidate.getByRole("button", { name: "继续登录", exact: true });
+        if (await button.count().catch(() => 0) === 1) {
+          await button.click().catch(() => {});
+          continuedPages.add(candidate);
+        }
+      }
+    }
+    await delay(500);
+  }
+  throw new Error("Maozi extension login did not produce a plugin token before timeout");
+}

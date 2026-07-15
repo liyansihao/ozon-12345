@@ -338,6 +338,14 @@ export function createPublishState({ runDir, publishedCsv }) {
     return runPublishedSkus.size;
   }
 
+  function entries() {
+    return [...states].map(([sku, value]) => ({
+      sku,
+      status: value.status,
+      data: { ...(value.data || {}) },
+    }));
+  }
+
   function summary(target) {
     return writeSummary(target);
   }
@@ -355,6 +363,6 @@ export function createPublishState({ runDir, publishedCsv }) {
     return operation;
   }
 
-  const api = { load, transition, hasPublished, statusOf, runPublishedCount, summary, recordPublished };
+  const api = { load, transition, hasPublished, statusOf, entries, runPublishedCount, summary, recordPublished };
   return api;
 }

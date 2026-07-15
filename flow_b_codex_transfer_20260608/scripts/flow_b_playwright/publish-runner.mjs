@@ -4,8 +4,8 @@ import path from "node:path";
 import * as defaultPolicy from "./publish-policy.mjs";
 import { canonicalProductUrl } from "./publish-state.mjs";
 import { mapOzonCategory } from "./category-commission.mjs";
-import { productTitlePriority } from "./source-scanner.mjs";
-import { AdaptiveConcurrency, hasReusableCandidateFacts, loadCandidateFacts, mergeCandidateFacts } from "./continuous-runtime.mjs";
+import { productTitleFamily, productTitlePriority } from "./source-scanner.mjs";
+import { AdaptiveConcurrency, hasReusableCandidateFacts, isFatalBrowserError, loadCandidateFacts, mergeCandidateFacts } from "./continuous-runtime.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -33,6 +33,12 @@ function offerDate(date) {
   return `${dd}${mm}${yy}`;
 }
 
+export function offerIdForSku(skuValue, date = new Date()) {
+  const sku = String(skuValue || "").trim();
+  if (!sku) throw new Error("offer SKU is required");
+  return `mz-${offerDate(date)}-${sku}`;
+}
+
 function rounded(value) {
   return Math.round(Number(value) * 100) / 100;
 }
@@ -52,6 +58,18 @@ function importFailureReason(log) {
     return "daily-product-limit";
   }
   return "import-failed";
+}
+
+function normalizedImportStatus(log) {
+  const top = String(log?.import_status || "").toLowerCase();
+  const nested = Array.isArray(log?.skus)
+    ? log.skus.map((row) => String(row?.import_status || "").toLowerCase()).filter(Boolean)
+    : [];
+  if ([top, ...nested].some((status) => ["all_failed", "failed"].includes(status))) return "all_failed";
+  if (["all_imported", "imported"].includes(top)) return top;
+  if (nested.length > 0 && nested.every((status) => ["all_imported", "imported"].includes(status))) return "nested_imported";
+  if ([top, ...nested].some((status) => ["pending", "processing", "unknown"].includes(status))) return "pending";
+  return top;
 }
 
 function isEffectiveOnlineProduct(product) {
@@ -113,7 +131,7 @@ function buildPayload(item, detail, economy, targetConfig, now) {
       sell_price: price,
       price,
       old_price: rounded(price * 2),
-      offer_id: `mz-${offerDate(now())}-${sku.slice(-6)}`,
+      offer_id: offerIdForSku(sku, now()),
       brand: "",
       source: "favorite",
       source_currency: "CNY",
@@ -135,6 +153,8 @@ export function createPublishRunner({
   watermarkNeedle = "lysh",
   storeId = 104965,
   watermarkId = 60822,
+  storeTargets = null,
+  reconciliationOnly = false,
   concurrency = 1,
   maxConcurrency = 12,
   dryCandidateLimit = 0,
@@ -143,6 +163,9 @@ export function createPublishRunner({
   sourceYieldHistoryPath = null,
   confirmationAttempts = 90,
   confirmationIntervalMs = 2000,
+  onlineSyncIntervalMs = 1_800_000,
+  warehouseId = null,
+  initialStock = 1,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -157,10 +180,31 @@ export function createPublishRunner({
   if (!Number.isInteger(workerCount) || workerCount <= 0) throw new TypeError("concurrency must be a positive integer");
   const dryLimit = Number(dryCandidateLimit);
   if (!Number.isInteger(dryLimit) || dryLimit < 0) throw new TypeError("dryCandidateLimit must be a non-negative integer");
+  const verifiedWarehouseId = Number(warehouseId);
+  const activationStock = Number(initialStock);
+  if (warehouseId !== null && warehouseId !== undefined && !(verifiedWarehouseId > 0)) {
+    throw new TypeError("warehouseId must be a positive number when configured");
+  }
+  if (!Number.isInteger(activationStock) || activationStock <= 0) throw new TypeError("initialStock must be a positive integer");
+  const targetPlan = Array.isArray(storeTargets) && storeTargets.length > 0
+    ? storeTargets.map((entry) => ({
+      id: Number(entry?.id),
+      needle: String(entry?.needle || entry?.name || "").trim(),
+      warehouseId: entry?.warehouseId === null || entry?.warehouseId === undefined ? null : Number(entry.warehouseId),
+      requireWarehouse: entry?.requireWarehouse !== false,
+    }))
+    : [{ id: Number(storeId), needle: String(storeNeedle), warehouseId: warehouseId == null ? null : Number(warehouseId), requireWarehouse: false }];
+  for (const entry of targetPlan) {
+    if (!(entry.id > 0) || !entry.needle) throw new TypeError("each store target requires a positive id and needle");
+    if (entry.warehouseId !== null && !(entry.warehouseId > 0)) throw new TypeError("store target warehouseId must be positive when configured");
+  }
   let cnyRubRate = 10.4672;
   let publishChain = Promise.resolve();
   let metricsChain = Promise.resolve();
   let haltReason = null;
+  let activeTargetIndex = 0;
+  const storeSwitches = [];
+  const lastOnlineSyncAt = new Map();
   const adaptive = new AdaptiveConcurrency({ initial: workerCount, max: Math.max(workerCount, Number(maxConcurrency) || workerCount) });
 
   function recordMetric(filename, row) {
@@ -192,10 +236,13 @@ export function createPublishRunner({
     const attempts = Math.max(1, Number(confirmationAttempts) || 1);
     let lastImportLog = null;
     let lastOnlineProduct = null;
+    let lastStockUpdate = null;
+    const stockAttempts = new Set();
+    const targetWarehouseId = Number(targetConfig.warehouseId || 0);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const importLog = await client.findImportLog({ shopId: targetConfig.store.id, sku, offerId });
       lastImportLog = importLog || lastImportLog;
-      const status = String(importLog?.import_status || "");
+      const status = normalizedImportStatus(importLog);
       if (["all_failed", "failed"].includes(status)) {
         return { ok: false, reason: importFailureReason(importLog), import_log: importLog };
       }
@@ -204,6 +251,41 @@ export function createPublishRunner({
         const onlineProduct = await client.findOnlineProduct({ shopId: targetConfig.store.id, offerId: confirmedOfferId });
         lastOnlineProduct = onlineProduct || lastOnlineProduct;
         if (isEffectiveOnlineProduct(onlineProduct)) return { ok: true, import_log: importLog, online_product: onlineProduct };
+        const stockAttemptKey = String(onlineProduct?.id || confirmedOfferId);
+        if (targetWarehouseId > 0
+          && Number(onlineProduct?.sku) > 0
+          && String(onlineProduct?.online_status || "") === "ready_to_sell"
+          && Number(onlineProduct?.stock) <= 0
+          && !stockAttempts.has(stockAttemptKey)) {
+          stockAttempts.add(stockAttemptKey);
+          try {
+            lastStockUpdate = await client.updateProductStock({
+              shopId: targetConfig.store.id,
+              product: onlineProduct,
+              warehouseId: targetWarehouseId,
+              stock: activationStock,
+            });
+          } catch (error) {
+            return {
+              ok: false,
+              reason: "stock-activation-failed",
+              import_log: importLog,
+              online_product: onlineProduct,
+              error: String(error?.message || error),
+            };
+          }
+          const updated = Array.isArray(lastStockUpdate?.result)
+            && lastStockUpdate.result.some((row) => row?.updated === true && (!Array.isArray(row?.errors) || row.errors.length === 0));
+          if (!updated) {
+            return {
+              ok: false,
+              reason: "stock-activation-rejected",
+              import_log: importLog,
+              online_product: onlineProduct,
+              stock_update: lastStockUpdate,
+            };
+          }
+        }
       }
       if (attempt + 1 < attempts && Number(confirmationIntervalMs) > 0) await sleep(Number(confirmationIntervalMs));
     }
@@ -213,24 +295,39 @@ export function createPublishRunner({
         reason: "online-product-not-selling",
         import_log: lastImportLog,
         online_product: lastOnlineProduct,
+        stock_update: lastStockUpdate,
       };
     }
     return { ok: false, reason: "publish-final-status-timeout" };
   }
 
-  function publishSerial(sku, payload, targetConfig) {
-    const operation = publishChain.then(async () => {
+  async function maybeSyncOnlineShop(targetConfig) {
+    if (typeof client.syncOnlineShops !== "function") return;
+    const activeStoreId = Number(targetConfig.store.id);
+    const currentTime = now().getTime();
+    const lastSync = Number(lastOnlineSyncAt.get(activeStoreId) || 0);
+    if (currentTime - lastSync < Math.max(0, Number(onlineSyncIntervalMs) || 0)) return;
+    lastOnlineSyncAt.set(activeStoreId, currentTime);
+    try {
+      const syncResult = await client.syncOnlineShops([activeStoreId], "all");
+      recordMetric("store_syncs.jsonl", { store_id: activeStoreId, kind: "online-products", ok: true, result: syncResult ?? null });
+    } catch (error) {
+      recordMetric("store_syncs.jsonl", { store_id: activeStoreId, kind: "online-products", ok: false, error: String(error?.message || error) });
+    }
+  }
+
+  async function publishSerial(sku, payload, targetConfig) {
+    const submission = publishChain.then(async () => {
       if (haltReason) return { ok: false, reason: haltReason, not_submitted: true };
-      const publishResult = await client.publish(payload);
-      if (!publishResult?.ok) return { ok: false, reason: "publish-not-confirmed", publish_result: publishResult ?? null };
-      const confirmation = await confirmPublication(sku, payload, targetConfig);
-      if (["daily-product-limit", "online-product-not-selling"].includes(confirmation.reason)) {
-        haltReason = confirmation.reason;
-      }
-      return { ...confirmation, publish_result: publishResult };
+      return client.publish(payload);
     });
-    publishChain = operation.catch(() => {});
-    return operation;
+    publishChain = submission.catch(() => {});
+    const publishResult = await submission;
+    if (!publishResult?.ok) return { ok: false, reason: publishResult?.reason || "publish-not-confirmed", publish_result: publishResult ?? null };
+    await maybeSyncOnlineShop(targetConfig);
+    const confirmation = await confirmPublication(sku, payload, targetConfig);
+    if (confirmation.reason === "daily-product-limit") haltReason = confirmation.reason;
+    return { ...confirmation, publish_result: publishResult };
   }
 
   async function skip(item, reason, data = {}) {
@@ -238,6 +335,7 @@ export function createPublishRunner({
     try {
       await client.deleteFavorite(item);
     } catch (error) {
+      if (isFatalBrowserError(error)) throw error;
       await state.transition(sku, "failed", {
         reason: "favorite-delete-failed",
         skip_reason: reason,
@@ -314,10 +412,32 @@ export function createPublishRunner({
       if (profitReason) return skip(item, profitReason, { profit });
 
       const payload = buildPayload(item, detail, economy, targetConfig, now);
+      const submissionState = {
+        ...item,
+        sku,
+        title: payload.rows[0].title,
+        link: payload.rows[0].link,
+        sell_price: payload.rows[0].sell_price,
+        purchase_price: profit.purchase_price,
+        profit_rate: profit.profit_rate,
+        cate_rate: profit.cate_rate,
+        cate_fee: profit.cate_fee,
+        store_id: targetConfig.store.id,
+        watermark_id: targetConfig.watermark.id,
+        offer_id: payload.rows[0].offer_id,
+        submission_pending: true,
+        prepared_at: now().toISOString(),
+      };
+      await state.transition(sku, "processing", submissionState);
       const finalResult = await timed(sku, "maozi_publish_and_confirm", () => publishSerial(sku, payload, targetConfig));
       if (!finalResult?.ok) {
         const reason = finalResult?.reason || "publish-not-confirmed";
-        await state.transition(sku, "failed", { reason, final_result: finalResult ?? null });
+        await state.transition(sku, "failed", {
+          ...submissionState,
+          reason,
+          submitted: Boolean(finalResult?.publish_result?.ok && !finalResult?.publish_result?.not_submitted),
+          final_result: finalResult ?? null,
+        });
         return { status: "failed", sku, source_url: item.source_url ?? null, reason };
       }
 
@@ -340,11 +460,12 @@ export function createPublishRunner({
         product_record_id: onlineProduct.id,
         online_status: onlineProduct.online_status,
         stock: onlineProduct.stock,
-        import_status: finalResult.import_log?.import_status,
+        import_status: normalizedImportStatus(finalResult.import_log),
         published_at: now().toISOString(),
       });
       return { status: "published", sku, source_url: item.source_url ?? null, payload, finalResult };
     } catch (error) {
+      if (isFatalBrowserError(error)) throw error;
       await state.transition(sku, "failed", { reason: "exception", error: String(error?.message || error) }).catch(() => {});
       return { status: "failed", sku, source_url: item.source_url ?? null, reason: "exception", error };
     }
@@ -352,18 +473,149 @@ export function createPublishRunner({
 
   async function run() {
     await state.load?.();
+    try {
+      const syncEvents = await fs.readFile(path.join(runDir, "store_syncs.jsonl"), "utf8");
+      for (const line of syncEvents.split(/\n/).filter(Boolean)) {
+        try {
+          const event = JSON.parse(line);
+          if (event?.kind !== "online-products" || event?.ok !== true) continue;
+          const storeKey = Number(event.store_id);
+          const timestamp = Date.parse(event.at);
+          if (storeKey > 0 && Number.isFinite(timestamp)) {
+            lastOnlineSyncAt.set(storeKey, Math.max(timestamp, Number(lastOnlineSyncAt.get(storeKey) || 0)));
+          }
+        } catch {}
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
     state.summary?.(targetCount);
-    let targetConfig = targetConfigCache?.value;
-    if (!targetConfig) {
-      targetConfig = {
-        ...await client.resolvePublishTarget({ storeNeedle, watermarkNeedle, storeId, watermarkId }),
-        commissionTree: typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [],
-      };
-      if (targetConfigCache) targetConfigCache.value = targetConfig;
+    async function resolveTargetConfig(index) {
+      const spec = targetPlan[index];
+      const cacheKey = String(spec.id);
+      const cached = targetPlan.length === 1
+        ? targetConfigCache?.value
+        : targetConfigCache?.targets?.[cacheKey];
+      if (cached) return cached;
+      let resolved = await client.resolvePublishTarget({
+        storeNeedle: spec.needle,
+        watermarkNeedle,
+        storeId: spec.id,
+        watermarkId,
+      });
+      const dailyCreate = resolved.store?.product_limit?.daily_create;
+      const dailyLimit = Number(dailyCreate?.limit);
+      const dailyUsage = Number(dailyCreate?.usage);
+      if (dailyLimit > 0 && dailyUsage >= dailyLimit) {
+        const error = new Error(`daily creation quota exhausted for store ${spec.id}`);
+        error.code = "STORE_DAILY_LIMIT";
+        throw error;
+      }
+      let discoveredWarehouses = Array.isArray(resolved.store?.warehouse) ? resolved.store.warehouse : [];
+      let discoveredWarehouseId = discoveredWarehouses.length === 1
+        ? Number(discoveredWarehouses[0]?.warehouse_id)
+        : 0;
+      if (spec.requireWarehouse
+        && !(Number(spec.warehouseId) > 0)
+        && !(discoveredWarehouseId > 0)
+        && typeof client.syncWarehouses === "function") {
+        await client.syncWarehouses([spec.id]);
+        for (let attempt = 0; attempt < 6 && !(discoveredWarehouseId > 0); attempt += 1) {
+          await sleep(10_000);
+          resolved = await client.resolvePublishTarget({
+            storeNeedle: spec.needle,
+            watermarkNeedle,
+            storeId: spec.id,
+            watermarkId,
+          });
+          discoveredWarehouses = Array.isArray(resolved.store?.warehouse) ? resolved.store.warehouse : [];
+          discoveredWarehouseId = discoveredWarehouses.length === 1
+            ? Number(discoveredWarehouses[0]?.warehouse_id)
+            : 0;
+        }
+      }
+      const targetWarehouseId = Number(spec.warehouseId || discoveredWarehouseId || 0);
+      if (spec.requireWarehouse && !(targetWarehouseId > 0)) {
+        const error = new Error(`verified FBS warehouse unavailable for store ${spec.id}`);
+        error.code = "STORE_WAREHOUSE_UNAVAILABLE";
+        throw error;
+      }
+      let commissionTree = targetConfigCache?.commissionTree;
+      if (!commissionTree) {
+        commissionTree = typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [];
+        if (targetConfigCache) targetConfigCache.commissionTree = commissionTree;
+      }
+      const value = { ...resolved, commissionTree, warehouseId: targetWarehouseId || null };
+      if (targetConfigCache) {
+        if (targetPlan.length === 1) targetConfigCache.value = value;
+        else {
+          targetConfigCache.targets ||= {};
+          targetConfigCache.targets[cacheKey] = value;
+        }
+      }
+      return value;
+    }
+
+    async function advanceStore(reason, currentConfig) {
+      const fromStoreId = Number(currentConfig?.store?.id || targetPlan[activeTargetIndex]?.id);
+      while (activeTargetIndex + 1 < targetPlan.length) {
+        activeTargetIndex += 1;
+        try {
+          const nextConfig = await resolveTargetConfig(activeTargetIndex);
+          storeSwitches.push({ from_store_id: fromStoreId, to_store_id: Number(nextConfig.store.id), reason });
+          recordMetric("store_switches.jsonl", storeSwitches.at(-1));
+          haltReason = null;
+          return nextConfig;
+        } catch (error) {
+          recordMetric("store_switches.jsonl", {
+            from_store_id: fromStoreId,
+            to_store_id: targetPlan[activeTargetIndex].id,
+            reason: error?.code === "STORE_DAILY_LIMIT" ? "daily-product-limit" : "store-target-unavailable",
+            error: String(error?.message || error),
+          });
+        }
+      }
+      return null;
+    }
+
+    let targetConfig;
+    try {
+      targetConfig = await resolveTargetConfig(activeTargetIndex);
+    } catch (error) {
+      if (error?.code !== "STORE_DAILY_LIMIT") throw error;
+      haltReason = "daily-product-limit";
+      targetConfig = await advanceStore(haltReason, { store: { id: targetPlan[activeTargetIndex].id } });
+      if (!targetConfig) throw error;
     }
     const facts = await loadCandidateFacts(runDir);
+    const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
+    const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
+    const favorites = (await client.listFavorites()).map((item) => {
+      const sku = String(item?.sku ?? item?.id ?? "");
+      const restored = restoredBySku.get(sku);
+      return mergeCandidateFacts({ ...(restored?.data || {}), ...item }, facts.get(sku) || {});
+    });
+    const favoriteSkus = new Set(favorites.map((item) => String(item?.sku ?? item?.id ?? "")));
+    const delayedSubmissions = restoredEntries
+      .filter((entry) => ["processing", "failed"].includes(entry.status)
+        && !favoriteSkus.has(String(entry.sku))
+        && (entry.data?.submitted === true
+          || entry.data?.submission_pending === true
+          || entry.data?.reason === "publish-final-status-timeout"))
+      .map((entry) => mergeCandidateFacts({
+        ...(entry.data || {}),
+        sku: String(entry.sku),
+        reconcile_only: true,
+      }, facts.get(String(entry.sku)) || {}));
+    if (delayedSubmissions.length > 0) await maybeSyncOnlineShop(targetConfig);
+    const runnableFavorites = reconciliationOnly
+      ? favorites.filter((item) => {
+        const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
+        return restored?.data?.submitted === true || restored?.data?.submission_pending === true;
+      })
+      : favorites;
     const candidates = prioritizePublishCandidates(
-      (await client.listFavorites()).map((item) => mergeCandidateFacts(item, facts.get(String(item?.sku ?? item?.id ?? "")) || {})),
+      [...delayedSubmissions, ...runnableFavorites],
       await loadPreflightPureSkus(runDir),
     );
     let published = Number(state.runPublishedCount?.() ?? 0);
@@ -381,15 +633,26 @@ export function createPublishRunner({
         try {
           await client.deleteFavorite(item);
         } catch (error) {
+          if (isFatalBrowserError(error)) throw error;
           await state.transition(sku, "failed", { reason: "favorite-delete-failed", error: String(error?.message || error) }).catch(() => {});
           return { status: "failed", sku, reason: "favorite-delete-failed" };
         }
         return { status: "ignored", sku };
       }
       if (restoredStatus === "processing" || restoredStatus === "failed") {
+        const nextReconcileAt = Date.parse(item.next_reconcile_at || "");
+        if ((item.submitted || item.submission_pending)
+          && Number.isFinite(nextReconcileAt)
+          && nextReconcileAt > now().getTime()) {
+          return { status: "ignored", sku, reason: "reconciliation-backoff" };
+        }
         try {
-          const importLog = await client.findImportLog({ shopId: targetConfig.store.id, sku });
-          const importStatus = String(importLog?.import_status || "");
+          const importLog = await client.findImportLog({
+            shopId: targetConfig.store.id,
+            sku,
+            offerId: item.offer_id || undefined,
+          });
+          const importStatus = normalizedImportStatus(importLog);
           if (["all_failed", "failed"].includes(importStatus)) {
             const reason = importFailureReason(importLog);
             if (reason === "daily-product-limit") haltReason = reason;
@@ -397,19 +660,20 @@ export function createPublishRunner({
             return { status: "failed", sku, source_url: item.source_url ?? null, reason };
           }
           if (["all_imported", "imported"].includes(importStatus)) {
-            const existing = await client.findOnlineProduct({ shopId: targetConfig.store.id, offerId: importLog.offer_id });
-            if (!existing) {
-              await state.transition(sku, "failed", { reason: "reconciliation-online-product-missing", import_log: importLog });
-              return { status: "failed", sku, reason: "reconciliation-online-product-missing" };
-            }
-            if (!isEffectiveOnlineProduct(existing)) {
-              haltReason = "online-product-not-selling";
+            const confirmed = await confirmPublication(sku, {
+              rows: [{ offer_id: importLog.offer_id || item.offer_id }],
+            }, targetConfig);
+            const existing = confirmed.online_product;
+            if (!confirmed.ok || !existing) {
+              const reason = confirmed.reason || "reconciliation-online-product-missing";
               await state.transition(sku, "failed", {
-                reason: "online-product-not-selling",
+                ...item,
+                reason,
                 import_log: importLog,
-                online_product: existing,
+                final_result: confirmed,
+                submitted: true,
               });
-              return { status: "failed", sku, reason: "online-product-not-selling" };
+              return { status: "failed", sku, reason };
             }
             await state.recordPublished({
               ...item,
@@ -423,16 +687,78 @@ export function createPublishRunner({
               import_status: importStatus,
               reconciled: true,
               reconciled_at: now().toISOString(),
+              published_at: now().toISOString(),
             });
             return { status: "published", sku, source_url: item.source_url ?? null, reconciled: true };
           }
+          const pendingOfferId = importLog?.offer_id || item.offer_id;
+          if (pendingOfferId && (importLog || item.submitted || item.submission_pending)) {
+            let existing = await client.findOnlineProduct({
+              shopId: targetConfig.store.id,
+              offerId: pendingOfferId,
+            });
+            const targetWarehouseId = Number(targetConfig.warehouseId || 0);
+            if (targetWarehouseId > 0
+              && Number(existing?.sku) > 0
+              && String(existing?.online_status || "") === "ready_to_sell"
+              && Number(existing?.stock) <= 0) {
+              const stockUpdate = await client.updateProductStock({
+                shopId: targetConfig.store.id,
+                product: existing,
+                warehouseId: targetWarehouseId,
+                stock: activationStock,
+              });
+              const updated = Array.isArray(stockUpdate?.result)
+                && stockUpdate.result.some((row) => row?.updated === true && (!Array.isArray(row?.errors) || row.errors.length === 0));
+              if (updated) {
+                existing = await client.findOnlineProduct({
+                  shopId: targetConfig.store.id,
+                  offerId: pendingOfferId,
+                });
+              }
+            }
+            if (isEffectiveOnlineProduct(existing)) {
+              await state.recordPublished({
+                ...item,
+                sku,
+                offer_id: pendingOfferId,
+                store_sku: existing.sku,
+                product_id: existing.product_id,
+                product_record_id: existing.id,
+                online_status: existing.online_status,
+                stock: existing.stock,
+                import_status: importStatus || "not-visible",
+                confirmation_source: "exact-online-offer",
+                reconciled: true,
+                reconciled_at: now().toISOString(),
+                published_at: now().toISOString(),
+              });
+              return { status: "published", sku, source_url: item.source_url ?? null, reconciled: true };
+            }
+          }
           if (importLog) {
-            await state.transition(sku, "failed", { reason: "reconciliation-import-pending", import_log: importLog });
-            return { status: "failed", sku, reason: "reconciliation-import-pending" };
+            const reconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0) + 1;
+            await state.transition(sku, "processing", {
+              ...item,
+              reason: "reconciliation-import-pending",
+              import_log: importLog,
+              submitted: true,
+              reconcile_attempts: reconcileAttempts,
+              next_reconcile_at: new Date(now().getTime() + Math.min(60_000, 10_000 + reconcileAttempts * 5_000)).toISOString(),
+            });
+            return { status: "ignored", sku, reason: "reconciliation-import-pending" };
+          }
+          if (item.reconcile_only || item.submitted || item.submission_pending) {
+            return { status: "ignored", sku, reason: "reconciliation-import-not-visible" };
           }
         } catch (error) {
-          await state.transition(sku, "failed", { reason: "reconciliation-check-failed", error: String(error?.message || error) }).catch(() => {});
-          return { status: "failed", sku, reason: "reconciliation-check-failed" };
+          if (isFatalBrowserError(error)) throw error;
+          await state.transition(sku, "failed", {
+            ...item,
+            reason: "reconciliation-check-failed",
+            error: String(error?.message || error),
+          }).catch(() => {});
+          return { status: "failed", sku, reason: "reconciliation-check-failed", error };
         }
       }
 
@@ -450,8 +776,17 @@ export function createPublishRunner({
       const batch = candidates.slice(cursor, cursor + width);
       cursor += batch.length;
       const results = await Promise.all(batch.map(handleCandidate));
-      for (const result of results) {
-        recordMetric("source_yield.jsonl", { sku: result.sku, source_url: result.source_url ?? null, status: result.status, reason: result.reason ?? null });
+      for (const [index, result] of results.entries()) {
+        const item = batch[index];
+        recordMetric("source_yield.jsonl", {
+          sku: result.sku,
+          source_url: result.source_url ?? item?.source_url ?? null,
+          seller_url: item?.seller_url ?? null,
+          title: item?.title ?? null,
+          title_family: productTitleFamily(item?.title),
+          status: result.status,
+          reason: result.reason ?? null,
+        });
         if (result.status === "failed" && result.error) adaptive.recordFailure(result.error);
         else adaptive.recordSuccess();
         if (result.attempted) attempted += 1;
@@ -463,6 +798,10 @@ export function createPublishRunner({
           if (result.status === "failed") failed += 1;
           else if (result.status === "skipped") skipped += 1;
         }
+      }
+      if (haltReason === "daily-product-limit") {
+        const nextConfig = await advanceStore(haltReason, targetConfig);
+        if (nextConfig) targetConfig = nextConfig;
       }
     }
 
@@ -478,6 +817,8 @@ export function createPublishRunner({
       deadline_reached: Boolean(deadlineAt && Date.now() >= Date.parse(deadlineAt)),
       target: targetCount,
       halt_reason: haltReason,
+      active_store_id: Number(targetConfig?.store?.id || 0),
+      store_switches: storeSwitches,
       state_summary: state.summary?.(targetCount),
     };
   }

@@ -67,6 +67,36 @@ test("restored state exposes the latest SKU status for reconciliation", async ()
   });
 });
 
+test("restored state exposes a defensive snapshot for delayed submission reconciliation", async () => {
+  await withTempDir(async (dir) => {
+    const csv = path.join(dir, "published.csv");
+    const state = createPublishState({ runDir: dir, publishedCsv: csv });
+    await state.transition("delayed", "failed", {
+      reason: "publish-final-status-timeout",
+      submitted: true,
+      offer_id: "mz-150726-delayed",
+      profit_rate: 45,
+    });
+
+    const restored = createPublishState({ runDir: dir, publishedCsv: csv });
+    await restored.load();
+    const snapshot = restored.entries();
+
+    assert.deepEqual(snapshot, [{
+      sku: "delayed",
+      status: "failed",
+      data: {
+        reason: "publish-final-status-timeout",
+        submitted: true,
+        offer_id: "mz-150726-delayed",
+        profit_rate: 45,
+      },
+    }]);
+    snapshot[0].data.profit_rate = 0;
+    assert.equal(restored.entries()[0].data.profit_rate, 45);
+  });
+});
+
 test("CSV history seeds published SKUs from valid links and ignores malformed rows", async () => {
   await withTempDir(async (dir) => {
     const csv = path.join(dir, "published.csv");

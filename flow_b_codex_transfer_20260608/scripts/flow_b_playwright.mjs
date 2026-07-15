@@ -5,7 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-import { ensureMaoziLogin, launchFlowContext, openMaoziPage, resolveBrowserOptions } from "./flow_b_playwright/browser-context.mjs";
+import { ensureMaoziLogin, ensureMaoziPluginLogin, launchFlowContext, openMaoziPage, resolveBrowserOptions } from "./flow_b_playwright/browser-context.mjs";
 import { createCostBridge } from "./flow_b_playwright/cost-bridge.mjs";
 import { createMaoziClient, createMaoziPageTransport } from "./flow_b_playwright/maozi-client.mjs";
 import { createOzonDetailProvider } from "./flow_b_playwright/ozon-detail.mjs";
@@ -13,7 +13,7 @@ import { createPublishRunner } from "./flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "./flow_b_playwright/publish-state.mjs";
 import { scanSources } from "./flow_b_playwright/source-scanner.mjs";
 import { runReadOnlyVerification } from "./flow_b_playwright/verification.mjs";
-import { acceptanceSummary, isFatalBrowserError, operationalErrorSummary, rankSourcesByYield, runProducerLoop } from "./flow_b_playwright/continuous-runtime.mjs";
+import { acceptanceSummary, collectionErrorSummary, isFatalBrowserError, operationalErrorSummary, rankSourcesByYield, runProducerLoop, summarizeConsumerRound } from "./flow_b_playwright/continuous-runtime.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_RUN_DIR = path.join(ROOT, "runs/flow_b/playwright_target100");
@@ -34,6 +34,26 @@ function runtimeDefaults(env) {
   if (!storeNeedle) throw new Error("FLOW_B_STORE_NEEDLE is required");
   if (!watermarkNeedle) throw new Error("FLOW_B_WATERMARK_NEEDLE is required");
   return { threshold, target, storeNeedle, watermarkNeedle };
+}
+
+export function parseStoreTargets(env = process.env) {
+  const source = String(env.FLOW_B_STORE_TARGETS || "").trim();
+  if (!source) return null;
+  let rows;
+  try {
+    rows = JSON.parse(source);
+  } catch {
+    throw new Error("FLOW_B_STORE_TARGETS must be valid JSON");
+  }
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error("FLOW_B_STORE_TARGETS must be a non-empty JSON array");
+  return rows.map((row) => {
+    const id = Number(row?.id);
+    const needle = String(row?.needle || row?.name || "").trim();
+    const warehouseId = row?.warehouseId === null || row?.warehouseId === undefined ? null : Number(row.warehouseId);
+    if (!(id > 0) || !needle) throw new Error("FLOW_B_STORE_TARGETS entries require a positive id and needle");
+    if (warehouseId !== null && !(warehouseId > 0)) throw new Error("FLOW_B_STORE_TARGETS warehouseId must be positive when configured");
+    return { id, needle, warehouseId, requireWarehouse: row?.requireWarehouse !== false };
+  });
 }
 
 export function parseCli(argv, env = process.env) {
@@ -114,12 +134,19 @@ async function createPublishingSession(context, options, env, shared) {
       watermarkNeedle: options.watermarkNeedle,
       storeId: Number(env.FLOW_B_STORE_ID || 104965),
       watermarkId: Number(env.FLOW_B_WATERMARK_ID || 60822),
+      storeTargets: parseStoreTargets(env),
+      reconciliationOnly: env.FLOW_B_RECONCILIATION_ONLY === "1",
       concurrency: Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 8),
       maxConcurrency: Math.max(1, Number(env.FLOW_B_MAX_PUBLISH_WORKERS) || 12),
       dryCandidateLimit: Math.max(0, Number(env.FLOW_B_MAX_DRY_CANDIDATES) || 0),
       deadlineAt: env.FLOW_B_DEADLINE_AT || null,
       targetConfigCache: shared.targetConfigCache || null,
       sourceYieldHistoryPath: env.FLOW_B_SOURCE_YIELD_HISTORY || path.join(ROOT, "data/flow_b/source_yield_history.jsonl"),
+      confirmationAttempts: Math.max(1, Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) || 90),
+      confirmationIntervalMs: Math.max(0, Number(env.FLOW_B_CONFIRMATION_INTERVAL_MS) || 2000),
+      onlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_ONLINE_SYNC_INTERVAL_MS) || 1_800_000),
+      warehouseId: env.FLOW_B_WAREHOUSE_ID || null,
+      initialStock: Math.max(1, Number(env.FLOW_B_INITIAL_STOCK) || 1),
     });
     return { maoziPage, costBridge, detailProvider, runner };
   } catch (error) {
@@ -157,6 +184,7 @@ async function verifyWithContext(context, options, env) {
   const page = await openMaoziPage(context);
   try {
     await ensureMaoziLogin(page, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
+    await ensureMaoziPluginLogin(context, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
     const client = createMaoziClient({ transport: createMaoziPageTransport({ page, context }) });
     const manifest = JSON.parse(await fs.readFile(path.join(browserOptions(env).extensionDir, "manifest.json"), "utf8"));
     return runReadOnlyVerification({
@@ -223,6 +251,12 @@ export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) 
   const yieldEvents = await readJsonLines(path.join(runDir, "source_yield.jsonl"));
   const published = publishedEvents.map((row) => ({ ...row, ...(row.data || {}) }));
   const acceptance = acceptanceSummary({ rows: published, startedAt, endedAt, target });
+  const windowStart = Date.parse(startedAt);
+  const windowEnd = Date.parse(endedAt);
+  const favoriteCollectionInWindow = favoriteCollection.filter((row) => {
+    const at = Date.parse(row?.at || row?.timestamp || "");
+    return at >= windowStart && at <= windowEnd;
+  });
   const stageMap = new Map();
   for (const row of timings) {
     const values = stageMap.get(row.stage) || [];
@@ -247,13 +281,14 @@ export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) 
     ...acceptance,
     stage_timings: stageSummary,
     collection_elimination_reasons: countsBy(
-      favoriteCollection
+      favoriteCollectionInWindow
         .filter((row) => row.status === "rejected" || row.status === "failed")
         .map((row) => ({ ...row, reason: collectionEliminationReason(row) })),
       "reason",
     ),
     elimination_reasons: countsBy(skipped, "reason"),
     failure_reasons: countsBy(failed, "reason"),
+    ...collectionErrorSummary(favoriteCollectionInWindow),
     ...operationalErrorSummary({
       successCount: acceptance.success_count,
       skippedCount: skipped.length,
@@ -276,6 +311,7 @@ async function runAcceptance(context, options, env) {
   const authPage = await openMaoziPage(context, { forceNew: true, settleMs: 1500 });
   try {
     await ensureMaoziLogin(authPage, { continueDeviceLogin: true, timeout: 60000 });
+    await ensureMaoziPluginLogin(context, { continueDeviceLogin: true, timeout: 60000 });
   } finally {
     await authPage.close().catch(() => {});
   }
@@ -297,7 +333,9 @@ async function runAcceptance(context, options, env) {
     ...env,
     FLOW_B_DEADLINE_AT: endedAt.toISOString(),
     FLOW_B_MAOZI_CONTINUE_LOGIN: "1",
+    FLOW_B_LOG_LEVEL: env.FLOW_B_LOG_LEVEL || "summary",
   };
+  const storeTargets = parseStoreTargets(env);
   await createRunDir(options.runDir, {
     mode: "continuous-acceptance",
     urls_file: options.urlsFile,
@@ -307,7 +345,10 @@ async function runAcceptance(context, options, env) {
     publish_target: options.target,
     acceptance_target: acceptanceTarget,
     store_id: Number(env.FLOW_B_STORE_ID || 104965),
+    store_targets: storeTargets,
     watermark_id: Number(env.FLOW_B_WATERMARK_ID || 60822),
+    warehouse_id: env.FLOW_B_WAREHOUSE_ID ? Number(env.FLOW_B_WAREHOUSE_ID) : null,
+    initial_stock: Math.max(1, Number(env.FLOW_B_INITIAL_STOCK) || 1),
     initial_concurrency: Number(env.FLOW_B_PUBLISH_WORKERS || 8),
     max_concurrency: Number(env.FLOW_B_MAX_PUBLISH_WORKERS || 12),
   });
@@ -326,11 +367,11 @@ async function runAcceptance(context, options, env) {
       }
     },
   });
-  const rounds = [];
+  let roundSummary;
   while (Date.now() < endedAt.getTime()) {
     if (producerFatalError) throw producerFatalError;
     try {
-      rounds.push(await publishWithContext(context, options, runtimeEnv, shared));
+      roundSummary = summarizeConsumerRound(roundSummary, await publishWithContext(context, options, runtimeEnv, shared));
     } catch (error) {
       await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), stage: "consumer", error: String(error?.message || error) })}\n`);
       if (isFatalBrowserError(error)) {
@@ -346,7 +387,7 @@ async function runAcceptance(context, options, env) {
   shared.session = null;
   if (producerFatalError) throw producerFatalError;
   const report = await writeAcceptanceReport(options.runDir, startedAt.toISOString(), endedAt.toISOString(), acceptanceTarget);
-  return { report, scan, rounds };
+  return { report, scan, round_summary: roundSummary || null };
 }
 
 function printHelp() {

@@ -133,6 +133,39 @@ export function operationalErrorSummary({ successCount = 0, skippedCount = 0, fa
   };
 }
 
+export function collectionErrorSummary(rows = []) {
+  const attempts = rows.filter((row) => ["favorited", "rejected", "failed"].includes(String(row?.status || "")));
+  const failed = attempts.filter((row) => row?.status === "failed").length;
+  return {
+    collection_attempt_count: attempts.length,
+    collection_failed_count: failed,
+    collection_error_rate: attempts.length ? Math.round((failed / attempts.length) * 10000) / 10000 : 0,
+  };
+}
+
+export function summarizeConsumerRound(previous, round = {}) {
+  const totals = previous?.totals || { published: 0, attempted: 0, skipped: 0, failed: 0 };
+  const number = (value) => Math.max(0, Number(value) || 0);
+  return {
+    round_count: number(previous?.round_count) + 1,
+    totals: {
+      published: totals.published + number(round.published),
+      attempted: totals.attempted + number(round.attempted),
+      skipped: totals.skipped + number(round.skipped),
+      failed: totals.failed + number(round.failed),
+    },
+    last: {
+      published: number(round.published),
+      attempted: number(round.attempted),
+      skipped: number(round.skipped),
+      failed: number(round.failed),
+      dry_candidates: number(round.dry_candidates),
+      final_concurrency: number(round.final_concurrency),
+      deadline_reached: Boolean(round.deadline_reached),
+    },
+  };
+}
+
 export async function runProducerLoop({
   scan,
   deadlineMs,

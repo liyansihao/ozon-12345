@@ -4,12 +4,27 @@ import assert from "node:assert/strict";
 import {
   AdaptiveConcurrency,
   acceptanceSummary,
+  collectionErrorSummary,
   operationalErrorSummary,
   mergeCandidateFacts,
   isFatalBrowserError,
   rankSourcesByYield,
   runProducerLoop,
+  summarizeConsumerRound,
 } from "../scripts/flow_b_playwright/continuous-runtime.mjs";
+
+test("collection error rate reports failed preflight requests separately", () => {
+  assert.deepEqual(collectionErrorSummary([
+    { status: "favorited" },
+    { status: "rejected" },
+    { status: "failed" },
+    { status: "capacity_reached" },
+  ]), {
+    collection_attempt_count: 3,
+    collection_failed_count: 1,
+    collection_error_rate: 0.3333,
+  });
+});
 
 test("collection facts retain publish-critical fields and override incomplete favorite rows", () => {
   const favorite = { sku: 42, title: "", sell_price: null, cover_image: null };
@@ -116,4 +131,25 @@ test("closed Playwright contexts are fatal while individual page timeouts are re
   assert.equal(isFatalBrowserError(new Error("Target page, context or browser has been closed")), true);
   assert.equal(isFatalBrowserError(new Error("browserContext.newPage: Target page has been closed")), true);
   assert.equal(isFatalBrowserError(new Error("page.goto: Timeout 12000ms exceeded")), false);
+});
+
+test("consumer round summaries stay bounded during 24 hour polling", () => {
+  let summary;
+  for (let index = 0; index < 10_000; index += 1) {
+    summary = summarizeConsumerRound(summary, {
+      published: index % 3 === 0 ? 1 : 0,
+      attempted: 4,
+      skipped: 2,
+      failed: 1,
+      dry_candidates: 2,
+      final_concurrency: 8 + (index % 5),
+      state_summary: { deliberately_large: "x".repeat(10_000) },
+    });
+  }
+  assert.equal(summary.round_count, 10_000);
+  assert.equal(summary.totals.attempted, 40_000);
+  assert.equal(summary.totals.failed, 10_000);
+  assert.equal(summary.last.final_concurrency, 12);
+  assert.equal("state_summary" in summary.last, false);
+  assert.ok(JSON.stringify(summary).length < 500);
 });

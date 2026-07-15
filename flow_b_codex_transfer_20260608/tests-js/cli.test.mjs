@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { parseCli } from "../scripts/flow_b_playwright.mjs";
+import { parseCli, parseStoreTargets } from "../scripts/flow_b_playwright.mjs";
 
 test("publish CLI uses strict production defaults", () => {
   const parsed = parseCli(["publish", "/tmp/flow-run"], {});
@@ -47,4 +47,18 @@ test("environment overrides production defaults explicitly", () => {
   assert.equal(parsed.target, 12);
   assert.equal(parsed.storeNeedle, "店铺A");
   assert.equal(parsed.watermarkNeedle, "wm");
+});
+
+test("store target environment parses an ordered verified rotation plan", () => {
+  assert.deepEqual(parseStoreTargets({
+    FLOW_B_STORE_TARGETS: JSON.stringify([
+      { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960 },
+      { id: 106637, needle: "丽丽二号" },
+    ]),
+  }), [
+    { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
+    { id: 106637, needle: "丽丽二号", warehouseId: null, requireWarehouse: true },
+  ]);
+  assert.equal(parseStoreTargets({}), null);
+  assert.throws(() => parseStoreTargets({ FLOW_B_STORE_TARGETS: "not-json" }), /STORE_TARGETS.*JSON/i);
 });

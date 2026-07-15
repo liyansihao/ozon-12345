@@ -49,42 +49,44 @@ npm run flow:b:run -- runs/flow_b/20260713_playwright_publish runs/flow_b/source
 export FLOW_B_EXTENSION_DIR=/Users/mac/Downloads/maozi-plugin-3.0.9/maozi-plugin-3.0.9
 export FLOW_B_STORE_ID=104965 FLOW_B_WATERMARK_ID=60822
 export FLOW_B_STORE_NEEDLE=丽丽1号 FLOW_B_WATERMARK_NEEDLE=lysh
-export FLOW_B_ACCEPTANCE_SECONDS=7200 FLOW_B_ACCEPTANCE_TARGET=50
-export FLOW_B_TARGET_PUBLISH_COUNT=600 FLOW_B_SKIP_RETAINED=1
+export FLOW_B_ACCEPTANCE_SECONDS=7200 FLOW_B_ACCEPTANCE_TARGET=70
+export FLOW_B_TARGET_PUBLISH_COUNT=120 FLOW_B_SKIP_RETAINED=1
 scripts/run_acceptance_supervised.sh runs/flow_b/acceptance_2h runs/flow_b/source_urls.txt
 ```
 
-2026-07-14 的固定两小时窗口用以下生产参数确认 52 个有效唯一 SKU（26 个/小时）。24 小时连续运行沿用同一安全配置，将验收目标设为 600、发布上限留出到 720，并使用新的独立运行目录：
+2026-07-14 的固定两小时窗口确认过 52 个有效唯一 SKU（26 个/小时）。2026-07-15 v24 在旧候选顺序下只确认 25 个（12.5 个/小时），未通过 70 个验收标准，不能作为 35 个/小时配置。当前 24 小时安全候选配置如下；只有新的完整两小时窗口通过 70 个后，才可把它标记为已验收配置：
 
 ```bash
 export FLOW_B_EXTENSION_DIR=/Users/mac/Downloads/maozi-plugin-3.0.9/maozi-plugin-3.0.9
 export FLOW_B_MAOZI_CONTINUE_LOGIN=1
 export FLOW_B_STORE_ID=104965 FLOW_B_WATERMARK_ID=60822
 export FLOW_B_STORE_NEEDLE=丽丽1号 FLOW_B_WATERMARK_NEEDLE=lysh
-export FLOW_B_ACCEPTANCE_SECONDS=86400 FLOW_B_ACCEPTANCE_TARGET=600
-export FLOW_B_TARGET_PUBLISH_COUNT=720 FLOW_B_EXCLUDED_SKUS=2815247918
+export FLOW_B_ACCEPTANCE_SECONDS=86400 FLOW_B_ACCEPTANCE_TARGET=840
+export FLOW_B_TARGET_PUBLISH_COUNT=900 FLOW_B_EXCLUDED_SKUS=2815247918
+export FLOW_B_LOG_LEVEL=summary
 export FLOW_B_PUBLISH_WORKERS=8 FLOW_B_MAX_PUBLISH_WORKERS=12
-export FLOW_B_TAB_WORKERS=6 FLOW_B_MAX_TAB_WORKERS=10 FLOW_B_FAVORITE_WORKERS=6
+export FLOW_B_TAB_WORKERS=8 FLOW_B_MAX_TAB_WORKERS=12 FLOW_B_FAVORITE_WORKERS=2
 export FLOW_B_TARGET_FAVORITES=1000 FLOW_B_MAX_LINKS_PER_SOURCE=12
 export FLOW_B_POLL_INTERVAL_MS=5000 FLOW_B_PRODUCER_INTERVAL_MS=10000
 export FLOW_B_SKIP_RETAINED=1 FLOW_B_LOW_DELTA_BATCH_LIMIT=0
-export FLOW_B_FAVORITE_DETAIL_INTERVAL_MS=1000 FLOW_B_FAVORITE_API_INTERVAL_MS=500
+export FLOW_B_FAVORITE_DETAIL_INTERVAL_MS=2000 FLOW_B_FAVORITE_API_INTERVAL_MS=500
 export FLOW_B_FAVORITE_DETAIL_RETRIES=0 FLOW_B_FAVORITE_DETAIL_TIMEOUT=8000
 export FLOW_B_OZON_DETAIL_TIMEOUT_MS=12000 FLOW_B_1688_ITEM_TIMEOUT=60
+export FLOW_B_DERIVED_SEARCH_SOURCES=0
+export FLOW_B_FRESH_SOURCE_FILES=runs/flow_b/20260715_v16_high_yield_neighbor_queries.txt
 export FLOW_B_RESTART_DELAY_SECONDS=5
 
 RUN_DIR=runs/flow_b/$(date +%Y%m%d_%H%M%S)_ozon_24h
-SEED_DIR=runs/flow_b/20260714_135000_ozon500_acceptance_2h_v2
-export FLOW_B_SOURCE_YIELD_SEED_FILES="$SEED_DIR/source_yield.jsonl"
-export FLOW_B_STATE_SEED_FILES="$SEED_DIR/sku_states.jsonl"
-export FLOW_B_FAVORITE_SEED_FILES="$SEED_DIR/favorite_collection.jsonl"
+export FLOW_B_SOURCE_YIELD_SEED_FILES="$(find runs/flow_b -mindepth 2 -maxdepth 2 -name source_yield.jsonl -type f | sort | paste -sd: -)"
+export FLOW_B_STATE_SEED_FILES="$(find runs/flow_b -mindepth 2 -maxdepth 2 -name sku_states.jsonl -type f | sort | paste -sd: -)"
+export FLOW_B_FAVORITE_SEED_FILES="$(find runs/flow_b -mindepth 2 -maxdepth 2 -name favorite_collection.jsonl -type f | sort | paste -sd: -)"
 
 scripts/run_acceptance_supervised.sh \
   "$RUN_DIR" \
-  runs/flow_b/20260623_131244_gap_to_maozi/source_urls_priority_for_1000.txt
+  runs/flow_b/20260714_source_urls_union.txt
 ```
 
-采集端会按最新发布收益把已扫描来源切成 60 条反馈小批，复用未尝试链接；成功批次自动提高来源优先级。`Failed to fetch`、HTTP 0、超时或 Ozon 软拦截会触发并发降级与 60/120/180 秒移动冷却。每个 SKU 的错误会落盘后继续；设备已满时会走页面提供的设备接管流程，但不会绕过验证码或其他安全校验。
+采集端持久化并复用标题、售价、封面、配送模式和来源 URL，按完整漏斗收益排序来源。列表卡片中插件明确标记为 `发货模式：FBS` 的候选优先占用详情页额度，但详情页仍会再次确认纯 FBS；同标题变体会保留带 FBS 证据的版本。`Failed to fetch`、Ozon `net::ERR_*`、HTTP 0、超时或软拦截会触发并发降级与 10/15/30 分钟共享移动冷却，固定验收截止时间也会终止批内采集和 API 重试。每个 SKU 的错误会落盘后继续；设备已满时会走页面提供的设备接管流程，但不会绕过验证码或其他安全校验。
 
 可覆盖参数：
 

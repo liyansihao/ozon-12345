@@ -4,10 +4,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createPublishRunner, prioritizePublishCandidates } from "../scripts/flow_b_playwright/publish-runner.mjs";
+import { createPublishRunner, offerIdForSku, prioritizePublishCandidates } from "../scripts/flow_b_playwright/publish-runner.mjs";
 
 function fakeState(initial = {}, initialRunPublished = 0) {
-  const statuses = new Map(Object.entries(initial));
+  const statuses = new Map(Object.entries(initial).map(([sku, value]) => [sku,
+    typeof value === "string" ? { status: value, data: {} } : { status: value.status, data: { ...(value.data || {}) } },
+  ]));
   const transitions = [];
   const records = [];
   return {
@@ -15,21 +17,22 @@ function fakeState(initial = {}, initialRunPublished = 0) {
     records,
     load: async () => {},
     runPublishedCount: () => initialRunPublished + records.length,
-    hasPublished: (sku) => statuses.get(String(sku)) === "published",
-    statusOf: (sku) => statuses.get(String(sku)) || null,
+    hasPublished: (sku) => statuses.get(String(sku))?.status === "published",
+    statusOf: (sku) => statuses.get(String(sku))?.status || null,
+    entries: () => [...statuses].map(([sku, value]) => ({ sku, status: value.status, data: { ...value.data } })),
     transition: async (sku, status, data) => {
-      statuses.set(String(sku), status);
+      statuses.set(String(sku), { status, data: { ...(data || {}) } });
       transitions.push({ sku: String(sku), status, data });
       return true;
     },
     recordPublished: async (item) => {
       const sku = String(item.sku);
-      if (statuses.get(sku) === "published") return false;
-      statuses.set(sku, "published");
+      if (statuses.get(sku)?.status === "published") return false;
+      statuses.set(sku, { status: "published", data: { ...item } });
       records.push(item);
       return true;
     },
-    summary: (target) => ({ published: [...statuses.values()].filter((x) => x === "published").length, remaining: target }),
+    summary: (target) => ({ published: [...statuses.values()].filter((x) => x.status === "published").length, remaining: target }),
   };
 }
 
@@ -69,7 +72,7 @@ function clientFor(items, overrides = {}) {
   };
 }
 
-test("publish candidates prioritize proven product titles independently of API order", () => {
+test("publish candidates prioritize observed strict-yield titles independently of API order", () => {
   const items = [
     { sku: "ordinary-low", title: "Воздушные шары из фольги", sell_price: 10 },
     { sku: "ordinary-high", title: "Рюкзак", sell_price: 60 },
@@ -78,12 +81,18 @@ test("publish candidates prioritize proven product titles independently of API o
     { sku: "underwear", title: "Комплект трусов" },
   ];
   assert.deepEqual(prioritizePublishCandidates(items).map((item) => item.sku), [
-    "hat",
     "underwear",
-    "toy",
+    "hat",
     "ordinary-high",
     "ordinary-low",
+    "toy",
   ]);
+});
+
+test("offer IDs retain the complete SKU and cannot collide on a six-digit suffix", () => {
+  const now = new Date("2026-07-15T00:00:00Z");
+  assert.equal(offerIdForSku("4799637133", now), "mz-150726-4799637133");
+  assert.notEqual(offerIdForSku("4799637133", now), offerIdForSku("1234637133", now));
 });
 
 test("runner does not count an accepted task that later hits the daily product limit", async () => {
@@ -114,16 +123,175 @@ test("runner does not count an accepted task that later hits the daily product l
   assert.ok(state.transitions.some((event) => event.status === "failed" && event.data.reason === "daily-product-limit"));
 });
 
-test("runner does not count a final import that is only ready to sell with zero stock", async () => {
+test("runner rotates to the next verified store after a daily creation limit", async () => {
   const state = fakeState();
-  const client = clientFor([{ id: 92, sku: 3301105092 }], {
-    findImportLog: async () => ({ sku: 3301105092, offer_id: "mz-140726-105092", import_status: "all_imported" }),
-    findOnlineProduct: async () => ({
-      id: 1271192336,
-      sku: 5069587484,
-      offer_id: "mz-140726-105092",
-      online_status: "ready_to_sell",
-      stock: 0,
+  const shopIds = [];
+  const client = clientFor([{ id: 201, sku: 201 }, { id: 202, sku: 202 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 104965 ? "丽丽1号" : "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => {
+      shopIds.push(payload.shop_ids[0]);
+      return { ok: true, response: { code: 1 } };
+    },
+    findImportLog: async ({ shopId, sku, offerId }) => Number(shopId) === 104965 ? ({
+      sku,
+      offer_id: offerId,
+      import_status: "all_failed",
+      skus: [{ error_msg: "вы исчерпали суточный лимит" }],
+    }) : ({ sku, offer_id: offerId, import_status: "all_imported" }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [
+      { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960 },
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(shopIds, [104965, 106637]);
+  assert.equal(state.records[0].store_id, 106637);
+  assert.equal(result.halt_reason, null);
+  assert.deepEqual(result.store_switches, [{ from_store_id: 104965, to_store_id: 106637, reason: "daily-product-limit" }]);
+});
+
+test("runner skips a store whose daily creation quota is already exhausted", async () => {
+  const state = fakeState();
+  const shopIds = [];
+  const client = clientFor([{ id: 203, sku: 203 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: {
+        id: Number(storeId),
+        name: Number(storeId) === 104965 ? "丽丽1号" : "丽丽二号",
+        product_limit: {
+          daily_create: Number(storeId) === 104965
+            ? { limit: 100, usage: 100 }
+            : { limit: 100, usage: 0 },
+        },
+      },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => {
+      shopIds.push(payload.shop_ids[0]);
+      return { ok: true, response: { code: 1 } };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [
+      { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960 },
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(shopIds, [106637]);
+  assert.equal(result.active_store_id, 106637);
+  assert.deepEqual(result.store_switches, [{ from_store_id: 104965, to_store_id: 106637, reason: "daily-product-limit" }]);
+});
+
+test("runner syncs and verifies a missing warehouse before rotating into a store", async () => {
+  const state = fakeState();
+  const shopIds = [];
+  const syncCalls = [];
+  let storeTwoReads = 0;
+  const client = clientFor([{ id: 204, sku: 204 }], {
+    resolvePublishTarget: async ({ storeId }) => {
+      if (Number(storeId) === 106637) storeTwoReads += 1;
+      return {
+        store: {
+          id: Number(storeId),
+          name: Number(storeId) === 104965 ? "丽丽1号" : "丽丽二号",
+          product_limit: {
+            daily_create: Number(storeId) === 104965
+              ? { limit: 100, usage: 100 }
+              : { limit: 100, usage: 0 },
+          },
+          warehouse: Number(storeId) === 106637 && storeTwoReads >= 2
+            ? [{ warehouse_id: 2020005022957960, name: "丽丽二号仓库" }]
+            : [],
+        },
+        watermark: { id: 60822, name: "lysh" },
+      };
+    },
+    syncWarehouses: async (ids) => {
+      syncCalls.push(ids);
+      return { queued: true };
+    },
+    publish: async (payload) => {
+      shopIds.push(payload.shop_ids[0]);
+      return { ok: true, response: { code: 1 } };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [
+      { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960 },
+      { id: 106637, needle: "丽丽二号" },
+    ],
+    sleep: async () => {},
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(syncCalls, [[106637]]);
+  assert.deepEqual(shopIds, [106637]);
+  assert.equal(state.records[0].store_id, 106637);
+});
+
+test("runner queues a bounded online-product sync after a successful submission", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-online-sync-"));
+  const state = fakeState();
+  const syncCalls = [];
+  const client = clientFor([{ id: 205, sku: 205 }], {
+    syncOnlineShops: async (ids, type) => {
+      syncCalls.push({ ids, type });
+      return { msg: "queued" };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    target: 1,
+    onlineSyncIntervalMs: 180_000,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(syncCalls, [{ ids: [7], type: "all" }]);
+});
+
+test("runner logs a ready-to-sell zero-stock SKU and continues to the next candidate", async () => {
+  const state = fakeState();
+  const client = clientFor([{ id: 92, sku: 3301105092 }, { id: 93, sku: 3301105093 }], {
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async ({ offerId }) => String(offerId).endsWith("3301105092") ? ({
+      id: 1271192336, sku: 5069587484, offer_id: offerId, online_status: "ready_to_sell", stock: 0,
+    }) : ({
+      id: 1271192337, sku: 5069587485, offer_id: offerId, online_status: "selling", stock: 1,
     }),
   });
   const result = await createPublishRunner({
@@ -135,10 +303,62 @@ test("runner does not count a final import that is only ready to sell with zero 
     confirmationIntervalMs: 0,
   }).run();
 
-  assert.equal(result.published, 0);
-  assert.equal(result.halt_reason, "online-product-not-selling");
-  assert.equal(state.records.length, 0);
+  assert.equal(result.published, 1);
+  assert.equal(result.failed, 1);
+  assert.equal(result.halt_reason, null);
+  assert.equal(state.records[0].sku, "3301105093");
   assert.ok(state.transitions.some((event) => event.status === "failed" && event.data.reason === "online-product-not-selling"));
+});
+
+test("runner activates a ready-to-sell product in the verified FBS warehouse before counting it", async () => {
+  const state = fakeState();
+  const stockUpdates = [];
+  let onlineChecks = 0;
+  const client = clientFor([{ id: 92, sku: 3301105092 }], {
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async ({ offerId }) => {
+      onlineChecks += 1;
+      return {
+        id: 1271192336,
+        product_id: 5489750001,
+        sku: 5069587484,
+        offer_id: offerId,
+        online_status: onlineChecks === 1 ? "ready_to_sell" : "selling",
+        stock: onlineChecks === 1 ? 0 : 1,
+      };
+    },
+    updateProductStock: async (input) => {
+      stockUpdates.push(input);
+      return { updated_count: 1, result: [{ updated: true, errors: [] }] };
+    },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    warehouseId: 1020005022957960,
+    initialStock: 1,
+    confirmationAttempts: 2,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(state.records[0].online_status, "selling");
+  assert.equal(state.records[0].stock, 1);
+  assert.deepEqual(stockUpdates, [{
+    shopId: 7,
+    product: {
+      id: 1271192336,
+      product_id: 5489750001,
+      sku: 5069587484,
+      offer_id: "mz-150726-3301105092",
+      online_status: "ready_to_sell",
+      stock: 0,
+    },
+    warehouseId: 1020005022957960,
+    stock: 1,
+  }]);
 });
 
 test("runner counts only a final imported task that is selling with positive stock", async () => {
@@ -199,6 +419,21 @@ test("runner records a failed SKU and continues until confirmed success target",
   assert.deepEqual(detailCalls, ["1", "2"]);
 });
 
+test("fatal browser closure escapes the SKU failure path for supervisor recovery", async () => {
+  const state = fakeState();
+  const client = clientFor([{ id: 1, sku: 1 }], {
+    getProductDetail: async () => { throw new Error("browserContext.newPage: Target page, context or browser has been closed"); },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+  });
+  await assert.rejects(runner.run(), /context or browser has been closed/);
+  assert.equal(state.transitions.some((event) => event.status === "failed"), false);
+});
+
 test("runner rejects profit rate exactly 30 and never publishes it", async () => {
   const state = fakeState();
   let publishCalls = 0;
@@ -225,6 +460,264 @@ test("runner reconciles restored failed SKU without resubmitting", async () => {
   assert.equal(result.published, 1);
   assert.equal(publishCalls, 0);
   assert.equal(state.records[0].reconciled, true);
+});
+
+test("runner proactively reconciles a submitted SKU that disappeared from favorites", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-reconcile-sync-"));
+  const state = fakeState({
+    4854106078: {
+      status: "failed",
+      data: {
+        reason: "publish-final-status-timeout",
+        submitted: true,
+        offer_id: "mz-150726-4854106078",
+        title: "delayed imported item",
+        sell_price: 99,
+        purchase_price: 20,
+        profit_rate: 45,
+        cate_rate: 12,
+        cate_fee: 8,
+        store_id: 104965,
+        watermark_id: 60822,
+      },
+    },
+  });
+  let publishCalls = 0;
+  const syncCalls = [];
+  const client = clientFor([], {
+    publish: async () => { publishCalls += 1; return { ok: true }; },
+    syncOnlineShops: async (ids, type) => { syncCalls.push({ ids, type }); return { msg: "queued" }; },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async ({ offerId }) => ({
+      id: 77,
+      product_id: 88,
+      sku: 99,
+      offer_id: offerId,
+      online_status: "selling",
+      stock: 1,
+    }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    target: 1,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(publishCalls, 0);
+  assert.deepEqual(syncCalls, [{ ids: [7], type: "all" }]);
+  assert.equal(state.records[0].sku, "4854106078");
+  assert.equal(state.records[0].profit_rate, 45);
+  assert.equal(state.records[0].reconciled, true);
+  assert.match(state.records[0].published_at, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("runner restores the persisted online-sync cooldown after a supervisor restart", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-sync-cooldown-"));
+  const now = () => new Date("2026-07-15T08:06:00.000Z");
+  await fs.writeFile(path.join(runDir, "store_syncs.jsonl"), `${JSON.stringify({
+    at: "2026-07-15T08:05:00.000Z",
+    store_id: 7,
+    kind: "online-products",
+    ok: true,
+  })}\n`);
+  const state = fakeState({
+    delayed: { status: "failed", data: { submitted: true, offer_id: "mz-delayed", profit_rate: 45 } },
+  });
+  const syncCalls = [];
+  const client = clientFor([], {
+    syncOnlineShops: async (...args) => { syncCalls.push(args); return { msg: "queued" }; },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    now,
+    target: 1,
+    onlineSyncIntervalMs: 600_000,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(syncCalls, []);
+});
+
+test("reconciliation HTTP 0 errors reduce adaptive publish concurrency", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-reconcile-http0-"));
+  const state = fakeState({
+    delayed: { status: "processing", data: { submitted: true, offer_id: "mz-delayed", profit_rate: 45 } },
+  });
+  const client = clientFor([], {
+    findImportLog: async () => { throw new Error("Maozi import logs lookup request failed: HTTP 0"); },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    target: 1,
+    concurrency: 8,
+    maxConcurrency: 12,
+  }).run();
+
+  assert.equal(result.failed, 1);
+  assert.equal(result.final_concurrency, 4);
+  assert.equal(state.entries()[0].data.submitted, true);
+  assert.equal(state.entries()[0].data.offer_id, "mz-delayed");
+});
+
+test("reconciliation-only mode never submits a fresh favorite", async () => {
+  const state = fakeState({
+    delayed: { status: "failed", data: { submitted: true, offer_id: "mz-150726-delayed", profit_rate: 45 } },
+  });
+  let publishCalls = 0;
+  const client = clientFor([{ id: "delayed", sku: "delayed" }, { id: "fresh", sku: "fresh" }], {
+    publish: async () => { publishCalls += 1; return { ok: true }; },
+    findImportLog: async ({ sku, offerId }) => String(sku) === "delayed"
+      ? { sku, offer_id: offerId, import_status: "all_imported" }
+      : null,
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 10,
+    reconciliationOnly: true,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(publishCalls, 0);
+  assert.equal(state.statusOf("fresh"), null);
+});
+
+test("runner backs off a delayed reconciliation until its persisted retry time", async () => {
+  const state = fakeState({
+    delayed: {
+      status: "processing",
+      data: {
+        submitted: true,
+        submission_pending: true,
+        offer_id: "mz-150726-delayed",
+        next_reconcile_at: "2026-07-15T07:00:15.000Z",
+      },
+    },
+  });
+  let importChecks = 0;
+  const client = clientFor([], {
+    findImportLog: async () => { importChecks += 1; return null; },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T07:00:00.000Z"),
+  }).run();
+
+  assert.equal(result.published, 0);
+  assert.equal(importChecks, 0);
+});
+
+test("runner confirms an exact selling online offer even while its import log is stale pending", async () => {
+  const state = fakeState({
+    4854106079: {
+      status: "processing",
+      data: {
+        submitted: true,
+        offer_id: "mz-150726-4854106079",
+        profit_rate: 55,
+      },
+    },
+  });
+  const client = clientFor([], {
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "pending" }),
+    findOnlineProduct: async ({ offerId }) => ({
+      id: 177,
+      product_id: 188,
+      sku: 199,
+      offer_id: offerId,
+      online_status: "selling",
+      stock: 1,
+    }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(state.records[0].offer_id, "mz-150726-4854106079");
+  assert.equal(state.records[0].online_status, "selling");
+  assert.equal(state.records[0].import_status, "pending");
+  assert.equal(state.records[0].confirmation_source, "exact-online-offer");
+});
+
+test("runner recognizes nested imported status when the parent import status is unknown", async () => {
+  const state = fakeState({
+    nested: {
+      status: "processing",
+      data: { submitted: true, offer_id: "mz-150726-nested", profit_rate: 55 },
+    },
+  });
+  let onlineChecks = 0;
+  const stockUpdates = [];
+  const client = clientFor([], {
+    findImportLog: async ({ sku, offerId }) => ({
+      sku,
+      offer_id: offerId,
+      import_status: "unknown",
+      skus: [{ offer_id: offerId, import_status: "imported" }],
+    }),
+    findOnlineProduct: async ({ offerId }) => {
+      onlineChecks += 1;
+      return {
+        id: 277,
+        product_id: 288,
+        sku: 299,
+        offer_id: offerId,
+        online_status: onlineChecks === 1 ? "ready_to_sell" : "selling",
+        stock: onlineChecks === 1 ? 0 : 1,
+      };
+    },
+    updateProductStock: async (input) => {
+      stockUpdates.push(input);
+      return { result: [{ updated: true, errors: [] }] };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    warehouseId: 1020005022957960,
+    confirmationAttempts: 2,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(state.records[0].import_status, "nested_imported");
+  assert.equal(state.records[0].online_status, "selling");
+  assert.equal(stockUpdates.length, 1);
 });
 
 test("runner never promotes a restored daily-limit failure from the imported favorites flag", async () => {
@@ -371,6 +864,8 @@ test("parallel preflight serializes publishing and never exceeds the exact targe
   let activeDetails = 0;
   let maxActiveDetails = 0;
   let publishCalls = 0;
+  let activeConfirmations = 0;
+  let maxActiveConfirmations = 0;
   const items = Array.from({ length: 8 }, (_, index) => ({ id: index + 1, sku: index + 1 }));
   const client = clientFor(items, {
     getProductDetail: async (sku) => {
@@ -388,6 +883,13 @@ test("parallel preflight serializes publishing and never exceeds the exact targe
       activePublishes -= 1;
       return { ok: true, response: { code: 1 } };
     },
+    findImportLog: async ({ sku }) => {
+      activeConfirmations += 1;
+      maxActiveConfirmations = Math.max(maxActiveConfirmations, activeConfirmations);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeConfirmations -= 1;
+      return { sku, offer_id: `mz-test-${sku}`, import_status: "all_imported" };
+    },
   });
   const result = await createPublishRunner({
     client,
@@ -400,6 +902,7 @@ test("parallel preflight serializes publishing and never exceeds the exact targe
   assert.equal(result.published, 5);
   assert.equal(publishCalls, 5);
   assert.equal(maxActivePublishes, 1);
+  assert.ok(maxActiveConfirmations > 1);
   assert.ok(maxActiveDetails > 1);
 });
 
@@ -454,7 +957,7 @@ test("source outcomes persist to the cross-run yield history", async () => {
   try {
     const sourceUrl = "https://www.ozon.ru/seller/proven/?currency_price=50.000%3B";
     const runner = createPublishRunner({
-      client: clientFor([{ id: 50, sku: 50, source_url: sourceUrl }]),
+      client: clientFor([{ id: 50, sku: 50, title: "Комплект трусов", source_url: sourceUrl }]),
       costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
       state: fakeState(),
       target: 1,
@@ -466,6 +969,8 @@ test("source outcomes persist to the cross-run yield history", async () => {
     assert.equal(rows.length, 1);
     assert.equal(rows[0].status, "published");
     assert.equal(rows[0].source_url, sourceUrl);
+    assert.equal(rows[0].title, "Комплект трусов");
+    assert.equal(rows[0].title_family, "underwear");
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
     await fs.rm(historyDir, { recursive: true, force: true });
