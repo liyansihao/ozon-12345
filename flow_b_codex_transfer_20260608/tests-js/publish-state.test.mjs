@@ -205,6 +205,33 @@ test("recordPublished writes aggregate and per-store SKU CSV reports", async () 
   });
 });
 
+test("recordSelected writes idempotent per-store candidate SKU reports separately from publications", async () => {
+  await withTempDir(async (dir) => {
+    const state = createPublishState({ runDir: dir, publishedCsv: path.join(dir, "published-links.csv") });
+    const selected = {
+      sku: "601",
+      title: "selected item",
+      store_id: 106637,
+      store_name: "丽丽二号",
+      profit_rate: 55,
+      offer_id: "mz-601",
+      selected_at: "2026-07-15T11:00:00.000Z",
+    };
+    assert.equal(await state.recordSelected(selected), true);
+    assert.equal(await state.recordSelected(selected), false);
+
+    const aggregate = await fs.readFile(path.join(dir, "selected_by_store.csv"), "utf8");
+    const store = await fs.readFile(path.join(dir, "selected_store_106637.csv"), "utf8");
+    assert.equal((aggregate.match(/,601,/g) || []).length, 1);
+    assert.equal((store.match(/,601,/g) || []).length, 1);
+    await assert.rejects(fs.access(path.join(dir, "published_store_106637.csv")));
+
+    const restored = createPublishState({ runDir: dir, publishedCsv: path.join(dir, "published-links.csv") });
+    await restored.load();
+    assert.equal(await restored.recordSelected(selected), false);
+  });
+});
+
 test("concurrent recordPublished calls commit exactly one canonical success", async () => {
   await withTempDir(async (dir) => {
     const csv = path.join(dir, "published.csv");

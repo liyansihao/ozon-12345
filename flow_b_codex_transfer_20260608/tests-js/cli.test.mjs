@@ -60,11 +60,11 @@ test("store target environment parses an ordered verified rotation plan", () => 
     { id: 106637, needle: "丽丽二号", warehouseId: null, requireWarehouse: true },
   ]);
   assert.deepEqual(parseStoreTargets({}), [
-    { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
     { id: 106637, needle: "丽丽二号", warehouseId: null, requireWarehouse: true },
     { id: 106640, needle: "丽丽三号", warehouseId: null, requireWarehouse: true },
     { id: 106644, needle: "丽丽四号", warehouseId: null, requireWarehouse: true },
     { id: 106646, needle: "丽丽五号", warehouseId: null, requireWarehouse: true },
+    { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
   ]);
   assert.throws(() => parseStoreTargets({ FLOW_B_STORE_TARGETS: "not-json" }), /STORE_TARGETS.*JSON/i);
 });

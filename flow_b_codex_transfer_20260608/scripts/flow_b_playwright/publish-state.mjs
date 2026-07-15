@@ -141,6 +141,10 @@ const STORE_REPORT_HEADERS = [
   "store_id", "store_name", "sku", "product_link", "title", "profit_rate",
   "sell_price", "purchase_price", "offer_id", "published_at",
 ];
+const SELECTION_REPORT_HEADERS = [
+  "store_id", "store_name", "sku", "product_link", "title", "profit_rate",
+  "sell_price", "purchase_price", "offer_id", "selected_at",
+];
 
 function csvCell(value) {
   const text = value === null || value === undefined ? "" : String(value);
@@ -155,15 +159,18 @@ export function createPublishState({ runDir, publishedCsv }) {
   const publishedPath = path.join(runDir, "published.jsonl");
   const failedPath = path.join(runDir, "failed.jsonl");
   const skippedPath = path.join(runDir, "skipped.jsonl");
+  const selectedPath = path.join(runDir, "selected.jsonl");
   const summaryPath = path.join(runDir, "summary.json");
   const states = new Map();
   const publishedSkus = new Set();
   const runPublishedSkus = new Set();
+  const selectedKeys = new Set();
   let loaded = false;
   let loading = null;
   let summaryTarget;
   let writeChain = Promise.resolve();
   let publishedTransitionChain = Promise.resolve();
+  let selectedTransitionChain = Promise.resolve();
 
   function queueWrite(task) {
     const queued = writeChain.then(task);
@@ -174,6 +181,12 @@ export function createPublishState({ runDir, publishedCsv }) {
   function enqueuePublishedTransition(task) {
     const queued = publishedTransitionChain.then(task);
     publishedTransitionChain = queued.catch(() => {});
+    return queued;
+  }
+
+  function enqueueSelectedTransition(task) {
+    const queued = selectedTransitionChain.then(task);
+    selectedTransitionChain = queued.catch(() => {});
     return queued;
   }
 
@@ -226,6 +239,35 @@ export function createPublishState({ runDir, publishedCsv }) {
         await fs.mkdir(path.dirname(filename), { recursive: true });
         const existing = await readTextIfPresent(filename);
         if (!existing.trim()) await fs.writeFile(filename, `${STORE_REPORT_HEADERS.join(",")}\n`, "utf8");
+        await fs.appendFile(filename, line, "utf8");
+      });
+    }
+  }
+
+  async function appendSelectionReports(sku, data) {
+    const storeId = Number(data?.store_id);
+    if (!(storeId > 0)) return;
+    const row = {
+      store_id: storeId,
+      store_name: data?.store_name ?? "",
+      sku,
+      product_link: canonicalProductUrl(sku),
+      title: data?.title ?? "",
+      profit_rate: data?.profit_rate ?? "",
+      sell_price: data?.sell_price ?? "",
+      purchase_price: data?.purchase_price ?? "",
+      offer_id: data?.offer_id ?? "",
+      selected_at: data?.selected_at ?? "",
+    };
+    const line = `${SELECTION_REPORT_HEADERS.map((header) => csvCell(row[header])).join(",")}\n`;
+    for (const filename of [
+      path.join(runDir, "selected_by_store.csv"),
+      path.join(runDir, `selected_store_${storeId}.csv`),
+    ]) {
+      await queueWrite(async () => {
+        await fs.mkdir(path.dirname(filename), { recursive: true });
+        const existing = await readTextIfPresent(filename);
+        if (!existing.trim()) await fs.writeFile(filename, `${SELECTION_REPORT_HEADERS.join(",")}\n`, "utf8");
         await fs.appendFile(filename, line, "utf8");
       });
     }
@@ -300,6 +342,11 @@ export function createPublishState({ runDir, publishedCsv }) {
         for (const event of parseJsonLines(await readTextIfPresent(filename))) {
           applyLoadedEvent(event, { fallback: true });
         }
+      }
+      for (const event of parseJsonLines(await readTextIfPresent(selectedPath))) {
+        const sku = normalizeSku(event?.sku ?? event?.data?.sku);
+        const storeId = Number(event?.data?.store_id ?? event?.store_id);
+        if (sku && storeId > 0) selectedKeys.add(`${storeId}:${sku}`);
       }
 
       for (const sku of csvPublishedSkus(await readTextIfPresent(publishedCsv))) {
@@ -403,6 +450,24 @@ export function createPublishState({ runDir, publishedCsv }) {
     return operation;
   }
 
-  const api = { load, transition, hasPublished, statusOf, entries, runPublishedCount, summary, recordPublished };
+  async function recordSelected(item) {
+    return enqueueSelectedTransition(async () => {
+      await load();
+      const sku = normalizeSku(item?.sku ?? item?.id);
+      const storeId = Number(item?.store_id);
+      if (!sku) throw new TypeError("selected item sku is required");
+      if (!(storeId > 0)) throw new TypeError("selected item store_id is required");
+      const key = `${storeId}:${sku}`;
+      if (selectedKeys.has(key)) return false;
+      const data = { ...(item || {}), sku, store_id: storeId, link: canonicalProductUrl(sku) };
+      const event = { sku, data, timestamp: new Date().toISOString() };
+      selectedKeys.add(key);
+      await appendJsonl(selectedPath, event);
+      await appendSelectionReports(sku, data);
+      return true;
+    });
+  }
+
+  const api = { load, transition, hasPublished, statusOf, entries, runPublishedCount, summary, recordPublished, recordSelected };
   return api;
 }

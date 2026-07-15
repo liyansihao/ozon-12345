@@ -19,11 +19,11 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_RUN_DIR = path.join(ROOT, "runs/flow_b/playwright_target500");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
 const DEFAULT_STORE_TARGETS = Object.freeze([
-  { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
   { id: 106637, needle: "丽丽二号", warehouseId: null, requireWarehouse: true },
   { id: 106640, needle: "丽丽三号", warehouseId: null, requireWarehouse: true },
   { id: 106644, needle: "丽丽四号", warehouseId: null, requireWarehouse: true },
   { id: 106646, needle: "丽丽五号", warehouseId: null, requireWarehouse: true },
+  { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
 ]);
 
 function required(value, label) {
@@ -149,13 +149,16 @@ async function createPublishingSession(context, options, env, shared) {
       deadlineAt: env.FLOW_B_DEADLINE_AT || null,
       targetConfigCache: shared.targetConfigCache || null,
       sourceYieldHistoryPath: env.FLOW_B_SOURCE_YIELD_HISTORY || path.join(ROOT, "data/flow_b/source_yield_history.jsonl"),
-      confirmationAttempts: Math.max(1, Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) || 90),
+      confirmationAttempts: Math.max(1, Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) || 6),
       confirmationIntervalMs: Math.max(0, Number(env.FLOW_B_CONFIRMATION_INTERVAL_MS) || 2000),
       onlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_ONLINE_SYNC_INTERVAL_MS) || 1_800_000),
       warehouseId: env.FLOW_B_WAREHOUSE_ID || null,
       initialStock: Math.max(1, Number(env.FLOW_B_INITIAL_STOCK) || 1),
       dailyStoreLimit: Math.max(1, Number(env.FLOW_B_DAILY_STORE_LIMIT) || 100),
       dailyStoreTimeZone: env.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
+      warehouseSyncAttempts: Math.max(1, Number(env.FLOW_B_WAREHOUSE_SYNC_ATTEMPTS) || 2),
+      warehouseSyncIntervalMs: Math.max(0, Number(env.FLOW_B_WAREHOUSE_SYNC_INTERVAL_MS) || 5000),
+      unavailableStoreRetryMs: Math.max(0, Number(env.FLOW_B_UNAVAILABLE_STORE_RETRY_MS) || 1_800_000),
     });
     return { maoziPage, costBridge, detailProvider, runner };
   } catch (error) {

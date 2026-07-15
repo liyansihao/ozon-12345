@@ -160,6 +160,16 @@ test("full-funnel source yield penalizes exhausted high-volume sources", () => {
   assert.deepEqual(prioritizeSourceUrls([exhausted, fresh], { yieldRows: rows }), [fresh, exhausted]);
 });
 
+test("full-funnel source yield promotes repeated pure-FBS favorites over rejected sources", () => {
+  const rejected = "https://www.ozon.ru/seller/rejected/";
+  const pureFbs = "https://www.ozon.ru/seller/pure-fbs/";
+  const rows = [
+    ...Array.from({ length: 5 }, (_, i) => ({ source_url: rejected, sku: `r-${i}`, status: "rejected" })),
+    ...Array.from({ length: 5 }, (_, i) => ({ source_url: pureFbs, sku: `f-${i}`, status: "favorited" })),
+  ];
+  assert.deepEqual(prioritizeSourceUrls([rejected, pureFbs], { yieldRows: rows }), [pureFbs, rejected]);
+});
+
 test("derived search discovery is explored before exhausted historical sources", () => {
   const known = "https://www.ozon.ru/seller/known/";
   const fresh = "https://www.ozon.ru/search/?text=fresh&is_global=true";

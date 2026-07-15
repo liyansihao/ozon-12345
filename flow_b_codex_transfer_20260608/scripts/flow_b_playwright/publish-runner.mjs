@@ -189,13 +189,16 @@ export function createPublishRunner({
   deadlineAt = null,
   targetConfigCache = null,
   sourceYieldHistoryPath = null,
-  confirmationAttempts = 90,
+  confirmationAttempts = 6,
   confirmationIntervalMs = 2000,
   onlineSyncIntervalMs = 1_800_000,
   warehouseId = null,
   initialStock = 1,
   dailyStoreLimit = 100,
   dailyStoreTimeZone = "Asia/Shanghai",
+  warehouseSyncAttempts = 2,
+  warehouseSyncIntervalMs = 5000,
+  unavailableStoreRetryMs = 1_800_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -242,6 +245,7 @@ export function createPublishRunner({
   const storeDailyLimits = new Map();
   let storeUsageDay = null;
   const lastOnlineSyncAt = new Map();
+  const unavailableStoreUntil = new Map();
   const adaptive = new AdaptiveConcurrency({ initial: workerCount, max: Math.max(workerCount, Number(maxConcurrency) || workerCount) });
 
   function recordMetric(filename, row) {
@@ -283,7 +287,7 @@ export function createPublishRunner({
       if (["all_failed", "failed"].includes(status)) {
         return { ok: false, reason: importFailureReason(importLog), import_log: importLog };
       }
-      if (["all_imported", "imported"].includes(status)) {
+      if (["all_imported", "imported", "nested_imported"].includes(status)) {
         const confirmedOfferId = String(importLog?.offer_id || offerId);
         const onlineProduct = await client.findOnlineProduct({ shopId: targetConfig.store.id, offerId: confirmedOfferId });
         lastOnlineProduct = onlineProduct || lastOnlineProduct;
@@ -473,18 +477,29 @@ export function createPublishRunner({
         offer_id: payload.rows[0].offer_id,
         submission_pending: true,
         prepared_at: now().toISOString(),
+        selected_at: now().toISOString(),
       };
+      await state.recordSelected?.(submissionState);
       await state.transition(sku, "processing", submissionState);
       const finalResult = await timed(sku, "maozi_publish_and_confirm", () => publishSerial(sku, payload, targetConfig));
       if (!finalResult?.ok) {
         const reason = finalResult?.reason || "publish-not-confirmed";
-        await state.transition(sku, "failed", {
+        const submitted = Boolean(finalResult?.publish_result?.ok && !finalResult?.publish_result?.not_submitted);
+        const retryablePending = submitted && [
+          "publish-final-status-timeout",
+          "online-product-not-selling",
+        ].includes(reason);
+        await state.transition(sku, retryablePending ? "processing" : "failed", {
           ...submissionState,
           reason,
-          submitted: Boolean(finalResult?.publish_result?.ok && !finalResult?.publish_result?.not_submitted),
+          submitted,
           final_result: finalResult ?? null,
+          ...(retryablePending ? {
+            reconcile_attempts: 0,
+            next_reconcile_at: new Date(now().getTime() + 10_000).toISOString(),
+          } : {}),
         });
-        return { status: "failed", sku, source_url: item.source_url ?? null, reason };
+        return { status: retryablePending ? "submitted" : "failed", sku, source_url: item.source_url ?? null, reason };
       }
 
       const onlineProduct = finalResult.online_product;
@@ -524,8 +539,11 @@ export function createPublishRunner({
     const currentUsageDay = localDateKey(now(), dailyStoreTimeZone);
     if (storeUsageDay !== currentUsageDay) {
       storeUsageDay = currentUsageDay;
+      activeTargetIndex = 0;
+      haltReason = null;
       storeDailyUsage.clear();
       storeDailyLimits.clear();
+      unavailableStoreUntil.clear();
       if (targetConfigCache?.targets) targetConfigCache.targets = {};
       if (targetConfigCache?.value) delete targetConfigCache.value;
     }
@@ -549,6 +567,12 @@ export function createPublishRunner({
     async function resolveTargetConfig(index, { allowExhausted = false } = {}) {
       const spec = targetPlan[index];
       const cacheKey = String(spec.id);
+      const unavailableUntil = Number(unavailableStoreUntil.get(spec.id) || 0);
+      if (!allowExhausted && unavailableUntil > now().getTime()) {
+        const error = new Error(`store ${spec.id} remains unavailable until ${new Date(unavailableUntil).toISOString()}`);
+        error.code = "STORE_WAREHOUSE_UNAVAILABLE";
+        throw error;
+      }
       let resolved = await client.resolvePublishTarget({
         storeNeedle: spec.needle,
         watermarkNeedle,
@@ -583,8 +607,9 @@ export function createPublishRunner({
         && !(discoveredWarehouseId > 0)
         && typeof client.syncWarehouses === "function") {
         await client.syncWarehouses([spec.id]);
-        for (let attempt = 0; attempt < 6 && !(discoveredWarehouseId > 0); attempt += 1) {
-          await sleep(10_000);
+        const attempts = Math.max(1, Number(warehouseSyncAttempts) || 1);
+        for (let attempt = 0; attempt < attempts && !(discoveredWarehouseId > 0); attempt += 1) {
+          if (Number(warehouseSyncIntervalMs) > 0) await sleep(Number(warehouseSyncIntervalMs));
           resolved = await client.resolvePublishTarget({
             storeNeedle: spec.needle,
             watermarkNeedle,
@@ -599,10 +624,12 @@ export function createPublishRunner({
       }
       const targetWarehouseId = Number(spec.warehouseId || discoveredWarehouseId || 0);
       if (spec.requireWarehouse && !(targetWarehouseId > 0)) {
+        unavailableStoreUntil.set(spec.id, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
         const error = new Error(`verified FBS warehouse unavailable for store ${spec.id}`);
         error.code = "STORE_WAREHOUSE_UNAVAILABLE";
         throw error;
       }
+      unavailableStoreUntil.delete(spec.id);
       let commissionTree = targetConfigCache?.commissionTree;
       if (!commissionTree) {
         commissionTree = typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [];
@@ -645,8 +672,7 @@ export function createPublishRunner({
     try {
       targetConfig = await resolveTargetConfig(activeTargetIndex);
     } catch (error) {
-      if (error?.code !== "STORE_DAILY_LIMIT") throw error;
-      haltReason = "daily-product-limit";
+      haltReason = error?.code === "STORE_DAILY_LIMIT" ? "daily-product-limit" : "store-target-unavailable";
       targetConfig = await advanceStore(haltReason, { store: { id: targetPlan[activeTargetIndex].id } });
       if (!targetConfig) throw error;
     }
@@ -684,6 +710,7 @@ export function createPublishRunner({
     let failed = 0;
     let skipped = 0;
     let attempted = 0;
+    let submittedPending = 0;
     let dryCandidates = 0;
 
     async function handleCandidate(item) {
@@ -869,20 +896,25 @@ export function createPublishRunner({
       const results = await Promise.all(batch.map(handleCandidate));
       for (const [index, result] of results.entries()) {
         const item = batch[index];
-        recordMetric("source_yield.jsonl", {
-          sku: result.sku,
-          source_url: result.source_url ?? item?.source_url ?? null,
-          seller_url: item?.seller_url ?? null,
-          title: item?.title ?? null,
-          title_family: productTitleFamily(item?.title),
-          status: result.status,
-          reason: result.reason ?? null,
-        });
-        if (result.status === "failed" && result.error) adaptive.recordFailure(result.error);
-        else adaptive.recordSuccess();
+        if (result.status !== "ignored") {
+          recordMetric("source_yield.jsonl", {
+            sku: result.sku,
+            source_url: result.source_url ?? item?.source_url ?? null,
+            seller_url: item?.seller_url ?? null,
+            title: item?.title ?? null,
+            title_family: productTitleFamily(item?.title),
+            status: result.status,
+            reason: result.reason ?? null,
+          });
+        }
+        if (result.status === "failed") adaptive.recordFailure(result.error || new Error(result.reason || "publish-failed"));
+        else if (["published", "submitted"].includes(result.status)) adaptive.recordSuccess();
         if (result.attempted) attempted += 1;
         if (result.status === "published") {
           published += 1;
+          dryCandidates = 0;
+        } else if (result.status === "submitted") {
+          submittedPending += 1;
           dryCandidates = 0;
         } else {
           if (result.attempted) dryCandidates += 1;
@@ -906,6 +938,7 @@ export function createPublishRunner({
       failed,
       skipped,
       attempted,
+      submitted_pending: submittedPending,
       dry_candidates: dryCandidates,
       final_concurrency: adaptive.current,
       deadline_reached: Boolean(deadlineAt && Date.now() >= Date.parse(deadlineAt)),

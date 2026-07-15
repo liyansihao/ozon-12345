@@ -12,9 +12,11 @@ function fakeState(initial = {}, initialRunPublished = 0) {
   ]));
   const transitions = [];
   const records = [];
+  const selections = [];
   return {
     transitions,
     records,
+    selections,
     load: async () => {},
     runPublishedCount: () => initialRunPublished + records.length,
     hasPublished: (sku) => statuses.get(String(sku))?.status === "published",
@@ -32,6 +34,7 @@ function fakeState(initial = {}, initialRunPublished = 0) {
       records.push(item);
       return true;
     },
+    recordSelected: async (item) => { selections.push({ ...item }); return true; },
     summary: (target) => ({ published: [...statuses.values()].filter((x) => x.status === "published").length, remaining: target }),
   };
 }
@@ -315,6 +318,89 @@ test("runner syncs and verifies a missing warehouse before rotating into a store
   assert.equal(state.records[0].store_id, 106637);
 });
 
+test("runner caches an unavailable store between consumer rounds instead of repeating warehouse sync", async () => {
+  const state = fakeState();
+  let syncCalls = 0;
+  const client = clientFor([{ id: 206, sku: 206 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: {
+        id: Number(storeId),
+        name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽1号",
+        warehouse: Number(storeId) === 104965
+          ? [{ warehouse_id: 1020005022957960, name: "丽丽1号仓库" }]
+          : [],
+      },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    syncWarehouses: async () => { syncCalls += 1; return []; },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号" },
+      { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960 },
+    ],
+    warehouseSyncAttempts: 1,
+    warehouseSyncIntervalMs: 0,
+    unavailableStoreRetryMs: 1_800_000,
+    sleep: async () => {},
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  });
+
+  await runner.run();
+  await runner.run();
+  assert.equal(syncCalls, 1);
+});
+
+test("runner restarts the store rotation from 丽丽二号 after the local day changes", async () => {
+  let current = new Date("2026-07-15T10:00:00.000Z");
+  let round = 1;
+  const state = fakeState();
+  const shopIds = [];
+  const client = clientFor([], {
+    listFavorites: async () => round === 1 ? [{ id: 211, sku: 211 }] : [{ id: 212, sku: 212 }],
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: {
+        id: Number(storeId),
+        name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽1号",
+        product_limit: {
+          daily_create: Number(storeId) === 106637 && round === 1
+            ? { limit: 100, usage: 100 }
+            : { limit: 100, usage: 0 },
+        },
+        warehouse: Number(storeId) === 106637
+          ? [{ warehouse_id: 2020005022957960, name: "丽丽二号仓库" }]
+          : [{ warehouse_id: 1020005022957960, name: "丽丽1号仓库" }],
+      },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 2,
+    now: () => current,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号" },
+      { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960 },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  });
+
+  await runner.run();
+  round = 2;
+  current = new Date("2026-07-16T10:00:00.000Z");
+  await runner.run();
+  assert.deepEqual(shopIds, [104965, 106637]);
+});
+
 test("runner queues a bounded online-product sync after a successful submission", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-online-sync-"));
   const state = fakeState();
@@ -341,7 +427,7 @@ test("runner queues a bounded online-product sync after a successful submission"
   assert.deepEqual(syncCalls, [{ ids: [7], type: "all" }]);
 });
 
-test("runner logs a ready-to-sell zero-stock SKU and continues to the next candidate", async () => {
+test("runner keeps a ready-to-sell zero-stock SKU retryable and continues to the next candidate", async () => {
   const state = fakeState();
   const client = clientFor([{ id: 92, sku: 3301105092 }, { id: 93, sku: 3301105093 }], {
     findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
@@ -361,10 +447,11 @@ test("runner logs a ready-to-sell zero-stock SKU and continues to the next candi
   }).run();
 
   assert.equal(result.published, 1);
-  assert.equal(result.failed, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(result.submitted_pending, 1);
   assert.equal(result.halt_reason, null);
   assert.equal(state.records[0].sku, "3301105093");
-  assert.ok(state.transitions.some((event) => event.status === "failed" && event.data.reason === "online-product-not-selling"));
+  assert.ok(state.transitions.some((event) => event.status === "processing" && event.data.reason === "online-product-not-selling"));
 });
 
 test("runner activates a ready-to-sell product in the verified FBS warehouse before counting it", async () => {
@@ -474,6 +561,32 @@ test("runner records a failed SKU and continues until confirmed success target",
   assert.ok(state.transitions.some((event) => event.sku === "1" && event.status === "failed"));
   assert.equal(state.records[0].sku, "2");
   assert.deepEqual(detailCalls, ["1", "2"]);
+});
+
+test("accepted imports that are still pending stay retryable without blocking the next SKU", async () => {
+  const state = fakeState();
+  const client = clientFor([{ id: 901, sku: 901 }, { id: 902, sku: 902 }], {
+    findImportLog: async ({ sku, offerId }) => String(sku) === "901"
+      ? { sku, offer_id: offerId, import_status: "pending" }
+      : { sku, offer_id: offerId, import_status: "all_imported" },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    concurrency: 1,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(result.submitted_pending, 1);
+  assert.equal(result.failed, 0);
+  assert.equal(state.statusOf("901"), "processing");
+  assert.equal(state.entries().find((entry) => entry.sku === "901").data.submitted, true);
+  assert.equal(state.statusOf("902"), "published");
 });
 
 test("fatal browser closure escapes the SKU failure path for supervisor recovery", async () => {
@@ -703,6 +816,7 @@ test("reconciliation-only mode never submits a fresh favorite", async () => {
 });
 
 test("runner backs off a delayed reconciliation until its persisted retry time", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-reconcile-backoff-"));
   const state = fakeState({
     delayed: {
       status: "processing",
@@ -723,12 +837,15 @@ test("runner backs off a delayed reconciliation until its persisted retry time",
     client,
     costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
     state,
+    runDir,
     target: 1,
     now: () => new Date("2026-07-15T07:00:00.000Z"),
   }).run();
 
   assert.equal(result.published, 0);
   assert.equal(importChecks, 0);
+  await assert.rejects(fs.access(path.join(runDir, "source_yield.jsonl")));
+  await fs.rm(runDir, { recursive: true, force: true });
 });
 
 test("runner confirms an exact selling online offer even while its import log is stale pending", async () => {
@@ -819,6 +936,37 @@ test("runner recognizes nested imported status when the parent import status is 
   assert.equal(stockUpdates.length, 1);
 });
 
+test("fresh confirmation recognizes nested imported status without waiting for a timeout", async () => {
+  const state = fakeState();
+  let onlineChecks = 0;
+  const client = clientFor([{ id: 777, sku: 777 }], {
+    findImportLog: async ({ sku, offerId }) => ({
+      sku,
+      offer_id: offerId,
+      import_status: "unknown",
+      skus: [{ offer_id: offerId, import_status: "imported" }],
+    }),
+    findOnlineProduct: async ({ offerId }) => {
+      onlineChecks += 1;
+      return { id: 77, product_id: 78, sku: 79, offer_id: offerId, online_status: "selling", stock: 1 };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(result.submitted_pending, 0);
+  assert.equal(onlineChecks, 1);
+  assert.equal(state.records[0].import_status, "nested_imported");
+});
+
 test("runner never promotes a restored daily-limit failure from the imported favorites flag", async () => {
   const state = fakeState({ 44: "failed" });
   let publishCalls = 0;
@@ -884,6 +1032,9 @@ test("runner builds the exact one-row payload and stops at target", async () => 
   assert.equal(result.published, 1);
   assert.deepEqual(calculatedCate, [11, 22, "1,12.00"]);
   assert.equal(payloads.length, 1);
+  assert.equal(state.selections.length, 1);
+  assert.equal(state.selections[0].sku, "700001");
+  assert.equal(state.selections[0].profit_rate, 40);
   assert.deepEqual(payloads[0], {
     scene: "erp",
     shop_ids: [7],

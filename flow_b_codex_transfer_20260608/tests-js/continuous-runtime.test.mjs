@@ -89,15 +89,17 @@ test("source yield ranks China/high-yield segments ahead of unproven sources", (
   assert.deepEqual(rankSourcesByYield(rows).map((row) => row.source_url), ["china-kids", "china-apparel", "generic"]);
 });
 
-test("acceptance only counts unique in-window profit>30 publications and excludes the bad SKU", () => {
+test("acceptance only counts unique in-window profit>30 selling publications with positive stock", () => {
   const startedAt = "2026-07-14T00:00:00.000Z";
   const endedAt = "2026-07-14T02:00:00.000Z";
   const rows = [
-    { sku: "ok-1", profit_rate: 30.01, published_at: "2026-07-14T00:01:00.000Z" },
-    { sku: "ok-1", profit_rate: 90, published_at: "2026-07-14T00:02:00.000Z" },
-    { sku: "equal", profit_rate: 30, published_at: "2026-07-14T00:03:00.000Z" },
-    { sku: "2815247918", profit_rate: 80, published_at: "2026-07-14T00:04:00.000Z" },
-    { sku: "late", profit_rate: 80, published_at: "2026-07-14T02:00:00.001Z" },
+    { sku: "ok-1", profit_rate: 30.01, online_status: "selling", stock: 1, published_at: "2026-07-14T00:01:00.000Z" },
+    { sku: "ok-1", profit_rate: 90, online_status: "selling", stock: 2, published_at: "2026-07-14T00:02:00.000Z" },
+    { sku: "equal", profit_rate: 30, online_status: "selling", stock: 1, published_at: "2026-07-14T00:03:00.000Z" },
+    { sku: "2815247918", profit_rate: 80, online_status: "selling", stock: 1, published_at: "2026-07-14T00:04:00.000Z" },
+    { sku: "not-selling", profit_rate: 80, online_status: "ready_to_sell", stock: 1, published_at: "2026-07-14T00:05:00.000Z" },
+    { sku: "zero-stock", profit_rate: 80, online_status: "selling", stock: 0, published_at: "2026-07-14T00:06:00.000Z" },
+    { sku: "late", profit_rate: 80, online_status: "selling", stock: 1, published_at: "2026-07-14T02:00:00.001Z" },
   ];
   const summary = acceptanceSummary({ rows, startedAt, endedAt, target: 1 });
   assert.equal(summary.success_count, 1);

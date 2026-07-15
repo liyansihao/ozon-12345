@@ -104,7 +104,12 @@ export function acceptanceSummary({ rows, startedAt, endedAt, target = 50 }) {
   for (const row of rows || []) {
     const sku = String(row?.sku || "").trim();
     const at = Date.parse(row?.published_at || row?.timestamp || "");
-    if (!sku || BAD_SKUS.has(sku) || !(Number(row?.profit_rate) > 30) || !(at >= start && at <= end)) continue;
+    if (!sku
+      || BAD_SKUS.has(sku)
+      || !(Number(row?.profit_rate) > 30)
+      || String(row?.online_status || "") !== "selling"
+      || !(Number(row?.stock) > 0)
+      || !(at >= start && at <= end)) continue;
     unique.set(sku, row);
   }
   const successCount = unique.size;

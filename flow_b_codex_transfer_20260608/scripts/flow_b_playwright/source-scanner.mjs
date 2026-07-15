@@ -414,7 +414,11 @@ function fullFunnelSourceScores(rows) {
   return new Map([...sources].map(([key, outcomes]) => {
     const attempted = outcomes.size;
     const published = [...outcomes.values()].filter((rank) => rank === outcomeRank.published).length;
-    const score = ((published + 1) / (attempted + 5)) * 100_000 + Math.log1p(published) * 1000;
+    const pureFbs = [...outcomes.values()].filter((rank) => rank === outcomeRank.favorited).length;
+    const qualifiedYield = published + pureFbs * 0.35;
+    const score = ((qualifiedYield + 0.5) / (attempted + 5)) * 100_000
+      + Math.log1p(published) * 1000
+      + Math.log1p(pureFbs) * 100;
     return [key, score];
   }));
 }

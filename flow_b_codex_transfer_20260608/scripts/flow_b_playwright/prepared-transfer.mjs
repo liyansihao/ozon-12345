@@ -129,12 +129,15 @@ export async function transferPreparedCandidates({
       ...item,
       sku,
       store_id: Number(storeId),
+      store_name: target.store?.name ?? target.store?.title ?? storeNeedle,
       watermark_id: Number(watermarkId),
       offer_id: offerId,
       submission_pending: true,
       transfer_prepared: true,
+      selected_at: new Date().toISOString(),
     };
     try {
+      await state.recordSelected?.(base);
       const online = await client.findOnlineProduct({ shopId: storeId, offerId });
       if (effectiveOnline(online)) {
         await recordEffective({ state, item: base, offerId, target, online, status: "exact-online-offer" });
