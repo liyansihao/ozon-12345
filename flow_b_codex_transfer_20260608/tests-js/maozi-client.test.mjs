@@ -378,7 +378,7 @@ test("browser transport falls back to the authenticated context request after pe
   const page = {
     evaluate: async (_fn, request) => request
       ? ({ status: 0, json: { error: "Failed to fetch" } })
-      : "token-from-page",
+      : ({ token: "token-from-page", userAgent: "Chrome Test Agent" }),
   };
   const context = {
     request: {
@@ -406,4 +406,7 @@ test("browser transport falls back to the authenticated context request after pe
   assert.match(calls[0].url, /api\.shop\/lists\?page=2$/);
   assert.equal(calls[0].options.headers.Authorization, "Bearer token-from-page");
   assert.equal(calls[0].options.headers.Client, "pc");
+  assert.equal(calls[0].options.headers.Origin, "https://ozon.maozierp.com");
+  assert.equal(calls[0].options.headers.Referer, "https://ozon.maozierp.com/");
+  assert.equal(calls[0].options.headers["User-Agent"], "Chrome Test Agent");
 });

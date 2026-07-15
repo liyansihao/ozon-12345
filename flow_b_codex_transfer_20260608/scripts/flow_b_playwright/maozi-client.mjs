@@ -285,11 +285,14 @@ export function createMaoziPageTransport({
   }, request);
   const contextRequest = async (activePage, request) => {
     if (!context?.request || typeof context.request.fetch !== "function") return null;
-    const token = await activePage.evaluate(() => {
+    const identity = await activePage.evaluate(() => {
       try {
-        return JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "";
+        return {
+          token: JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "",
+          userAgent: navigator.userAgent || "",
+        };
       } catch {
-        return "";
+        return { token: "", userAgent: "" };
       }
     });
     const url = new URL(request.endpoint, request.baseUrl);
@@ -298,9 +301,15 @@ export function createMaoziPageTransport({
         if (entry !== undefined && entry !== null) url.searchParams.append(key, String(entry));
       }
     }
-    const headers = { "Accept-Language": "zh-CN", Client: "pc" };
-    if (token) headers.Authorization = `Bearer ${token}`;
-    const options = { method: request.method, headers };
+    const headers = {
+      "Accept-Language": "zh-CN",
+      Client: "pc",
+      Origin: "https://ozon.maozierp.com",
+      Referer: "https://ozon.maozierp.com/",
+    };
+    if (identity?.token) headers.Authorization = `Bearer ${identity.token}`;
+    if (identity?.userAgent) headers["User-Agent"] = identity.userAgent;
+    const options = { method: request.method, headers, failOnStatusCode: false };
     if (request.body !== undefined && request.body !== null && request.method !== "GET") {
       headers["Content-Type"] = "application/json";
       options.data = request.body;
