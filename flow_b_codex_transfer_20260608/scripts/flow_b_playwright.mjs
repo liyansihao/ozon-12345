@@ -139,6 +139,7 @@ async function createPublishingSession(context, options, env, shared) {
     const state = createPublishState({
       runDir: options.runDir,
       publishedCsv: path.join(ROOT, "data/flow_b/published_links.csv"),
+      pendingStateFiles: String(env.FLOW_B_PENDING_STATE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
     });
     const costBridge = createCostBridge({
       python: env.FLOW_B_PYTHON || "python3",

@@ -151,9 +151,10 @@ function csvCell(value) {
   return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-export function createPublishState({ runDir, publishedCsv }) {
+export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [] }) {
   if (!runDir) throw new TypeError("runDir is required");
   if (!publishedCsv) throw new TypeError("publishedCsv is required");
+  if (!Array.isArray(pendingStateFiles)) throw new TypeError("pendingStateFiles must be an array");
 
   const statePath = path.join(runDir, "sku_states.jsonl");
   const publishedPath = path.join(runDir, "published.jsonl");
@@ -331,6 +332,31 @@ export function createPublishState({ runDir, publishedCsv }) {
       const persistedSummary = parseJsonObject(await readTextIfPresent(summaryPath));
       if (persistedSummary && Number.isFinite(Number(persistedSummary.published)) && Number.isFinite(Number(persistedSummary.remaining))) {
         summaryTarget = Math.max(0, Number(persistedSummary.published) + Number(persistedSummary.remaining));
+      }
+      const latestPendingSeeds = new Map();
+      for (const filename of pendingStateFiles) {
+        for (const event of parseJsonLines(await readTextIfPresent(filename))) {
+          const parsed = eventFromHistory(event);
+          if (parsed) latestPendingSeeds.set(parsed.sku, { ...parsed, filename });
+        }
+      }
+      for (const { sku, status, data, filename } of latestPendingSeeds.values()) {
+        const submitted = data?.submitted === true || data?.submission_pending === true;
+        const importStatus = String(data?.import_log?.import_status || "").toLowerCase();
+        if (!["processing", "failed"].includes(status)
+          || !submitted
+          || ["all_failed", "failed"].includes(importStatus)) continue;
+        applyLoadedEvent({
+          sku,
+          status: "processing",
+          data: {
+            ...data,
+            submitted: true,
+            reconcile_only: true,
+            cross_run_seed: true,
+            seed_source_file: filename,
+          },
+        });
       }
       const stateEvents = parseJsonLines(await readTextIfPresent(statePath));
       for (const event of stateEvents) applyLoadedEvent(event);

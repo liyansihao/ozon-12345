@@ -97,6 +97,42 @@ test("restored state exposes a defensive snapshot for delayed submission reconci
   });
 });
 
+test("cross-run pending seeds restore only latest submitted work as reconciliation-only", async () => {
+  await withTempDir(async (dir) => {
+    const seedPath = path.join(dir, "prior-run-states.jsonl");
+    await fs.writeFile(seedPath, [
+      JSON.stringify({ sku: "pending", status: "processing", data: { store_id: 106637, submitted: true, offer_id: "mz-pending", profit_rate: 45 } }),
+      JSON.stringify({ sku: "failed-retry", status: "failed", data: { store_id: 106637, submission_pending: true, offer_id: "mz-failed", profit_rate: 55 } }),
+      JSON.stringify({ sku: "terminal", status: "processing", data: { submitted: true } }),
+      JSON.stringify({ sku: "terminal", status: "published", data: { profit_rate: 60 } }),
+      JSON.stringify({ sku: "not-submitted", status: "failed", data: { reason: "detail-timeout" } }),
+      JSON.stringify({ sku: "local-wins", status: "processing", data: { submitted: true } }),
+    ].join("\n"));
+    await fs.writeFile(path.join(dir, "sku_states.jsonl"), `${JSON.stringify({
+      sku: "local-wins",
+      status: "skipped",
+      data: { reason: "local-terminal" },
+    })}\n`);
+
+    const state = createPublishState({
+      runDir: dir,
+      publishedCsv: path.join(dir, "published.csv"),
+      pendingStateFiles: [seedPath],
+    });
+    await state.load();
+    const entries = new Map(state.entries().map((entry) => [entry.sku, entry]));
+
+    assert.equal(entries.get("pending").status, "processing");
+    assert.equal(entries.get("pending").data.reconcile_only, true);
+    assert.equal(entries.get("pending").data.cross_run_seed, true);
+    assert.equal(entries.get("failed-retry").status, "processing");
+    assert.equal(entries.get("local-wins").status, "skipped");
+    assert.equal(entries.has("terminal"), false);
+    assert.equal(entries.has("not-submitted"), false);
+    assert.equal(state.runPublishedCount(), 0);
+  });
+});
+
 test("CSV history seeds published SKUs from valid links and ignores malformed rows", async () => {
   await withTempDir(async (dir) => {
     const csv = path.join(dir, "published.csv");
