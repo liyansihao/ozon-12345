@@ -63,6 +63,27 @@ export function parseStoreTargets(env = process.env) {
   });
 }
 
+export function parseDailyStoreUsageSeed(env = process.env) {
+  const source = String(env.FLOW_B_STORE_DAILY_USAGE_SEED || "").trim();
+  if (!source) return null;
+  let value;
+  try { value = JSON.parse(source); }
+  catch { throw new Error("FLOW_B_STORE_DAILY_USAGE_SEED must be valid JSON"); }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value?.date || "")) || !value?.usage || typeof value.usage !== "object" || Array.isArray(value.usage)) {
+    throw new Error("FLOW_B_STORE_DAILY_USAGE_SEED requires date YYYY-MM-DD and an usage object");
+  }
+  const usage = {};
+  for (const [storeId, count] of Object.entries(value.usage)) {
+    const id = Number(storeId);
+    const numericCount = Number(count);
+    if (!(id > 0) || !Number.isInteger(numericCount) || numericCount < 0) {
+      throw new Error("FLOW_B_STORE_DAILY_USAGE_SEED usage entries require a positive store ID and non-negative integer count");
+    }
+    usage[id] = numericCount;
+  }
+  return { date: String(value.date), usage };
+}
+
 export function parseCli(argv, env = process.env) {
   const args = [...argv];
   if (!args.length || args.includes("--help") || args.includes("-h")) return { command: "help" };
@@ -156,9 +177,12 @@ async function createPublishingSession(context, options, env, shared) {
       initialStock: Math.max(1, Number(env.FLOW_B_INITIAL_STOCK) || 1),
       dailyStoreLimit: Math.max(1, Number(env.FLOW_B_DAILY_STORE_LIMIT) || 100),
       dailyStoreTimeZone: env.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
+      dailyStoreUsageSeed: parseDailyStoreUsageSeed(env),
       warehouseSyncAttempts: Math.max(1, Number(env.FLOW_B_WAREHOUSE_SYNC_ATTEMPTS) || 2),
       warehouseSyncIntervalMs: Math.max(0, Number(env.FLOW_B_WAREHOUSE_SYNC_INTERVAL_MS) || 5000),
       unavailableStoreRetryMs: Math.max(0, Number(env.FLOW_B_UNAVAILABLE_STORE_RETRY_MS) || 1_800_000),
+      pendingStoreStallMs: Math.max(0, Number(env.FLOW_B_PENDING_STORE_STALL_MS) || 300_000),
+      pendingStoreStallCount: Math.max(1, Number(env.FLOW_B_PENDING_STORE_STALL_COUNT) || 3),
     });
     return { maoziPage, costBridge, detailProvider, runner };
   } catch (error) {

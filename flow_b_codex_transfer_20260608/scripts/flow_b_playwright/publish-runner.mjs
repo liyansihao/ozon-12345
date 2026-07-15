@@ -196,9 +196,12 @@ export function createPublishRunner({
   initialStock = 1,
   dailyStoreLimit = 100,
   dailyStoreTimeZone = "Asia/Shanghai",
+  dailyStoreUsageSeed = null,
   warehouseSyncAttempts = 2,
   warehouseSyncIntervalMs = 5000,
   unavailableStoreRetryMs = 1_800_000,
+  pendingStoreStallMs = 300_000,
+  pendingStoreStallCount = 3,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -473,6 +476,7 @@ export function createPublishRunner({
         cate_rate: profit.cate_rate,
         cate_fee: profit.cate_fee,
         store_id: targetConfig.store.id,
+        store_name: targetConfig.store.name ?? targetConfig.store.title ?? "",
         watermark_id: targetConfig.watermark.id,
         offer_id: payload.rows[0].offer_id,
         submission_pending: true,
@@ -543,6 +547,13 @@ export function createPublishRunner({
       haltReason = null;
       storeDailyUsage.clear();
       storeDailyLimits.clear();
+      if (dailyStoreUsageSeed?.date === currentUsageDay) {
+        for (const [storeId, usage] of Object.entries(dailyStoreUsageSeed.usage || {})) {
+          const id = Number(storeId);
+          const count = Number(usage);
+          if (id > 0 && Number.isInteger(count) && count >= 0) storeDailyUsage.set(id, count);
+        }
+      }
       unavailableStoreUntil.clear();
       if (targetConfigCache?.targets) targetConfigCache.targets = {};
       if (targetConfigCache?.value) delete targetConfigCache.value;
@@ -675,6 +686,19 @@ export function createPublishRunner({
       haltReason = error?.code === "STORE_DAILY_LIMIT" ? "daily-product-limit" : "store-target-unavailable";
       targetConfig = await advanceStore(haltReason, { store: { id: targetPlan[activeTargetIndex].id } });
       if (!targetConfig) throw error;
+    }
+    const stalledPending = restoredEntries.filter((entry) => {
+      if (!["processing", "failed"].includes(entry.status)) return false;
+      if (Number(entry.data?.store_id) !== Number(targetConfig.store.id)) return false;
+      if (entry.data?.submitted !== true && entry.data?.submission_pending !== true) return false;
+      const submittedAt = Date.parse(entry.data?.prepared_at || entry.data?.selected_at || entry.data?.submitted_at || "");
+      return Number.isFinite(submittedAt) && now().getTime() - submittedAt >= Math.max(0, Number(pendingStoreStallMs) || 0);
+    });
+    if (stalledPending.length >= Math.max(1, Number(pendingStoreStallCount) || 1)) {
+      const stalledStoreId = Number(targetConfig.store.id);
+      unavailableStoreUntil.set(stalledStoreId, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
+      const nextConfig = await advanceStore("submission-stall", targetConfig);
+      if (nextConfig) targetConfig = nextConfig;
     }
     const facts = await loadCandidateFacts(runDir);
     const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));

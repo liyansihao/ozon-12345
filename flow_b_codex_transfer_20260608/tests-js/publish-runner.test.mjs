@@ -207,6 +207,71 @@ test("runner skips a store whose daily creation quota is already exhausted", asy
   assert.deepEqual(result.store_switches, [{ from_store_id: 104965, to_store_id: 106637, reason: "daily-product-limit" }]);
 });
 
+test("date-scoped prior-run usage rotates after the combined store total reaches its cap", async () => {
+  const state = fakeState();
+  const shopIds = [];
+  const client = clientFor([{ id: 207, sku: 207 }, { id: 208, sku: 208 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽三号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 2,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    dailyStoreLimit: 2,
+    dailyStoreUsageSeed: { date: "2026-07-15", usage: { 106637: 1 } },
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+  assert.equal(result.published, 2);
+  assert.deepEqual(shopIds, [106637, 106640]);
+});
+
+test("a stalled pending-import backlog keeps reconciliation but routes fresh work to the next store", async () => {
+  const state = fakeState({
+    "old-1": { status: "processing", data: { store_id: 106637, submitted: true, prepared_at: "2026-07-15T09:00:00.000Z" } },
+    "old-2": { status: "processing", data: { store_id: 106637, submission_pending: true, prepared_at: "2026-07-15T09:01:00.000Z" } },
+  });
+  const shopIds = [];
+  const client = clientFor([{ id: 209, sku: 209 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽三号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+    findImportLog: async ({ sku, offerId }) => String(sku).startsWith("old-")
+      ? ({ sku, offer_id: offerId, import_status: "pending" })
+      : ({ sku, offer_id: offerId, import_status: "all_imported" }),
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    pendingStoreStallMs: 60_000,
+    pendingStoreStallCount: 2,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+  assert.equal(result.published, 1);
+  assert.deepEqual(shopIds, [106640]);
+  assert.ok(result.store_switches.some((event) => event.from_store_id === 106637 && event.to_store_id === 106640 && event.reason === "submission-stall"));
+});
+
 test("restored daily store usage counts unique submitted or published SKUs in the configured timezone", () => {
   const entries = [
     { sku: "1", status: "processing", data: { store_id: 104965, submitted: true, submitted_at: "2026-07-15T00:01:00Z" } },
@@ -1035,6 +1100,7 @@ test("runner builds the exact one-row payload and stops at target", async () => 
   assert.equal(state.selections.length, 1);
   assert.equal(state.selections[0].sku, "700001");
   assert.equal(state.selections[0].profit_rate, 40);
+  assert.equal(state.selections[0].store_name, "丽丽1号");
   assert.deepEqual(payloads[0], {
     scene: "erp",
     shop_ids: [7],

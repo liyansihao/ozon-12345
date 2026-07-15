@@ -365,8 +365,10 @@ test("verified FBS seller feedback becomes a unique next-round source", () => {
     { status: "published", sku: "a-1", seller_url: "https://www.ozon.ru/seller/a/" },
     { status: "published", sku: "a-2", seller_url: "https://www.ozon.ru/seller/a/?miniapp=1" },
     { status: "published", sku: "b-1", seller_url: "https://www.ozon.ru/seller/b/" },
+    { status: "published", sku: "d-1", source_url: "https://www.ozon.ru/seller/d/?currency_price=50.000%3B" },
+    { status: "published", sku: "d-2", source_url: "https://www.ozon.ru/seller/d/" },
     { status: "rejected", seller_url: "https://www.ozon.ru/seller/c/" },
-  ]), ["https://www.ozon.ru/seller/a/"]);
+  ]), ["https://www.ozon.ru/seller/a/", "https://www.ozon.ru/seller/d/"]);
 });
 
 test("favorite preflight accepts only an explicit pure FBS mode", () => {

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { parseCli, parseStoreTargets } from "../scripts/flow_b_playwright.mjs";
+import { parseCli, parseDailyStoreUsageSeed, parseStoreTargets } from "../scripts/flow_b_playwright.mjs";
 
 test("publish CLI uses strict production defaults", () => {
   const parsed = parseCli(["publish", "/tmp/flow-run"], {});
@@ -67,4 +67,14 @@ test("store target environment parses an ordered verified rotation plan", () => 
     { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
   ]);
   assert.throws(() => parseStoreTargets({ FLOW_B_STORE_TARGETS: "not-json" }), /STORE_TARGETS.*JSON/i);
+});
+
+test("daily store usage seed is date-scoped so it cannot leak into the next day", () => {
+  assert.deepEqual(parseDailyStoreUsageSeed({
+    FLOW_B_STORE_DAILY_USAGE_SEED: JSON.stringify({ date: "2026-07-15", usage: { 106637: 45 } }),
+  }), { date: "2026-07-15", usage: { 106637: 45 } });
+  assert.equal(parseDailyStoreUsageSeed({}), null);
+  assert.throws(() => parseDailyStoreUsageSeed({
+    FLOW_B_STORE_DAILY_USAGE_SEED: JSON.stringify({ date: "15-07-2026", usage: { 106637: 45 } }),
+  }), /STORE_DAILY_USAGE_SEED/i);
 });

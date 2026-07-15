@@ -389,7 +389,7 @@ export function verifiedSellerSourceUrls(yieldRows) {
   const sellers = new Map();
   for (const row of yieldRows || []) {
     if (String(row?.status || "") !== "published") continue;
-    const url = canonicalSellerUrl(row?.seller_url);
+    const url = canonicalSellerUrl(row?.seller_url) || canonicalSellerUrl(row?.source_url);
     const sku = String(row?.sku || "").trim();
     if (!url || !sku) continue;
     const skus = sellers.get(url) || new Set();
