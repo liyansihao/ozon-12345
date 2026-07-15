@@ -309,6 +309,43 @@ test("runner pauses fresh submissions when the last available store import queue
   assert.equal(nextRound.store_switches.filter((entry) => entry.reason === "all-store-imports-stalled").length, 1);
 });
 
+test("runner rechecks store health after rotating and pauses when every configured store is stalled", async () => {
+  const state = fakeState({
+    "store-2-old-1": { status: "processing", data: { store_id: 106637, submitted: true, prepared_at: "2026-07-15T09:00:00.000Z" } },
+    "store-2-old-2": { status: "processing", data: { store_id: 106637, submitted: true, prepared_at: "2026-07-15T09:01:00.000Z" } },
+    "store-1-old-1": { status: "processing", data: { store_id: 104965, submitted: true, prepared_at: "2026-07-15T09:02:00.000Z" } },
+    "store-1-old-2": { status: "processing", data: { store_id: 104965, submitted: true, prepared_at: "2026-07-15T09:03:00.000Z" } },
+  });
+  let publishCalls = 0;
+  const client = clientFor([{ id: 210, sku: 210 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽1号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async () => { publishCalls += 1; return { ok: true }; },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "pending" }),
+    findOnlineProduct: async () => null,
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    pendingStoreStallMs: 60_000,
+    pendingStoreStallCount: 2,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 104965, needle: "丽丽1号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+  assert.equal(publishCalls, 0);
+  assert.equal(result.fresh_submissions_paused, true);
+  assert.deepEqual(result.store_switches.map((entry) => entry.reason), ["submission-stall", "all-store-imports-stalled"]);
+});
+
 test("restored daily store usage counts unique submitted or published SKUs in the configured timezone", () => {
   const entries = [
     { sku: "1", status: "processing", data: { store_id: 104965, submitted: true, submitted_at: "2026-07-15T00:01:00Z" } },

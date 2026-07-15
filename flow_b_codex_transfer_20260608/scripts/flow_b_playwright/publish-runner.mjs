@@ -689,14 +689,15 @@ export function createPublishRunner({
       if (!targetConfig) throw error;
     }
     let freshSubmissionsPaused = false;
-    const stalledPending = restoredEntries.filter((entry) => {
-      if (!["processing", "failed"].includes(entry.status)) return false;
-      if (Number(entry.data?.store_id) !== Number(targetConfig.store.id)) return false;
-      if (entry.data?.submitted !== true && entry.data?.submission_pending !== true) return false;
-      const submittedAt = Date.parse(entry.data?.prepared_at || entry.data?.selected_at || entry.data?.submitted_at || "");
-      return Number.isFinite(submittedAt) && now().getTime() - submittedAt >= Math.max(0, Number(pendingStoreStallMs) || 0);
-    });
-    if (stalledPending.length >= Math.max(1, Number(pendingStoreStallCount) || 1)) {
+    while (!freshSubmissionsPaused) {
+      const stalledPending = restoredEntries.filter((entry) => {
+        if (!["processing", "failed"].includes(entry.status)) return false;
+        if (Number(entry.data?.store_id) !== Number(targetConfig.store.id)) return false;
+        if (entry.data?.submitted !== true && entry.data?.submission_pending !== true) return false;
+        const submittedAt = Date.parse(entry.data?.prepared_at || entry.data?.selected_at || entry.data?.submitted_at || "");
+        return Number.isFinite(submittedAt) && now().getTime() - submittedAt >= Math.max(0, Number(pendingStoreStallMs) || 0);
+      });
+      if (stalledPending.length < Math.max(1, Number(pendingStoreStallCount) || 1)) break;
       const stalledStoreId = Number(targetConfig.store.id);
       const nextConfig = await advanceStore("submission-stall", targetConfig);
       if (nextConfig) {
