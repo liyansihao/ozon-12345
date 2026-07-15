@@ -34,6 +34,7 @@ import {
   createScannerLogger,
   favoriteFailureDisposition,
   favoritePriceSkipReason,
+  favoriteTitleSkipReason,
   softBlockCooldownState,
   sourceBatchCooldownState,
   collectionRuntimeState,
@@ -551,6 +552,17 @@ test("title family priority follows observed strict-publication conversion", () 
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Браслет с кулоном"));
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Летняя кепка для кошек"));
   assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Детский игровой столик для игр с водой"));
+});
+
+test("favorite title preflight rejects proven low-yield oversized categories", () => {
+  assert.equal(favoriteTitleSkipReason("Зеркало настенное круглое 80 см в ванную"), "oversized-low-yield-title");
+  assert.equal(favoriteTitleSkipReason("Ванна акриловая 160х70 см"), "oversized-low-yield-title");
+  assert.equal(favoriteTitleSkipReason("Цифровое пианино 88 клавиш"), "oversized-low-yield-title");
+  assert.equal(favoriteTitleSkipReason("Носки для девочек"), null);
+  assert.deepEqual(favoriteFailureDisposition(new Error("oversized-low-yield-title: SKU 1")), {
+    status: "rejected",
+    reason: "oversized-low-yield-title",
+  });
 });
 
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {

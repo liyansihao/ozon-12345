@@ -130,6 +130,7 @@ export function favoriteFailureDisposition(error) {
   if (/^non-pure-fbs:/i.test(message)) return { status: "rejected", reason: "non-pure-fbs" };
   if (/^missing-shipping-mode:/i.test(message)) return { status: "rejected", reason: "missing-shipping-mode" };
   if (/^source-price-above-limit:/i.test(message)) return { status: "rejected", reason: "source-price-above-limit" };
+  if (/^oversized-low-yield-title:/i.test(message)) return { status: "rejected", reason: "oversized-low-yield-title" };
   return { status: "failed", reason: null };
 }
 
@@ -137,6 +138,14 @@ export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
   const currency = String(productInfo?.price_info?.currency || "").toUpperCase();
   if (currency === "CNY" && Number(productInfo?.price_info?.sell_price) > Math.max(0, Number(maxPrice) || 0)) {
     return "source-price-above-limit";
+  }
+  return null;
+}
+
+export function favoriteTitleSkipReason(value) {
+  const title = String(value || "");
+  if (/зеркал|ванн(?:а|ы|ой|ую|е|у)|раковин|пианино|спортивн\w*\s+площад|турник.*брусь|(?:wall|bathroom)\s+mirror|bath\s*tub|digital\s+piano/i.test(title)) {
+    return "oversized-low-yield-title";
   }
   return null;
 }
@@ -854,7 +863,11 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         collection.attempted += 1;
         inFlight += 1;
         try {
+          const titleReason = favoriteTitleSkipReason(item.text);
+          if (titleReason) throw new Error(`${titleReason}: SKU ${item.sku}`);
           const productInfo = await loadProduct(page, item);
+          const detailTitleReason = favoriteTitleSkipReason(productInfo.title);
+          if (detailTitleReason) throw new Error(`${detailTitleReason}: SKU ${item.sku}`);
           const priceReason = favoritePriceSkipReason(productInfo, envNumber(env, "FLOW_B_MAX_SOURCE_PRICE_CNY", 1000));
           if (priceReason) throw new Error(`${priceReason}: SKU ${item.sku}`);
           const favoritePayload = { ...productInfo };

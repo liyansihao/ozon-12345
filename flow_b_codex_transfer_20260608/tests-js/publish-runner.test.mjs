@@ -868,6 +868,99 @@ test("runner reconciles a delayed submission against its original store after ro
   assert.equal(state.records[0].store_id, 106637);
 });
 
+test("a delayed SKU hitting another store's daily limit does not halt the active store", async () => {
+  const state = fakeState({
+    delayed: {
+      status: "processing",
+      data: {
+        store_id: 104965,
+        submitted: true,
+        offer_id: "mz-150726-delayed-limit",
+        profit_rate: 45,
+      },
+    },
+  });
+  const shopIds = [];
+  const client = clientFor([{ id: 301, sku: 301 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 104965 ? "丽丽1号" : "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    findImportLog: async ({ shopId, sku, offerId }) => Number(shopId) === 104965 ? ({
+      sku,
+      offer_id: offerId,
+      import_status: "all_failed",
+      skus: [{ error_msg: "вы исчерпали суточный лимит" }],
+    }) : ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    publish: async (payload) => {
+      shopIds.push(payload.shop_ids[0]);
+      return { ok: true, response: { code: 1 } };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 104965, needle: "丽丽1号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(shopIds, [106637]);
+  assert.equal(result.active_store_id, 106637);
+  assert.equal(result.halt_reason, null);
+  assert.ok(state.transitions.some((entry) => entry.sku === "delayed" && entry.data.reason === "daily-product-limit"));
+});
+
+test("runner restores a shop-name-only daily limit signal after restart", async () => {
+  const state = fakeState({
+    exhausted: {
+      status: "failed",
+      data: {
+        reason: "daily-product-limit",
+        reconciled_at: "2026-07-15T10:00:00.000Z",
+        import_log: { shop_name: "丽丽1号" },
+      },
+    },
+  });
+  const shopIds = [];
+  const client = clientFor([{ id: 302, sku: 302 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 104965 ? "丽丽1号" : "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => {
+      shopIds.push(payload.shop_ids[0]);
+      return { ok: true, response: { code: 1 } };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T11:00:00.000Z"),
+    storeTargets: [
+      { id: 104965, needle: "丽丽1号", requireWarehouse: false },
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(shopIds, [106637]);
+  assert.equal(result.active_store_id, 106637);
+  assert.deepEqual(result.store_switches, [{ from_store_id: 104965, to_store_id: 106637, reason: "daily-product-limit" }]);
+});
+
 test("runner resolves one original store only once while reconciling many delayed SKUs", async () => {
   const state = fakeState({
     delayed1: { status: "processing", data: { store_id: 106637, submitted: true, offer_id: "mz-delayed-1", profit_rate: 45 } },

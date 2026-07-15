@@ -578,6 +578,27 @@ export function createPublishRunner({
       if (targetConfigCache?.targets) targetConfigCache.targets = {};
       if (targetConfigCache?.value) delete targetConfigCache.value;
     }
+    for (const entry of restoredEntries) {
+      const data = entry?.data || {};
+      if (data.reason !== "daily-product-limit") continue;
+      const timestamp = data.reconciled_at || data.published_at || data.submitted_at || data.prepared_at;
+      if (localDateKey(timestamp, dailyStoreTimeZone) !== currentUsageDay) continue;
+      let exhaustedStoreId = Number(data.store_id || 0);
+      if (!(exhaustedStoreId > 0)) {
+        const shopName = String(data.import_log?.shop_name || data.store_name || "").trim();
+        const matched = targetPlan.find((spec) => {
+          const needle = String(spec.needle || "").trim();
+          return shopName && needle && (shopName.includes(needle) || needle.includes(shopName));
+        });
+        exhaustedStoreId = Number(matched?.id || 0);
+      }
+      if (exhaustedStoreId > 0) {
+        storeDailyUsage.set(exhaustedStoreId, Math.max(
+          Number(storeDailyUsage.get(exhaustedStoreId) || 0),
+          configuredDailyStoreLimit,
+        ));
+      }
+    }
     try {
       const syncEvents = await fs.readFile(path.join(runDir, "store_syncs.jsonl"), "utf8");
       for (const line of syncEvents.split(/\n/).filter(Boolean)) {
@@ -847,8 +868,20 @@ export function createPublishRunner({
           const importStatus = normalizedImportStatus(importLog);
           if (["all_failed", "failed"].includes(importStatus)) {
             const reason = importFailureReason(importLog);
-            if (reason === "daily-product-limit") haltReason = reason;
-            await state.transition(sku, "failed", { reason, import_log: importLog, reconciled_at: now().toISOString() });
+            if (reason === "daily-product-limit") {
+              const exhaustedStoreId = Number(reconciliationTarget.store.id);
+              const exhaustedStoreLimit = Number(storeDailyLimits.get(exhaustedStoreId) || configuredDailyStoreLimit);
+              storeDailyUsage.set(exhaustedStoreId, exhaustedStoreLimit);
+              if (exhaustedStoreId === Number(targetConfig.store.id)) haltReason = reason;
+            }
+            await state.transition(sku, "failed", {
+              ...item,
+              store_id: reconciliationTarget.store.id,
+              store_name: reconciliationTarget.store.name ?? reconciliationTarget.store.title ?? item.store_name ?? "",
+              reason,
+              import_log: importLog,
+              reconciled_at: now().toISOString(),
+            });
             return { status: "failed", sku, source_url: item.source_url ?? null, reason };
           }
           if (["all_imported", "imported"].includes(importStatus)) {
