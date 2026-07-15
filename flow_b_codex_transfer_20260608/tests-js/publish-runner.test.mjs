@@ -782,7 +782,7 @@ test("runner proactively reconciles a submitted SKU that disappeared from favori
 
   assert.equal(result.published, 1);
   assert.equal(publishCalls, 0);
-  assert.deepEqual(syncCalls, [{ ids: [7], type: "all" }]);
+  assert.deepEqual(syncCalls, [{ ids: [104965], type: "all" }]);
   assert.equal(state.records[0].sku, "4854106078");
   assert.equal(state.records[0].profit_rate, 45);
   assert.equal(state.records[0].reconciled, true);
@@ -829,6 +829,44 @@ test("runner reconciles a delayed submission against its original store after ro
   assert.equal(result.published, 1);
   assert.deepEqual(checkedShopIds, [106637, 106637]);
   assert.equal(state.records[0].store_id, 106637);
+});
+
+test("runner syncs every original store represented by delayed submissions", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-multi-store-sync-"));
+  const state = fakeState({
+    "store-2-pending": {
+      status: "processing",
+      data: { store_id: 106637, submitted: true, offer_id: "mz-store-2", profit_rate: 45 },
+    },
+    "store-1-pending": {
+      status: "processing",
+      data: { store_id: 104965, submitted: true, offer_id: "mz-store-1", profit_rate: 45 },
+    },
+  });
+  const syncedStoreIds = [];
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽1号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    syncOnlineShops: async (storeIds) => { syncedStoreIds.push(...storeIds.map(Number)); return { msg: "queued" }; },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "pending" }),
+    findOnlineProduct: async () => null,
+  });
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    target: 1,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 104965, needle: "丽丽1号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+  assert.deepEqual(syncedStoreIds.sort((left, right) => left - right), [104965, 106637]);
 });
 
 test("runner restores the persisted online-sync cooldown after a supervisor restart", async () => {

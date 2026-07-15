@@ -736,7 +736,12 @@ export function createPublishRunner({
         sku: String(entry.sku),
         reconcile_only: true,
       }, facts.get(String(entry.sku)) || {}));
-    if (delayedSubmissions.length > 0) await maybeSyncOnlineShop(targetConfig);
+    if (delayedSubmissions.length > 0) {
+      const delayedStoreIds = new Set(delayedSubmissions.map((item) => Number(item.store_id) || Number(targetConfig.store.id)));
+      for (const delayedStoreId of delayedStoreIds) {
+        await maybeSyncOnlineShop({ store: { id: delayedStoreId } });
+      }
+    }
     const runnableFavorites = reconciliationOnly || freshSubmissionsPaused
       ? favorites.filter((item) => {
         const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
