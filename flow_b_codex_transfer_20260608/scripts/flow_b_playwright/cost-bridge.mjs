@@ -115,9 +115,12 @@ export function createCostBridge({
   scriptPath = path.resolve(import.meta.dirname, "../1688_image_median.py"),
   runProcess = defaultRunProcess,
   download = defaultDownload,
+  sharedCachePath = null,
+  seedCacheFiles = [],
 } = {}) {
   const inFlight = new Map();
   const cacheByRun = new Map();
+  const crossRunKeysByRun = new Map();
   let cacheWriteChain = Promise.resolve();
 
   function cacheKey(item) {
@@ -128,24 +131,37 @@ export function createCostBridge({
   async function loadCache(runDir) {
     const root = path.resolve(runDir);
     if (cacheByRun.has(root)) return cacheByRun.get(root);
-    let cache = { version: 1, entries: {} };
-    try {
-      const parsed = JSON.parse(await fs.readFile(path.join(root, "1688_cache.json"), "utf8"));
-      if (parsed?.entries && typeof parsed.entries === "object") cache = parsed;
-    } catch (error) {
-      if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    async function readEntries(filename) {
+      try {
+        const parsed = JSON.parse(await fs.readFile(path.resolve(filename), "utf8"));
+        return parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {};
+      } catch (error) {
+        if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+        return {};
+      }
     }
+    const runEntries = await readEntries(path.join(root, "1688_cache.json"));
+    const crossRunEntries = {};
+    for (const filename of [sharedCachePath, ...seedCacheFiles].filter(Boolean)) {
+      Object.assign(crossRunEntries, await readEntries(filename));
+    }
+    const cache = { version: 1, entries: { ...crossRunEntries, ...runEntries } };
+    crossRunKeysByRun.set(root, new Set(Object.keys(crossRunEntries).filter((key) => !(key in runEntries))));
     cacheByRun.set(root, cache);
     return cache;
   }
 
   function saveCache(runDir, cache) {
     const operation = cacheWriteChain.then(async () => {
-      const filename = path.join(path.resolve(runDir), "1688_cache.json");
-      const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
-      await fs.mkdir(path.dirname(filename), { recursive: true });
-      await fs.writeFile(temporary, `${JSON.stringify(cache)}\n`, "utf8");
-      await fs.rename(temporary, filename);
+      const filenames = [path.join(path.resolve(runDir), "1688_cache.json"), sharedCachePath]
+        .filter(Boolean)
+        .map((filename) => path.resolve(filename));
+      for (const filename of new Set(filenames)) {
+        const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
+        await fs.mkdir(path.dirname(filename), { recursive: true });
+        await fs.writeFile(temporary, `${JSON.stringify(cache)}\n`, "utf8");
+        await fs.rename(temporary, filename);
+      }
     });
     cacheWriteChain = operation.catch(() => {});
     return operation;
@@ -240,6 +256,7 @@ export function createCostBridge({
           process_code: Number.isFinite(Number(cached.process_code)) ? Number(cached.process_code) : undefined,
           cached: true,
           shared_cache: true,
+          cross_run_cache: crossRunKeysByRun.get(root)?.has(key) === true,
           cache_key: key,
         };
       }
@@ -259,6 +276,7 @@ export function createCostBridge({
           source_image: String(item.cover_image),
           updated_at: new Date().toISOString(),
         };
+        crossRunKeysByRun.get(root)?.delete(key);
         await saveCache(root, cache);
       }
       return { ...result, shared_cache: false, cache_key: key };

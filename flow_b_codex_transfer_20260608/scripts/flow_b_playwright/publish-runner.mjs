@@ -576,7 +576,9 @@ export function createPublishRunner({
       if (error?.code !== "ENOENT") throw error;
     }
     state.summary?.(targetCount);
-    async function resolveTargetConfig(index, { allowExhausted = false } = {}) {
+    const resolvedTargetsThisRun = new Map();
+    const resolvingTargetsThisRun = new Map();
+    async function resolveTargetConfigUncached(index, { allowExhausted = false } = {}) {
       const spec = targetPlan[index];
       const cacheKey = String(spec.id);
       const unavailableUntil = Number(unavailableStoreUntil.get(spec.id) || 0);
@@ -648,6 +650,7 @@ export function createPublishRunner({
         if (targetConfigCache) targetConfigCache.commissionTree = commissionTree;
       }
       const value = { ...resolved, commissionTree, warehouseId: targetWarehouseId || null };
+      resolvedTargetsThisRun.set(cacheKey, value);
       if (targetConfigCache) {
         if (targetPlan.length === 1) targetConfigCache.value = value;
         else {
@@ -656,6 +659,21 @@ export function createPublishRunner({
         }
       }
       return value;
+    }
+
+    async function resolveTargetConfig(index, options = {}) {
+      const allowExhausted = options.allowExhausted === true;
+      const cacheKey = String(targetPlan[index].id);
+      if (!allowExhausted) return resolveTargetConfigUncached(index, options);
+      if (resolvedTargetsThisRun.has(cacheKey)) return resolvedTargetsThisRun.get(cacheKey);
+      if (resolvingTargetsThisRun.has(cacheKey)) return resolvingTargetsThisRun.get(cacheKey);
+      const operation = resolveTargetConfigUncached(index, options);
+      resolvingTargetsThisRun.set(cacheKey, operation);
+      try {
+        return await operation;
+      } finally {
+        resolvingTargetsThisRun.delete(cacheKey);
+      }
     }
 
     async function advanceStore(reason, currentConfig) {

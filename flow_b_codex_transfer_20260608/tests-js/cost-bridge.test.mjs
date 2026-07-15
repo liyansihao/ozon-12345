@@ -280,3 +280,40 @@ test("same cover image shares one in-flight 1688 query and persists reusable cac
     assert.equal(Object.keys(cache.entries).length, 1);
   });
 });
+
+test("shared cache reuses a reliable 1688 result across independent run directories", async () => {
+  await withTempDir(async (root) => {
+    const firstRun = path.join(root, "run-1");
+    const secondRun = path.join(root, "run-2");
+    const sharedCachePath = path.join(root, "shared", "1688_cache.json");
+    let runs = 0;
+    const options = {
+      sharedCachePath,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        return {
+          code: 0,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+            "P70_COST 11",
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    };
+    const item = { sku: "shared-1", cover_image: "https://img.example/shared.jpg", sell_price: 100 };
+    assert.equal((await createCostBridge(options).estimate(item, firstRun)).ok, true);
+    const reused = await createCostBridge({
+      ...options,
+      runProcess: async () => { throw new Error("shared cache should avoid a second process"); },
+      download: async () => { throw new Error("shared cache should avoid a second download"); },
+    }).estimate({ ...item, sku: "shared-2" }, secondRun);
+
+    assert.equal(reused.ok, true);
+    assert.equal(reused.shared_cache, true);
+    assert.equal(reused.cross_run_cache, true);
+    assert.equal(runs, 1);
+  });
+});

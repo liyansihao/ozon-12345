@@ -144,6 +144,8 @@ async function createPublishingSession(context, options, env, shared) {
     const costBridge = createCostBridge({
       python: env.FLOW_B_PYTHON || "python3",
       scriptPath: env.FLOW_B_1688_SCRIPT || path.join(ROOT, "scripts/1688_image_median.py"),
+      sharedCachePath: env.FLOW_B_1688_SHARED_CACHE || path.join(ROOT, "data/flow_b/1688_cache.json"),
+      seedCacheFiles: String(env.FLOW_B_1688_CACHE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
     });
     const detailProvider = createOzonDetailProvider({
       context,

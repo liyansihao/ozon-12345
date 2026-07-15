@@ -324,6 +324,24 @@ export function createMaoziPageTransport({
     }
     return { status: typeof response.status === "function" ? response.status() : Number(response.status), json };
   };
+  let httpZeroRecovery = null;
+  const recoverStalePage = async (failedPage) => {
+    if (page !== failedPage) return page;
+    if (typeof failedPage?.reload !== "function") return null;
+    if (!httpZeroRecovery) {
+      httpZeroRecovery = (async () => {
+        await failedPage.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+        return failedPage;
+      })();
+    }
+    try {
+      const recovered = await httpZeroRecovery;
+      if (recovered) page = recovered;
+      return recovered;
+    } finally {
+      httpZeroRecovery = null;
+    }
+  };
   return async (endpoint, { method = "GET", query, body } = {}) => {
     const request = {
       baseUrl,
@@ -344,6 +362,14 @@ export function createMaoziPageTransport({
         );
         if (!transientGet || attempt + 1 >= attempts) {
           if (Number(result?.status) === 0) {
+            const failedPage = page;
+            const recovered = request.method === "GET"
+              ? await recoverStalePage(failedPage).catch(() => null)
+              : null;
+            if (recovered) {
+              const retry = await evaluate(page, { ...request, headers: {} });
+              if (Number(retry?.status) !== 0) return retry;
+            }
             const fallback = await contextRequest(page, request).catch(() => null);
             if (fallback) return fallback;
           }

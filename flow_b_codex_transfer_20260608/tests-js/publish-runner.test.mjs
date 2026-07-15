@@ -868,6 +868,39 @@ test("runner reconciles a delayed submission against its original store after ro
   assert.equal(state.records[0].store_id, 106637);
 });
 
+test("runner resolves one original store only once while reconciling many delayed SKUs", async () => {
+  const state = fakeState({
+    delayed1: { status: "processing", data: { store_id: 106637, submitted: true, offer_id: "mz-delayed-1", profit_rate: 45 } },
+    delayed2: { status: "processing", data: { store_id: 106637, submitted: true, offer_id: "mz-delayed-2", profit_rate: 46 } },
+  });
+  const targetCalls = new Map();
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => {
+      const id = Number(storeId);
+      targetCalls.set(id, Number(targetCalls.get(id) || 0) + 1);
+      return { store: { id, name: id === 104965 ? "丽丽1号" : "丽丽二号" }, watermark: { id: 60822, name: "lysh" } };
+    },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 2,
+    storeTargets: [
+      { id: 104965, needle: "丽丽1号", requireWarehouse: false },
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 2);
+  assert.equal(targetCalls.get(104965), 1);
+  assert.equal(targetCalls.get(106637), 1);
+});
+
 test("runner syncs every original store represented by delayed submissions", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-multi-store-sync-"));
   const state = fakeState({

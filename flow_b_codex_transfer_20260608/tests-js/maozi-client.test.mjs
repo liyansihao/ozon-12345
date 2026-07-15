@@ -410,3 +410,41 @@ test("browser transport falls back to the authenticated context request after pe
   assert.equal(calls[0].options.headers.Referer, "https://ozon.maozierp.com/");
   assert.equal(calls[0].options.headers["User-Agent"], "Chrome Test Agent");
 });
+
+test("browser transport reloads one stale ERP page before using the HTTP 0 fallback", async () => {
+  let healthy = false;
+  let reloads = 0;
+  let fallbackCalls = 0;
+  const page = {
+    evaluate: async (_fn, request) => request
+      ? (healthy
+        ? { status: 200, json: { code: 1, data: [{ id: 106637 }] } }
+        : { status: 0, json: { error: "Failed to fetch" } })
+      : ({ token: "token-from-page", userAgent: "Chrome Test Agent" }),
+    reload: async () => {
+      reloads += 1;
+      healthy = true;
+    },
+  };
+  const context = {
+    request: {
+      fetch: async () => {
+        fallbackCalls += 1;
+        throw new Error("fallback should not run after page recovery");
+      },
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    context,
+    maxGetAttempts: 2,
+    retrySleep: async () => {},
+  });
+
+  assert.deepEqual(await transport("/api.shop/lists"), {
+    status: 200,
+    json: { code: 1, data: [{ id: 106637 }] },
+  });
+  assert.equal(reloads, 1);
+  assert.equal(fallbackCalls, 0);
+});
