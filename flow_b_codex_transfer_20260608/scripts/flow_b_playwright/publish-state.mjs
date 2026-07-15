@@ -137,6 +137,16 @@ export function canonicalProductUrl(sku) {
   return `https://www.ozon.ru/product/${String(sku)}`;
 }
 
+const STORE_REPORT_HEADERS = [
+  "store_id", "store_name", "sku", "product_link", "title", "profit_rate",
+  "sell_price", "purchase_price", "offer_id", "published_at",
+];
+
+function csvCell(value) {
+  const text = value === null || value === undefined ? "" : String(value);
+  return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
 export function createPublishState({ runDir, publishedCsv }) {
   if (!runDir) throw new TypeError("runDir is required");
   if (!publishedCsv) throw new TypeError("publishedCsv is required");
@@ -190,6 +200,35 @@ export function createPublishState({ runDir, publishedCsv }) {
       const separator = existing.endsWith("\n") || existing.endsWith("\r") ? "" : "\n";
       await fs.appendFile(publishedCsv, `${separator}${canonicalProductUrl(sku)}\n`, "utf8");
     });
+  }
+
+  async function appendStoreReports(sku, data) {
+    const storeId = Number(data?.store_id);
+    if (!(storeId > 0)) return;
+    const row = {
+      store_id: storeId,
+      store_name: data?.store_name ?? "",
+      sku,
+      product_link: canonicalProductUrl(sku),
+      title: data?.title ?? "",
+      profit_rate: data?.profit_rate ?? "",
+      sell_price: data?.sell_price ?? "",
+      purchase_price: data?.purchase_price ?? "",
+      offer_id: data?.offer_id ?? "",
+      published_at: data?.published_at ?? "",
+    };
+    const line = `${STORE_REPORT_HEADERS.map((header) => csvCell(row[header])).join(",")}\n`;
+    for (const filename of [
+      path.join(runDir, "published_by_store.csv"),
+      path.join(runDir, `published_store_${storeId}.csv`),
+    ]) {
+      await queueWrite(async () => {
+        await fs.mkdir(path.dirname(filename), { recursive: true });
+        const existing = await readTextIfPresent(filename);
+        if (!existing.trim()) await fs.writeFile(filename, `${STORE_REPORT_HEADERS.join(",")}\n`, "utf8");
+        await fs.appendFile(filename, line, "utf8");
+      });
+    }
   }
 
   function calculateSummary(target) {
@@ -304,6 +343,7 @@ export function createPublishState({ runDir, publishedCsv }) {
       runPublishedSkus.add(sku);
       await appendJsonl(publishedPath, { ...event, link: canonicalProductUrl(sku) });
       await appendPublishedCsv(sku);
+      await appendStoreReports(sku, nextData);
     } else if (status === "failed") {
       await appendJsonl(failedPath, event);
     } else if (status === "skipped") {

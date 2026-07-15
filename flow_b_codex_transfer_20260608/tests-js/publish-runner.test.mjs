@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createPublishRunner, offerIdForSku, prioritizePublishCandidates } from "../scripts/flow_b_playwright/publish-runner.mjs";
+import { createPublishRunner, offerIdForSku, prioritizePublishCandidates, restoredDailyStoreUsage } from "../scripts/flow_b_playwright/publish-runner.mjs";
 
 function fakeState(initial = {}, initialRunPublished = 0) {
   const statuses = new Map(Object.entries(initial).map(([sku, value]) => [sku,
@@ -201,6 +201,63 @@ test("runner skips a store whose daily creation quota is already exhausted", asy
   assert.equal(result.published, 1);
   assert.deepEqual(shopIds, [106637]);
   assert.equal(result.active_store_id, 106637);
+  assert.deepEqual(result.store_switches, [{ from_store_id: 104965, to_store_id: 106637, reason: "daily-product-limit" }]);
+});
+
+test("restored daily store usage counts unique submitted or published SKUs in the configured timezone", () => {
+  const entries = [
+    { sku: "1", status: "processing", data: { store_id: 104965, submitted: true, submitted_at: "2026-07-15T00:01:00Z" } },
+    { sku: "1", status: "failed", data: { store_id: 104965, submitted: true, submitted_at: "2026-07-15T00:01:00Z" } },
+    { sku: "2", status: "published", data: { store_id: 104965, published_at: "2026-07-15T15:59:59Z" } },
+    { sku: "3", status: "processing", data: { store_id: 104965, submission_pending: true, prepared_at: "2026-07-14T15:59:59Z" } },
+    { sku: "4", status: "published", data: { store_id: 106637, published_at: "2026-07-15T03:00:00Z" } },
+  ];
+  assert.equal(restoredDailyStoreUsage(entries, 104965, new Date("2026-07-15T10:00:00Z"), "Asia/Shanghai"), 2);
+  assert.equal(restoredDailyStoreUsage(entries, 106637, new Date("2026-07-15T10:00:00Z"), "Asia/Shanghai"), 1);
+});
+
+test("runner rotates at the local per-store daily cap without submitting an oversized concurrent batch", async () => {
+  const existing = {};
+  for (let index = 0; index < 99; index += 1) {
+    existing[`old-${index}`] = {
+      status: "published",
+      data: { store_id: 104965, published_at: "2026-07-15T01:00:00Z" },
+    };
+  }
+  const state = fakeState(existing);
+  const shopIds = [];
+  const items = Array.from({ length: 6 }, (_, index) => ({ id: 300 + index, sku: String(300 + index) }));
+  const client = clientFor(items, {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 104965 ? "丽丽1号" : "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => {
+      shopIds.push(payload.shop_ids[0]);
+      return { ok: true, response: { code: 1 } };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 6,
+    concurrency: 8,
+    dailyStoreLimit: 100,
+    now: () => new Date("2026-07-15T10:00:00Z"),
+    storeTargets: [
+      { id: 104965, needle: "丽丽1号", requireWarehouse: false },
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 6);
+  assert.deepEqual(shopIds, [104965, 106637, 106637, 106637, 106637, 106637]);
+  assert.deepEqual(result.store_submitted_usage, { "104965": 100, "106637": 5 });
+  assert.deepEqual(result.store_confirmed_count, { "104965": 100, "106637": 5 });
   assert.deepEqual(result.store_switches, [{ from_store_id: 104965, to_store_id: 106637, reason: "daily-product-limit" }]);
 });
 
@@ -515,6 +572,48 @@ test("runner proactively reconciles a submitted SKU that disappeared from favori
   assert.equal(state.records[0].profit_rate, 45);
   assert.equal(state.records[0].reconciled, true);
   assert.match(state.records[0].published_at, /^\d{4}-\d{2}-\d{2}T/);
+});
+
+test("runner reconciles a delayed submission against its original store after rotation", async () => {
+  const state = fakeState({
+    delayed: {
+      status: "processing",
+      data: {
+        store_id: 106637,
+        submitted: true,
+        offer_id: "mz-150726-delayed",
+        profit_rate: 45,
+      },
+    },
+  });
+  const checkedShopIds = [];
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 104965 ? "丽丽1号" : "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    findImportLog: async ({ shopId, sku, offerId }) => {
+      checkedShopIds.push(Number(shopId));
+      return { sku, offer_id: offerId, import_status: "all_imported" };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [
+      { id: 104965, needle: "丽丽1号", requireWarehouse: false },
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(checkedShopIds, [106637, 106637]);
+  assert.equal(state.records[0].store_id, 106637);
 });
 
 test("runner restores the persisted online-sync cooldown after a supervisor restart", async () => {
@@ -926,7 +1025,7 @@ test("runner ends a dry candidate tail at the configured limit", async () => {
   assert.equal(result.dry_candidates, 2);
 });
 
-test("repeated consumer rounds reuse verified target and commission configuration", async () => {
+test("repeated consumer rounds refresh store quota but reuse commission configuration", async () => {
   const cache = {};
   let targetCalls = 0;
   let commissionCalls = 0;
@@ -946,7 +1045,7 @@ test("repeated consumer rounds reuse verified target and commission configuratio
       targetConfigCache: cache,
     }).run();
   }
-  assert.equal(targetCalls, 1);
+  assert.equal(targetCalls, 2);
   assert.equal(commissionCalls, 1);
 });
 

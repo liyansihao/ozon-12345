@@ -171,6 +171,40 @@ test("recordPublished writes one canonical URL per SKU", async () => {
   });
 });
 
+test("recordPublished writes aggregate and per-store SKU CSV reports", async () => {
+  await withTempDir(async (dir) => {
+    const state = createPublishState({ runDir: dir, publishedCsv: path.join(dir, "published-links.csv") });
+    await state.recordPublished({
+      sku: "501",
+      title: "title, with comma",
+      store_id: 104965,
+      store_name: "丽丽1号",
+      profit_rate: 31.25,
+      published_at: "2026-07-15T10:00:00.000Z",
+    });
+    await state.recordPublished({
+      sku: "502",
+      title: "second",
+      store_id: 106637,
+      store_name: "丽丽二号",
+      profit_rate: 45,
+      published_at: "2026-07-15T10:01:00.000Z",
+    });
+
+    const aggregate = await fs.readFile(path.join(dir, "published_by_store.csv"), "utf8");
+    assert.match(aggregate, /store_id,store_name,sku/);
+    assert.match(aggregate, /104965/);
+    assert.match(aggregate, /106637/);
+    assert.match(aggregate, /"title, with comma"/);
+
+    const storeOne = await fs.readFile(path.join(dir, "published_store_104965.csv"), "utf8");
+    const storeTwo = await fs.readFile(path.join(dir, "published_store_106637.csv"), "utf8");
+    assert.match(storeOne, /,501,/);
+    assert.doesNotMatch(storeOne, /,502,/);
+    assert.match(storeTwo, /,502,/);
+  });
+});
+
 test("concurrent recordPublished calls commit exactly one canonical success", async () => {
   await withTempDir(async (dir) => {
     const csv = path.join(dir, "published.csv");

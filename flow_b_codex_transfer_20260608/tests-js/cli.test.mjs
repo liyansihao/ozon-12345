@@ -9,7 +9,7 @@ test("publish CLI uses strict production defaults", () => {
   assert.equal(parsed.command, "publish");
   assert.equal(parsed.runDir, path.resolve("/tmp/flow-run"));
   assert.equal(parsed.threshold, 30);
-  assert.equal(parsed.target, 100);
+  assert.equal(parsed.target, 500);
   assert.equal(parsed.storeNeedle, "丽丽1号");
   assert.equal(parsed.watermarkNeedle, "lysh");
 });
@@ -59,6 +59,12 @@ test("store target environment parses an ordered verified rotation plan", () => 
     { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
     { id: 106637, needle: "丽丽二号", warehouseId: null, requireWarehouse: true },
   ]);
-  assert.equal(parseStoreTargets({}), null);
+  assert.deepEqual(parseStoreTargets({}), [
+    { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
+    { id: 106637, needle: "丽丽二号", warehouseId: null, requireWarehouse: true },
+    { id: 106640, needle: "丽丽三号", warehouseId: null, requireWarehouse: true },
+    { id: 106644, needle: "丽丽四号", warehouseId: null, requireWarehouse: true },
+    { id: 106646, needle: "丽丽五号", warehouseId: null, requireWarehouse: true },
+  ]);
   assert.throws(() => parseStoreTargets({ FLOW_B_STORE_TARGETS: "not-json" }), /STORE_TARGETS.*JSON/i);
 });

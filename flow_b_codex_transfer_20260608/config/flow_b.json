@@ -6,11 +6,19 @@
     "publish_when_profit_rate_is_strictly_greater_than_threshold": true
   },
   "target": {
-    "published_count": 100
+    "published_count": 500
   },
   "publish_target": {
     "store_name_contains": "丽丽1号",
-    "watermark_name_contains": "lysh"
+    "watermark_name_contains": "lysh",
+    "daily_store_limit": 100,
+    "rotation": [
+      { "id": 104965, "name_contains": "丽丽1号", "warehouse_id": 1020005022957960 },
+      { "id": 106637, "name_contains": "丽丽二号", "warehouse_id": null },
+      { "id": 106640, "name_contains": "丽丽三号", "warehouse_id": null },
+      { "id": 106644, "name_contains": "丽丽四号", "warehouse_id": null },
+      { "id": 106646, "name_contains": "丽丽五号", "warehouse_id": null }
+    ]
   },
   "source": {
     "ozon_store_scroll_required": true,

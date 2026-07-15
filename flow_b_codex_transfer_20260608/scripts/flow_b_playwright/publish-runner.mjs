@@ -39,6 +39,34 @@ export function offerIdForSku(skuValue, date = new Date()) {
   return `mz-${offerDate(date)}-${sku}`;
 }
 
+function localDateKey(value, timeZone) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${byType.year}-${byType.month}-${byType.day}`;
+}
+
+export function restoredDailyStoreUsage(entries, storeId, at = new Date(), timeZone = "Asia/Shanghai") {
+  const targetDay = localDateKey(at, timeZone);
+  const skus = new Set();
+  for (const entry of entries || []) {
+    const data = entry?.data || {};
+    if (Number(data.store_id) !== Number(storeId)) continue;
+    if (entry?.status !== "published" && data.submitted !== true && data.submission_pending !== true) continue;
+    const timestamp = data.submitted_at || data.published_at || data.reconciled_at || data.prepared_at;
+    if (localDateKey(timestamp, timeZone) !== targetDay) continue;
+    const sku = String(entry?.sku ?? data.sku ?? "").trim();
+    if (sku) skus.add(sku);
+  }
+  return skus.size;
+}
+
 function rounded(value) {
   return Math.round(Number(value) * 100) / 100;
 }
@@ -166,6 +194,8 @@ export function createPublishRunner({
   onlineSyncIntervalMs = 1_800_000,
   warehouseId = null,
   initialStock = 1,
+  dailyStoreLimit = 100,
+  dailyStoreTimeZone = "Asia/Shanghai",
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -186,6 +216,10 @@ export function createPublishRunner({
     throw new TypeError("warehouseId must be a positive number when configured");
   }
   if (!Number.isInteger(activationStock) || activationStock <= 0) throw new TypeError("initialStock must be a positive integer");
+  const configuredDailyStoreLimit = Number(dailyStoreLimit);
+  if (!Number.isInteger(configuredDailyStoreLimit) || configuredDailyStoreLimit <= 0) {
+    throw new TypeError("dailyStoreLimit must be a positive integer");
+  }
   const targetPlan = Array.isArray(storeTargets) && storeTargets.length > 0
     ? storeTargets.map((entry) => ({
       id: Number(entry?.id),
@@ -204,6 +238,9 @@ export function createPublishRunner({
   let haltReason = null;
   let activeTargetIndex = 0;
   const storeSwitches = [];
+  const storeDailyUsage = new Map();
+  const storeDailyLimits = new Map();
+  let storeUsageDay = null;
   const lastOnlineSyncAt = new Map();
   const adaptive = new AdaptiveConcurrency({ initial: workerCount, max: Math.max(workerCount, Number(maxConcurrency) || workerCount) });
 
@@ -324,6 +361,15 @@ export function createPublishRunner({
     publishChain = submission.catch(() => {});
     const publishResult = await submission;
     if (!publishResult?.ok) return { ok: false, reason: publishResult?.reason || "publish-not-confirmed", publish_result: publishResult ?? null };
+    const submittedStoreId = Number(targetConfig.store.id);
+    storeDailyUsage.set(submittedStoreId, Number(storeDailyUsage.get(submittedStoreId) || 0) + 1);
+    recordMetric("store_daily_usage.jsonl", {
+      store_id: submittedStoreId,
+      sku,
+      usage: storeDailyUsage.get(submittedStoreId),
+      limit: storeDailyLimits.get(submittedStoreId) || configuredDailyStoreLimit,
+      event: "submission-accepted",
+    });
     await maybeSyncOnlineShop(targetConfig);
     const confirmation = await confirmPublication(sku, payload, targetConfig);
     if (confirmation.reason === "daily-product-limit") haltReason = confirmation.reason;
@@ -453,6 +499,7 @@ export function createPublishRunner({
         cate_rate: profit.cate_rate,
         cate_fee: profit.cate_fee,
         store_id: targetConfig.store.id,
+        store_name: targetConfig.store.name ?? targetConfig.store.title ?? "",
         watermark_id: targetConfig.watermark.id,
         offer_id: finalResult.import_log?.offer_id || payload.rows[0].offer_id,
         store_sku: onlineProduct.sku,
@@ -473,6 +520,15 @@ export function createPublishRunner({
 
   async function run() {
     await state.load?.();
+    const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
+    const currentUsageDay = localDateKey(now(), dailyStoreTimeZone);
+    if (storeUsageDay !== currentUsageDay) {
+      storeUsageDay = currentUsageDay;
+      storeDailyUsage.clear();
+      storeDailyLimits.clear();
+      if (targetConfigCache?.targets) targetConfigCache.targets = {};
+      if (targetConfigCache?.value) delete targetConfigCache.value;
+    }
     try {
       const syncEvents = await fs.readFile(path.join(runDir, "store_syncs.jsonl"), "utf8");
       for (const line of syncEvents.split(/\n/).filter(Boolean)) {
@@ -490,13 +546,9 @@ export function createPublishRunner({
       if (error?.code !== "ENOENT") throw error;
     }
     state.summary?.(targetCount);
-    async function resolveTargetConfig(index) {
+    async function resolveTargetConfig(index, { allowExhausted = false } = {}) {
       const spec = targetPlan[index];
       const cacheKey = String(spec.id);
-      const cached = targetPlan.length === 1
-        ? targetConfigCache?.value
-        : targetConfigCache?.targets?.[cacheKey];
-      if (cached) return cached;
       let resolved = await client.resolvePublishTarget({
         storeNeedle: spec.needle,
         watermarkNeedle,
@@ -506,7 +558,18 @@ export function createPublishRunner({
       const dailyCreate = resolved.store?.product_limit?.daily_create;
       const dailyLimit = Number(dailyCreate?.limit);
       const dailyUsage = Number(dailyCreate?.usage);
-      if (dailyLimit > 0 && dailyUsage >= dailyLimit) {
+      const effectiveDailyLimit = dailyLimit > 0
+        ? Math.min(configuredDailyStoreLimit, dailyLimit)
+        : configuredDailyStoreLimit;
+      const restoredUsage = restoredDailyStoreUsage(restoredEntries, spec.id, now(), dailyStoreTimeZone);
+      const effectiveDailyUsage = Math.max(
+        Number(storeDailyUsage.get(spec.id) || 0),
+        Number.isFinite(dailyUsage) && dailyUsage > 0 ? dailyUsage : 0,
+        restoredUsage,
+      );
+      storeDailyLimits.set(spec.id, effectiveDailyLimit);
+      storeDailyUsage.set(spec.id, effectiveDailyUsage);
+      if (!allowExhausted && effectiveDailyUsage >= effectiveDailyLimit) {
         const error = new Error(`daily creation quota exhausted for store ${spec.id}`);
         error.code = "STORE_DAILY_LIMIT";
         throw error;
@@ -588,7 +651,6 @@ export function createPublishRunner({
       if (!targetConfig) throw error;
     }
     const facts = await loadCandidateFacts(runDir);
-    const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
     const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
     const favorites = (await client.listFavorites()).map((item) => {
       const sku = String(item?.sku ?? item?.id ?? "");
@@ -640,6 +702,19 @@ export function createPublishRunner({
         return { status: "ignored", sku };
       }
       if (restoredStatus === "processing" || restoredStatus === "failed") {
+        let reconciliationTarget = targetConfig;
+        const restoredStoreId = Number(item.store_id || 0);
+        if (restoredStoreId > 0 && restoredStoreId !== Number(targetConfig.store.id)) {
+          const restoredTargetIndex = targetPlan.findIndex((entry) => Number(entry.id) === restoredStoreId);
+          if (restoredTargetIndex < 0) {
+            await state.transition(sku, "failed", {
+              ...item,
+              reason: "reconciliation-store-not-configured",
+            });
+            return { status: "failed", sku, reason: "reconciliation-store-not-configured" };
+          }
+          reconciliationTarget = await resolveTargetConfig(restoredTargetIndex, { allowExhausted: true });
+        }
         const nextReconcileAt = Date.parse(item.next_reconcile_at || "");
         if ((item.submitted || item.submission_pending)
           && Number.isFinite(nextReconcileAt)
@@ -648,7 +723,7 @@ export function createPublishRunner({
         }
         try {
           const importLog = await client.findImportLog({
-            shopId: targetConfig.store.id,
+            shopId: reconciliationTarget.store.id,
             sku,
             offerId: item.offer_id || undefined,
           });
@@ -662,7 +737,7 @@ export function createPublishRunner({
           if (["all_imported", "imported"].includes(importStatus)) {
             const confirmed = await confirmPublication(sku, {
               rows: [{ offer_id: importLog.offer_id || item.offer_id }],
-            }, targetConfig);
+            }, reconciliationTarget);
             const existing = confirmed.online_product;
             if (!confirmed.ok || !existing) {
               const reason = confirmed.reason || "reconciliation-online-product-missing";
@@ -678,6 +753,8 @@ export function createPublishRunner({
             await state.recordPublished({
               ...item,
               sku,
+              store_id: reconciliationTarget.store.id,
+              store_name: reconciliationTarget.store.name ?? reconciliationTarget.store.title ?? "",
               offer_id: importLog.offer_id,
               store_sku: existing.sku,
               product_id: existing.product_id,
@@ -694,16 +771,16 @@ export function createPublishRunner({
           const pendingOfferId = importLog?.offer_id || item.offer_id;
           if (pendingOfferId && (importLog || item.submitted || item.submission_pending)) {
             let existing = await client.findOnlineProduct({
-              shopId: targetConfig.store.id,
+              shopId: reconciliationTarget.store.id,
               offerId: pendingOfferId,
             });
-            const targetWarehouseId = Number(targetConfig.warehouseId || 0);
+            const targetWarehouseId = Number(reconciliationTarget.warehouseId || 0);
             if (targetWarehouseId > 0
               && Number(existing?.sku) > 0
               && String(existing?.online_status || "") === "ready_to_sell"
               && Number(existing?.stock) <= 0) {
               const stockUpdate = await client.updateProductStock({
-                shopId: targetConfig.store.id,
+                shopId: reconciliationTarget.store.id,
                 product: existing,
                 warehouseId: targetWarehouseId,
                 stock: activationStock,
@@ -712,7 +789,7 @@ export function createPublishRunner({
                 && stockUpdate.result.some((row) => row?.updated === true && (!Array.isArray(row?.errors) || row.errors.length === 0));
               if (updated) {
                 existing = await client.findOnlineProduct({
-                  shopId: targetConfig.store.id,
+                  shopId: reconciliationTarget.store.id,
                   offerId: pendingOfferId,
                 });
               }
@@ -721,6 +798,8 @@ export function createPublishRunner({
               await state.recordPublished({
                 ...item,
                 sku,
+                store_id: reconciliationTarget.store.id,
+                store_name: reconciliationTarget.store.name ?? reconciliationTarget.store.title ?? "",
                 offer_id: pendingOfferId,
                 store_sku: existing.sku,
                 product_id: existing.product_id,
@@ -771,8 +850,20 @@ export function createPublishRunner({
       && !haltReason
       && (!deadlineAt || Date.now() < Date.parse(deadlineAt))
       && (dryLimit === 0 || dryCandidates < dryLimit)) {
+      const activeStoreId = Number(targetConfig.store.id);
+      const remainingStoreQuota = Number(storeDailyLimits.get(activeStoreId) || configuredDailyStoreLimit)
+        - Number(storeDailyUsage.get(activeStoreId) || 0);
+      if (remainingStoreQuota <= 0) {
+        haltReason = "daily-product-limit";
+        const nextConfig = await advanceStore(haltReason, targetConfig);
+        if (nextConfig) {
+          targetConfig = nextConfig;
+          continue;
+        }
+        break;
+      }
       const nearTarget = published >= targetCount - (adaptive.current - 1);
-      const width = nearTarget ? 1 : adaptive.current;
+      const width = Math.min(remainingStoreQuota, nearTarget ? 1 : adaptive.current);
       const batch = candidates.slice(cursor, cursor + width);
       cursor += batch.length;
       const results = await Promise.all(batch.map(handleCandidate));
@@ -799,6 +890,9 @@ export function createPublishRunner({
           else if (result.status === "skipped") skipped += 1;
         }
       }
+      const currentStoreId = Number(targetConfig.store.id);
+      const currentStoreLimit = Number(storeDailyLimits.get(currentStoreId) || configuredDailyStoreLimit);
+      if (Number(storeDailyUsage.get(currentStoreId) || 0) >= currentStoreLimit) haltReason = "daily-product-limit";
       if (haltReason === "daily-product-limit") {
         const nextConfig = await advanceStore(haltReason, targetConfig);
         if (nextConfig) targetConfig = nextConfig;
@@ -819,6 +913,16 @@ export function createPublishRunner({
       halt_reason: haltReason,
       active_store_id: Number(targetConfig?.store?.id || 0),
       store_switches: storeSwitches,
+      store_submitted_usage: Object.fromEntries([...storeDailyUsage].map(([id, usage]) => [String(id), usage])),
+      store_confirmed_count: Object.fromEntries(
+        [...(typeof state.entries === "function" ? state.entries() : [])]
+          .filter((entry) => entry.status === "published" && Number(entry.data?.store_id) > 0)
+          .reduce((counts, entry) => {
+            const id = String(Number(entry.data.store_id));
+            counts.set(id, Number(counts.get(id) || 0) + 1);
+            return counts;
+          }, new Map()),
+      ),
       state_summary: state.summary?.(targetCount),
     };
   }

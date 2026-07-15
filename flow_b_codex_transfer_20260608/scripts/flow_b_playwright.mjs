@@ -16,8 +16,15 @@ import { runReadOnlyVerification } from "./flow_b_playwright/verification.mjs";
 import { acceptanceSummary, collectionErrorSummary, isFatalBrowserError, operationalErrorSummary, rankSourcesByYield, runProducerLoop, summarizeConsumerRound } from "./flow_b_playwright/continuous-runtime.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
-const DEFAULT_RUN_DIR = path.join(ROOT, "runs/flow_b/playwright_target100");
+const DEFAULT_RUN_DIR = path.join(ROOT, "runs/flow_b/playwright_target500");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
+const DEFAULT_STORE_TARGETS = Object.freeze([
+  { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
+  { id: 106637, needle: "丽丽二号", warehouseId: null, requireWarehouse: true },
+  { id: 106640, needle: "丽丽三号", warehouseId: null, requireWarehouse: true },
+  { id: 106644, needle: "丽丽四号", warehouseId: null, requireWarehouse: true },
+  { id: 106646, needle: "丽丽五号", warehouseId: null, requireWarehouse: true },
+]);
 
 function required(value, label) {
   if (!value || String(value).startsWith("--")) throw new Error(`${label} is required`);
@@ -26,7 +33,7 @@ function required(value, label) {
 
 function runtimeDefaults(env) {
   const threshold = Number(env.FLOW_B_PROFIT_THRESHOLD ?? 30);
-  const target = Number(env.FLOW_B_TARGET_PUBLISH_COUNT ?? 100);
+  const target = Number(env.FLOW_B_TARGET_PUBLISH_COUNT ?? 500);
   if (!Number.isFinite(threshold)) throw new Error("FLOW_B_PROFIT_THRESHOLD must be numeric");
   if (!Number.isInteger(target) || target <= 0) throw new Error("FLOW_B_TARGET_PUBLISH_COUNT must be a positive integer");
   const storeNeedle = String(env.FLOW_B_STORE_NEEDLE ?? "丽丽1号").trim();
@@ -38,7 +45,7 @@ function runtimeDefaults(env) {
 
 export function parseStoreTargets(env = process.env) {
   const source = String(env.FLOW_B_STORE_TARGETS || "").trim();
-  if (!source) return null;
+  if (!source) return DEFAULT_STORE_TARGETS.map((row) => ({ ...row }));
   let rows;
   try {
     rows = JSON.parse(source);
@@ -147,6 +154,8 @@ async function createPublishingSession(context, options, env, shared) {
       onlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_ONLINE_SYNC_INTERVAL_MS) || 1_800_000),
       warehouseId: env.FLOW_B_WAREHOUSE_ID || null,
       initialStock: Math.max(1, Number(env.FLOW_B_INITIAL_STOCK) || 1),
+      dailyStoreLimit: Math.max(1, Number(env.FLOW_B_DAILY_STORE_LIMIT) || 100),
+      dailyStoreTimeZone: env.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
     });
     return { maoziPage, costBridge, detailProvider, runner };
   } catch (error) {
@@ -400,7 +409,7 @@ function printHelp() {
   flow_b_playwright.mjs accept RUN_DIR URLS.txt
 
 Required for browser commands: FLOW_B_EXTENSION_DIR=/path/to/unpacked/maozi-plugin
-Defaults: profit_rate > 30, target 100, store contains 丽丽1号, watermark contains lysh`);
+Defaults: profit_rate > 30, target 500, five verified stores with a 100/store/day cap, watermark contains lysh`);
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
