@@ -129,14 +129,15 @@ export function favoriteFailureDisposition(error) {
   const message = String(error?.message || error || "");
   if (/^non-pure-fbs:/i.test(message)) return { status: "rejected", reason: "non-pure-fbs" };
   if (/^missing-shipping-mode:/i.test(message)) return { status: "rejected", reason: "missing-shipping-mode" };
-  if (/^non-cny-sale-price:/i.test(message)) return { status: "rejected", reason: "non-cny-sale-price" };
   if (/^source-price-above-limit:/i.test(message)) return { status: "rejected", reason: "source-price-above-limit" };
   return { status: "failed", reason: null };
 }
 
 export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
-  if (String(productInfo?.price_info?.currency || "").toUpperCase() !== "CNY") return "non-cny-sale-price";
-  if (Number(productInfo?.price_info?.sell_price) > Math.max(0, Number(maxPrice) || 0)) return "source-price-above-limit";
+  const currency = String(productInfo?.price_info?.currency || "").toUpperCase();
+  if (currency === "CNY" && Number(productInfo?.price_info?.sell_price) > Math.max(0, Number(maxPrice) || 0)) {
+    return "source-price-above-limit";
+  }
   return null;
 }
 
@@ -588,7 +589,10 @@ export function excludedSkusFromHistories({ stateTexts = [], favoriteTexts = [] 
       try {
         const event = JSON.parse(line);
         const deterministicMissingMode = event?.status === "failed" && /^missing-shipping-mode:/i.test(String(event?.error || ""));
-        if ((event?.status === "rejected" || deterministicMissingMode) && event?.sku) excluded.add(String(event.sku));
+        const needsCurrencyRecheck = event?.status === "rejected" && event?.reason === "non-cny-sale-price";
+        if (((event?.status === "rejected" && !needsCurrencyRecheck) || deterministicMissingMode) && event?.sku) {
+          excluded.add(String(event.sku));
+        }
       } catch {}
     }
   }

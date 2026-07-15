@@ -389,14 +389,11 @@ test("missing shipping mode is a deterministic rejection, not an infinite retry"
   });
 });
 
-test("collection accepts bounded CNY source prices and rejects RUB or implausibly expensive rows", () => {
+test("collection rechecks RUB rows in detail and rejects only explicit expensive CNY rows", () => {
   assert.equal(favoritePriceSkipReason({ price_info: { currency: "CNY", sell_price: 88 } }, 1000), null);
-  assert.equal(favoritePriceSkipReason({ price_info: { currency: "RUB", sell_price: 19114 } }, 1000), "non-cny-sale-price");
+  assert.equal(favoritePriceSkipReason({ price_info: { currency: "RUB", sell_price: 19114 } }, 1000), null);
+  assert.equal(favoritePriceSkipReason({ price_info: { sell_price: 19114 } }, 1000), null);
   assert.equal(favoritePriceSkipReason({ price_info: { currency: "CNY", sell_price: 1200 } }, 1000), "source-price-above-limit");
-  assert.deepEqual(favoriteFailureDisposition(new Error("non-cny-sale-price: SKU 42")), {
-    status: "rejected",
-    reason: "non-cny-sale-price",
-  });
 });
 
 test("favorite payload parser rejects incomplete Ozon details", () => {
@@ -608,6 +605,7 @@ test("cross-run seeds skip deterministic outcomes but retry transient favorite f
     ].join("\n")],
     favoriteTexts: [[
       JSON.stringify({ sku: "non-fbs", status: "rejected", reason: "non-pure-fbs" }),
+      JSON.stringify({ sku: "currency-recheck", status: "rejected", reason: "non-cny-sale-price" }),
       JSON.stringify({ sku: "missing-mode", status: "failed", error: "missing-shipping-mode: SKU missing-mode" }),
       JSON.stringify({ sku: "soft-block", status: "failed", error: "Ozon detail soft blocked" }),
     ].join("\n")],
