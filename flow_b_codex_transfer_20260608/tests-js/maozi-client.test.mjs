@@ -372,3 +372,38 @@ test("browser transport retries GET requests through a short HTTP 0 outage", asy
   assert.equal(calls, 5);
   assert.deepEqual(delays, [750, 1_500, 3_000, 5_000]);
 });
+
+test("browser transport falls back to the authenticated context request after persistent HTTP 0", async () => {
+  const calls = [];
+  const page = {
+    evaluate: async (_fn, request) => request
+      ? ({ status: 0, json: { error: "Failed to fetch" } })
+      : "token-from-page",
+  };
+  const context = {
+    request: {
+      fetch: async (url, options) => {
+        calls.push({ url, options });
+        return {
+          status: () => 200,
+          text: async () => JSON.stringify({ code: 1, data: [{ id: 106637 }] }),
+        };
+      },
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    context,
+    maxGetAttempts: 2,
+    retrySleep: async () => {},
+  });
+
+  assert.deepEqual(await transport("/api.shop/lists", { query: { page: 2 } }), {
+    status: 200,
+    json: { code: 1, data: [{ id: 106637 }] },
+  });
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /api\.shop\/lists\?page=2$/);
+  assert.equal(calls[0].options.headers.Authorization, "Bearer token-from-page");
+  assert.equal(calls[0].options.headers.Client, "pc");
+});

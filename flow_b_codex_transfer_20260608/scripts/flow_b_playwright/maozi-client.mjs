@@ -283,6 +283,38 @@ export function createMaoziPageTransport({
       return { status: 0, json: { error: String(error?.message || error) } };
     }
   }, request);
+  const contextRequest = async (activePage, request) => {
+    if (!context?.request || typeof context.request.fetch !== "function") return null;
+    const token = await activePage.evaluate(() => {
+      try {
+        return JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "";
+      } catch {
+        return "";
+      }
+    });
+    const url = new URL(request.endpoint, request.baseUrl);
+    for (const [key, value] of Object.entries(request.query || {})) {
+      for (const entry of Array.isArray(value) ? value : [value]) {
+        if (entry !== undefined && entry !== null) url.searchParams.append(key, String(entry));
+      }
+    }
+    const headers = { "Accept-Language": "zh-CN", Client: "pc" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const options = { method: request.method, headers };
+    if (request.body !== undefined && request.body !== null && request.method !== "GET") {
+      headers["Content-Type"] = "application/json";
+      options.data = request.body;
+    }
+    const response = await context.request.fetch(url.toString(), options);
+    const text = await response.text();
+    let json;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = { raw: text };
+    }
+    return { status: typeof response.status === "function" ? response.status() : Number(response.status), json };
+  };
   return async (endpoint, { method = "GET", query, body } = {}) => {
     const request = {
       baseUrl,
@@ -301,7 +333,13 @@ export function createMaoziPageTransport({
           Number(result?.status) === 0
           || /请求过于频繁|too many requests|rate.?limit|failed to fetch/i.test(String(result?.json?.msg || result?.json?.message || result?.json?.error || ""))
         );
-        if (!transientGet || attempt + 1 >= attempts) return result;
+        if (!transientGet || attempt + 1 >= attempts) {
+          if (Number(result?.status) === 0) {
+            const fallback = await contextRequest(page, request).catch(() => null);
+            if (fallback) return fallback;
+          }
+          return result;
+        }
         await retrySleep(Math.min(5_000, 750 * (2 ** attempt)));
       } catch (error) {
         lastError = error;
