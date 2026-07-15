@@ -287,7 +287,7 @@ test("runner pauses fresh submissions when the last available store import queue
     findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "pending" }),
     findOnlineProduct: async () => null,
   });
-  const result = await createPublishRunner({
+  const runner = createPublishRunner({
     client,
     costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
     state,
@@ -298,10 +298,15 @@ test("runner pauses fresh submissions when the last available store import queue
     storeTargets: [{ id: 106637, needle: "丽丽二号", requireWarehouse: false }],
     confirmationAttempts: 1,
     confirmationIntervalMs: 0,
-  }).run();
+  });
+  const result = await runner.run();
   assert.equal(publishCalls, 0);
   assert.equal(result.fresh_submissions_paused, true);
   assert.ok(state.transitions.some((entry) => entry.sku === "old-1" && entry.data.reason === "reconciliation-import-pending"));
+  const nextRound = await runner.run();
+  assert.equal(nextRound.fresh_submissions_paused, true);
+  assert.equal(publishCalls, 0);
+  assert.equal(nextRound.store_switches.filter((entry) => entry.reason === "all-store-imports-stalled").length, 1);
 });
 
 test("restored daily store usage counts unique submitted or published SKUs in the configured timezone", () => {

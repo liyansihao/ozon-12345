@@ -249,6 +249,7 @@ export function createPublishRunner({
   let storeUsageDay = null;
   const lastOnlineSyncAt = new Map();
   const unavailableStoreUntil = new Map();
+  let lastAllStoresStalledAt = 0;
   const adaptive = new AdaptiveConcurrency({ initial: workerCount, max: Math.max(workerCount, Number(maxConcurrency) || workerCount) });
 
   function recordMetric(filename, row) {
@@ -697,18 +698,23 @@ export function createPublishRunner({
     });
     if (stalledPending.length >= Math.max(1, Number(pendingStoreStallCount) || 1)) {
       const stalledStoreId = Number(targetConfig.store.id);
-      unavailableStoreUntil.set(stalledStoreId, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
       const nextConfig = await advanceStore("submission-stall", targetConfig);
-      if (nextConfig) targetConfig = nextConfig;
-      else {
+      if (nextConfig) {
+        unavailableStoreUntil.set(stalledStoreId, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
+        targetConfig = nextConfig;
+      } else {
         freshSubmissionsPaused = true;
-        const event = {
-          from_store_id: stalledStoreId,
-          to_store_id: null,
-          reason: "all-store-imports-stalled",
-        };
-        storeSwitches.push(event);
-        recordMetric("store_switches.jsonl", event);
+        const currentTime = now().getTime();
+        if (currentTime - lastAllStoresStalledAt >= Math.max(60_000, Number(unavailableStoreRetryMs) || 0)) {
+          lastAllStoresStalledAt = currentTime;
+          const event = {
+            from_store_id: stalledStoreId,
+            to_store_id: null,
+            reason: "all-store-imports-stalled",
+          };
+          storeSwitches.push(event);
+          recordMetric("store_switches.jsonl", event);
+        }
       }
     }
     const facts = await loadCandidateFacts(runDir);
