@@ -687,6 +687,7 @@ export function createPublishRunner({
       targetConfig = await advanceStore(haltReason, { store: { id: targetPlan[activeTargetIndex].id } });
       if (!targetConfig) throw error;
     }
+    let freshSubmissionsPaused = false;
     const stalledPending = restoredEntries.filter((entry) => {
       if (!["processing", "failed"].includes(entry.status)) return false;
       if (Number(entry.data?.store_id) !== Number(targetConfig.store.id)) return false;
@@ -699,6 +700,16 @@ export function createPublishRunner({
       unavailableStoreUntil.set(stalledStoreId, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
       const nextConfig = await advanceStore("submission-stall", targetConfig);
       if (nextConfig) targetConfig = nextConfig;
+      else {
+        freshSubmissionsPaused = true;
+        const event = {
+          from_store_id: stalledStoreId,
+          to_store_id: null,
+          reason: "all-store-imports-stalled",
+        };
+        storeSwitches.push(event);
+        recordMetric("store_switches.jsonl", event);
+      }
     }
     const facts = await loadCandidateFacts(runDir);
     const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
@@ -720,7 +731,7 @@ export function createPublishRunner({
         reconcile_only: true,
       }, facts.get(String(entry.sku)) || {}));
     if (delayedSubmissions.length > 0) await maybeSyncOnlineShop(targetConfig);
-    const runnableFavorites = reconciliationOnly
+    const runnableFavorites = reconciliationOnly || freshSubmissionsPaused
       ? favorites.filter((item) => {
         const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
         return restored?.data?.submitted === true || restored?.data?.submission_pending === true;
@@ -968,6 +979,7 @@ export function createPublishRunner({
       deadline_reached: Boolean(deadlineAt && Date.now() >= Date.parse(deadlineAt)),
       target: targetCount,
       halt_reason: haltReason,
+      fresh_submissions_paused: freshSubmissionsPaused,
       active_store_id: Number(targetConfig?.store?.id || 0),
       store_switches: storeSwitches,
       store_submitted_usage: Object.fromEntries([...storeDailyUsage].map(([id, usage]) => [String(id), usage])),

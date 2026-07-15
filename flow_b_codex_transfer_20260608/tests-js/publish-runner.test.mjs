@@ -272,6 +272,38 @@ test("a stalled pending-import backlog keeps reconciliation but routes fresh wor
   assert.ok(result.store_switches.some((event) => event.from_store_id === 106637 && event.to_store_id === 106640 && event.reason === "submission-stall"));
 });
 
+test("runner pauses fresh submissions when the last available store import queue is stalled", async () => {
+  const state = fakeState({
+    "old-1": { status: "processing", data: { store_id: 106637, submitted: true, prepared_at: "2026-07-15T09:00:00.000Z" } },
+    "old-2": { status: "processing", data: { store_id: 106637, submission_pending: true, prepared_at: "2026-07-15T09:01:00.000Z" } },
+  });
+  let publishCalls = 0;
+  const client = clientFor([{ id: 209, sku: 209 }], {
+    resolvePublishTarget: async () => ({
+      store: { id: 106637, name: "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async () => { publishCalls += 1; return { ok: true }; },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "pending" }),
+    findOnlineProduct: async () => null,
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    pendingStoreStallMs: 60_000,
+    pendingStoreStallCount: 2,
+    storeTargets: [{ id: 106637, needle: "丽丽二号", requireWarehouse: false }],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+  assert.equal(publishCalls, 0);
+  assert.equal(result.fresh_submissions_paused, true);
+  assert.ok(state.transitions.some((entry) => entry.sku === "old-1" && entry.data.reason === "reconciliation-import-pending"));
+});
+
 test("restored daily store usage counts unique submitted or published SKUs in the configured timezone", () => {
   const entries = [
     { sku: "1", status: "processing", data: { store_id: 104965, submitted: true, submitted_at: "2026-07-15T00:01:00Z" } },
