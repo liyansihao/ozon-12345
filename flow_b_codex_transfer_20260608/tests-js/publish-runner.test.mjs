@@ -431,6 +431,62 @@ test("runner rechecks store health after rotating and pauses when every configur
   assert.deepEqual(result.store_switches.map((entry) => entry.reason), ["submission-stall", "all-store-imports-stalled"]);
 });
 
+test("persistent rotation wraps from the last stalled store to an earlier recovered store", async () => {
+  let current = new Date("2026-07-15T10:00:00.000Z");
+  let favorites = [{ id: 501, sku: 501 }];
+  const state = fakeState({
+    "store-a-old": {
+      status: "processing",
+      data: { store_id: 106637, submitted: true, prepared_at: "2026-07-15T09:00:00.000Z" },
+    },
+  });
+  const shopIds = [];
+  const client = clientFor([], {
+    listFavorites: async () => favorites,
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽三号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => {
+      shopIds.push(payload.shop_ids[0]);
+      return { ok: true, response: { code: 1 } };
+    },
+    findImportLog: async ({ sku, offerId }) => ["store-a-old", "501"].includes(String(sku))
+      ? ({ sku, offer_id: offerId, import_status: "pending" })
+      : ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async ({ offerId }) => String(offerId).includes("501")
+      ? null
+      : ({ sku: 900001, offer_id: offerId, online_status: "selling", stock: 1 }),
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => current,
+    pendingStoreStallMs: 60_000,
+    pendingStoreStallCount: 1,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  });
+
+  await runner.run();
+  await state.transition("store-a-old", "skipped", { reason: "released-for-test" });
+  current = new Date("2026-07-15T10:06:00.000Z");
+  favorites = [{ id: 502, sku: 502 }];
+  const second = await runner.run();
+
+  assert.deepEqual(shopIds, [106640, 106637]);
+  assert.equal(second.published, 1);
+  assert.ok(second.store_switches.some((event) => event.from_store_id === 106640
+    && event.to_store_id === 106637
+    && event.reason === "submission-stall"));
+});
+
 test("restored daily store usage counts unique submitted or published SKUs in the configured timezone", () => {
   const entries = [
     { sku: "1", status: "processing", data: { store_id: 104965, submitted: true, submitted_at: "2026-07-15T00:01:00Z" } },

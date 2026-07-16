@@ -246,6 +246,7 @@ export function createPublishRunner({
   unavailableStoreRetryMs = 1_800_000,
   pendingStoreStallMs = 300_000,
   pendingStoreStallCount = 3,
+  pendingStoreRetryMs = 300_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -844,10 +845,13 @@ export function createPublishRunner({
       });
     }
 
-    async function advanceStore(reason, currentConfig) {
+    async function advanceStore(reason, currentConfig, { excludedStoreIds = new Set() } = {}) {
       const fromStoreId = Number(currentConfig?.store?.id || targetPlan[activeTargetIndex]?.id);
-      while (activeTargetIndex + 1 < targetPlan.length) {
-        activeTargetIndex += 1;
+      const startingIndex = activeTargetIndex;
+      for (let offset = 1; offset < targetPlan.length; offset += 1) {
+        const candidateIndex = (startingIndex + offset) % targetPlan.length;
+        if (excludedStoreIds.has(Number(targetPlan[candidateIndex].id))) continue;
+        activeTargetIndex = candidateIndex;
         try {
           const nextConfig = await resolveTargetConfig(activeTargetIndex);
           storeSwitches.push({ from_store_id: fromStoreId, to_store_id: Number(nextConfig.store.id), reason });
@@ -865,9 +869,11 @@ export function createPublishRunner({
           });
         }
       }
+      activeTargetIndex = startingIndex;
       return null;
     }
 
+    const stalledStoresThisRun = new Set();
     let targetConfig;
     try {
       targetConfig = await resolveTargetConfig(activeTargetIndex);
@@ -883,14 +889,17 @@ export function createPublishRunner({
       const stalledPending = stalledPendingForStore(targetConfig.store.id);
       if (stalledPending.length < Math.max(1, Number(pendingStoreStallCount) || 1)) break;
       const stalledStoreId = Number(targetConfig.store.id);
-      const nextConfig = await advanceStore("submission-stall", targetConfig);
+      stalledStoresThisRun.add(stalledStoreId);
+      const nextConfig = await advanceStore("submission-stall", targetConfig, {
+        excludedStoreIds: stalledStoresThisRun,
+      });
       if (nextConfig) {
-        unavailableStoreUntil.set(stalledStoreId, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
+        unavailableStoreUntil.set(stalledStoreId, now().getTime() + Math.max(0, Number(pendingStoreRetryMs) || 0));
         targetConfig = nextConfig;
       } else {
         freshSubmissionsPaused = true;
         const currentTime = now().getTime();
-        if (currentTime - lastAllStoresStalledAt >= Math.max(60_000, Number(unavailableStoreRetryMs) || 0)) {
+        if (currentTime - lastAllStoresStalledAt >= Math.max(60_000, Number(pendingStoreRetryMs) || 0)) {
           lastAllStoresStalledAt = currentTime;
           const event = {
             from_store_id: stalledStoreId,
@@ -1147,9 +1156,12 @@ export function createPublishRunner({
         || nextCandidate?.submission_pending === true;
       if (!nextIsReconciliation
         && stalledPendingForStore(activeStoreId).length >= Math.max(1, Number(pendingStoreStallCount) || 1)) {
-        const nextConfig = await advanceStore("submission-stall", targetConfig);
+        stalledStoresThisRun.add(activeStoreId);
+        const nextConfig = await advanceStore("submission-stall", targetConfig, {
+          excludedStoreIds: stalledStoresThisRun,
+        });
         if (nextConfig) {
-          unavailableStoreUntil.set(activeStoreId, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
+          unavailableStoreUntil.set(activeStoreId, now().getTime() + Math.max(0, Number(pendingStoreRetryMs) || 0));
           targetConfig = nextConfig;
           continue;
         }
