@@ -221,7 +221,9 @@ export function softBlockCooldownState({ streak = 0, lastBlockedAt = 0, now = Da
 }
 
 export function sourceBatchCooldownState(rows, state, now = Date.now()) {
-  const blocked = (rows || []).some((row) => row?.blocked || isOzonSoftBlock(`${row?.title || ""} ${row?.stop_reason || ""}`));
+  const batch = rows || [];
+  const blockedCount = batch.filter((row) => row?.blocked || isOzonSoftBlock(`${row?.title || ""} ${row?.stop_reason || ""}`)).length;
+  const blocked = blockedCount >= Math.floor(batch.length / 2) + 1;
   if (!blocked) {
     state.detailSoftBlockStreak = 0;
     state.lastDetailSoftBlockAt = 0;

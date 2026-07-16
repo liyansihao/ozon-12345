@@ -761,6 +761,20 @@ test("one blocked source batch creates one shared cooldown incident", () => {
   assert.equal(state.detailSoftBlockStreak, 0);
 });
 
+test("one isolated blocked source only lowers concurrency without pausing the producer", () => {
+  const state = { detailSoftBlockStreak: 0, lastDetailSoftBlockAt: 0, detailBlockedUntil: 0 };
+  const result = sourceBatchCooldownState([
+    { blocked: true, stop_reason: "blocked_or_empty" },
+    { blocked: false, stop_reason: "max_steps" },
+    { blocked: false, stop_reason: "stable_bottom" },
+    { blocked: false, stop_reason: "max_steps" },
+    { blocked: false, stop_reason: "stable_bottom" },
+  ], state, 10_000);
+  assert.deepEqual(result, { blocked: false, delay: 0 });
+  assert.equal(state.detailSoftBlockStreak, 0);
+  assert.equal(state.detailBlockedUntil, 0);
+});
+
 test("collection pacing and cooldown state persists across producer tranches", () => {
   const key = `run-${Date.now()}-${Math.random()}`;
   const first = collectionRuntimeState(key);
