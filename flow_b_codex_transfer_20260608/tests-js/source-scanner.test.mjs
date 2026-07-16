@@ -300,6 +300,39 @@ test("full-funnel source yield promotes repeated pure-FBS favorites over rejecte
   assert.deepEqual(prioritizeSourceUrls([rejected, pureFbs], { yieldRows: rows }), [pureFbs, rejected]);
 });
 
+test("strict submissions are a stronger leading source signal than favorites", () => {
+  const favoriteOnly = "https://www.ozon.ru/seller/favorite-only/";
+  const submitted = "https://www.ozon.ru/seller/submitted/";
+  const rows = [
+    ...Array.from({ length: 3 }, (_, i) => ({ source_url: favoriteOnly, sku: `f-${i}`, status: "favorited" })),
+    ...Array.from({ length: 3 }, (_, i) => ({ source_url: submitted, sku: `s-${i}`, status: "submitted" })),
+  ];
+  assert.deepEqual(prioritizeSourceUrls([favoriteOnly, submitted], { yieldRows: rows }), [submitted, favoriteOnly]);
+});
+
+test("recent strict submissions keep a verified seller out of the dry-tail penalty", () => {
+  const productive = "https://www.ozon.ru/seller/recent-submitted/";
+  const untried = "https://www.ozon.ru/seller/untried/";
+  const rows = [
+    ...Array.from({ length: 12 }, (_, index) => ({
+      at: `2026-07-16T00:${String(index).padStart(2, "0")}:00Z`,
+      source_url: `${productive}?page=${index + 2}`,
+      sku: `reject-${index}`,
+      status: "rejected",
+    })),
+    ...Array.from({ length: 2 }, (_, index) => ({
+      at: `2026-07-16T00:${12 + index}:00Z`,
+      source_url: productive,
+      sku: `submitted-${index}`,
+      status: "submitted",
+    })),
+  ];
+  assert.deepEqual(prioritizeSourceUrls([productive, untried], {
+    yieldRows: rows,
+    verifiedFreshSourceUrls: [productive, untried],
+  }), [productive, untried]);
+});
+
 test("an exhausted one-hit seller yields to an untried verified seller family", () => {
   const exhausted = "https://www.ozon.ru/seller/one-hit/?currency_price=50.000%3B";
   const untried = "https://www.ozon.ru/seller/untried/";

@@ -604,7 +604,7 @@ export function verifiedPrioritySourceUrls({
 
 function fullFunnelSourceScores(rows) {
   const sources = new Map();
-  const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, published: 3 };
+  const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
   for (const row of rows || []) {
     const key = sourceYieldKey(row?.source_url);
     const sku = String(row?.sku || "").trim();
@@ -617,10 +617,12 @@ function fullFunnelSourceScores(rows) {
   return new Map([...sources].map(([key, outcomes]) => {
     const attempted = outcomes.size;
     const published = [...outcomes.values()].filter((rank) => rank === outcomeRank.published).length;
+    const submitted = [...outcomes.values()].filter((rank) => rank === outcomeRank.submitted).length;
     const pureFbs = [...outcomes.values()].filter((rank) => rank === outcomeRank.favorited).length;
-    const qualifiedYield = published + pureFbs * 0.35;
+    const qualifiedYield = published + submitted * 0.65 + pureFbs * 0.35;
     const score = ((qualifiedYield + 0.5) / (attempted + 5)) * 100_000
       + Math.log1p(published) * 1000
+      + Math.log1p(submitted) * 500
       + Math.log1p(pureFbs) * 100;
     return [key, score];
   }));
@@ -632,9 +634,9 @@ function exhaustedSellerFamilyPenalties(rows) {
     const key = sourceUrlKey(row?.source_url);
     const sku = String(row?.sku || "").trim();
     const status = String(row?.status || "");
-    if (!canonicalSellerUrl(key) || !sku || !["favorited", "published", "rejected", "skipped"].includes(status)) return;
+    if (!canonicalSellerUrl(key) || !sku || !["favorited", "submitted", "published", "rejected", "skipped"].includes(status)) return;
     const family = families.get(key) || { outcomes: new Map(), events: [] };
-    const productive = status === "favorited" || status === "published";
+    const productive = status === "favorited" || status === "submitted" || status === "published";
     family.outcomes.set(sku, Boolean(family.outcomes.get(sku)) || productive);
     family.events.push({
       sku,
