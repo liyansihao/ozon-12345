@@ -816,12 +816,13 @@ export function cachedExactFbsFallbackLinks(records, {
   attempted = new Set(),
   limit = 24,
   familyScores = {},
+  yieldRows = [],
 } = {}) {
   const maximum = Math.max(0, Number(limit) || 0);
   if (maximum === 0) return [];
   const result = [];
   const seen = new Set();
-  const eligibleRows = (records || []).map((row) => ({
+  const eligibleRows = orderRowsBySourceYield((records || []).map((row) => ({
     ...row,
     links: (row?.links || []).map((link) => ({ ...link, source_url: row.source_url }))
       .filter((link) => {
@@ -829,7 +830,7 @@ export function cachedExactFbsFallbackLinks(records, {
         return sku && !attempted.has(sku) && !favoriteTitleSkipReason(link?.text)
           && Boolean(parseListingFavoriteSnapshot(link));
       }),
-  })).filter((row) => row.links.length > 0);
+  })).filter((row) => row.links.length > 0), yieldRows);
   for (const link of limitLinksPerSource(eligibleRows, maximum, familyScores)) {
     const sku = skuFromProductUrl(link?.href);
     if (!sku || seen.has(sku)) continue;
@@ -1502,6 +1503,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           attempted,
           limit: fallbackLimit,
           familyScores: titleFamilyScores,
+          yieldRows,
         }), fallbackLimit);
         retainedLinks.splice(0, retainedLinks.length, ...filled);
       }

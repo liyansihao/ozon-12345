@@ -479,6 +479,30 @@ test("cached fallback filters attempted cards before applying its per-source cap
   ], { attempted: new Set(["2001", "2002"]), limit: 2 }).map((row) => row.href), [survivor.href]);
 });
 
+test("cached fallback prioritizes sources with verified publication yield", () => {
+  const card = (sku) => ({
+    href: `https://www.ozon.ru/product/item-${sku}/`,
+    text: `Аксессуар ${sku}`,
+    image_url: `https://ir.ozone.ru/${sku}.jpg`,
+    card_text: "999 ₽\n发货模式：FBS\n库存",
+  });
+  const weak = "https://www.ozon.ru/seller/weak/";
+  const strong = "https://www.ozon.ru/seller/strong/";
+  assert.deepEqual(cachedExactFbsFallbackLinks([
+    { source_url: weak, links: [card("3001")] },
+    { source_url: strong, links: [card("3002")] },
+  ], {
+    limit: 2,
+    yieldRows: [
+      { source_url: weak, status: "skipped", reason: "non-pure-fbs" },
+      { source_url: strong, status: "published" },
+    ],
+  }).map((row) => row.href), [
+    "https://www.ozon.ru/product/item-3002/",
+    "https://www.ozon.ru/product/item-3001/",
+  ]);
+});
+
 test("cached fallback fills a short retained tranche without duplicating its SKU", () => {
   const retained = [{ href: "https://www.ozon.ru/product/retained-1001/" }];
   const fallback = [
