@@ -617,6 +617,21 @@ test("bounded deep pages rotate seller families before taking another same-selle
   }).slice(0, 3), [urls[0], urls[1], urls[4]]);
 });
 
+test("verified and qualified sellers share a bounded family rotation", () => {
+  const sellerA = "https://www.ozon.ru/seller/price-a/";
+  const sellerB = "https://www.ozon.ru/seller/price-b/";
+  const urls = [
+    `${sellerA}?currency_price=500.000%3B&sorting=discount&page=2`,
+    `${sellerA}?currency_price=500.000%3B&sorting=discount&page=3`,
+    `${sellerA}?currency_price=1000.000%3B&sorting=rating&page=2`,
+    `${sellerB}?currency_price=500.000%3B&sorting=discount&page=2`,
+  ];
+  assert.deepEqual(prioritizeSourceUrls(urls, {
+    verifiedFreshSourceUrls: [sellerA],
+    qualifiedFreshSourceUrls: [sellerB],
+  }).slice(0, 3), [urls[0], urls[1], urls[3]]);
+});
+
 test("a fresh search family with twelve recent dry candidates yields to an untried source", () => {
   const drySearch = "https://www.ozon.ru/search/?text=dry-family&is_global=true&sorting=rating";
   const untriedSeller = "https://www.ozon.ru/seller/untried-family/";

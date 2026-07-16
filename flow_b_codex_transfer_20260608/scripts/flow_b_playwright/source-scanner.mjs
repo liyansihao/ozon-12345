@@ -945,10 +945,13 @@ export function prioritizeSourceUrls(urls, {
     groups.set(key, group);
   });
   const ordered = [];
-  for (const tier of [4, 3, 2, 1, 0]) {
+  // Strict-success and repeated-submission sellers are both evidence-backed.
+  // Rotate those two tiers together so one seller cannot fill an entire source
+  // batch merely because its variants sit one tier above the next seller.
+  for (const tiers of [[4, 3], [2], [1], [0]]) {
     const ranked = [...groups.values()]
-      .filter((group) => group.tier === tier)
-      .sort((left, right) => right.priority - left.priority || left.index - right.index);
+      .filter((group) => tiers.includes(group.tier))
+      .sort((left, right) => right.tier - left.tier || right.priority - left.priority || left.index - right.index);
     const rounds = Math.max(0, ...ranked.map((group) => group.urls.length));
     const burst = 2;
     for (let round = 0; round < rounds; round += burst) {
