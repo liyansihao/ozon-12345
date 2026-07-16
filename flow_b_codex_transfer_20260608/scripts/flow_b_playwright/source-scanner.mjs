@@ -718,11 +718,14 @@ export function retainedRowsForCollection(records, {
   skipRetained = false,
   provenOnly = false,
   highYieldSources = [],
+  yieldRows = [],
 } = {}) {
   const successfulKeys = new Set(highYieldSources.map(sourceYieldKey));
+  const exhaustedFamilies = exhaustedSellerFamilyPenalties(yieldRows);
   return (records || []).filter((row) => {
     if (provenOnly && !isProvenSellerSource(row?.source_url)) return false;
     if (skipRetained && !successfulKeys.has(sourceYieldKey(row?.source_url))) return false;
+    if (skipRetained && (exhaustedFamilies.get(sourceUrlKey(row?.source_url)) || 0) < 0) return false;
     return true;
   });
 }
@@ -1430,6 +1433,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         skipRetained: env.FLOW_B_SKIP_RETAINED === "1",
         provenOnly: env.FLOW_B_RETAINED_PROVEN_ONLY === "1",
         highYieldSources,
+        yieldRows,
       }), yieldRows);
       const retainedCandidates = limitLinksPerSource(
         retainedRows,

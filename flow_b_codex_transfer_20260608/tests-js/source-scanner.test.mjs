@@ -502,6 +502,25 @@ test("skip-retained still resumes persisted high-yield sources", () => {
   }).map((row) => row.links[0].href), ["winner"]);
 });
 
+test("skip-retained removes a historically successful seller after a recent dry tail", () => {
+  const source = "https://www.ozon.ru/seller/stale-retained/";
+  const records = [{ source_url: source, links: [{ href: "stale" }] }];
+  const yieldRows = [
+    { source_url: source, sku: "old-win", status: "published", at: "2026-07-15T00:00:00Z" },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      source_url: `${source}?page=${index + 2}`,
+      sku: `dry-${index}`,
+      status: "rejected",
+      at: `2026-07-16T00:${String(index).padStart(2, "0")}:00Z`,
+    })),
+  ];
+  assert.deepEqual(retainedRowsForCollection(records, {
+    skipRetained: true,
+    highYieldSources: [source],
+    yieldRows,
+  }), []);
+});
+
 test("retained high-yield matching keeps successful and rejected price bands separate", () => {
   const fifty = "https://www.ozon.ru/seller/winner/?currency_price=50.000%3B";
   const fiveHundred = "https://www.ozon.ru/seller/winner/?currency_price=500.000%3B";
