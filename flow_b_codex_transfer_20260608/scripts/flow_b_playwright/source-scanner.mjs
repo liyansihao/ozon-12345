@@ -420,6 +420,18 @@ function isSearchSource(value) {
   }
 }
 
+function isHighlightSource(value) {
+  try {
+    return /^\/highlight\//i.test(new URL(String(value || "")).pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isPriceBandedSource(value) {
+  return isSearchSource(value) || isHighlightSource(value);
+}
+
 export function sourceYieldKey(value) {
   try {
     const url = new URL(String(value));
@@ -742,14 +754,15 @@ function exhaustedSourceFamilyPenalties(rows) {
   const families = new Map();
   (rows || []).forEach((row, order) => {
     const familyKey = sourceUrlKey(row?.source_url);
-    const key = isSearchSource(row?.source_url) ? sourceYieldKey(row?.source_url) : familyKey;
+    const priceBanded = isPriceBandedSource(row?.source_url);
+    const key = priceBanded ? sourceYieldKey(row?.source_url) : familyKey;
     const sku = String(row?.sku || "").trim();
     const status = String(row?.status || "");
-    if ((!canonicalSellerUrl(familyKey) && !isSearchSource(row?.source_url))
+    if ((!canonicalSellerUrl(familyKey) && !priceBanded)
       || !sku
       || !["favorited", "submitted", "published", "rejected", "skipped"].includes(status)) return;
-    const family = families.get(key) || { outcomes: new Map(), events: [], search: false };
-    family.search ||= isSearchSource(row?.source_url);
+    const family = families.get(key) || { outcomes: new Map(), events: [], priceBanded: false };
+    family.priceBanded ||= priceBanded;
     const productive = status === "favorited" || status === "submitted" || status === "published";
     family.outcomes.set(sku, Boolean(family.outcomes.get(sku)) || productive);
     family.events.push({
@@ -762,7 +775,7 @@ function exhaustedSourceFamilyPenalties(rows) {
     families.set(key, family);
   });
   return new Map([...families].flatMap(([key, family]) => {
-    const dryThreshold = family.search ? 8 : 12;
+    const dryThreshold = family.priceBanded ? 8 : 12;
     const attempted = family.outcomes.size;
     const productive = [...family.outcomes.values()].filter(Boolean).length;
     const recent = [];
@@ -774,7 +787,7 @@ function exhaustedSourceFamilyPenalties(rows) {
       if (recent.length >= dryThreshold) break;
     }
     const recentProductive = recent.filter((event) => event.productive).length;
-    if (family.search
+    if (family.priceBanded
       && recent.length >= 4
       && recent.slice(0, 4).every((event) => event.explicitNonPureFbs)) return [[key, -500_000]];
     if (recent.length >= dryThreshold && recentProductive / recent.length < 0.1) return [[key, -500_000]];
@@ -807,7 +820,7 @@ export function prioritizeSourceUrls(urls, {
   [...urls].forEach((url, index) => {
     const familyKey = sourceUrlKey(url);
     const yieldKey = sourceYieldKey(url);
-    const key = isSearchSource(url) ? yieldKey : familyKey;
+    const key = isPriceBandedSource(url) ? yieldKey : familyKey;
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
     const familyPenalty = familyPenalties.get(key) || 0;
     const baseTier = verifiedSellerKeys.has(familyKey)
@@ -858,7 +871,7 @@ export function retainedRowsForCollection(records, {
   return (records || []).filter((row) => {
     if (provenOnly && !isProvenSellerSource(row?.source_url)) return false;
     if (skipRetained && !successfulKeys.has(sourceYieldKey(row?.source_url))) return false;
-    const familyKey = isSearchSource(row?.source_url)
+    const familyKey = isPriceBandedSource(row?.source_url)
       ? sourceYieldKey(row?.source_url)
       : sourceUrlKey(row?.source_url);
     if (skipRetained && (exhaustedFamilies.get(familyKey) || 0) < 0) return false;

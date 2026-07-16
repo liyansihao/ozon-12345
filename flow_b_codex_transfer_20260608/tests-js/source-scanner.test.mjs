@@ -581,6 +581,25 @@ test("a dry search price band cannot demote a productive sibling price band", ()
   }), [productive, untriedSeller, dry]);
 });
 
+test("four explicit non-pure outcomes demote only the affected highlight price band", () => {
+  const productive = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B";
+  const dry = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=500.000%3B";
+  const untriedSeller = "https://www.ozon.ru/seller/untried-after-highlight/";
+  assert.deepEqual(prioritizeSourceUrls([dry, untriedSeller, productive], {
+    freshSourceUrls: [productive, dry],
+    yieldRows: [
+      { at: "2026-07-16T06:00:00.000Z", source_url: productive, sku: "winner", status: "submitted" },
+      ...Array.from({ length: 4 }, (_, index) => ({
+        at: new Date(Date.parse("2026-07-16T07:00:00.000Z") + index * 1000).toISOString(),
+        source_url: dry,
+        sku: `highlight-fbo-${index}`,
+        status: "skipped",
+        reason: "non-pure-fbs",
+      })),
+    ],
+  }), [productive, untriedSeller, dry]);
+});
+
 test("source variants use a bounded two-item burst before rotating families", () => {
   const urls = [
     "https://www.ozon.ru/seller/a/",
