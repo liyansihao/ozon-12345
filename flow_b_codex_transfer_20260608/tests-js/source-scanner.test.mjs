@@ -56,6 +56,8 @@ import {
   sourceScanLinkTarget,
   sourceScanLinkTargetForSource,
   boundedEvidenceSourceUrls,
+  eligibleLinkCountsBySource,
+  exhaustedScanFamilyKeys,
   nextDetailPacingState,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
@@ -620,6 +622,34 @@ test("verified source variants finish their tier before ordinary sources", () =>
   assert.deepEqual(prioritizeSourceUrls([ordinary, verifiedPage, verified, verifiedVariant], {
     verifiedFreshSourceUrls: [verified],
   }), [verifiedPage, verified, verifiedVariant, ordinary]);
+});
+
+test("two exhausted scan variants demote an overlapping verified family", () => {
+  const seller = "https://www.ozon.ru/seller/overlap/";
+  const untried = "https://www.ozon.ru/search/?text=untried&is_global=true";
+  const scanRows = [
+    { source_url: `${seller}?page=2`, cumulative_product_link_count: 36, eligible_link_count_before_collection: 0 },
+    { source_url: `${seller}?page=3`, cumulative_product_link_count: 36, eligible_link_count_before_collection: 0 },
+  ];
+  assert.deepEqual(prioritizeSourceUrls([seller, untried], {
+    verifiedFreshSourceUrls: [seller],
+    freshSourceUrls: [untried],
+    scanRows,
+  }), [untried, seller]);
+  assert.deepEqual([...exhaustedScanFamilyKeys(scanRows)], [seller]);
+  assert.deepEqual([...exhaustedScanFamilyKeys([
+    scanRows[0],
+    { ...scanRows[1], eligible_link_count_before_collection: null },
+  ])], []);
+  assert.deepEqual(prioritizeSourceUrls([seller, untried], {
+    verifiedFreshSourceUrls: [seller],
+    freshSourceUrls: [untried],
+    scanRows: [...scanRows, {
+      source_url: `${seller}?sorting=discount`,
+      cumulative_product_link_count: 36,
+      eligible_link_count_before_collection: 4,
+    }],
+  }), [seller, untried]);
 });
 
 test("bounded deep pages rotate seller families before taking another same-seller page", () => {
@@ -1518,6 +1548,18 @@ test("strict discovery pages share bounded scan headroom with proven deep pages"
     perSourceLimit: 24,
     boundedDeepUrls: bounded,
   }), 36);
+});
+
+test("source scan persistence counts only unique unattempted limited links", () => {
+  const sourceA = "https://www.ozon.ru/search/?text=a";
+  const sourceB = "https://www.ozon.ru/search/?text=b";
+  const counts = eligibleLinkCountsBySource([
+    { href: "https://www.ozon.ru/product/a-101/", source_url: sourceA },
+    { href: "https://www.ozon.ru/product/a-copy-101/", source_url: sourceA },
+    { href: "https://www.ozon.ru/product/a-102/", source_url: sourceA },
+    { href: "https://www.ozon.ru/product/b-201/", source_url: sourceB },
+  ], new Set(["102"]));
+  assert.deepEqual(Object.fromEntries(counts), { [sourceA]: 1, [sourceB]: 1 });
 });
 
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {

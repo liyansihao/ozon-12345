@@ -931,6 +931,7 @@ function exhaustedSourceFamilyPenalties(rows) {
 export function prioritizeSourceUrls(urls, {
   highYieldSources = [],
   yieldRows = [],
+  scanRows = [],
   freshSourceUrls = [],
   qualifiedFreshSourceUrls = [],
   verifiedFreshSourceUrls = [],
@@ -944,6 +945,7 @@ export function prioritizeSourceUrls(urls, {
   const funnelScores = fullFunnelSourceScores(yieldRows);
   const familyScores = observedTitleFamilyScores(yieldRows);
   const familyPenalties = exhaustedSourceFamilyPenalties(yieldRows);
+  const exhaustedScanFamilies = exhaustedScanFamilyKeys(scanRows);
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
   const qualifiedFreshKeys = new Set(qualifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
@@ -961,19 +963,23 @@ export function prioritizeSourceUrls(urls, {
       : boundedDeep ? `bounded-deep:${familyKey}` : familyKey;
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
     const familyPenalty = familyPenalties.get(isPriceBandedSource(url) ? yieldKey : familyKey) || 0;
+    const scanFamilyKey = isPriceBandedSource(url) ? yieldKey : familyKey;
+    const scanPenalty = exhaustedScanFamilies.has(scanFamilyKey) ? -600_000 : 0;
     const baseTier = verifiedSellerKeys.has(familyKey)
       ? 4
       : qualifiedFreshKeys.has(familyKey)
         ? 3
         : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
-    const tier = familyPenalty < 0 && !qualifiedFreshKeys.has(familyKey)
+    let tier = familyPenalty < 0 && !qualifiedFreshKeys.has(familyKey)
       ? boundedDeep ? 3 : (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
+    if (scanPenalty < 0) tier = 0;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
       + (freshKeys.has(familyKey) ? 200_000 : 0)
       + (qualifiedFreshKeys.has(familyKey) ? 300_000 : 0)
       + (verifiedFreshKeys.has(familyKey) ? 400_000 : 0)
-      + familyPenalty;
+      + familyPenalty
+      + scanPenalty;
     const group = groups.get(key) || { index, priority, tier, urls: [] };
     group.priority = Math.max(group.priority, priority);
     group.tier = Math.max(group.tier, tier);
@@ -1110,6 +1116,54 @@ export function limitLinksPerSource(rows, limit = 24, familyScores = {}) {
     combined.push(...prioritizeFavoriteLinks(sourceRound, familyScores));
   }
   return combined;
+}
+
+export function eligibleLinkCountsBySource(links, attempted = new Set()) {
+  const seen = new Map();
+  const counts = new Map();
+  for (const link of links || []) {
+    const source = sourceNonFbsSampleKey(link?.source_url);
+    const sku = skuFromProductUrl(link?.href);
+    if (!source || !sku || attempted.has(sku)) continue;
+    const sourceSeen = seen.get(source) || new Set();
+    if (sourceSeen.has(sku)) continue;
+    sourceSeen.add(sku);
+    seen.set(source, sourceSeen);
+    counts.set(source, (counts.get(source) || 0) + 1);
+  }
+  return counts;
+}
+
+export function exhaustedScanFamilyKeys(records, consecutive = 2) {
+  const minimum = Math.max(1, Number(consecutive) || 2);
+  const groups = new Map();
+  for (const row of records || []) {
+    if (typeof row?.eligible_link_count_before_collection !== "number") continue;
+    const eligible = Number(row?.eligible_link_count_before_collection);
+    const linkCount = Number(row?.cumulative_product_link_count) || Number(row?.links?.length) || 0;
+    if (!Number.isFinite(eligible) || linkCount < 12) continue;
+    const family = isPriceBandedSource(row?.source_url)
+      ? sourceYieldKey(row?.source_url)
+      : sourceUrlKey(row?.source_url);
+    const variant = sourceNonFbsSampleKey(row?.source_url);
+    if (!family || !variant) continue;
+    const events = groups.get(family) || [];
+    events.push({ variant, eligible });
+    groups.set(family, events);
+  }
+  const exhausted = new Set();
+  for (const [family, events] of groups) {
+    const recent = [];
+    const seen = new Set();
+    for (const event of [...events].reverse()) {
+      if (seen.has(event.variant)) continue;
+      seen.add(event.variant);
+      recent.push(event);
+      if (recent.length >= minimum) break;
+    }
+    if (recent.length >= minimum && recent.every((event) => event.eligible === 0)) exhausted.add(family);
+  }
+  return exhausted;
 }
 
 export function cachedExactFbsFallbackLinks(records, {
@@ -1893,6 +1947,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const pending = prioritizeSourceUrls(urls.filter((url) => !done.has(url)), {
     highYieldSources,
     yieldRows,
+    scanRows: records,
     freshSourceUrls: [
       ...classifiedFreshUrls.explorationUrls,
       ...derivedSearchUrls,
@@ -2103,17 +2158,20 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           adaptiveWorkers.recordSuccess();
         }
       }
+      let eligibleCounts = null;
       if (favoriteBefore !== null && !sourceCooldown.blocked) {
         let collectionSoftBlocked = false;
         let batchFavorited = 0;
+        const collectionLinks = limitLinksPerSource(
+          batchRows.map((row, index) => ({ ...row, source_url: batch[index] })),
+          perSourceLinkLimit,
+          titleFamilyScores,
+        );
+        eligibleCounts = eligibleLinkCountsBySource(collectionLinks, attempted);
         favoriteBefore = await collectFavorites({
           context,
           maozi,
-          links: limitLinksPerSource(
-            batchRows.map((row, index) => ({ ...row, source_url: batch[index] })),
-            perSourceLinkLimit,
-            titleFamilyScores,
-          ),
+          links: collectionLinks,
           target: targetFavorites,
           currentTotal: favoriteBefore,
           env,
@@ -2161,6 +2219,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       records.push(...batchRows.map((row, index) => ({
         source_url: batch[index],
         ...row,
+        eligible_link_count_before_collection: eligibleCounts
+          ? (eligibleCounts.get(sourceNonFbsSampleKey(batch[index])) || 0)
+          : null,
         favorite_count_before: batchFavoriteBefore,
         favorite_count_after: favoriteAfter,
         favorite_count_delta: delta,
