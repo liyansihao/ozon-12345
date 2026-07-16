@@ -285,18 +285,22 @@ test("strictly published sources expand into deeper result pages", () => {
   ]);
 });
 
-test("strict page-three discovery sources probe only their exact page four sibling", () => {
-  const highlight = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating&page=3";
-  const search = "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=3";
+test("strict discovery sources probe only their exact next page through page four", () => {
+  const highlight = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating";
+  const pageTwoSearch = "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=2";
+  const pageThreeSearch = "https://www.ozon.ru/search/?text=%D0%BD%D0%BE%D1%81%D0%BA%D0%B8&is_global=true&currency_price=500.000%3B&page=3";
   assert.deepEqual(expandNextPublishedDiscoveryPages([
     { source_url: highlight, sku: "highlight-win", status: "published" },
     { source_url: `${highlight}&miniapp=1`, sku: "highlight-win-2", status: "published" },
-    { source_url: search, sku: "search-win", status: "published" },
+    { source_url: pageTwoSearch, sku: "search-page-two-win", status: "published" },
+    { source_url: pageThreeSearch, sku: "search-page-three-win", status: "published" },
+    { source_url: `${pageThreeSearch.replace("page=3", "page=4")}`, sku: "search-page-four-win", status: "published" },
     { source_url: "https://www.ozon.ru/seller/proven/?page=3", sku: "seller-win", status: "published" },
     { source_url: "https://www.ozon.ru/highlight/rejected/?page=3", sku: "nope", status: "rejected" },
   ]), [
-    "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating&page=4",
-    "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=4",
+    "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating&page=2",
+    "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=3",
+    "https://www.ozon.ru/search/?text=%D0%BD%D0%BE%D1%81%D0%BA%D0%B8&is_global=true&currency_price=500.000%3B&page=4",
   ]);
 });
 

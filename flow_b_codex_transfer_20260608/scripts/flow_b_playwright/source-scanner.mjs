@@ -563,10 +563,11 @@ export function expandNextPublishedDiscoveryPages(yieldRows = []) {
     let url;
     try { url = new URL(String(row?.source_url || "")); } catch { continue; }
     if (!isSearchSource(url) && !isHighlightSource(url)) continue;
-    if (Number(url.searchParams.get("page") || 1) !== 3) continue;
+    const currentPage = Number(url.searchParams.get("page") || 1);
+    if (!Number.isInteger(currentPage) || currentPage < 1 || currentPage >= 4) continue;
     url.hash = "";
     url.searchParams.delete("miniapp");
-    url.searchParams.set("page", "4");
+    url.searchParams.set("page", String(currentPage + 1));
     const value = url.toString();
     if (seen.has(value)) continue;
     seen.add(value);
