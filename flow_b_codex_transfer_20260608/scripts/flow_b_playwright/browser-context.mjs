@@ -42,6 +42,12 @@ export function resolveBrowserOptions(env = process.env, defaultExecutable = chr
     executablePath,
     headless: false,
     viewport: null,
+    // Playwright otherwise consumes process signals, closes Chromium, and
+    // leaves the long-running producer/consumer timers alive. The external
+    // supervisor owns restarts, so let Node terminate normally on signals.
+    handleSIGINT: false,
+    handleSIGTERM: false,
+    handleSIGHUP: false,
     args: [
       "--disable-blink-features=AutomationControlled",
       "--no-first-run",

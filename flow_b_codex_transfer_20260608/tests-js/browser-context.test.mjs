@@ -35,6 +35,9 @@ test("browser options require an unpacked extension and use Chrome for Testing",
   ]);
   assert.deepEqual(options.ignoreDefaultArgs, ["--disable-extensions"]);
   assert.equal(options.headless, false);
+  assert.equal(options.handleSIGINT, false);
+  assert.equal(options.handleSIGTERM, false);
+  assert.equal(options.handleSIGHUP, false);
 });
 
 test("empty extension token is repaired through the plugin's own login button", async () => {
