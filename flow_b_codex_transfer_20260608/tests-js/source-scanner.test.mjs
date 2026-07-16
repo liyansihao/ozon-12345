@@ -787,17 +787,23 @@ test("concurrent pages coalesce one Ozon incident instead of escalating to 180 s
   assert.equal(ozonRetryDelay(3), 1_800_000);
 });
 
-test("one blocked source batch creates one shared cooldown incident", () => {
+test("blocked source batches probe with short backoff before escalating", () => {
   const state = { detailSoftBlockStreak: 0, lastDetailSoftBlockAt: 0, detailBlockedUntil: 0 };
-  const result = sourceBatchCooldownState([
+  const rows = [
     { blocked: true, stop_reason: "blocked_or_empty" },
     { blocked: true, stop_reason: "blocked_or_empty" },
     { blocked: true, stop_reason: "blocked_or_empty" },
-  ], state, 10_000);
+  ];
+  const result = sourceBatchCooldownState(rows, state, 10_000);
   assert.equal(result.blocked, true);
+  assert.equal(result.delay, 60_000);
   assert.equal(state.detailSoftBlockStreak, 1);
-  assert.equal(state.detailBlockedUntil, 610_000);
-  sourceBatchCooldownState([{ blocked: false, stop_reason: "max_steps" }], state, 80_000);
+  assert.equal(state.detailBlockedUntil, 70_000);
+  const repeated = sourceBatchCooldownState(rows, state, 80_000);
+  assert.equal(repeated.delay, 180_000);
+  assert.equal(state.detailSoftBlockStreak, 2);
+  assert.equal(state.detailBlockedUntil, 260_000);
+  sourceBatchCooldownState([{ blocked: false, stop_reason: "max_steps" }], state, 270_000);
   assert.equal(state.detailSoftBlockStreak, 0);
 });
 

@@ -234,6 +234,7 @@ export function sourceBatchCooldownState(rows, state, now = Date.now()) {
     lastBlockedAt: state.lastDetailSoftBlockAt,
     now,
   });
+  cooldown.delay = [60_000, 180_000, 600_000][Math.min(2, Math.max(0, cooldown.streak - 1))];
   state.detailSoftBlockStreak = cooldown.streak;
   state.lastDetailSoftBlockAt = cooldown.lastBlockedAt;
   state.detailBlockedUntil = Math.max(Number(state.detailBlockedUntil) || 0, Number(now) + cooldown.delay);
