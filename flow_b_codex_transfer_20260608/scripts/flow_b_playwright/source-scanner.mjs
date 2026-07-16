@@ -679,7 +679,8 @@ function exhaustedSourceFamilyPenalties(rows) {
     if ((!canonicalSellerUrl(familyKey) && !isSearchSource(row?.source_url))
       || !sku
       || !["favorited", "submitted", "published", "rejected", "skipped"].includes(status)) return;
-    const family = families.get(key) || { outcomes: new Map(), events: [] };
+    const family = families.get(key) || { outcomes: new Map(), events: [], search: false };
+    family.search ||= isSearchSource(row?.source_url);
     const productive = status === "favorited" || status === "submitted" || status === "published";
     family.outcomes.set(sku, Boolean(family.outcomes.get(sku)) || productive);
     family.events.push({
@@ -691,6 +692,7 @@ function exhaustedSourceFamilyPenalties(rows) {
     families.set(key, family);
   });
   return new Map([...families].flatMap(([key, family]) => {
+    const dryThreshold = family.search ? 8 : 12;
     const attempted = family.outcomes.size;
     const productive = [...family.outcomes.values()].filter(Boolean).length;
     const recent = [];
@@ -699,11 +701,11 @@ function exhaustedSourceFamilyPenalties(rows) {
       if (seen.has(event.sku)) continue;
       seen.add(event.sku);
       recent.push(event);
-      if (recent.length >= 12) break;
+      if (recent.length >= dryThreshold) break;
     }
     const recentProductive = recent.filter((event) => event.productive).length;
-    if (recent.length >= 12 && recentProductive / recent.length < 0.1) return [[key, -500_000]];
-    return attempted >= 12 && productive / attempted < 0.1 ? [[key, -250_000]] : [];
+    if (recent.length >= dryThreshold && recentProductive / recent.length < 0.1) return [[key, -500_000]];
+    return attempted >= dryThreshold && productive / attempted < 0.1 ? [[key, -250_000]] : [];
   }));
 }
 

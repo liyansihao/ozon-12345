@@ -486,6 +486,21 @@ test("a fresh search family with twelve recent dry candidates yields to an untri
   }), [untriedSeller, drySearch]);
 });
 
+test("a Global search price band yields after eight recent dry publish outcomes", () => {
+  const drySearch = "https://www.ozon.ru/search/?text=eight-dry&is_global=true&currency_price=500.000%3B";
+  const untriedSeller = "https://www.ozon.ru/seller/untried-after-eight/";
+  assert.deepEqual(prioritizeSourceUrls([drySearch, untriedSeller], {
+    freshSourceUrls: [drySearch],
+    yieldRows: Array.from({ length: 8 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-16T07:00:00.000Z") + index * 1000).toISOString(),
+      source_url: drySearch,
+      sku: `eight-dry-${index}`,
+      status: "skipped",
+      reason: "non-pure-fbs",
+    })),
+  }), [untriedSeller, drySearch]);
+});
+
 test("a dry search price band cannot demote a productive sibling price band", () => {
   const productive = "https://www.ozon.ru/search/?text=banded-family&is_global=true&currency_price=150.000%3B";
   const dry = "https://www.ozon.ru/search/?text=banded-family&is_global=true&currency_price=1000.000%3B";
