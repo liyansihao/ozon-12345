@@ -41,6 +41,7 @@ import {
   createScannerLogger,
   favoriteFailureDisposition,
   shouldDeferSourceAfterNonFbsSample,
+  sourceNonFbsSampleKey,
   favoritePriceSkipReason,
   favoriteTitleSkipReason,
   nextLowYieldBatchStreak,
@@ -74,6 +75,13 @@ test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 7, nonPureFbs: 6, favorited: 0 }, 6), false);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 8, nonPureFbs: 7, favorited: 1 }, 6), false);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 20, nonPureFbs: 20, favorited: 0 }, 0), false);
+});
+
+test("non-pure-FBS sampling isolates seller page and sorting variants", () => {
+  const base = "https://www.ozon.ru/seller/shi-dada/?currency_price=150.000%3B";
+  assert.notEqual(sourceNonFbsSampleKey(base), sourceNonFbsSampleKey(`${base}&sorting=rating`));
+  assert.notEqual(sourceNonFbsSampleKey(base), sourceNonFbsSampleKey(`${base}&page=2`));
+  assert.equal(sourceNonFbsSampleKey(`${base}#products`), sourceNonFbsSampleKey(base));
 });
 
 test("collection deadline stops an in-flight producer tranche", () => {

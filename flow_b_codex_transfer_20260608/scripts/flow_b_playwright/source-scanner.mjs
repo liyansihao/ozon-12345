@@ -470,6 +470,17 @@ export function sourceCollectionBlockKey(value) {
   return value ? sourceYieldKey(value) : null;
 }
 
+export function sourceNonFbsSampleKey(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value));
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return String(value);
+  }
+}
+
 function sourceEvidenceKey(value, { keepSorting = false } = {}) {
   try {
     const url = new URL(String(value));
@@ -1440,11 +1451,13 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         const item = queue[cursor++];
         if (!item) break;
         const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
-        if (sourceBlockKey && (softBlockedSources.has(sourceBlockKey) || nonFbsDeferredSources.has(sourceBlockKey))) {
+        const nonFbsSampleKey = sourceNonFbsSampleKey(item.source_url);
+        if ((sourceBlockKey && softBlockedSources.has(sourceBlockKey))
+          || (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey))) {
           attempted.delete(item.sku);
           continue;
         }
-        const sourceStats = statsForSource(sourceBlockKey);
+        const sourceStats = statsForSource(nonFbsSampleKey);
         if (sourceStats) sourceStats.attempted += 1;
         collection.attempted += 1;
         inFlight += 1;
@@ -1500,8 +1513,8 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             if (sourceStats && reason === "non-pure-fbs") {
               sourceStats.nonPureFbs += 1;
               if (shouldDeferSourceAfterNonFbsSample(sourceStats, nonFbsSampleLimit)) {
-                nonFbsDeferredSources.add(sourceBlockKey);
-                log(`source non-pure-FBS sample deferred after ${sourceStats.attempted} checks: ${sourceBlockKey}`);
+                nonFbsDeferredSources.add(nonFbsSampleKey);
+                log(`source non-pure-FBS sample deferred after ${sourceStats.attempted} checks: ${nonFbsSampleKey}`);
               }
             }
             await record({ status: "rejected", reason, sku: item.sku, url: item.href, source_url: item.source_url || null });
