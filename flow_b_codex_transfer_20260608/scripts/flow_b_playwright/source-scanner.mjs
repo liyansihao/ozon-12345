@@ -832,6 +832,20 @@ export function cachedExactFbsFallbackLinks(records, {
   return result;
 }
 
+export function fillRetainedFallbackLinks(retained, fallback, limit = 24) {
+  const maximum = Math.max(0, Number(limit) || 0);
+  const result = [];
+  const seen = new Set();
+  for (const link of [...(retained || []), ...(fallback || [])]) {
+    const key = skuFromProductUrl(link?.href) || String(link?.href || "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(link);
+    if (result.length >= maximum) break;
+  }
+  return result;
+}
+
 export function terminalSkusFromJsonl(text) {
   const latest = new Map();
   for (const line of String(text || "").split(/\r?\n/)) {
@@ -1474,12 +1488,14 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           if (retainedLinks.length >= retainedLimit) break;
         }
       }
-      if (retainedLinks.length === 0) {
-        retainedLinks.push(...cachedExactFbsFallbackLinks(records, {
+      const fallbackLimit = envNumber(env, "FLOW_B_CACHED_FBS_FALLBACK_LINKS", 24);
+      if (retainedLinks.length < fallbackLimit) {
+        const filled = fillRetainedFallbackLinks(retainedLinks, cachedExactFbsFallbackLinks(records, {
           attempted,
-          limit: envNumber(env, "FLOW_B_CACHED_FBS_FALLBACK_LINKS", 24),
+          limit: fallbackLimit,
           familyScores: titleFamilyScores,
-        }));
+        }), fallbackLimit);
+        retainedLinks.splice(0, retainedLinks.length, ...filled);
       }
       emit(`collecting favorites from ${retainedLinks.length} retained product links`);
       let retainedAttempted = 0;

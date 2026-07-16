@@ -32,6 +32,7 @@ import {
   terminalSkusFromJsonl,
   limitLinksPerSource,
   cachedExactFbsFallbackLinks,
+  fillRetainedFallbackLinks,
   productTitleFamily,
   productTitlePriority,
   observedTitleFamilyScores,
@@ -463,6 +464,19 @@ test("cached fallback uses only unattempted cards with complete exact-FBS eviden
     { source_url: "https://www.ozon.ru/seller/a/", links: [ambiguous, alreadyAttempted] },
     { source_url: "https://www.ozon.ru/seller/b/", links: [exact] },
   ], { attempted: new Set(["1003"]), limit: 12 }).map((row) => row.href), [exact.href]);
+});
+
+test("cached fallback fills a short retained tranche without duplicating its SKU", () => {
+  const retained = [{ href: "https://www.ozon.ru/product/retained-1001/" }];
+  const fallback = [
+    { href: "https://www.ozon.ru/product/duplicate-1001/" },
+    { href: "https://www.ozon.ru/product/fallback-1002/" },
+    { href: "https://www.ozon.ru/product/overflow-1003/" },
+  ];
+  assert.deepEqual(fillRetainedFallbackLinks(retained, fallback, 2).map((row) => row.href), [
+    retained[0].href,
+    fallback[1].href,
+  ]);
 });
 
 test("one source does not enqueue numeric variants of the same title family", () => {
