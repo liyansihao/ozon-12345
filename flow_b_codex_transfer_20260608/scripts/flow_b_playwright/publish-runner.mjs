@@ -325,9 +325,9 @@ export function createPublishRunner({
     }
   }
 
-  async function confirmPublication(sku, payload, targetConfig) {
+  async function confirmPublication(sku, payload, targetConfig, { attempts: attemptOverride = null } = {}) {
     const offerId = payload.rows[0].offer_id;
-    const attempts = Math.max(1, Number(confirmationAttempts) || 1);
+    const attempts = Math.max(1, Number(attemptOverride ?? confirmationAttempts) || 1);
     let lastImportLog = null;
     let lastOnlineProduct = null;
     let lastStockUpdate = null;
@@ -984,7 +984,7 @@ export function createPublishRunner({
           if (["all_imported", "imported"].includes(importStatus)) {
             const confirmed = await confirmPublication(sku, {
               rows: [{ offer_id: importLog.offer_id || item.offer_id }],
-            }, reconciliationTarget);
+            }, reconciliationTarget, { attempts: 1 });
             const existing = confirmed.online_product;
             if (!confirmed.ok || !existing) {
               const reason = confirmed.reason || "reconciliation-online-product-missing";
