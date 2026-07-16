@@ -1892,11 +1892,19 @@ export function fatalSourceBatchError(rows = []) {
   return new Error(String(fatal.stop_reason || "fatal browser source error").replace(/^error:\s*/i, ""));
 }
 
-export function completedSourceUrls(records = []) {
+export function completedSourceUrls(records = [], {
+  now = Date.now(),
+  transientRetryMs = 10 * 60_000,
+} = {}) {
+  const retryDelay = Math.max(0, Number(transientRetryMs) || 0);
   return new Set((records || []).filter((row) => {
-    if (!row?.source_url || row?.blocked) return false;
-    return !/timed?\s*out|timeout|soft block|access denied|captcha|no connection|network|HTTP\s*0/i
-      .test(String(row?.stop_reason || ""));
+    if (!row?.source_url) return false;
+    const transient = Boolean(row?.blocked)
+      || /timed?\s*out|timeout|soft block|access denied|captcha|no connection|network|HTTP\s*0/i
+        .test(String(row?.stop_reason || ""));
+    if (!transient) return true;
+    const scannedAt = Date.parse(row?.scanned_at || "");
+    return Number.isFinite(scannedAt) && Number(now) - scannedAt < retryDelay;
   }).map((row) => row.source_url));
 }
 
@@ -2012,7 +2020,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     const parsed = JSON.parse(await fs.readFile(outputPath, "utf8"));
     if (Array.isArray(parsed)) records = parsed;
   } catch {}
-  const done = completedSourceUrls(records);
+  const done = completedSourceUrls(records, {
+    transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
+  });
   const highYieldSources = yieldRows.filter((row) => row?.status === "published").map((row) => row.source_url);
   const pending = prioritizeSourceUrls(urls.filter((url) => !done.has(url)), {
     highYieldSources,
@@ -2287,9 +2297,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         target: targetFavorites,
       });
       const delta = batchFavoriteBefore !== null && favoriteAfter !== null ? favoriteAfter - batchFavoriteBefore : null;
+      const scannedAt = new Date().toISOString();
       records.push(...batchRows.map((row, index) => ({
         source_url: batch[index],
         ...row,
+        scanned_at: scannedAt,
         eligible_link_count_before_collection: eligibleCounts
           ? (eligibleCounts.get(sourceNonFbsSampleKey(batch[index])) || 0)
           : null,

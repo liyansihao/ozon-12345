@@ -1633,6 +1633,24 @@ test("transient source timeouts and soft blocks remain retryable after their evi
   ])], [completed]);
 });
 
+test("fresh transient source failures cool down before becoming retryable again", () => {
+  const recent = "https://www.ozon.ru/seller/recent-timeout/";
+  const expired = "https://www.ozon.ru/seller/expired-timeout/";
+  const now = Date.parse("2026-07-16T16:00:00.000Z");
+  assert.deepEqual([...completedSourceUrls([
+    {
+      source_url: recent,
+      scanned_at: "2026-07-16T15:55:00.000Z",
+      stop_reason: "error: source page lifecycle timed out after 60000ms",
+    },
+    {
+      source_url: expired,
+      scanned_at: "2026-07-16T15:40:00.000Z",
+      stop_reason: "error: source page lifecycle timed out after 60000ms",
+    },
+  ], { now, transientRetryMs: 10 * 60_000 })], [recent]);
+});
+
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {
   const messages = [];
   const log = createScannerLogger((message) => messages.push(message), "summary");
