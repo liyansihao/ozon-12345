@@ -376,6 +376,28 @@ test("derived search recency follows event time across concatenated run files", 
   assert.equal(new URL(urls[0]).searchParams.get("text"), "комплект трусов бикини");
 });
 
+test("derived searches prefer a repeatable full-funnel source over a newer one-off success", () => {
+  const repeatable = "https://www.ozon.ru/search/?text=repeatable&is_global=true&currency_price=500.000%3B";
+  const oneOff = "https://www.ozon.ru/seller/one-off/";
+  const urls = deriveSearchSourceUrls([
+    ...Array.from({ length: 3 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-16T15:00:00.000Z") + index * 1000).toISOString(),
+      status: "published",
+      sku: `repeat-${index}`,
+      source_url: repeatable,
+      title: `Комплект трусов бикини ${index + 1}`,
+    })),
+    {
+      at: "2026-07-16T15:30:00.000Z",
+      status: "published",
+      sku: "one-off",
+      source_url: oneOff,
+      title: "Кресло детское мягкое",
+    },
+  ], 1);
+  assert.equal(new URL(urls[0]).searchParams.get("text"), "комплект трусов бикини");
+});
+
 test("duplicate strict evidence from run and history does not crowd out another winner", () => {
   const recent = { at: "2026-07-16T15:30:00.000Z", status: "published", sku: "recent", title: "Комплект трусов бикини" };
   const urls = deriveSearchSourceUrls([

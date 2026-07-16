@@ -710,13 +710,17 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     .map(([key]) => key));
   const publishedGroups = [];
   const submittedGroups = [];
+  const sourceScores = fullFunnelSourceScores(yieldRows);
   const recencyOrderedRows = [...(yieldRows || [])]
     .map((row, order) => ({
       row,
       order,
       time: Date.parse(row?.at || row?.timestamp || "") || 0,
+      sourceScore: Number(sourceScores.get(sourceYieldKey(row?.source_url)) || 0),
     }))
-    .sort((left, right) => right.time - left.time || right.order - left.order)
+    .sort((left, right) => right.sourceScore - left.sourceScore
+      || right.time - left.time
+      || right.order - left.order)
     .map(({ row }) => row);
   const seenEvidence = new Set();
   for (const row of recencyOrderedRows) {
