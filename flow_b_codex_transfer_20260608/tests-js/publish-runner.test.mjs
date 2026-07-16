@@ -1079,6 +1079,62 @@ test("runner does not retry or stall on restored terminal Ozon moderation reject
   assert.equal(importChecks, 1);
 });
 
+test("runner rechecks a restored rejection whose moderation evidence belongs to another store", async () => {
+  const state = fakeState({
+    mismatched: {
+      status: "failed",
+      data: {
+        sku: "3995562725",
+        store_id: 106637,
+        submitted: true,
+        offer_id: "mz-150726-3995562725",
+        profit_rate: 43.98,
+        reason: "online-product-rejected",
+        final_result: {
+          online_product: {
+            shop_id: 104965,
+            sku: 0,
+            online_status: "unknown",
+            stock: 0,
+            errors: [{ code: "SPU_ALREADY_EXISTS_IN_ANOTHER_ACCOUNT", level: "ERROR_LEVEL_ERROR", state: "moderated" }],
+          },
+        },
+      },
+    },
+  });
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async ({ shopId, offerId }) => ({
+      id: 912,
+      product_id: 913,
+      shop_id: Number(shopId),
+      sku: 914,
+      offer_id: offerId,
+      online_status: "selling",
+      stock: 5,
+    }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    storeTargets: [{ id: 106637, needle: "丽丽二号", requireWarehouse: false }],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(state.records[0].sku, "3995562725");
+  assert.equal(state.records[0].store_id, 106637);
+  assert.equal(state.records[0].online_status, "selling");
+});
+
 test("runner syncs every original store represented by delayed submissions", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-multi-store-sync-"));
   const state = fakeState({

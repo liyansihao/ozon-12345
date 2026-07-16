@@ -117,9 +117,16 @@ function hasTerminalModerationDecline(product) {
 
 function isTerminalSubmittedFailure(entry) {
   const data = entry?.data || entry || {};
-  if (["daily-product-limit", "import-failed", "online-product-rejected", "reconciliation-store-not-configured"]
-    .includes(String(data.reason || ""))) return true;
-  return hasTerminalModerationDecline(data?.final_result?.online_product || data?.online_product);
+  const reason = String(data.reason || "");
+  if (["daily-product-limit", "import-failed", "reconciliation-store-not-configured"].includes(reason)) return true;
+  const moderationProduct = data?.final_result?.online_product || data?.online_product;
+  const targetStoreId = Number(data?.store_id);
+  const evidenceStoreId = Number(moderationProduct?.shop_id);
+  const evidenceBelongsToAnotherStore = targetStoreId > 0
+    && evidenceStoreId > 0
+    && targetStoreId !== evidenceStoreId;
+  if (reason === "online-product-rejected") return !evidenceBelongsToAnotherStore;
+  return !evidenceBelongsToAnotherStore && hasTerminalModerationDecline(moderationProduct);
 }
 
 export function prioritizePublishCandidates(items, preflightPureSkus = new Set()) {
