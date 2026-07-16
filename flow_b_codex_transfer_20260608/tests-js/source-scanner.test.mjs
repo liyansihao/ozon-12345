@@ -204,6 +204,19 @@ test("strict publications derive fresh Global search sources from useful title t
   assert.ok(urls.every((url) => !decodeURIComponent(url).includes("бесполезный")));
 });
 
+test("repeated strict submissions receive a bounded derived-search leading slot", () => {
+  const repeated = "https://www.ozon.ru/search/?text=winner&currency_price=500.000%3B";
+  const singleton = "https://www.ozon.ru/search/?text=singleton&currency_price=500.000%3B";
+  const urls = deriveSearchSourceUrls([
+    { status: "submitted", sku: "repeat-1", source_url: repeated, title: "Комплект трусов хлопковые мягкие" },
+    { status: "submitted", sku: "repeat-2", source_url: `${repeated}&page=2`, title: "Трусы слипы хлопковые набор" },
+    { status: "submitted", sku: "single-1", source_url: singleton, title: "Одиночный случай источник" },
+  ], 4, ["500.000;"], [1]);
+  const texts = urls.map((url) => new URL(url).searchParams.get("text"));
+  assert.ok(texts.some((text) => text.includes("трус")));
+  assert.ok(texts.every((text) => !text.includes("одиночный")));
+});
+
 test("derived search budget uses the most recent strict publications first", () => {
   const urls = deriveSearchSourceUrls([
     { status: "published", title: "Старый товар источник" },

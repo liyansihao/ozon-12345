@@ -524,11 +524,10 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
   const pages = [...new Set((resultPages || []).map(Number).filter((value) => Number.isInteger(value) && value > 0))];
   const maximum = Math.max(0, Number(limit) || 0);
   if (maximum === 0 || bands.length === 0 || pages.length === 0) return queries;
-  for (const row of [...(yieldRows || [])].reverse()) {
-    if (row?.status !== "published") continue;
+  const queryGroupForRow = (row) => {
     const words = String(row?.title || "").toLowerCase().match(/[а-яё]{4,}/gi) || [];
     const terms = words.filter((word) => !stopWords.has(word)).slice(0, 5);
-    if (terms.length < 2) continue;
+    if (terms.length < 2) return null;
     const candidates = [
       terms.slice(0, 3),
       terms.slice(0, 2),
@@ -536,10 +535,44 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
       terms.slice(0, 4),
       terms.slice(1, 4),
     ].filter((candidate) => candidate.length >= 2).map((candidate) => candidate.join(" "));
-    if (candidates.length > 0) queryGroups.push([...new Set(candidates)]);
+    return candidates.length > 0 ? [...new Set(candidates)] : null;
+  };
+  const submittedSkusBySource = new Map();
+  for (const row of yieldRows || []) {
+    if (row?.status !== "submitted") continue;
+    const key = sourceYieldKey(row?.source_url);
+    const sku = String(row?.sku || "").trim();
+    if (!key || !sku) continue;
+    const skus = submittedSkusBySource.get(key) || new Set();
+    skus.add(sku);
+    submittedSkusBySource.set(key, skus);
+  }
+  const repeatedSubmittedSources = new Set([...submittedSkusBySource]
+    .filter(([, skus]) => skus.size >= 2)
+    .map(([key]) => key));
+  const publishedGroups = [];
+  const submittedGroups = [];
+  for (const row of [...(yieldRows || [])].reverse()) {
+    const group = queryGroupForRow(row);
+    if (!group) continue;
+    if (row?.status === "published") publishedGroups.push(group);
+    else if (row?.status === "submitted" && repeatedSubmittedSources.has(sourceYieldKey(row?.source_url))) {
+      submittedGroups.push(group);
+    }
   }
   const recentGroupLimit = Math.max(2, Math.floor(maximum / (bands.length * pages.length * 2)));
-  queryGroups.splice(recentGroupLimit);
+  const leadingSubmittedLimit = Math.max(1, Math.floor(recentGroupLimit / 4));
+  let submittedSlots = Math.min(submittedGroups.length, leadingSubmittedLimit);
+  let publishedSlots = Math.min(publishedGroups.length, recentGroupLimit - submittedSlots);
+  let remainingSlots = recentGroupLimit - publishedSlots - submittedSlots;
+  const extraPublished = Math.min(remainingSlots, publishedGroups.length - publishedSlots);
+  publishedSlots += extraPublished;
+  remainingSlots -= extraPublished;
+  submittedSlots += Math.min(remainingSlots, submittedGroups.length - submittedSlots);
+  queryGroups.push(
+    ...publishedGroups.slice(0, publishedSlots),
+    ...submittedGroups.slice(0, submittedSlots),
+  );
   const rounds = Math.max(0, ...queryGroups.map((group) => group.length));
   for (let round = 0; round < rounds; round += 1) {
     for (const group of queryGroups) {
