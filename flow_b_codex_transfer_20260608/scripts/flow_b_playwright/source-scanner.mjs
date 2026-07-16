@@ -343,6 +343,21 @@ function sourceYieldKey(value) {
   }
 }
 
+export function filterProductiveSourceVariants(urls, yieldRows = []) {
+  const publishedBands = new Set((yieldRows || [])
+    .filter((row) => row?.status === "published")
+    .map((row) => sourceYieldKey(row?.source_url))
+    .filter(Boolean));
+  return (urls || []).filter((value) => {
+    let parsed;
+    try { parsed = new URL(String(value)); } catch { return true; }
+    if (parsed.searchParams.get("sorting") === "price") return false;
+    const band = parsed.searchParams.get("currency_price");
+    if (!["50.000;", "120.000;"].includes(band)) return true;
+    return publishedBands.has(sourceYieldKey(value));
+  });
+}
+
 export function expandHighYieldSourceUrls(urls, yieldRows = []) {
   const expanded = [...urls];
   const seen = new Set(expanded);
@@ -353,9 +368,9 @@ export function expandHighYieldSourceUrls(urls, yieldRows = []) {
     let parsed;
     try { parsed = new URL(source); } catch { continue; }
     const existingBand = parsed.searchParams.get("currency_price");
-    const bands = [...new Set([existingBand, "50.000;", "120.000;", "150.000;", "500.000;"].filter(Boolean))];
+    const bands = [...new Set(["500.000;", "150.000;", "1000.000;", existingBand].filter(Boolean))];
     for (const band of bands) {
-      for (const sorting of [null, "rating", "price", "discount"]) {
+      for (const sorting of [null, "rating", "discount"]) {
         const url = new URL(source);
         url.searchParams.set("currency_price", band);
         if (sorting) url.searchParams.set("sorting", sorting);
@@ -385,7 +400,7 @@ export function expandFreshSellerSourceUrls(urls = []) {
   const seen = new Set(expanded);
   for (const source of urls) {
     if (!canonicalSellerUrl(source)) continue;
-    for (const band of ["50.000;", "120.000;", "150.000;", "500.000;"]) {
+    for (const band of ["500.000;", "150.000;", "1000.000;"]) {
       for (const sorting of ["rating", "discount"]) {
         const url = new URL(source);
         url.searchParams.set("currency_price", band);
@@ -1149,7 +1164,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     derivedPriceBands,
   );
   const verifiedSellerUrls = verifiedSellerSourceUrls(yieldRows);
-  const urls = [...new Set(expandHighYieldSourceUrls([...inputUrls, ...verifiedSellerUrls, ...derivedSearchUrls], yieldRows))];
+  const urls = filterProductiveSourceVariants(
+    [...new Set(expandHighYieldSourceUrls([...inputUrls, ...verifiedSellerUrls, ...derivedSearchUrls], yieldRows))],
+    yieldRows,
+  );
   let records = [];
   try {
     const parsed = JSON.parse(await fs.readFile(outputPath, "utf8"));

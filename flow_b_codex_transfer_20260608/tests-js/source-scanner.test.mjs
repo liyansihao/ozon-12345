@@ -48,6 +48,7 @@ import {
   deriveSearchSourceUrls,
   verifiedSellerSourceUrls,
   verifiedPrioritySourceUrls,
+  filterProductiveSourceVariants,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("collection deadline stops an in-flight producer tranche", () => {
@@ -123,10 +124,13 @@ test("fresh sellers expand into bounded price and sorting variants", () => {
   const seller = "https://www.ozon.ru/seller/new-store/";
   const expanded = expandFreshSellerSourceUrls([seller]);
   assert.equal(expanded[0], seller);
-  assert.equal(expanded.length, 9);
+  assert.equal(expanded.length, 7);
   assert.equal(new Set(expanded).size, expanded.length);
+  assert.equal(new URL(expanded[1]).searchParams.get("currency_price"), "500.000;");
   assert.ok(expanded.some((url) => new URL(url).searchParams.get("currency_price") === "500.000;"
     && new URL(url).searchParams.get("sorting") === "discount"));
+  assert.ok(expanded.every((url) => new URL(url).searchParams.get("sorting") !== "price"));
+  assert.ok(expanded.every((url) => new URL(url).searchParams.get("currency_price") !== "120.000;"));
 });
 
 test("published sources expand into prioritized sorting variants without duplicates", () => {
@@ -136,11 +140,33 @@ test("published sources expand into prioritized sorting variants without duplica
   const expanded = expandHighYieldSourceUrls([ordinary, successful], rows);
   const prioritized = prioritizeSourceUrls(expanded, { highYieldSources: [successful] });
   assert.equal(prioritized[0], successful);
-  assert.equal(new URL(prioritized[1]).searchParams.get("sorting"), "rating");
-  assert.equal(prioritized[2], ordinary);
+  assert.equal(new URL(expanded[2]).searchParams.get("currency_price"), "500.000;");
   assert.ok(prioritized.some((value) => new URL(value).searchParams.get("currency_price") === "500.000;"
     && new URL(value).searchParams.get("sorting") === "discount"));
+  assert.ok(expanded.every((value) => new URL(value).searchParams.get("sorting") !== "price"));
+  assert.ok(expanded.every((value) => new URL(value).searchParams.get("currency_price") !== "120.000;"));
   assert.equal(new Set(prioritized).size, prioritized.length);
+});
+
+test("legacy low-price variants require exact-band publication evidence", () => {
+  const proven50 = "https://www.ozon.ru/seller/proven/?currency_price=50.000%3B";
+  const urls = [
+    proven50,
+    `${proven50}&sorting=rating`,
+    `${proven50}&sorting=price`,
+    "https://www.ozon.ru/seller/unproven/?currency_price=50.000%3B",
+    "https://www.ozon.ru/seller/unproven/?currency_price=120.000%3B",
+    "https://www.ozon.ru/seller/unproven/?currency_price=150.000%3B",
+    "https://www.ozon.ru/seller/unproven/?currency_price=500.000%3B",
+  ];
+  assert.deepEqual(filterProductiveSourceVariants(urls, [
+    { source_url: proven50, sku: "winner", status: "published" },
+  ]), [
+    proven50,
+    `${proven50}&sorting=rating`,
+    "https://www.ozon.ru/seller/unproven/?currency_price=150.000%3B",
+    "https://www.ozon.ru/seller/unproven/?currency_price=500.000%3B",
+  ]);
 });
 
 test("strict publications derive fresh Global search sources from useful title terms", () => {
