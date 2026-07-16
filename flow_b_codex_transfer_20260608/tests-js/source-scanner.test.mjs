@@ -296,6 +296,23 @@ test("full-funnel source yield promotes repeated pure-FBS favorites over rejecte
   assert.deepEqual(prioritizeSourceUrls([rejected, pureFbs], { yieldRows: rows }), [pureFbs, rejected]);
 });
 
+test("an exhausted one-hit seller yields to an untried verified seller family", () => {
+  const exhausted = "https://www.ozon.ru/seller/one-hit/?currency_price=50.000%3B";
+  const untried = "https://www.ozon.ru/seller/untried/";
+  const rows = [
+    { source_url: exhausted, sku: "only-win", status: "published" },
+    ...Array.from({ length: 20 }, (_, index) => ({
+      source_url: `${exhausted}&page=${index + 2}`,
+      sku: `rejected-${index}`,
+      status: "rejected",
+    })),
+  ];
+  assert.deepEqual(prioritizeSourceUrls([exhausted, untried], {
+    yieldRows: rows,
+    verifiedFreshSourceUrls: [exhausted, untried],
+  }), [untried, exhausted]);
+});
+
 test("deeper pages inherit source yield within the same price band", () => {
   const winner = "https://www.ozon.ru/seller/winner/?currency_price=500.000%3B";
   const pageTwo = `${winner}&page=2`;

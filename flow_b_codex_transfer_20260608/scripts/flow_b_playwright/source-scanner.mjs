@@ -588,6 +588,24 @@ function fullFunnelSourceScores(rows) {
   }));
 }
 
+function exhaustedSellerFamilyPenalties(rows) {
+  const families = new Map();
+  for (const row of rows || []) {
+    const key = sourceUrlKey(row?.source_url);
+    const sku = String(row?.sku || "").trim();
+    const status = String(row?.status || "");
+    if (!canonicalSellerUrl(key) || !sku || !["favorited", "published", "rejected", "skipped"].includes(status)) continue;
+    const outcomes = families.get(key) || new Map();
+    outcomes.set(sku, Boolean(outcomes.get(sku)) || status === "favorited" || status === "published");
+    families.set(key, outcomes);
+  }
+  return new Map([...families].flatMap(([key, outcomes]) => {
+    const attempted = outcomes.size;
+    const productive = [...outcomes.values()].filter(Boolean).length;
+    return attempted >= 12 && productive / attempted < 0.1 ? [[key, -250_000]] : [];
+  }));
+}
+
 export function prioritizeSourceUrls(urls, {
   highYieldSources = [],
   yieldRows = [],
@@ -600,6 +618,7 @@ export function prioritizeSourceUrls(urls, {
     successfulCounts.set(key, (successfulCounts.get(key) || 0) + 1);
   }
   const funnelScores = fullFunnelSourceScores(yieldRows);
+  const familyPenalties = exhaustedSellerFamilyPenalties(yieldRows);
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedSellerKeys = new Set(verifiedFreshSourceUrls
@@ -613,7 +632,8 @@ export function prioritizeSourceUrls(urls, {
     const tier = verifiedSellerKeys.has(key) ? 3 : verifiedFreshKeys.has(key) ? 2 : freshKeys.has(key) ? 1 : 0;
     const priority = sourceUrlPriority(url) + yieldPriority
       + (freshKeys.has(key) ? 200_000 : 0)
-      + (verifiedFreshKeys.has(key) ? 400_000 : 0);
+      + (verifiedFreshKeys.has(key) ? 400_000 : 0)
+      + (familyPenalties.get(key) || 0);
     const group = groups.get(key) || { index, priority, tier, urls: [] };
     group.priority = Math.max(group.priority, priority);
     group.tier = Math.max(group.tier, tier);
