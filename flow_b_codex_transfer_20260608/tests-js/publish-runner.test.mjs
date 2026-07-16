@@ -1081,7 +1081,7 @@ test("runner does not retry or stall on restored terminal Ozon moderation reject
 
 test("runner rechecks a restored rejection whose moderation evidence belongs to another store", async () => {
   const state = fakeState({
-    mismatched: {
+    3995562725: {
       status: "failed",
       data: {
         sku: "3995562725",
