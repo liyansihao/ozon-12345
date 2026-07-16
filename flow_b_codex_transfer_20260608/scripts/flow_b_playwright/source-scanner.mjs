@@ -780,7 +780,7 @@ export function prioritizeSourceUrls(urls, {
       : qualifiedFreshKeys.has(familyKey)
         ? 3
         : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
-    const tier = familyPenalty < 0
+    const tier = familyPenalty < 0 && !qualifiedFreshKeys.has(familyKey)
       ? (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority

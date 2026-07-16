@@ -139,6 +139,28 @@ test("repeated submitted sellers outrank ordinary exploration without becoming v
   }), [strictSeller, submittedSeller, search]);
 });
 
+test("recent repeated submissions override an old dry-family penalty for bounded seller exploration", () => {
+  const submittedSeller = "https://www.ozon.ru/seller/recovered/";
+  const promotedSearch = "https://www.ozon.ru/search/?text=promoted&is_global=true";
+  const oldDryRows = Array.from({ length: 24 }, (_, index) => ({
+    at: new Date(Date.parse("2026-07-15T07:00:00.000Z") + index * 1000).toISOString(),
+    source_url: submittedSeller,
+    sku: `old-dry-${index}`,
+    status: "rejected",
+  }));
+  const recentSubmittedRows = ["recovered-1", "recovered-2"].map((sku, index) => ({
+    at: new Date(Date.parse("2026-07-16T07:00:00.000Z") + index * 1000).toISOString(),
+    source_url: submittedSeller,
+    sku,
+    status: "submitted",
+  }));
+  assert.deepEqual(prioritizeSourceUrls([promotedSearch, submittedSeller], {
+    yieldRows: [...oldDryRows, ...recentSubmittedRows],
+    qualifiedFreshSourceUrls: [submittedSeller],
+    verifiedFreshSourceUrls: [promotedSearch],
+  }), [submittedSeller, promotedSearch]);
+});
+
 test("fresh sellers expand into bounded price and sorting variants", () => {
   const seller = "https://www.ozon.ru/seller/new-store/";
   const expanded = expandFreshSellerSourceUrls([seller]);
