@@ -51,6 +51,7 @@ import {
   readFavoriteSkusWithTimeout,
   readFavoriteCountWithTimeout,
   deriveSearchSourceUrls,
+  repeatedSubmittedSellerSourceVariants,
   repeatedSubmittedSellerSourceUrls,
   verifiedSellerSourceUrls,
   verifiedPrioritySourceUrls,
@@ -899,6 +900,10 @@ test("repeated submitted seller feedback becomes bounded exploration only", () =
     { status: "published", sku: "c-2", seller_url: "https://www.ozon.ru/seller/c/" },
   ];
   assert.deepEqual(repeatedSubmittedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/a/"]);
+  const variants = repeatedSubmittedSellerSourceVariants(rows);
+  assert.equal(variants.length, 7);
+  assert.equal(variants[0], "https://www.ozon.ru/seller/a/");
+  assert.ok(variants.some((url) => url.includes("currency_price=500.000%3B") && url.includes("sorting=rating")));
   assert.deepEqual(verifiedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/c/"]);
 });
 

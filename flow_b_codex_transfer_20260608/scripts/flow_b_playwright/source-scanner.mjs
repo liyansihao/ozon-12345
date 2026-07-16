@@ -658,6 +658,12 @@ export function repeatedSubmittedSellerSourceUrls(yieldRows, minimumSubmittedSku
     .map(([url]) => url);
 }
 
+export function repeatedSubmittedSellerSourceVariants(yieldRows, minimumSubmittedSkus = 2, limit = 50) {
+  return expandFreshSellerSourceUrls(
+    repeatedSubmittedSellerSourceUrls(yieldRows, minimumSubmittedSkus, limit),
+  );
+}
+
 export function verifiedPrioritySourceUrls({
   verifiedFreshUrls = [],
   verifiedHistoricalUrls = [],
@@ -1505,6 +1511,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     envNumber(env, "FLOW_B_SUBMITTED_SELLER_MIN_SKUS", 2),
     envNumber(env, "FLOW_B_SUBMITTED_SELLER_SOURCES", 50),
   ).filter((url) => !verifiedSellerSet.has(url));
+  const submittedSellerSourceVariants = expandFreshSellerSourceUrls(submittedSellerUrls);
   const publishedSourcePages = expandPublishedSourcePages(
     [],
     yieldRows,
@@ -1517,7 +1524,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...expandHighYieldSourceUrls([
         ...inputUrls,
         ...verifiedSellerUrls,
-        ...submittedSellerUrls,
+        ...submittedSellerSourceVariants,
         ...derivedSearchUrls,
       ], yieldRows),
     ])],
@@ -1537,7 +1544,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...classifiedFreshUrls.explorationUrls,
       ...derivedSearchUrls,
     ],
-    qualifiedFreshSourceUrls: submittedSellerUrls,
+    qualifiedFreshSourceUrls: submittedSellerSourceVariants,
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
       verifiedFreshUrls: [...classifiedFreshUrls.verifiedSellerUrls, ...publishedSourcePages],
       verifiedHistoricalUrls: verifiedSellerUrls,
