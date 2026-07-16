@@ -892,6 +892,17 @@ export function verifiedPrioritySourceUrls({
   ])];
 }
 
+export function qualifiedPrioritySourceUrls({
+  submittedSellerUrls = [],
+  derivedSearchUrls = [],
+  prioritizeDerived = false,
+} = {}) {
+  return [...new Set([
+    ...submittedSellerUrls,
+    ...(prioritizeDerived ? derivedSearchUrls : []),
+  ])];
+}
+
 export function fullFunnelSourceScores(rows) {
   const sources = new Map();
   const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
@@ -2032,7 +2043,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...classifiedFreshUrls.explorationUrls,
       ...derivedSearchUrls,
     ],
-    qualifiedFreshSourceUrls: submittedSellerSourceVariants,
+    qualifiedFreshSourceUrls: qualifiedPrioritySourceUrls({
+      submittedSellerUrls: submittedSellerSourceVariants,
+      derivedSearchUrls,
+      prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
+    }),
     boundedDeepFreshSourceUrls: boundedEvidenceSources,
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
       verifiedFreshUrls: [

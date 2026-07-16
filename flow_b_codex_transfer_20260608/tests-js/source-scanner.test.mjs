@@ -71,6 +71,7 @@ import {
   deepVerifiedSellerSourceVariants,
   verifiedSellerSourceUrls,
   verifiedPrioritySourceUrls,
+  qualifiedPrioritySourceUrls,
   filterProductiveSourceVariants,
   expandPublishedSourcePages,
   expandNextPublishedDiscoveryPages,
@@ -652,6 +653,21 @@ test("explicitly promoted strict-derived searches join the verified priority tie
     freshSourceUrls: [derived],
     verifiedFreshSourceUrls: [seller, derived],
   }), [seller, derived]);
+});
+
+test("explicit strict-derived searches join qualified rotation without promotion when disabled", () => {
+  const submittedSeller = "https://www.ozon.ru/seller/submitted/";
+  const derived = "https://www.ozon.ru/search/?text=комплект+трусов+бикини&is_global=true";
+  assert.deepEqual(qualifiedPrioritySourceUrls({
+    submittedSellerUrls: [submittedSeller],
+    derivedSearchUrls: [derived],
+    prioritizeDerived: true,
+  }), [submittedSeller, derived]);
+  assert.deepEqual(qualifiedPrioritySourceUrls({
+    submittedSellerUrls: [submittedSeller],
+    derivedSearchUrls: [derived],
+    prioritizeDerived: false,
+  }), [submittedSeller]);
 });
 
 test("verified strict-success sellers outrank a higher-yield verified search page", () => {
