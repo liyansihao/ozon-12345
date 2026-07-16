@@ -453,6 +453,10 @@ export function sourceYieldKey(value) {
   }
 }
 
+export function sourceCollectionBlockKey(value) {
+  return value ? sourceYieldKey(value) : null;
+}
+
 function sourceEvidenceKey(value, { keepSorting = false } = {}) {
   try {
     const url = new URL(String(value));
@@ -1266,6 +1270,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const acceptanceDeadline = collectionDeadlineMs(env);
   let apiChain = Promise.resolve();
   let detailGate = Promise.resolve();
+  const softBlockedSources = new Set();
   const apiInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_INTERVAL_MS", 750));
   const maxRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_RETRIES", 5));
   const detailBaseInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS", 1500));
@@ -1308,7 +1313,18 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   };
   const loadProduct = async (page, item) => {
     for (let attempt = 0; ; attempt += 1) {
+      const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
+      if (sourceBlockKey && softBlockedSources.has(sourceBlockKey)) {
+        const error = new Error(`source deferred after Ozon detail soft block: ${sourceBlockKey}`);
+        error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
+        throw error;
+      }
       await reserveDetailSlot();
+      if (sourceBlockKey && softBlockedSources.has(sourceBlockKey)) {
+        const error = new Error(`source deferred after Ozon detail soft block: ${sourceBlockKey}`);
+        error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
+        throw error;
+      }
       try {
         const result = await extractFavoriteProduct(page, item.href, timeout);
         updateDetailPacing("success");
@@ -1322,6 +1338,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           throw error;
         }
         updateDetailPacing("soft-block");
+        if (sourceBlockKey) softBlockedSources.add(sourceBlockKey);
         const cooldownState = collectionDetailCooldownState({
           streak: runtime.detailSoftBlockStreak,
           lastBlockedAt: runtime.lastDetailSoftBlockAt,
@@ -1375,6 +1392,11 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
       while (canClaimFavorite({ total, inFlight, target }) && !isCollectionDeadlineReached(env)) {
         const item = queue[cursor++];
         if (!item) break;
+        const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
+        if (sourceBlockKey && softBlockedSources.has(sourceBlockKey)) {
+          attempted.delete(item.sku);
+          continue;
+        }
         collection.attempted += 1;
         inFlight += 1;
         try {
@@ -1414,6 +1436,10 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         } catch (error) {
           if (error?.code === "FLOW_B_DEADLINE_REACHED") {
             break;
+          } else if (error?.code === "FLOW_B_SOURCE_SOFT_BLOCKED") {
+            attempted.delete(item.sku);
+            collection.attempted -= 1;
+            continue;
           } else if (isFavoriteCapacityReached(error)) {
             total = target;
             await record({ status: "capacity_reached", sku: item.sku, url: item.href, source_url: item.source_url || null, message: String(error?.message || error) });

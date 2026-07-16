@@ -44,6 +44,7 @@ import {
   softBlockCooldownState,
   collectionDetailCooldownState,
   sourceBatchCooldownState,
+  sourceCollectionBlockKey,
   collectionRuntimeState,
   sourceAdaptiveConcurrency,
   nextDetailPacingState,
@@ -1125,6 +1126,14 @@ test("collection detail cooldown probes before using the ten-minute safety ceili
   assert.deepEqual(concurrent, { streak: 1, lastBlockedAt: 102_000, delay: 60_000 });
   assert.deepEqual(laterIncident, { streak: 2, lastBlockedAt: 165_000, delay: 180_000 });
   assert.deepEqual(persistentIncident, { streak: 3, lastBlockedAt: 400_000, delay: 600_000 });
+});
+
+test("collection soft blocks quarantine only the affected source price band", () => {
+  const pageTwo = "https://www.ozon.ru/seller/example/?currency_price=500.000%3B&page=2";
+  const pageThree = "https://www.ozon.ru/seller/example/?currency_price=500.000%3B&page=3";
+  const siblingBand = "https://www.ozon.ru/seller/example/?currency_price=150.000%3B&page=2";
+  assert.equal(sourceCollectionBlockKey(pageTwo), sourceCollectionBlockKey(pageThree));
+  assert.notEqual(sourceCollectionBlockKey(pageTwo), sourceCollectionBlockKey(siblingBand));
 });
 
 test("blocked source batches probe with short backoff before escalating", () => {
