@@ -16,6 +16,7 @@ export function mergeCandidateFacts(favorite = {}, fact = {}) {
   const coverImage = String(favorite?.cover_image || favorite?.coverImage || fact?.cover_image || "").trim() || null;
   const mode = String(favorite?.mode || favorite?.shipping_mode || fact?.shipping_mode || fact?.mode || "").trim() || null;
   const sourceUrl = String(favorite?.source_url || fact?.source_url || "").trim() || null;
+  const sellerUrl = String(favorite?.seller_url || fact?.seller_url || "").trim() || null;
   const productUrl = String(favorite?.link || favorite?.detail_url || fact?.source_url_product || fact?.link || "").trim() || null;
   const sourceCurrency = String(favorite?.source_currency || fact?.source_currency || "").trim().toUpperCase() || null;
   return {
@@ -29,6 +30,7 @@ export function mergeCandidateFacts(favorite = {}, fact = {}) {
     shipping_mode: mode,
     source_currency: sourceCurrency,
     source_url: sourceUrl,
+    seller_url: sellerUrl,
     link: productUrl,
   };
 }

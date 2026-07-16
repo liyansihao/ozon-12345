@@ -37,6 +37,7 @@ test("collection facts retain publish-critical fields and override incomplete fa
     source_currency: "CNY",
     source_url: "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/",
     source_url_product: "https://www.ozon.ru/product/42/",
+    seller_url: "https://www.ozon.ru/seller/proven/",
   };
   assert.deepEqual(mergeCandidateFacts(favorite, fact), {
     sku: "42",
@@ -49,6 +50,7 @@ test("collection facts retain publish-critical fields and override incomplete fa
     source_currency: "CNY",
     source_url: "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/",
     link: "https://www.ozon.ru/product/42/",
+    seller_url: "https://www.ozon.ru/seller/proven/",
   });
 });
 
