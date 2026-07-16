@@ -363,7 +363,7 @@ export function createScannerLogger(log = console.log, level = "summary") {
   return (message) => {
     const text = String(message || "").split(/\r?\n/, 1)[0].slice(0, 300);
     if (/^favorite\s+0\s+->\s+0\s+delta=0$/i.test(text)) return;
-    if (/^(?:favorite exclusions loaded:|favorite count telemetry unavailable|favorite SKU telemetry unavailable|collecting favorites from|batch \d|source soft block cooldown|favorite collection summary|favorite capacity reached|favorite \S+ ->)/i.test(text)) log(text);
+    if (/^(?:favorite exclusions loaded:|favorite count telemetry unavailable|favorite SKU telemetry unavailable|collecting favorites from|batch \d|source soft block cooldown|yielding source tranche|favorite collection summary|favorite capacity reached|favorite \S+ ->)/i.test(text)) log(text);
   };
 }
 
@@ -943,6 +943,13 @@ export function orderRowsBySourceYield(rows, yieldRows = []) {
 
 export function shouldYieldAfterRetained({ retainedLinks, retainedAttempted = retainedLinks, pendingSources }) {
   return Number(retainedLinks) > 0 && Number(retainedAttempted) > 0 && Number(pendingSources) > 0;
+}
+
+export function shouldYieldForSourceFeedback({ completedBatches, maximumBatches, pendingSources }) {
+  const maximum = Math.max(0, Number(maximumBatches) || 0);
+  return maximum > 0
+    && Number(completedBatches) >= maximum
+    && Number(pendingSources) > 0;
 }
 
 export function nextLowYieldBatchStreak({ current = 0, favorited = 0, threshold = 1 }) {
@@ -1690,6 +1697,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const lowDeltaThreshold = envNumber(env, "FLOW_B_LOW_DELTA_THRESHOLD", 1);
   const lowDeltaBatchLimit = envNumber(env, "FLOW_B_LOW_DELTA_BATCH_LIMIT", 2);
   let lowDeltaBatches = 0;
+  const maximumSourceBatches = Math.max(0, envNumber(env, "FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE", 8));
+  let completedSourceBatches = 0;
   const targetFavorites = envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000);
   const attempted = await loadExcludedSkus(outputPath, env);
   emit(`favorite exclusions loaded: ${attempted.size}`);
@@ -1796,6 +1805,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         closeTimeoutMs: pageCloseTimeout,
       })
         .catch((error) => ({ source_url: url, blocked: false, stop_reason: `error: ${error.message}`, links: [], cumulative_product_link_count: 0 }))));
+      completedSourceBatches += 1;
       const sourceCooldown = sourceBatchCooldownState(batchRows, collectionRuntimeState(favoriteLog));
       if (sourceCooldown.blocked && !isCollectionDeadlineReached(env)) {
         emit(`source soft block cooldown wait=${sourceCooldown.delay}ms`);
@@ -1876,6 +1886,14 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       favoriteBefore = favoriteAfter;
       if (favoriteAfter !== null && favoriteAfter >= targetFavorites) break;
       if (lowDeltaBatchLimit > 0 && lowDeltaBatches >= lowDeltaBatchLimit) break;
+      if (shouldYieldForSourceFeedback({
+        completedBatches: completedSourceBatches,
+        maximumBatches: maximumSourceBatches,
+        pendingSources: pending.length - start,
+      })) {
+        emit(`yielding source tranche after ${completedSourceBatches} batches for fresh publish feedback`);
+        break;
+      }
     }
     return { outFile: outputPath, records: records.length, pending: pending.length };
   } finally {

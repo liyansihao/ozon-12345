@@ -260,6 +260,8 @@ export function createPublishRunner({
   confirmationAttempts = 6,
   confirmationIntervalMs = 2000,
   onlineSyncIntervalMs = 1_800_000,
+  urgentOnlineSyncIntervalMs = 600_000,
+  urgentOnlineSyncPendingCount = 20,
   warehouseId = null,
   initialStock = 1,
   dailyStoreLimit = 100,
@@ -427,18 +429,41 @@ export function createPublishRunner({
     return { ok: false, reason: "publish-final-status-timeout" };
   }
 
-  async function maybeSyncOnlineShop(targetConfig) {
+  async function maybeSyncOnlineShop(targetConfig, { pendingCount = 0 } = {}) {
     if (typeof client.syncOnlineShops !== "function") return;
     const activeStoreId = Number(targetConfig.store.id);
     const currentTime = now().getTime();
     const lastSync = Number(lastOnlineSyncAt.get(activeStoreId) || 0);
-    if (currentTime - lastSync < Math.max(0, Number(onlineSyncIntervalMs) || 0)) return;
+    const urgent = Number(pendingCount) >= Math.max(1, Number(urgentOnlineSyncPendingCount) || 1);
+    const cooldownMs = urgent
+      ? Math.min(
+        Math.max(0, Number(onlineSyncIntervalMs) || 0),
+        Math.max(0, Number(urgentOnlineSyncIntervalMs) || 0),
+      )
+      : Math.max(0, Number(onlineSyncIntervalMs) || 0);
+    if (currentTime - lastSync < cooldownMs) return;
     lastOnlineSyncAt.set(activeStoreId, currentTime);
     try {
       const syncResult = await client.syncOnlineShops([activeStoreId], "all");
-      recordMetric("store_syncs.jsonl", { store_id: activeStoreId, kind: "online-products", ok: true, result: syncResult ?? null });
+      recordMetric("store_syncs.jsonl", {
+        store_id: activeStoreId,
+        kind: "online-products",
+        ok: true,
+        pending_count: Math.max(0, Number(pendingCount) || 0),
+        cooldown_ms: cooldownMs,
+        urgent,
+        result: syncResult ?? null,
+      });
     } catch (error) {
-      recordMetric("store_syncs.jsonl", { store_id: activeStoreId, kind: "online-products", ok: false, error: String(error?.message || error) });
+      recordMetric("store_syncs.jsonl", {
+        store_id: activeStoreId,
+        kind: "online-products",
+        ok: false,
+        pending_count: Math.max(0, Number(pendingCount) || 0),
+        cooldown_ms: cooldownMs,
+        urgent,
+        error: String(error?.message || error),
+      });
     }
   }
 
@@ -968,9 +993,13 @@ export function createPublishRunner({
         reconcile_only: true,
       }, facts.get(String(entry.sku)) || {}));
     if (delayedSubmissions.length > 0) {
-      const delayedStoreIds = new Set(delayedSubmissions.map((item) => Number(item.store_id) || Number(targetConfig.store.id)));
-      for (const delayedStoreId of delayedStoreIds) {
-        await maybeSyncOnlineShop({ store: { id: delayedStoreId } });
+      const delayedCountByStore = new Map();
+      for (const item of delayedSubmissions) {
+        const delayedStoreId = Number(item.store_id) || Number(targetConfig.store.id);
+        delayedCountByStore.set(delayedStoreId, Number(delayedCountByStore.get(delayedStoreId) || 0) + 1);
+      }
+      for (const [delayedStoreId, pendingCount] of delayedCountByStore) {
+        await maybeSyncOnlineShop({ store: { id: delayedStoreId } }, { pendingCount });
       }
     }
     const runnableFavorites = reconciliationOnly || freshSubmissionsPaused

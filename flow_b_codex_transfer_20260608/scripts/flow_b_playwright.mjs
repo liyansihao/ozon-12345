@@ -198,6 +198,8 @@ async function createPublishingSession(context, options, env, shared) {
       confirmationAttempts: Math.max(1, Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) || 6),
       confirmationIntervalMs: Math.max(0, Number(env.FLOW_B_CONFIRMATION_INTERVAL_MS) || 2000),
       onlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_ONLINE_SYNC_INTERVAL_MS) || 1_800_000),
+      urgentOnlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_URGENT_ONLINE_SYNC_INTERVAL_MS) || 600_000),
+      urgentOnlineSyncPendingCount: Math.max(1, Number(env.FLOW_B_URGENT_ONLINE_SYNC_PENDING_COUNT) || 20),
       warehouseId: env.FLOW_B_WAREHOUSE_ID || null,
       initialStock: Math.max(1, Number(env.FLOW_B_INITIAL_STOCK) || 1),
       dailyStoreLimit: Math.max(1, Number(env.FLOW_B_DAILY_STORE_LIMIT) || 100),

@@ -29,6 +29,7 @@ import {
   orderRowsBySourceYield,
   waitForMovingDeadline,
   shouldYieldAfterRetained,
+  shouldYieldForSourceFeedback,
   terminalSkusFromJsonl,
   limitLinksPerSource,
   cachedExactFbsFallbackLinks,
@@ -1306,6 +1307,13 @@ test("low-yield feedback uses actual batch favorites instead of the concurrently
   assert.equal(nextLowYieldBatchStreak({ current: 0, favorited: 1, threshold: 2 }), 1);
   assert.equal(nextLowYieldBatchStreak({ current: 1, favorited: 1, threshold: 2 }), 2);
   assert.equal(nextLowYieldBatchStreak({ current: 2, favorited: 4, threshold: 2 }), 0);
+});
+
+test("source scanning yields after a bounded tranche so new publish feedback can rerank it", () => {
+  assert.equal(shouldYieldForSourceFeedback({ completedBatches: 7, maximumBatches: 8, pendingSources: 100 }), false);
+  assert.equal(shouldYieldForSourceFeedback({ completedBatches: 8, maximumBatches: 8, pendingSources: 100 }), true);
+  assert.equal(shouldYieldForSourceFeedback({ completedBatches: 8, maximumBatches: 8, pendingSources: 0 }), false);
+  assert.equal(shouldYieldForSourceFeedback({ completedBatches: 80, maximumBatches: 0, pendingSources: 100 }), false);
 });
 
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {

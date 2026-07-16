@@ -1520,6 +1520,54 @@ test("runner restores the persisted online-sync cooldown after a supervisor rest
   assert.deepEqual(syncCalls, []);
 });
 
+test("runner shortens the online-sync cooldown only for a large delayed backlog", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-urgent-sync-"));
+  const now = () => new Date("2026-07-15T08:06:00.000Z");
+  await fs.writeFile(path.join(runDir, "store_syncs.jsonl"), `${JSON.stringify({
+    at: "2026-07-15T08:00:00.000Z",
+    store_id: 104965,
+    kind: "online-products",
+    ok: true,
+  })}\n`);
+  const state = fakeState({
+    delayed1: {
+      status: "processing",
+      data: { store_id: 104965, submitted: true, offer_id: "mz-delayed-1", profit_rate: 45 },
+    },
+    delayed2: {
+      status: "processing",
+      data: { store_id: 104965, submitted: true, offer_id: "mz-delayed-2", profit_rate: 46 },
+    },
+  });
+  const syncCalls = [];
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: "丽丽1号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    syncOnlineShops: async (...args) => { syncCalls.push(args); return { msg: "queued" }; },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "pending" }),
+    findOnlineProduct: async () => null,
+  });
+
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    now,
+    target: 1,
+    storeTargets: [{ id: 104965, needle: "丽丽1号", requireWarehouse: false }],
+    onlineSyncIntervalMs: 1_800_000,
+    urgentOnlineSyncIntervalMs: 300_000,
+    urgentOnlineSyncPendingCount: 2,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.deepEqual(syncCalls, [[[104965], "all"]]);
+});
+
 test("reconciliation HTTP 0 errors reduce adaptive publish concurrency", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-reconcile-http0-"));
   const state = fakeState({
