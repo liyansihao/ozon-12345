@@ -195,6 +195,13 @@ export function favoriteModeSkipReason(mode) {
   return isPureFbs(mode) ? null : "non-pure-fbs";
 }
 
+export function listingModeSkipReason(cardText) {
+  const mode = String(cardText || "")
+    .match(/(?:^|\n)\s*发货模式\s*[：:]\s*([^\n]+)/i)?.[1]?.trim() || "";
+  if (!mode || /^(?:暂无数据|--|-|unknown)$/i.test(mode)) return null;
+  return isPureFbs(mode) ? null : "non-pure-fbs";
+}
+
 export function isOzonSoftBlock(value) {
   return /похоже, нет(?:\s|\u00a0)+соединения|выключите VPN|incident:\s*[a-z0-9_]+/i.test(String(value || ""));
 }
@@ -921,7 +928,13 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     const sku = skuFromProductUrl(href);
     if (!sku || existing.has(sku) || attempted.has(sku)) continue;
     attempted.add(sku);
-    queue.push({ sku, href, source_url: typeof link === "object" ? link?.source_url : null });
+    queue.push({
+      sku,
+      href,
+      source_url: typeof link === "object" ? link?.source_url : null,
+      text: typeof link === "object" ? link?.text : "",
+      card_text: typeof link === "object" ? link?.card_text : "",
+    });
   }
   const workerCount = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_WORKERS", envNumber(env, "FLOW_B_TAB_WORKERS", 4)));
   const timeout = envNumber(env, "FLOW_B_FAVORITE_DETAIL_TIMEOUT", 15000);
@@ -1017,6 +1030,8 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         collection.attempted += 1;
         inFlight += 1;
         try {
+          const listingModeReason = listingModeSkipReason(item.card_text);
+          if (listingModeReason) throw new Error(`${listingModeReason}: SKU ${item.sku}`);
           const titleReason = favoriteTitleSkipReason(item.text);
           if (titleReason) throw new Error(`${titleReason}: SKU ${item.sku}`);
           const productInfo = await loadProduct(page, item);
