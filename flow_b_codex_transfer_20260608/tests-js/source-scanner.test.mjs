@@ -45,6 +45,7 @@ import {
   sourceBatchCooldownState,
   collectionRuntimeState,
   sourceAdaptiveConcurrency,
+  nextDetailPacingState,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
   withTimeout,
@@ -1120,6 +1121,27 @@ test("source adaptive concurrency keeps stable progress across producer tranches
   const resumed = sourceAdaptiveConcurrency(key, { initial: 3, max: 6, stableWindow: 2 });
   assert.equal(resumed, first);
   assert.equal(resumed.current, 4);
+});
+
+test("detail pacing ramps down only after stable loads and resets on soft block", () => {
+  const options = {
+    baseIntervalMs: 3000,
+    minIntervalMs: 2000,
+    stepMs: 500,
+    stableWindow: 3,
+  };
+  let state = { intervalMs: 3000, stableSuccesses: 0 };
+  state = nextDetailPacingState({ ...state, ...options, event: "success" });
+  state = nextDetailPacingState({ ...state, ...options, event: "success" });
+  assert.deepEqual(state, { intervalMs: 3000, stableSuccesses: 2 });
+  state = nextDetailPacingState({ ...state, ...options, event: "success" });
+  assert.deepEqual(state, { intervalMs: 2500, stableSuccesses: 0 });
+  for (let index = 0; index < 3; index += 1) {
+    state = nextDetailPacingState({ ...state, ...options, event: "success" });
+  }
+  assert.deepEqual(state, { intervalMs: 2000, stableSuccesses: 0 });
+  state = nextDetailPacingState({ ...state, ...options, event: "soft-block" });
+  assert.deepEqual(state, { intervalMs: 3000, stableSuccesses: 0 });
 });
 
 test("favorite collection prioritizes observed profitable title families stably", () => {

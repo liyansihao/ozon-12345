@@ -36,6 +36,27 @@ export function sourceAdaptiveConcurrency(key, options = {}) {
   return runtime.sourceAdaptiveConcurrency;
 }
 
+export function nextDetailPacingState({
+  intervalMs,
+  stableSuccesses = 0,
+  baseIntervalMs = 3000,
+  minIntervalMs = 2000,
+  stepMs = 500,
+  stableWindow = 12,
+  event = "success",
+} = {}) {
+  const base = Math.max(0, Number(baseIntervalMs) || 0);
+  const minimum = Math.min(base, Math.max(0, Number(minIntervalMs) || 0));
+  const step = Math.max(1, Number(stepMs) || 1);
+  const window = Math.max(1, Number(stableWindow) || 1);
+  const current = Math.max(minimum, Math.min(base, Number(intervalMs) || base));
+  if (event === "soft-block") return { intervalMs: base, stableSuccesses: 0 };
+  if (event !== "success") return { intervalMs: current, stableSuccesses: 0 };
+  const stable = Math.max(0, Number(stableSuccesses) || 0) + 1;
+  if (stable < window || current <= minimum) return { intervalMs: current, stableSuccesses: stable };
+  return { intervalMs: Math.max(minimum, current - step), stableSuccesses: 0 };
+}
+
 export function collectionDeadlineMs(env = process.env) {
   const value = Date.parse(String(env.FLOW_B_DEADLINE_AT || ""));
   return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
@@ -1215,7 +1236,30 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   let detailGate = Promise.resolve();
   const apiInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_INTERVAL_MS", 750));
   const maxRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_RETRIES", 5));
-  const detailInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS", 1500));
+  const detailBaseInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS", 1500));
+  const detailMinInterval = Math.min(
+    detailBaseInterval,
+    Math.max(0, envNumber(env, "FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS", 2000)),
+  );
+  const detailIntervalStep = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_STEP_MS", 500));
+  const detailStableWindow = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_STABLE_WINDOW", 12));
+  if (!Number.isFinite(Number(runtime.detailIntervalMs))) runtime.detailIntervalMs = detailBaseInterval;
+  if (!Number.isFinite(Number(runtime.detailStableSuccesses))) runtime.detailStableSuccesses = 0;
+  const updateDetailPacing = (event) => {
+    const previous = runtime.detailIntervalMs;
+    const next = nextDetailPacingState({
+      intervalMs: runtime.detailIntervalMs,
+      stableSuccesses: runtime.detailStableSuccesses,
+      baseIntervalMs: detailBaseInterval,
+      minIntervalMs: detailMinInterval,
+      stepMs: detailIntervalStep,
+      stableWindow: detailStableWindow,
+      event,
+    });
+    runtime.detailIntervalMs = next.intervalMs;
+    runtime.detailStableSuccesses = next.stableSuccesses;
+    if (next.intervalMs !== previous) log(`Ozon detail pacing interval=${next.intervalMs}ms event=${event}`);
+  };
   const detailRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_RETRIES", 3));
   const reserveDetailSlot = () => {
     const operation = detailGate.then(async () => {
@@ -1225,7 +1269,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         error.code = "FLOW_B_DEADLINE_REACHED";
         throw error;
       }
-      runtime.nextDetailAt = Date.now() + detailInterval;
+      runtime.nextDetailAt = Date.now() + runtime.detailIntervalMs;
     });
     detailGate = operation.catch(() => {});
     return operation;
@@ -1235,12 +1279,17 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
       await reserveDetailSlot();
       try {
         const result = await extractFavoriteProduct(page, item.href, timeout);
+        updateDetailPacing("success");
         runtime.detailSoftBlockStreak = 0;
         runtime.lastDetailSoftBlockAt = 0;
         return result;
       } catch (error) {
         const policy = ozonDetailFailurePolicy(error, attempt, detailRetries);
-        if (!policy.softBlocked) throw error;
+        if (!policy.softBlocked) {
+          updateDetailPacing(/^non-pure-fbs:/i.test(String(error?.message || error)) ? "success" : "failure");
+          throw error;
+        }
+        updateDetailPacing("soft-block");
         const cooldownState = softBlockCooldownState({
           streak: runtime.detailSoftBlockStreak,
           lastBlockedAt: runtime.lastDetailSoftBlockAt,
