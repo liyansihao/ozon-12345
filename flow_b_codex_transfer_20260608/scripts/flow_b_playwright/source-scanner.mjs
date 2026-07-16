@@ -1053,9 +1053,16 @@ export function prioritizeSourceUrls(urls, {
   // Rotate those two tiers together so one seller cannot fill an entire source
   // batch merely because its variants sit one tier above the next seller.
   for (const tiers of [[4, 3], [2], [1], [0]]) {
-    const ranked = [...groups.values()]
-      .filter((group) => tiers.includes(group.tier))
-      .sort((left, right) => right.tier - left.tier || right.priority - left.priority || left.index - right.index);
+    const rankedByTier = tiers.map((tier) => [...groups.values()]
+      .filter((group) => group.tier === tier)
+      .sort((left, right) => right.priority - left.priority || left.index - right.index));
+    const ranked = [];
+    const tierRounds = Math.max(0, ...rankedByTier.map((values) => values.length));
+    for (let index = 0; index < tierRounds; index += 1) {
+      for (const values of rankedByTier) {
+        if (values[index]) ranked.push(values[index]);
+      }
+    }
     const rounds = Math.max(0, ...ranked.map((group) => group.urls.length));
     const burst = 2;
     for (let round = 0; round < rounds; round += burst) {

@@ -759,6 +759,23 @@ test("verified and qualified sellers share a bounded family rotation", () => {
   }).slice(0, 3), [urls[0], urls[1], urls[3]]);
 });
 
+test("multiple verified families cannot postpone a qualified strict-derived family until the end of the tier", () => {
+  const sellerA = "https://www.ozon.ru/seller/verified-a/";
+  const sellerB = "https://www.ozon.ru/seller/verified-b/";
+  const derived = "https://www.ozon.ru/search/?text=комплект+трусов+бикини&is_global=true";
+  const urls = [
+    sellerA,
+    `${sellerA}?page=2`,
+    sellerB,
+    `${sellerB}?page=2`,
+    derived,
+  ];
+  assert.deepEqual(prioritizeSourceUrls(urls, {
+    verifiedFreshSourceUrls: [sellerA, sellerB, derived],
+    qualifiedFreshSourceUrls: [derived],
+  }).slice(0, 3), [urls[0], urls[1], derived]);
+});
+
 test("a fresh search family with twelve recent dry candidates yields to an untried source", () => {
   const drySearch = "https://www.ozon.ru/search/?text=dry-family&is_global=true&sorting=rating";
   const untriedSeller = "https://www.ozon.ru/seller/untried-family/";
