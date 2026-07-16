@@ -100,6 +100,52 @@ test("publish candidates use current strict title-family feedback before static 
   ], new Set(), scores).map((item) => item.sku), ["toy", "socks"]);
 });
 
+test("fresh favorites are scheduled before a large restored reconciliation backlog", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-fresh-fairness-"));
+  const restored = {};
+  for (let index = 0; index < 16; index += 1) {
+    restored[`old-${index}`] = {
+      status: "processing",
+      data: {
+        sku: `old-${index}`,
+        title: "Комплект трусов",
+        store_id: 104965,
+        submitted: true,
+        submission_pending: true,
+        offer_id: `mz-old-${index}`,
+        prepared_at: "2026-07-15T08:00:00.000Z",
+        next_reconcile_at: "2026-07-15T09:00:00.000Z",
+      },
+    };
+  }
+  const state = fakeState(restored);
+  const events = [];
+  const client = clientFor([{ id: 900, sku: "fresh-900", title: "ordinary safe item" }], {
+    findImportLog: async ({ sku, offerId }) => {
+      events.push(`reconcile:${sku}`);
+      return { sku, offer_id: offerId, import_status: "pending" };
+    },
+    publish: async () => {
+      events.push("publish:fresh-900");
+      return { ok: true, response: { code: 1 } };
+    },
+  });
+
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    runDir,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    pendingStoreStallCount: 99,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(events[0], "publish:fresh-900");
+});
+
 test("offer IDs retain the complete SKU and cannot collide on a six-digit suffix", () => {
   const now = new Date("2026-07-15T00:00:00Z");
   assert.equal(offerIdForSku("4799637133", now), "mz-150726-4799637133");

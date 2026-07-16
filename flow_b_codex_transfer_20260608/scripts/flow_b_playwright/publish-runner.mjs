@@ -151,6 +151,20 @@ export function prioritizePublishCandidates(items, preflightPureSkus = new Set()
     .map(({ item }) => item);
 }
 
+function interleaveCandidateBatches(primary, secondary, batchSize) {
+  const width = Math.max(1, Number(batchSize) || 1);
+  const result = [];
+  let primaryIndex = 0;
+  let secondaryIndex = 0;
+  while (primaryIndex < primary.length || secondaryIndex < secondary.length) {
+    result.push(...primary.slice(primaryIndex, primaryIndex + width));
+    primaryIndex += width;
+    result.push(...secondary.slice(secondaryIndex, secondaryIndex + width));
+    secondaryIndex += width;
+  }
+  return result;
+}
+
 async function loadPreflightPureSkus(runDir) {
   const result = new Set();
   try {
@@ -943,11 +957,25 @@ export function createPublishRunner({
         return restored?.data?.submitted === true || restored?.data?.submission_pending === true;
       })
       : favorites;
-    const candidates = prioritizePublishCandidates(
-      [...delayedSubmissions, ...runnableFavorites],
-      await loadPreflightPureSkus(runDir),
-      await loadObservedTitleFamilyScores(runDir),
+    const preflightPureSkus = await loadPreflightPureSkus(runDir);
+    const familyScores = await loadObservedTitleFamilyScores(runDir);
+    const isReconciliationCandidate = (item) => item?.reconcile_only === true
+      || item?.submitted === true
+      || item?.submission_pending === true;
+    const freshCandidates = prioritizePublishCandidates(
+      runnableFavorites.filter((item) => !isReconciliationCandidate(item)),
+      preflightPureSkus,
+      familyScores,
     );
+    const dueReconciliations = prioritizePublishCandidates(
+      [...delayedSubmissions, ...runnableFavorites.filter(isReconciliationCandidate)].filter((item) => {
+        const nextReconcileAt = Date.parse(item?.next_reconcile_at || "");
+        return !Number.isFinite(nextReconcileAt) || nextReconcileAt <= now().getTime();
+      }),
+      preflightPureSkus,
+      familyScores,
+    );
+    const candidates = interleaveCandidateBatches(freshCandidates, dueReconciliations, workerCount);
     let published = Number(state.runPublishedCount?.() ?? 0);
     let failed = 0;
     let skipped = 0;
@@ -1145,7 +1173,6 @@ export function createPublishRunner({
 
     let cursor = 0;
     while (cursor < candidates.length
-      && published < targetCount
       && !haltReason
       && (!deadlineAt || Date.now() < Date.parse(deadlineAt))
       && (dryLimit === 0 || dryCandidates < dryLimit)) {
@@ -1154,6 +1181,10 @@ export function createPublishRunner({
       const nextIsReconciliation = nextCandidate?.reconcile_only === true
         || nextCandidate?.submitted === true
         || nextCandidate?.submission_pending === true;
+      if (!nextIsReconciliation && published >= targetCount) {
+        cursor += 1;
+        continue;
+      }
       if (!nextIsReconciliation
         && stalledPendingForStore(activeStoreId).length >= Math.max(1, Number(pendingStoreStallCount) || 1)) {
         stalledStoresThisRun.add(activeStoreId);
