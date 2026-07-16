@@ -523,11 +523,19 @@ function canonicalSellerUrl(value) {
 
 export function verifiedSellerSourceUrls(yieldRows, minimumPublishedSkus = 2) {
   const minimum = Math.max(1, Number(minimumPublishedSkus) || 2);
+  const observedSellerBySku = new Map();
+  for (const row of yieldRows || []) {
+    const sku = String(row?.sku || "").trim();
+    const url = canonicalSellerUrl(row?.seller_url);
+    if (sku && url) observedSellerBySku.set(sku, url);
+  }
   const sellers = new Map();
   for (const row of yieldRows || []) {
     if (String(row?.status || "") !== "published") continue;
-    const url = canonicalSellerUrl(row?.seller_url) || canonicalSellerUrl(row?.source_url);
     const sku = String(row?.sku || "").trim();
+    const url = canonicalSellerUrl(row?.seller_url)
+      || canonicalSellerUrl(row?.source_url)
+      || observedSellerBySku.get(sku);
     if (!url || !sku) continue;
     const skus = sellers.get(url) || new Set();
     skus.add(sku);

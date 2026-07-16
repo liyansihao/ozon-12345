@@ -544,6 +544,8 @@ test("verified FBS seller feedback becomes a unique next-round source", () => {
     { status: "published", sku: "b-1", seller_url: "https://www.ozon.ru/seller/b/" },
     { status: "published", sku: "d-1", source_url: "https://www.ozon.ru/seller/d/?currency_price=50.000%3B" },
     { status: "published", sku: "d-2", source_url: "https://www.ozon.ru/seller/d/" },
+    { status: "favorited", sku: "e-1", seller_url: "https://www.ozon.ru/seller/e/?miniapp=1" },
+    { status: "published", sku: "e-1", source_url: "https://www.ozon.ru/search/?text=e" },
     { status: "rejected", seller_url: "https://www.ozon.ru/seller/c/" },
   ];
   assert.deepEqual(verifiedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/a/", "https://www.ozon.ru/seller/d/"]);
@@ -551,6 +553,7 @@ test("verified FBS seller feedback becomes a unique next-round source", () => {
     "https://www.ozon.ru/seller/a/",
     "https://www.ozon.ru/seller/b/",
     "https://www.ozon.ru/seller/d/",
+    "https://www.ozon.ru/seller/e/",
   ]);
 });
 
