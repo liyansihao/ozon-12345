@@ -211,10 +211,11 @@ export function shouldDeferSourceAfterNonFbsSample(stats = {}, limit = 6) {
   const attempted = Math.max(0, Number(stats.attempted) || 0);
   const nonPureFbs = Math.max(0, Number(stats.nonPureFbs) || 0);
   const favorited = Math.max(0, Number(stats.favorited) || 0);
-  return nonPureFbs >= threshold
-    && attempted >= threshold
-    && favorited === 0
-    && nonPureFbs / attempted >= 0.8;
+  const overwhelminglyNonFbs = nonPureFbs / attempted >= 0.8;
+  return overwhelminglyNonFbs && (
+    (nonPureFbs >= threshold && attempted >= threshold && favorited === 0)
+    || (attempted >= threshold * 2 && favorited <= 1)
+  );
 }
 
 export function nextSourceSampleStats(stats = {}, outcome = {}) {
@@ -1536,7 +1537,8 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             const { reason } = favoriteFailureDisposition(error);
             const sourceStats = recordSourceOutcome(nonFbsSampleKey, { status: "rejected", reason });
             if (sourceStats && reason === "non-pure-fbs") {
-              if (shouldDeferSourceAfterNonFbsSample(sourceStats, nonFbsSampleLimit)) {
+              if (!nonFbsDeferredSources.has(nonFbsSampleKey)
+                && shouldDeferSourceAfterNonFbsSample(sourceStats, nonFbsSampleLimit)) {
                 nonFbsDeferredSources.add(nonFbsSampleKey);
                 log(`source non-pure-FBS sample deferred after ${sourceStats.attempted} checks: ${nonFbsSampleKey}`);
               }

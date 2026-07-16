@@ -76,6 +76,9 @@ test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 10, nonPureFbs: 9, favorited: 0 }, 6), true);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 10, nonPureFbs: 7, favorited: 0 }, 6), false);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 8, nonPureFbs: 7, favorited: 1 }, 6), false);
+  assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 12, nonPureFbs: 11, favorited: 1 }, 6), true);
+  assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 11, nonPureFbs: 10, favorited: 1 }, 6), false);
+  assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 12, nonPureFbs: 10, favorited: 2 }, 6), false);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 20, nonPureFbs: 20, favorited: 0 }, 0), false);
 });
 
