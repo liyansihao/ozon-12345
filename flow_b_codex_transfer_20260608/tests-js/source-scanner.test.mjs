@@ -33,6 +33,7 @@ import {
   limitLinksPerSource,
   productTitleFamily,
   productTitlePriority,
+  observedTitleFamilyScores,
   createScannerLogger,
   favoriteFailureDisposition,
   favoritePriceSkipReason,
@@ -836,6 +837,20 @@ test("title family priority follows observed strict-publication conversion", () 
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Браслет с кулоном"));
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Летняя кепка для кошек"));
   assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Детский игровой столик для игр с водой"));
+});
+
+test("recent strict publications promote productive title families ahead of static guesses", () => {
+  const scores = observedTitleFamilyScores([
+    { sku: "toy-1", status: "published", title_family: "toy" },
+    { sku: "toy-2", status: "published", title_family: "toy" },
+    { sku: "socks-1", status: "skipped", title_family: "socks" },
+    { sku: "socks-2", status: "failed", title_family: "socks" },
+  ]);
+  assert.ok(scores.toy > scores.socks);
+  assert.deepEqual(prioritizeFavoriteLinks([
+    { href: "socks", text: "Носки для девочек" },
+    { href: "toy", text: "Детская игрушка погремушка" },
+  ], scores).map((link) => link.href), ["toy", "socks"]);
 });
 
 test("favorite title preflight rejects proven low-yield oversized categories", () => {

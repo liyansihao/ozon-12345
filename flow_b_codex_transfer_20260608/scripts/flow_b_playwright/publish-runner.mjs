@@ -4,7 +4,7 @@ import path from "node:path";
 import * as defaultPolicy from "./publish-policy.mjs";
 import { canonicalProductUrl } from "./publish-state.mjs";
 import { mapOzonCategory } from "./category-commission.mjs";
-import { productTitleFamily, productTitlePriority } from "./source-scanner.mjs";
+import { observedTitleFamilyScores, productTitleFamily, productTitlePriority } from "./source-scanner.mjs";
 import { AdaptiveConcurrency, hasReusableCandidateFacts, isFatalBrowserError, loadCandidateFacts, mergeCandidateFacts } from "./continuous-runtime.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
@@ -129,13 +129,13 @@ function isTerminalSubmittedFailure(entry) {
   return !evidenceBelongsToAnotherStore && hasTerminalModerationDecline(moderationProduct);
 }
 
-export function prioritizePublishCandidates(items, preflightPureSkus = new Set()) {
+export function prioritizePublishCandidates(items, preflightPureSkus = new Set(), familyScores = {}) {
   return [...items]
     .map((item, index) => ({
       item,
       index,
       purePreflight: preflightPureSkus.has(String(item?.sku ?? item?.id ?? "")) ? 1 : 0,
-      priority: productTitlePriority(item?.title),
+      priority: Number(familyScores[productTitleFamily(item?.title)] || 0) + productTitlePriority(item?.title),
       salePrice: Number(item?.sell_price ?? item?.price ?? item?.price_info?.sell_price) || 0,
     }))
     .sort((left, right) => right.purePreflight - left.purePreflight
@@ -161,6 +161,18 @@ async function loadPreflightPureSkus(runDir) {
     if (error.code !== "ENOENT") throw error;
   }
   return result;
+}
+
+async function loadObservedTitleFamilyScores(runDir) {
+  try {
+    const text = await fs.readFile(path.join(runDir, "source_yield.jsonl"), "utf8");
+    return observedTitleFamilyScores(text.split(/\n/).filter(Boolean).flatMap((line) => {
+      try { return [JSON.parse(line)]; } catch { return []; }
+    }));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    return {};
+  }
 }
 
 function buildPayload(item, detail, economy, targetConfig, now) {
@@ -874,6 +886,7 @@ export function createPublishRunner({
     const candidates = prioritizePublishCandidates(
       [...delayedSubmissions, ...runnableFavorites],
       await loadPreflightPureSkus(runDir),
+      await loadObservedTitleFamilyScores(runDir),
     );
     let published = Number(state.runPublishedCount?.() ?? 0);
     let failed = 0;

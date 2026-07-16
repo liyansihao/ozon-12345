@@ -291,6 +291,29 @@ export function productTitlePriority(value) {
   }[productTitleFamily(value)] ?? 0;
 }
 
+export function observedTitleFamilyScores(rows, recentLimit = 500) {
+  const latest = new Map();
+  for (let index = (rows || []).length - 1; index >= 0 && latest.size < Math.max(1, Number(recentLimit) || 500); index -= 1) {
+    const row = rows[index] || {};
+    const sku = String(row.sku || "").trim();
+    if (!sku || latest.has(sku)) continue;
+    latest.set(sku, row);
+  }
+  const totals = new Map();
+  for (const row of latest.values()) {
+    const family = String(row.title_family || productTitleFamily(row.title || ""));
+    const value = totals.get(family) || { attempted: 0, published: 0 };
+    if (!["ignored", "favorited"].includes(String(row.status || ""))) value.attempted += 1;
+    if (row.status === "published") value.published += 1;
+    totals.set(family, value);
+  }
+  return Object.fromEntries([...totals].map(([family, value]) => {
+    if (!(value.published > 0)) return [family, 0];
+    const conversion = value.published / Math.max(1, value.attempted);
+    return [family, Math.min(1200, value.published * 300 + conversion * 700)];
+  }));
+}
+
 export function createScannerLogger(log = console.log, level = "summary") {
   if (String(level).toLowerCase() === "verbose") return log;
   return (message) => {
@@ -300,7 +323,7 @@ export function createScannerLogger(log = console.log, level = "summary") {
   };
 }
 
-function favoriteLinkPriority(link) {
+function favoriteLinkPriority(link, familyScores = {}) {
   const provenSeller = isProvenSellerSource(link?.source_url);
   const cardText = String(link?.card_text || "");
   const pluginPureFbs = /(?:^|\n)\s*发货模式\s*[：:]\s*FBS\s*(?:\n|$)/i.test(cardText);
@@ -310,7 +333,9 @@ function favoriteLinkPriority(link) {
   const pricePriority = Number.isFinite(cardPrice) && cardPrice > 0
     ? (cardPrice < 15 ? -700 : cardPrice < 20 ? -400 : cardPrice >= 25 ? 75 : 0)
     : 0;
-  return (pluginPureFbs ? 2000 : 0) + (provenSeller ? 1000 : 0) + (explicitGlobal ? 800 : 0) + productTitlePriority(link?.text) + pricePriority;
+  const observedPriority = Number(familyScores[productTitleFamily(link?.text)] || 0);
+  return (pluginPureFbs ? 2000 : 0) + (provenSeller ? 1000 : 0) + (explicitGlobal ? 800 : 0)
+    + observedPriority + productTitlePriority(link?.text) + pricePriority;
 }
 
 export function isProvenSellerSource(value) {
@@ -731,9 +756,9 @@ export function nextLowYieldBatchStreak({ current = 0, favorited = 0, threshold 
   return Number(favorited) < Number(threshold) ? Number(current) + 1 : 0;
 }
 
-export function prioritizeFavoriteLinks(links) {
+export function prioritizeFavoriteLinks(links, familyScores = {}) {
   return [...links]
-    .map((link, index) => ({ link, index, priority: favoriteLinkPriority(link) }))
+    .map((link, index) => ({ link, index, priority: favoriteLinkPriority(link, familyScores) }))
     .sort((left, right) => right.priority - left.priority || left.index - right.index)
     .map(({ link }) => link);
 }
@@ -754,17 +779,17 @@ function deduplicateTitleVariants(links) {
   });
 }
 
-export function limitLinksPerSource(rows, limit = 24) {
+export function limitLinksPerSource(rows, limit = 24, familyScores = {}) {
   const maximum = Math.max(1, Number(limit) || 24);
   const perSource = rows.map((row) => deduplicateTitleVariants(prioritizeFavoriteLinks((row?.links || []).map((link) => ({
     ...link,
     source_url: row.source_url,
-  })))).slice(0, maximum));
+  })), familyScores)).slice(0, maximum));
   const combined = [];
   for (let index = 0; index < maximum; index += 1) {
     const sourceRound = [];
     for (const links of perSource) if (links[index]) sourceRound.push(links[index]);
-    combined.push(...prioritizeFavoriteLinks(sourceRound));
+    combined.push(...prioritizeFavoriteLinks(sourceRound, familyScores));
   }
   return combined;
 }
@@ -972,7 +997,7 @@ async function extractFavoriteProduct(page, url, timeout) {
   return parseFavoriteProductSnapshot(snapshot || { url });
 }
 
-async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, onResult = () => {} }) {
+async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, onResult = () => {} }) {
   if (currentTotal >= target || !links.length || isCollectionDeadlineReached(env)) return currentTotal;
   let existing = new Set();
   try {
@@ -985,7 +1010,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     log(`favorite SKU telemetry unavailable; continuing with run-local deduplication: ${error?.message || error}`);
   }
   const queue = [];
-  for (const link of prioritizeFavoriteLinks(links)) {
+  for (const link of prioritizeFavoriteLinks(links, familyScores)) {
     const href = typeof link === "string" ? link : link?.href;
     const sku = skuFromProductUrl(href);
     if (!sku || existing.has(sku) || attempted.has(sku)) continue;
@@ -1300,6 +1325,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       if (error.code !== "ENOENT") throw error;
     }
   }
+  const titleFamilyScores = observedTitleFamilyScores(yieldRows);
   const derivedPriceBands = String(env.FLOW_B_DERIVED_SEARCH_PRICE_BANDS || "150.000;")
     .split(",").map((value) => value.trim()).filter(Boolean);
   const derivedResultPages = String(env.FLOW_B_DERIVED_SEARCH_PAGES || "1")
@@ -1395,6 +1421,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       const retainedCandidates = limitLinksPerSource(
         retainedRows,
         envNumber(env, "FLOW_B_RETAINED_LINKS_PER_SOURCE", baseLinkLimit * 4),
+        titleFamilyScores,
       );
       const retainedLinks = [];
       const retainedSkus = new Set();
@@ -1420,6 +1447,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         attempted,
         logFile: favoriteLog,
         log: emit,
+        familyScores: titleFamilyScores,
         onResult: (result) => {
           if (result.sku) retainedAttempted += 1;
         },
@@ -1473,13 +1501,18 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         favoriteBefore = await collectFavorites({
           context,
           maozi,
-          links: limitLinksPerSource(batchRows.map((row, index) => ({ ...row, source_url: batch[index] })), envNumber(env, "FLOW_B_MAX_LINKS_PER_SOURCE", 24)),
+          links: limitLinksPerSource(
+            batchRows.map((row, index) => ({ ...row, source_url: batch[index] })),
+            envNumber(env, "FLOW_B_MAX_LINKS_PER_SOURCE", 24),
+            titleFamilyScores,
+          ),
           target: targetFavorites,
           currentTotal: favoriteBefore,
           env,
           attempted,
           logFile: favoriteLog,
           log: emit,
+          familyScores: titleFamilyScores,
           onResult: (result) => {
             if (result.status === "favorited") batchFavorited += 1;
             if (result.status === "failed" && /soft blocked|access denied|captcha|timeout|failed to fetch|network|HTTP 0/i.test(String(result.error?.message || result.error || ""))) {

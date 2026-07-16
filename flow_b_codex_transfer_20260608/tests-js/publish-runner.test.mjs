@@ -92,6 +92,14 @@ test("publish candidates prioritize observed strict-yield titles independently o
   ]);
 });
 
+test("publish candidates use current strict title-family feedback before static priority", () => {
+  const scores = { toy: 950, socks: 0 };
+  assert.deepEqual(prioritizePublishCandidates([
+    { sku: "socks", title: "Носки для девочек" },
+    { sku: "toy", title: "Детская игрушка погремушка" },
+  ], new Set(), scores).map((item) => item.sku), ["toy", "socks"]);
+});
+
 test("offer IDs retain the complete SKU and cannot collide on a six-digit suffix", () => {
   const now = new Date("2026-07-15T00:00:00Z");
   assert.equal(offerIdForSku("4799637133", now), "mz-150726-4799637133");
