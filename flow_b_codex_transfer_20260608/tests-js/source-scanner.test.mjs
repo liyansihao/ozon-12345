@@ -71,6 +71,7 @@ import {
   filterProductiveSourceVariants,
   expandPublishedSourcePages,
   fullFunnelSourceScores,
+  fatalSourceBatchError,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
@@ -120,6 +121,17 @@ test("one hung source page times out without blocking the batch", async () => {
     /source scan timed out after 10ms/,
   );
   assert.equal(await withTimeout(Promise.resolve("ok"), 100, "source scan"), "ok");
+});
+
+test("a closed browser source batch is fatal instead of being persisted as completed supply", () => {
+  const fatal = fatalSourceBatchError([
+    { source_url: "https://www.ozon.ru/seller/a/", stop_reason: "error: browserContext.newPage: Target page, context or browser has been closed" },
+    { source_url: "https://www.ozon.ru/seller/b/", stop_reason: "error: page.goto: Timeout 12000ms exceeded" },
+  ]);
+  assert.match(fatal.message, /context or browser has been closed/i);
+  assert.equal(fatalSourceBatchError([
+    { source_url: "https://www.ozon.ru/seller/b/", stop_reason: "error: page.goto: Timeout 12000ms exceeded" },
+  ]), null);
 });
 
 test("source page creation is included in the lifecycle timeout", async () => {

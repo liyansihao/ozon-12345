@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureMaoziLogin, ensureMaoziPluginLogin, openMaoziPage } from "./browser-context.mjs";
-import { AdaptiveConcurrency } from "./continuous-runtime.mjs";
+import { AdaptiveConcurrency, isFatalBrowserError } from "./continuous-runtime.mjs";
 import { isPureFbs } from "./publish-policy.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1741,6 +1741,12 @@ export async function scanSourceWithPage({
   }
 }
 
+export function fatalSourceBatchError(rows = []) {
+  const fatal = rows.find((row) => isFatalBrowserError(new Error(String(row?.stop_reason || ""))));
+  if (!fatal) return null;
+  return new Error(String(fatal.stop_reason || "fatal browser source error").replace(/^error:\s*/i, ""));
+}
+
 export async function scanSources({ context, urlsFile, outFile, env = process.env, log = console.log }) {
   const emit = createScannerLogger(log, env.FLOW_B_LOG_LEVEL || "verbose");
   const inputPath = path.resolve(urlsFile);
@@ -2030,7 +2036,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           linkTarget: String(env.FLOW_B_SOURCE_LINK_TARGET || "").trim()
             ? options.linkTarget
             : sourceScanLinkTargetForSource(url, {
-              perSourceLimit,
+              perSourceLimit: perSourceLinkLimit,
               boundedDeepUrls: boundedDeepFreshSourceKeys,
             }),
         },
@@ -2038,6 +2044,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         closeTimeoutMs: pageCloseTimeout,
       })
         .catch((error) => ({ source_url: url, blocked: false, stop_reason: `error: ${error.message}`, links: [], cumulative_product_link_count: 0 }))));
+      const fatalBatchError = fatalSourceBatchError(batchRows);
+      if (fatalBatchError) throw fatalBatchError;
       completedSourceBatches += 1;
       const sourceCooldown = sourceBatchCooldownState(batchRows, runtime);
       if (sourceCooldown.blocked && !isCollectionDeadlineReached(env)) {
