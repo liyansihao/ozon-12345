@@ -66,6 +66,10 @@ export function isCollectionDeadlineReached(env = process.env, now = Date.now())
   return Number(now) >= collectionDeadlineMs(env);
 }
 
+export function remainingCollectionCooldown(state = {}, now = Date.now()) {
+  return Math.max(0, (Number(state?.detailBlockedUntil) || 0) - Number(now));
+}
+
 export async function withTimeout(operation, timeoutMs, label = "operation") {
   const timeout = Math.max(1, Number(timeoutMs) || 1);
   let timer;
@@ -363,7 +367,7 @@ export function createScannerLogger(log = console.log, level = "summary") {
   return (message) => {
     const text = String(message || "").split(/\r?\n/, 1)[0].slice(0, 300);
     if (/^favorite\s+0\s+->\s+0\s+delta=0$/i.test(text)) return;
-    if (/^(?:favorite exclusions loaded:|favorite count telemetry unavailable|favorite SKU telemetry unavailable|collecting favorites from|batch \d|source soft block cooldown|yielding source tranche|favorite collection summary|favorite capacity reached|favorite \S+ ->)/i.test(text)) log(text);
+    if (/^(?:favorite exclusions loaded:|favorite count telemetry unavailable|favorite SKU telemetry unavailable|collecting favorites from|collecting \d+ exact-FBS cached links|batch \d|source soft block cooldown|yielding source tranche|favorite collection summary|favorite capacity reached|favorite \S+ ->)/i.test(text)) log(text);
   };
 }
 
@@ -1701,6 +1705,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   let completedSourceBatches = 0;
   const targetFavorites = envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000);
   const attempted = await loadExcludedSkus(outputPath, env);
+  const runtime = collectionRuntimeState(favoriteLog);
   emit(`favorite exclusions loaded: ${attempted.size}`);
   const maozi = await openMaoziPage(context, { forceNew: true });
   try {
@@ -1721,6 +1726,47 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     }
     if (requiresFavoriteSession(env) && !favoriteState.authenticated) throw new Error("Maozi profile token is stale or the session is not logged in");
     let favoriteBefore = favoriteState.authenticated ? favoriteState.total : null;
+
+    const cooldownRemaining = remainingCollectionCooldown(runtime);
+    if (cooldownRemaining > 0 && favoriteBefore !== null && favoriteBefore < targetFavorites) {
+      const cooldownFallbackLinks = cachedExactFbsFallbackLinks(records, {
+        attempted,
+        limit: envNumber(env, "FLOW_B_COOLDOWN_FBS_FALLBACK_LINKS", 24),
+        familyScores: titleFamilyScores,
+        yieldRows,
+      });
+      if (cooldownFallbackLinks.length > 0) {
+        emit(`collecting ${cooldownFallbackLinks.length} exact-FBS cached links during Ozon cooldown`);
+        favoriteBefore = await collectFavorites({
+          context,
+          maozi,
+          links: cooldownFallbackLinks,
+          target: targetFavorites,
+          currentTotal: favoriteBefore,
+          env,
+          attempted,
+          logFile: favoriteLog,
+          log: emit,
+          familyScores: titleFamilyScores,
+        });
+        return {
+          outFile: outputPath,
+          records: records.length,
+          pending: pending.length,
+          cooldown_fallback_attempted: cooldownFallbackLinks.length,
+          cooldown_remaining_ms: remainingCollectionCooldown(runtime),
+        };
+      }
+      await waitForMovingDeadline({
+        getDeadline: () => Math.min(runtime.detailBlockedUntil, collectionDeadlineMs(env)),
+      });
+      return {
+        outFile: outputPath,
+        records: records.length,
+        pending: pending.length,
+        cooldown_remaining_ms: remainingCollectionCooldown(runtime),
+      };
+    }
 
     if (favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
       const baseLinkLimit = envNumber(env, "FLOW_B_MAX_LINKS_PER_SOURCE", 24);
@@ -1806,10 +1852,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       })
         .catch((error) => ({ source_url: url, blocked: false, stop_reason: `error: ${error.message}`, links: [], cumulative_product_link_count: 0 }))));
       completedSourceBatches += 1;
-      const sourceCooldown = sourceBatchCooldownState(batchRows, collectionRuntimeState(favoriteLog));
+      const sourceCooldown = sourceBatchCooldownState(batchRows, runtime);
       if (sourceCooldown.blocked && !isCollectionDeadlineReached(env)) {
-        emit(`source soft block cooldown wait=${sourceCooldown.delay}ms`);
-        await waitForMovingDeadline({ getDeadline: () => Math.min(collectionRuntimeState(favoriteLog).detailBlockedUntil, collectionDeadlineMs(env)) });
+        emit(`source soft block cooldown defer=${sourceCooldown.delay}ms`);
       }
       for (const row of batchRows) {
         if (row.blocked || /soft block|access denied|captcha|timeout|error:/i.test(String(row.stop_reason || ""))) {
@@ -1818,7 +1863,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           adaptiveWorkers.recordSuccess();
         }
       }
-      if (favoriteBefore !== null) {
+      if (favoriteBefore !== null && !sourceCooldown.blocked) {
         let collectionSoftBlocked = false;
         let batchFavorited = 0;
         favoriteBefore = await collectFavorites({
@@ -1852,7 +1897,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           });
         }
       }
-      const afterWait = Math.min(
+      const afterWait = sourceCooldown.blocked ? 0 : Math.min(
         envNumber(env, "FLOW_B_MAOZI_AFTER_SCAN_WAIT", 10) * 1000,
         Math.max(0, collectionDeadlineMs(env) - Date.now()),
       );
@@ -1884,6 +1929,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       await fs.writeFile(outputPath, JSON.stringify(records, null, 2));
       emit(`favorite ${batchFavoriteBefore} -> ${favoriteAfter} delta=${delta}`);
       favoriteBefore = favoriteAfter;
+      if (sourceCooldown.blocked) break;
       if (favoriteAfter !== null && favoriteAfter >= targetFavorites) break;
       if (lowDeltaBatchLimit > 0 && lowDeltaBatches >= lowDeltaBatchLimit) break;
       if (shouldYieldForSourceFeedback({

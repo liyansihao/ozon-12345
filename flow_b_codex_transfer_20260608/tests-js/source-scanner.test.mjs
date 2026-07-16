@@ -47,6 +47,7 @@ import {
   sourceBatchCooldownState,
   sourceCollectionBlockKey,
   collectionRuntimeState,
+  remainingCollectionCooldown,
   sourceAdaptiveConcurrency,
   nextDetailPacingState,
   collectionDeadlineMs,
@@ -71,6 +72,12 @@ test("collection deadline stops an in-flight producer tranche", () => {
   assert.equal(isCollectionDeadlineReached(env, Date.parse("2026-07-14T22:00:29.808Z")), false);
   assert.equal(isCollectionDeadlineReached(env, Date.parse("2026-07-14T22:00:29.809Z")), true);
   assert.equal(collectionDeadlineMs({}), Number.POSITIVE_INFINITY);
+});
+
+test("collection cooldown exposes only its remaining bounded wait", () => {
+  assert.equal(remainingCollectionCooldown({ detailBlockedUntil: 10_000 }, 4_000), 6_000);
+  assert.equal(remainingCollectionCooldown({ detailBlockedUntil: 10_000 }, 10_000), 0);
+  assert.equal(remainingCollectionCooldown({}, 10_000), 0);
 });
 
 test("one hung source page times out without blocking the batch", async () => {
