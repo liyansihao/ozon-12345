@@ -498,6 +498,30 @@ test("a dry verified seller yields its fixed tier to productive Global discovery
   }), [toySearch, staleSeller]);
 });
 
+test("an unseen bounded deep seller page outranks search without reviving its exhausted old pages", () => {
+  const seller = "https://www.ozon.ru/seller/deep-winner/";
+  const pageTwo = `${seller}?page=2`;
+  const pageFour = `${seller}?page=4`;
+  const search = "https://www.ozon.ru/search/?text=productive&is_global=true";
+  const rows = [
+    { source_url: seller, sku: "old-win-1", status: "published", at: "2026-07-15T00:00:00Z" },
+    { source_url: seller, sku: "old-win-2", status: "published", at: "2026-07-15T00:01:00Z" },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      source_url: `${seller}?page=${index % 2 + 2}`,
+      sku: `dry-${index}`,
+      status: "rejected",
+      at: `2026-07-16T00:${String(index).padStart(2, "0")}:00Z`,
+    })),
+    { source_url: search, sku: "search-win", status: "published" },
+  ];
+  assert.deepEqual(prioritizeSourceUrls([pageTwo, search, pageFour], {
+    yieldRows: rows,
+    freshSourceUrls: [search],
+    verifiedFreshSourceUrls: [seller, search],
+    boundedDeepFreshSourceUrls: [pageFour],
+  }), [pageFour, search, pageTwo]);
+});
+
 test("deeper pages inherit source yield within the same price band", () => {
   const winner = "https://www.ozon.ru/seller/winner/?currency_price=500.000%3B";
   const pageTwo = `${winner}&page=2`;

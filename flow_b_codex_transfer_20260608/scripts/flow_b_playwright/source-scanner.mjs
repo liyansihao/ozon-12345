@@ -509,6 +509,17 @@ function sourceEvidenceKey(value, { keepSorting = false } = {}) {
   }
 }
 
+function sourcePageKey(value) {
+  try {
+    const url = new URL(String(value));
+    url.searchParams.delete("sorting");
+    url.searchParams.delete("currency_price");
+    return url.toString();
+  } catch {
+    return String(value || "");
+  }
+}
+
 export function filterProductiveSourceVariants(urls, yieldRows = []) {
   const publishedBands = new Set((yieldRows || [])
     .filter((row) => row?.status === "published")
@@ -898,6 +909,7 @@ export function prioritizeSourceUrls(urls, {
   freshSourceUrls = [],
   qualifiedFreshSourceUrls = [],
   verifiedFreshSourceUrls = [],
+  boundedDeepFreshSourceUrls = [],
 } = {}) {
   const successfulCounts = new Map();
   for (const source of highYieldSources) {
@@ -910,6 +922,7 @@ export function prioritizeSourceUrls(urls, {
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
   const qualifiedFreshKeys = new Set(qualifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
+  const boundedDeepFreshKeys = new Set(boundedDeepFreshSourceUrls.map(sourceNonFbsSampleKey).filter(Boolean));
   const verifiedSellerKeys = new Set(verifiedFreshSourceUrls
     .filter((url) => canonicalSellerUrl(url))
     .map(sourceUrlKey));
@@ -917,16 +930,19 @@ export function prioritizeSourceUrls(urls, {
   [...urls].forEach((url, index) => {
     const familyKey = sourceUrlKey(url);
     const yieldKey = sourceYieldKey(url);
-    const key = isPriceBandedSource(url) ? yieldKey : familyKey;
+    const boundedDeep = boundedDeepFreshKeys.has(sourceNonFbsSampleKey(url));
+    const key = isPriceBandedSource(url)
+      ? yieldKey
+      : boundedDeep ? `bounded-deep:${sourcePageKey(url)}` : familyKey;
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
-    const familyPenalty = familyPenalties.get(key) || 0;
+    const familyPenalty = familyPenalties.get(isPriceBandedSource(url) ? yieldKey : familyKey) || 0;
     const baseTier = verifiedSellerKeys.has(familyKey)
       ? 4
       : qualifiedFreshKeys.has(familyKey)
         ? 3
         : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
     const tier = familyPenalty < 0 && !qualifiedFreshKeys.has(familyKey)
-      ? (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
+      ? boundedDeep ? 3 : (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
       + (freshKeys.has(familyKey) ? 200_000 : 0)
@@ -1814,6 +1830,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...derivedSearchUrls,
     ],
     qualifiedFreshSourceUrls: submittedSellerSourceVariants,
+    boundedDeepFreshSourceUrls: deepVerifiedSellerVariants.filter((url) => {
+      try { return Number(new URL(url).searchParams.get("page")) >= 4; }
+      catch { return false; }
+    }),
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
       verifiedFreshUrls: [
         ...classifiedFreshUrls.verifiedSellerUrls,
