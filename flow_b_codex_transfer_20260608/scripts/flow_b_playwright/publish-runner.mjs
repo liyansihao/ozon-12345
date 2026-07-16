@@ -793,6 +793,18 @@ export function createPublishRunner({
       }
     }
 
+    function stalledPendingForStore(storeId) {
+      const entries = typeof state.entries === "function" ? state.entries() : restoredEntries;
+      return entries.filter((entry) => {
+        if (!["processing", "failed"].includes(entry.status)) return false;
+        if (entry.status === "failed" && isTerminalSubmittedFailure(entry)) return false;
+        if (Number(entry.data?.store_id) !== Number(storeId)) return false;
+        if (entry.data?.submitted !== true && entry.data?.submission_pending !== true) return false;
+        const submittedAt = Date.parse(entry.data?.prepared_at || entry.data?.selected_at || entry.data?.submitted_at || "");
+        return Number.isFinite(submittedAt) && now().getTime() - submittedAt >= Math.max(0, Number(pendingStoreStallMs) || 0);
+      });
+    }
+
     async function advanceStore(reason, currentConfig) {
       const fromStoreId = Number(currentConfig?.store?.id || targetPlan[activeTargetIndex]?.id);
       while (activeTargetIndex + 1 < targetPlan.length) {
@@ -829,14 +841,7 @@ export function createPublishRunner({
     }
     let freshSubmissionsPaused = false;
     while (!freshSubmissionsPaused) {
-      const stalledPending = restoredEntries.filter((entry) => {
-        if (!["processing", "failed"].includes(entry.status)) return false;
-        if (entry.status === "failed" && isTerminalSubmittedFailure(entry)) return false;
-        if (Number(entry.data?.store_id) !== Number(targetConfig.store.id)) return false;
-        if (entry.data?.submitted !== true && entry.data?.submission_pending !== true) return false;
-        const submittedAt = Date.parse(entry.data?.prepared_at || entry.data?.selected_at || entry.data?.submitted_at || "");
-        return Number.isFinite(submittedAt) && now().getTime() - submittedAt >= Math.max(0, Number(pendingStoreStallMs) || 0);
-      });
+      const stalledPending = stalledPendingForStore(targetConfig.store.id);
       if (stalledPending.length < Math.max(1, Number(pendingStoreStallCount) || 1)) break;
       const stalledStoreId = Number(targetConfig.store.id);
       const nextConfig = await advanceStore("submission-stall", targetConfig);
@@ -1097,6 +1102,21 @@ export function createPublishRunner({
       && (!deadlineAt || Date.now() < Date.parse(deadlineAt))
       && (dryLimit === 0 || dryCandidates < dryLimit)) {
       const activeStoreId = Number(targetConfig.store.id);
+      const nextCandidate = candidates[cursor];
+      const nextIsReconciliation = nextCandidate?.reconcile_only === true
+        || nextCandidate?.submitted === true
+        || nextCandidate?.submission_pending === true;
+      if (!nextIsReconciliation
+        && stalledPendingForStore(activeStoreId).length >= Math.max(1, Number(pendingStoreStallCount) || 1)) {
+        const nextConfig = await advanceStore("submission-stall", targetConfig);
+        if (nextConfig) {
+          unavailableStoreUntil.set(activeStoreId, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
+          targetConfig = nextConfig;
+          continue;
+        }
+        freshSubmissionsPaused = true;
+        break;
+      }
       const remainingDailyStoreQuota = Number(storeDailyLimits.get(activeStoreId) || configuredDailyStoreLimit)
         - Number(storeDailyUsage.get(activeStoreId) || 0);
       const remainingTotalStoreQuota = configuredTotalStoreLimit - Number(storeTotalUsage.get(activeStoreId) || 0);

@@ -311,6 +311,52 @@ test("a stalled pending-import backlog keeps reconciliation but routes fresh wor
   assert.ok(result.store_switches.some((event) => event.from_store_id === 106637 && event.to_store_id === 106640 && event.reason === "submission-stall"));
 });
 
+test("runner rechecks a newly stalled import backlog between fresh publish batches", async () => {
+  let current = new Date("2026-07-15T10:00:00.000Z");
+  const state = fakeState();
+  const shopIds = [];
+  const client = clientFor([
+    { id: 301, sku: 301 },
+    { id: 302, sku: 302 },
+    { id: 303, sku: 303 },
+  ], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽三号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => {
+      shopIds.push(payload.shop_ids[0]);
+      if (shopIds.length === 2) current = new Date("2026-07-15T10:10:00.000Z");
+      return { ok: true, response: { code: 1 } };
+    },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async () => null,
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => current,
+    concurrency: 1,
+    maxConcurrency: 1,
+    pendingStoreStallMs: 60_000,
+    pendingStoreStallCount: 2,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.deepEqual(shopIds, [106637, 106637, 106640]);
+  assert.ok(result.store_switches.some((event) => event.from_store_id === 106637
+    && event.to_store_id === 106640
+    && event.reason === "submission-stall"));
+});
+
 test("runner pauses fresh submissions when the last available store import queue is stalled", async () => {
   const state = fakeState({
     "old-1": { status: "processing", data: { store_id: 106637, submitted: true, prepared_at: "2026-07-15T09:00:00.000Z" } },
