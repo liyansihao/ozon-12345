@@ -42,6 +42,7 @@ import {
   favoriteTitleSkipReason,
   nextLowYieldBatchStreak,
   softBlockCooldownState,
+  collectionDetailCooldownState,
   sourceBatchCooldownState,
   collectionRuntimeState,
   sourceAdaptiveConcurrency,
@@ -1113,6 +1114,17 @@ test("concurrent pages coalesce one Ozon incident instead of escalating to 180 s
   assert.deepEqual(concurrent, { streak: 1, lastBlockedAt: 102_000, delay: 600_000 });
   assert.deepEqual(laterIncident, { streak: 2, lastBlockedAt: 165_000, delay: 900_000 });
   assert.equal(ozonRetryDelay(3), 1_800_000);
+});
+
+test("collection detail cooldown probes before using the ten-minute safety ceiling", () => {
+  const first = collectionDetailCooldownState({ streak: 0, lastBlockedAt: 0, now: 100_000 });
+  const concurrent = collectionDetailCooldownState({ streak: first.streak, lastBlockedAt: first.lastBlockedAt, now: 102_000 });
+  const laterIncident = collectionDetailCooldownState({ streak: concurrent.streak, lastBlockedAt: concurrent.lastBlockedAt, now: 165_000 });
+  const persistentIncident = collectionDetailCooldownState({ streak: laterIncident.streak, lastBlockedAt: laterIncident.lastBlockedAt, now: 400_000 });
+  assert.deepEqual(first, { streak: 1, lastBlockedAt: 100_000, delay: 60_000 });
+  assert.deepEqual(concurrent, { streak: 1, lastBlockedAt: 102_000, delay: 60_000 });
+  assert.deepEqual(laterIncident, { streak: 2, lastBlockedAt: 165_000, delay: 180_000 });
+  assert.deepEqual(persistentIncident, { streak: 3, lastBlockedAt: 400_000, delay: 600_000 });
 });
 
 test("blocked source batches probe with short backoff before escalating", () => {

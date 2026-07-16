@@ -255,6 +255,14 @@ export function softBlockCooldownState({ streak = 0, lastBlockedAt = 0, now = Da
   };
 }
 
+export function collectionDetailCooldownState(options = {}) {
+  const state = softBlockCooldownState(options);
+  return {
+    ...state,
+    delay: [60_000, 180_000, 600_000][Math.min(2, Math.max(0, state.streak - 1))],
+  };
+}
+
 export function sourceBatchCooldownState(rows, state, now = Date.now()) {
   const batch = rows || [];
   const blockedCount = batch.filter((row) => row?.blocked || isOzonSoftBlock(`${row?.title || ""} ${row?.stop_reason || ""}`)).length;
@@ -1314,7 +1322,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           throw error;
         }
         updateDetailPacing("soft-block");
-        const cooldownState = softBlockCooldownState({
+        const cooldownState = collectionDetailCooldownState({
           streak: runtime.detailSoftBlockStreak,
           lastBlockedAt: runtime.lastDetailSoftBlockAt,
         });
