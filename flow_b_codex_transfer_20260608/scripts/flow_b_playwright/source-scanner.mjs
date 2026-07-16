@@ -812,6 +812,26 @@ export function limitLinksPerSource(rows, limit = 24, familyScores = {}) {
   return combined;
 }
 
+export function cachedExactFbsFallbackLinks(records, {
+  attempted = new Set(),
+  limit = 24,
+  familyScores = {},
+} = {}) {
+  const maximum = Math.max(0, Number(limit) || 0);
+  if (maximum === 0) return [];
+  const result = [];
+  const seen = new Set();
+  for (const link of limitLinksPerSource(records || [], maximum, familyScores)) {
+    const sku = skuFromProductUrl(link?.href);
+    if (!sku || attempted.has(sku) || seen.has(sku) || favoriteTitleSkipReason(link?.text)) continue;
+    if (!parseListingFavoriteSnapshot(link)) continue;
+    seen.add(sku);
+    result.push(link);
+    if (result.length >= maximum) break;
+  }
+  return result;
+}
+
 export function terminalSkusFromJsonl(text) {
   const latest = new Map();
   for (const line of String(text || "").split(/\r?\n/)) {
@@ -1453,6 +1473,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           retainedLinks.push(link);
           if (retainedLinks.length >= retainedLimit) break;
         }
+      }
+      if (retainedLinks.length === 0) {
+        retainedLinks.push(...cachedExactFbsFallbackLinks(records, {
+          attempted,
+          limit: envNumber(env, "FLOW_B_CACHED_FBS_FALLBACK_LINKS", 24),
+          familyScores: titleFamilyScores,
+        }));
       }
       emit(`collecting favorites from ${retainedLinks.length} retained product links`);
       let retainedAttempted = 0;

@@ -31,6 +31,7 @@ import {
   shouldYieldAfterRetained,
   terminalSkusFromJsonl,
   limitLinksPerSource,
+  cachedExactFbsFallbackLinks,
   productTitleFamily,
   productTitlePriority,
   observedTitleFamilyScores,
@@ -442,6 +443,26 @@ test("source fairness caps and round-robins sources before combining batches", (
     { source_url: "b", links: Array.from({ length: 5 }, (_, index) => ({ href: `b-${index}`, text: "" })) },
   ];
   assert.deepEqual(limitLinksPerSource(rows, 2).map((row) => row.href), ["a-0", "b-0", "a-1", "b-1"]);
+});
+
+test("cached fallback uses only unattempted cards with complete exact-FBS evidence", () => {
+  const exact = {
+    href: "https://www.ozon.ru/product/exact-1001/",
+    text: "Детская игрушка погремушка",
+    image_url: "https://ir.ozone.ru/exact.jpg",
+    card_text: "999 ₽\n发货模式：FBS\n库存",
+  };
+  const ambiguous = {
+    href: "https://www.ozon.ru/product/ambiguous-1002/",
+    text: "Детская игрушка",
+    image_url: "https://ir.ozone.ru/ambiguous.jpg",
+    card_text: "999 ₽\n发货模式：暂无数据",
+  };
+  const alreadyAttempted = { ...exact, href: "https://www.ozon.ru/product/old-1003/" };
+  assert.deepEqual(cachedExactFbsFallbackLinks([
+    { source_url: "https://www.ozon.ru/seller/a/", links: [ambiguous, alreadyAttempted] },
+    { source_url: "https://www.ozon.ru/seller/b/", links: [exact] },
+  ], { attempted: new Set(["1003"]), limit: 12 }).map((row) => row.href), [exact.href]);
 });
 
 test("one source does not enqueue numeric variants of the same title family", () => {
