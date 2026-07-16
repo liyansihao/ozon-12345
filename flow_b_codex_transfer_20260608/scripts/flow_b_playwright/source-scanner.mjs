@@ -46,6 +46,30 @@ export async function withTimeout(operation, timeoutMs, label = "operation") {
   }
 }
 
+export async function createFavoriteWorkerPage(context, timeoutMs = 10_000) {
+  let expired = false;
+  const operation = Promise.resolve().then(() => context.newPage()).then(async (page) => {
+    if (expired) {
+      await page.close().catch(() => {});
+      throw new Error("favorite worker page creation completed after timeout");
+    }
+    return page;
+  });
+  try {
+    return await withTimeout(operation, timeoutMs, "favorite worker page creation");
+  } finally {
+    expired = true;
+  }
+}
+
+export function readFavoriteSkusWithTimeout(operation, timeoutMs = 10_000) {
+  return withTimeout(
+    Promise.resolve().then(operation),
+    timeoutMs,
+    "favorite SKU telemetry",
+  );
+}
+
 export async function waitForMovingDeadline({ getDeadline, now = () => Date.now(), sleep: wait = sleep }) {
   while (true) {
     const remaining = Number(getDeadline()) - Number(now());
@@ -299,6 +323,18 @@ function sourceUrlKey(value) {
   }
 }
 
+function sourceYieldKey(value) {
+  try {
+    const url = new URL(String(value));
+    url.searchParams.delete("sorting");
+    return url.toString();
+  } catch {
+    return String(value || "")
+      .replace(/([?&])sorting=[^&]*&?/gi, "$1")
+      .replace(/[?&]$/, "");
+  }
+}
+
 export function expandHighYieldSourceUrls(urls, yieldRows = []) {
   const expanded = [...urls];
   const seen = new Set(expanded);
@@ -356,15 +392,17 @@ export function expandFreshSellerSourceUrls(urls = []) {
   return expanded;
 }
 
-export function deriveSearchSourceUrls(yieldRows, limit = 200) {
+export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["150.000;"]) {
   const stopWords = new Set([
     "для", "или", "при", "это", "этот", "эта", "эти", "шт", "штук", "цвет", "размер",
     "женский", "женская", "женские", "мужской", "мужская", "детский", "детская", "детские",
   ]);
   const queries = [];
   const seen = new Set();
+  const queryGroups = [];
+  const bands = [...new Set((priceBands || []).map((value) => String(value || "").trim()).filter(Boolean))];
   const maximum = Math.max(0, Number(limit) || 0);
-  if (maximum === 0) return queries;
+  if (maximum === 0 || bands.length === 0) return queries;
   for (const row of [...(yieldRows || [])].reverse()) {
     if (row?.status !== "published") continue;
     const words = String(row?.title || "").toLowerCase().match(/[а-яё]{4,}/gi) || [];
@@ -376,18 +414,25 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200) {
       terms.slice(1, 3),
       terms.slice(0, 4),
       terms.slice(1, 4),
-    ];
-    for (const candidate of candidates) {
-      if (candidate.length < 2) continue;
-      const query = candidate.join(" ");
-      if (seen.has(query)) continue;
-      seen.add(query);
-      const url = new URL("https://www.ozon.ru/search/");
-      url.searchParams.set("text", query);
-      url.searchParams.set("is_global", "true");
-      url.searchParams.set("currency_price", "150.000;");
-      queries.push(url.toString());
-      if (queries.length >= maximum) return queries;
+    ].filter((candidate) => candidate.length >= 2).map((candidate) => candidate.join(" "));
+    if (candidates.length > 0) queryGroups.push([...new Set(candidates)]);
+  }
+  const rounds = Math.max(0, ...queryGroups.map((group) => group.length));
+  for (let round = 0; round < rounds; round += 1) {
+    for (const group of queryGroups) {
+      const query = group[round];
+      if (!query) continue;
+      for (const band of bands) {
+        const key = `${query}\0${band}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const url = new URL("https://www.ozon.ru/search/");
+        url.searchParams.set("text", query);
+        url.searchParams.set("is_global", "true");
+        url.searchParams.set("currency_price", band);
+        queries.push(url.toString());
+        if (queries.length >= maximum) return queries;
+      }
     }
   }
   return queries;
@@ -417,11 +462,24 @@ export function verifiedSellerSourceUrls(yieldRows) {
   return [...sellers].filter(([, skus]) => skus.size >= 2).map(([url]) => url);
 }
 
+export function verifiedPrioritySourceUrls({
+  verifiedFreshUrls = [],
+  verifiedHistoricalUrls = [],
+  derivedSearchUrls = [],
+  prioritizeDerived = false,
+} = {}) {
+  return [...new Set([
+    ...verifiedFreshUrls,
+    ...verifiedHistoricalUrls,
+    ...(prioritizeDerived ? derivedSearchUrls : []),
+  ])];
+}
+
 function fullFunnelSourceScores(rows) {
   const sources = new Map();
   const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, published: 3 };
   for (const row of rows || []) {
-    const key = sourceUrlKey(row?.source_url);
+    const key = sourceYieldKey(row?.source_url);
     const sku = String(row?.sku || "").trim();
     const rank = outcomeRank[row?.status] || 0;
     if (!key || !sku || !rank) continue;
@@ -449,7 +507,7 @@ export function prioritizeSourceUrls(urls, {
 } = {}) {
   const successfulCounts = new Map();
   for (const source of highYieldSources) {
-    const key = sourceUrlKey(source);
+    const key = sourceYieldKey(source);
     successfulCounts.set(key, (successfulCounts.get(key) || 0) + 1);
   }
   const funnelScores = fullFunnelSourceScores(yieldRows);
@@ -458,7 +516,8 @@ export function prioritizeSourceUrls(urls, {
   const groups = new Map();
   [...urls].forEach((url, index) => {
     const key = sourceUrlKey(url);
-    const yieldPriority = funnelScores.has(key) ? funnelScores.get(key) : (successfulCounts.get(key) || 0) * 2000;
+    const yieldKey = sourceYieldKey(url);
+    const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
     const tier = verifiedFreshKeys.has(key) ? 2 : freshKeys.has(key) ? 1 : 0;
     const priority = sourceUrlPriority(url) + yieldPriority
       + (freshKeys.has(key) ? 200_000 : 0)
@@ -492,10 +551,10 @@ export function retainedRowsForCollection(records, {
   provenOnly = false,
   highYieldSources = [],
 } = {}) {
-  const successfulKeys = new Set(highYieldSources.map(sourceUrlKey));
+  const successfulKeys = new Set(highYieldSources.map(sourceYieldKey));
   return (records || []).filter((row) => {
     if (provenOnly && !isProvenSellerSource(row?.source_url)) return false;
-    if (skipRetained && !successfulKeys.has(sourceUrlKey(row?.source_url))) return false;
+    if (skipRetained && !successfulKeys.has(sourceYieldKey(row?.source_url))) return false;
     return true;
   });
 }
@@ -503,7 +562,7 @@ export function retainedRowsForCollection(records, {
 export function orderRowsBySourceYield(rows, yieldRows = []) {
   const stats = new Map();
   for (const row of yieldRows) {
-    const key = sourceUrlKey(row?.source_url);
+    const key = sourceYieldKey(row?.source_url);
     if (!key || row?.status === "ignored") continue;
     const value = stats.get(key) || { attempted: 0, published: 0, outcomeWeight: 0 };
     value.attempted += 1;
@@ -516,7 +575,7 @@ export function orderRowsBySourceYield(rows, yieldRows = []) {
     stats.set(key, value);
   }
   return [...(rows || [])].map((row, index) => {
-    const value = stats.get(sourceUrlKey(row?.source_url)) || { attempted: 0, published: 0, outcomeWeight: 0 };
+    const value = stats.get(sourceYieldKey(row?.source_url)) || { attempted: 0, published: 0, outcomeWeight: 0 };
     return {
       row,
       index,
@@ -534,8 +593,12 @@ export function orderRowsBySourceYield(rows, yieldRows = []) {
     .map(({ row }) => row);
 }
 
-export function shouldYieldAfterRetained({ retainedLinks, pendingSources }) {
-  return Number(retainedLinks) > 0 && Number(pendingSources) > 0;
+export function shouldYieldAfterRetained({ retainedLinks, retainedAttempted = retainedLinks, pendingSources }) {
+  return Number(retainedLinks) > 0 && Number(retainedAttempted) > 0 && Number(pendingSources) > 0;
+}
+
+export function nextLowYieldBatchStreak({ current = 0, favorited = 0, threshold = 1 }) {
+  return Number(favorited) < Number(threshold) ? Number(current) + 1 : 0;
 }
 
 export function prioritizeFavoriteLinks(links) {
@@ -759,7 +822,10 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   if (currentTotal >= target || !links.length || isCollectionDeadlineReached(env)) return currentTotal;
   let existing = new Set();
   try {
-    existing = new Set(await favoriteSkus(maozi));
+    existing = new Set(await readFavoriteSkusWithTimeout(
+      () => favoriteSkus(maozi),
+      envNumber(env, "FLOW_B_FAVORITE_TELEMETRY_TIMEOUT_MS", 10_000),
+    ));
   } catch (error) {
     onResult({ status: "failed", error });
     log(`favorite SKU telemetry unavailable; continuing with run-local deduplication: ${error?.message || error}`);
@@ -855,7 +921,10 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     return writeChain;
   };
   const workers = Array.from({ length: Math.min(workerCount, queue.length) }, async () => {
-    const page = await context.newPage();
+    const page = await createFavoriteWorkerPage(
+      context,
+      envNumber(env, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS", 10_000),
+    );
     try {
       while (canClaimFavorite({ total, inFlight, target }) && !isCollectionDeadlineReached(env)) {
         const item = queue[cursor++];
@@ -1062,7 +1131,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       if (error.code !== "ENOENT") throw error;
     }
   }
-  const derivedSearchUrls = deriveSearchSourceUrls(yieldRows, envNumber(env, "FLOW_B_DERIVED_SEARCH_SOURCES", 200));
+  const derivedPriceBands = String(env.FLOW_B_DERIVED_SEARCH_PRICE_BANDS || "150.000;")
+    .split(",").map((value) => value.trim()).filter(Boolean);
+  const derivedSearchUrls = deriveSearchSourceUrls(
+    yieldRows,
+    envNumber(env, "FLOW_B_DERIVED_SEARCH_SOURCES", 200),
+    derivedPriceBands,
+  );
   const verifiedSellerUrls = verifiedSellerSourceUrls(yieldRows);
   const urls = [...new Set(expandHighYieldSourceUrls([...inputUrls, ...verifiedSellerUrls, ...derivedSearchUrls], yieldRows))];
   let records = [];
@@ -1076,7 +1151,12 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     highYieldSources,
     yieldRows,
     freshSourceUrls: [...classifiedFreshUrls.explorationUrls, ...derivedSearchUrls],
-    verifiedFreshSourceUrls: [...classifiedFreshUrls.verifiedSellerUrls, ...verifiedSellerUrls],
+    verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
+      verifiedFreshUrls: classifiedFreshUrls.verifiedSellerUrls,
+      verifiedHistoricalUrls: verifiedSellerUrls,
+      derivedSearchUrls,
+      prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
+    }),
   });
   if (!pending.length) return { outFile: outputPath, records: records.length, pending: 0 };
   const workers = Math.max(1, envNumber(env, "FLOW_B_TAB_WORKERS", 4));
@@ -1139,6 +1219,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         }
       }
       emit(`collecting favorites from ${retainedLinks.length} retained product links`);
+      let retainedAttempted = 0;
       favoriteBefore = await collectFavorites({
         context,
         maozi,
@@ -1149,8 +1230,15 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         attempted,
         logFile: favoriteLog,
         log: emit,
+        onResult: (result) => {
+          if (result.sku) retainedAttempted += 1;
+        },
       });
-      if (shouldYieldAfterRetained({ retainedLinks: retainedLinks.length, pendingSources: pending.length })) {
+      if (shouldYieldAfterRetained({
+        retainedLinks: retainedLinks.length,
+        retainedAttempted,
+        pendingSources: pending.length,
+      })) {
         return {
           outFile: outputPath,
           records: records.length,
@@ -1191,6 +1279,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       }
       if (favoriteBefore !== null) {
         let collectionSoftBlocked = false;
+        let batchFavorited = 0;
         favoriteBefore = await collectFavorites({
           context,
           maozi,
@@ -1202,12 +1291,20 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           logFile: favoriteLog,
           log: emit,
           onResult: (result) => {
+            if (result.status === "favorited") batchFavorited += 1;
             if (result.status === "failed" && /soft blocked|access denied|captcha|timeout|failed to fetch|network|HTTP 0/i.test(String(result.error?.message || result.error || ""))) {
               collectionSoftBlocked = true;
             }
           },
         });
         if (collectionSoftBlocked) adaptiveWorkers.recordFailure(new Error("Ozon collection soft blocked"));
+        if (lowDeltaBatchLimit > 0) {
+          lowDeltaBatches = nextLowYieldBatchStreak({
+            current: lowDeltaBatches,
+            favorited: batchFavorited,
+            threshold: lowDeltaThreshold,
+          });
+        }
       }
       const afterWait = Math.min(
         envNumber(env, "FLOW_B_MAOZI_AFTER_SCAN_WAIT", 10) * 1000,
@@ -1239,10 +1336,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       emit(`favorite ${batchFavoriteBefore} -> ${favoriteAfter} delta=${delta}`);
       favoriteBefore = favoriteAfter;
       if (favoriteAfter !== null && favoriteAfter >= targetFavorites) break;
-      if (lowDeltaBatchLimit > 0) {
-        lowDeltaBatches = delta === null || delta < lowDeltaThreshold ? lowDeltaBatches + 1 : 0;
-        if (lowDeltaBatches >= lowDeltaBatchLimit) break;
-      }
+      if (lowDeltaBatchLimit > 0 && lowDeltaBatches >= lowDeltaBatchLimit) break;
     }
     return { outFile: outputPath, records: records.length, pending: pending.length };
   } finally {

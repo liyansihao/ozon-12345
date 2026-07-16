@@ -35,14 +35,18 @@ import {
   favoriteFailureDisposition,
   favoritePriceSkipReason,
   favoriteTitleSkipReason,
+  nextLowYieldBatchStreak,
   softBlockCooldownState,
   sourceBatchCooldownState,
   collectionRuntimeState,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
   withTimeout,
+  createFavoriteWorkerPage,
+  readFavoriteSkusWithTimeout,
   deriveSearchSourceUrls,
   verifiedSellerSourceUrls,
+  verifiedPrioritySourceUrls,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("collection deadline stops an in-flight producer tranche", () => {
@@ -73,6 +77,20 @@ test("source page creation is included in the lifecycle timeout", async () => {
       scan: async () => ({ links: [] }),
     }),
     /source page lifecycle .* timed out after 10ms/,
+  );
+});
+
+test("favorite worker page creation has a bounded lifecycle", async () => {
+  await assert.rejects(
+    createFavoriteWorkerPage({ newPage: () => new Promise(() => {}) }, 5),
+    /favorite worker page creation timed out after 5ms/,
+  );
+});
+
+test("favorite SKU telemetry has a bounded lifecycle", async () => {
+  await assert.rejects(
+    readFavoriteSkusWithTimeout(() => new Promise(() => {}), 5),
+    /favorite SKU telemetry timed out after 5ms/,
   );
 });
 
@@ -139,6 +157,33 @@ test("derived search budget uses the most recent strict publications first", () 
   assert.equal(new URL(urls[0]).searchParams.get("text"), "новый успешный товар");
 });
 
+test("derived search discovery round-robins successful titles before using a second query variant", () => {
+  const urls = deriveSearchSourceUrls([
+    { status: "published", title: "Носки девочек хлопковые мягкие" },
+    { status: "published", title: "Самолет радиоуправляемый детский красный" },
+  ], 2);
+  assert.deepEqual(urls.map((url) => new URL(url).searchParams.get("text")), [
+    "самолет радиоуправляемый красный",
+    "носки девочек хлопковые",
+  ]);
+});
+
+test("derived search can probe multiple price bands without merging their yield", () => {
+  const urls = deriveSearchSourceUrls([
+    { status: "published", title: "Носки девочек хлопковые мягкие" },
+    { status: "published", title: "Самолет радиоуправляемый детский красный" },
+  ], 4, ["150.000;", "500.000;"]);
+  assert.deepEqual(urls.map((url) => ({
+    text: new URL(url).searchParams.get("text"),
+    band: new URL(url).searchParams.get("currency_price"),
+  })), [
+    { text: "самолет радиоуправляемый красный", band: "150.000;" },
+    { text: "самолет радиоуправляемый красный", band: "500.000;" },
+    { text: "носки девочек хлопковые", band: "150.000;" },
+    { text: "носки девочек хлопковые", band: "500.000;" },
+  ]);
+});
+
 test("derived search discovery can be disabled with a zero budget", () => {
   assert.deepEqual(deriveSearchSourceUrls([{ status: "published", title: "Новый успешный товар" }], 0), []);
 });
@@ -186,6 +231,21 @@ test("verified fresh sellers outrank derived keyword exploration", () => {
     freshSourceUrls: [search],
     verifiedFreshSourceUrls: [seller],
   }), [seller, search]);
+});
+
+test("explicitly promoted strict-derived searches join the verified priority tier", () => {
+  const seller = "https://www.ozon.ru/seller/fresh-store/";
+  const derived = "https://www.ozon.ru/search/?text=winning&is_global=true";
+  assert.deepEqual(verifiedPrioritySourceUrls({
+    verifiedFreshUrls: [seller],
+    verifiedHistoricalUrls: [],
+    derivedSearchUrls: [derived],
+    prioritizeDerived: true,
+  }), [seller, derived]);
+  assert.deepEqual(prioritizeSourceUrls([seller, derived], {
+    freshSourceUrls: [derived],
+    verifiedFreshSourceUrls: [seller, derived],
+  }), [derived, seller]);
 });
 
 test("verified source variants finish their tier before ordinary sources", () => {
@@ -275,6 +335,29 @@ test("skip-retained still resumes persisted high-yield sources", () => {
   }).map((row) => row.links[0].href), ["winner"]);
 });
 
+test("retained high-yield matching keeps successful and rejected price bands separate", () => {
+  const fifty = "https://www.ozon.ru/seller/winner/?currency_price=50.000%3B";
+  const fiveHundred = "https://www.ozon.ru/seller/winner/?currency_price=500.000%3B";
+  const records = [
+    { source_url: `${fifty}&sorting=rating`, links: [{ href: "winner-50" }] },
+    { source_url: `${fiveHundred}&sorting=rating`, links: [{ href: "winner-500" }] },
+  ];
+  assert.deepEqual(retainedRowsForCollection(records, {
+    skipRetained: true,
+    highYieldSources: [fifty],
+  }).map((row) => row.links[0].href), ["winner-50"]);
+});
+
+test("retained yield ordering does not let a rejected high price band borrow another band's success", () => {
+  const fifty = { source_url: "https://www.ozon.ru/seller/example/?currency_price=50.000%3B" };
+  const fiveHundred = { source_url: "https://www.ozon.ru/seller/example/?currency_price=500.000%3B" };
+  const yieldRows = [
+    { source_url: fifty.source_url, sku: "good", status: "published" },
+    ...Array.from({ length: 8 }, (_, index) => ({ source_url: fiveHundred.source_url, sku: `bad-${index}`, status: "rejected" })),
+  ];
+  assert.deepEqual(orderRowsBySourceYield([fiveHundred, fifty], yieldRows), [fifty, fiveHundred]);
+});
+
 test("retained source rows prefer observed publications over file order", () => {
   const rows = [
     { source_url: "https://www.ozon.ru/seller/dry/?sorting=rating" },
@@ -317,8 +400,9 @@ test("equal-yield retained variants prefer the higher price floor", () => {
 });
 
 test("retained collection yields to the producer loop for fresh source feedback", () => {
-  assert.equal(shouldYieldAfterRetained({ retainedLinks: 60, pendingSources: 400 }), true);
-  assert.equal(shouldYieldAfterRetained({ retainedLinks: 0, pendingSources: 400 }), false);
+  assert.equal(shouldYieldAfterRetained({ retainedLinks: 60, retainedAttempted: 60, pendingSources: 400 }), true);
+  assert.equal(shouldYieldAfterRetained({ retainedLinks: 3, retainedAttempted: 0, pendingSources: 400 }), false);
+  assert.equal(shouldYieldAfterRetained({ retainedLinks: 0, retainedAttempted: 0, pendingSources: 400 }), false);
 });
 
 test("retained replay uses a small bounded tranche by default", () => {
@@ -563,6 +647,12 @@ test("favorite title preflight rejects proven low-yield oversized categories", (
     status: "rejected",
     reason: "oversized-low-yield-title",
   });
+});
+
+test("low-yield feedback uses actual batch favorites instead of the concurrently drained queue total", () => {
+  assert.equal(nextLowYieldBatchStreak({ current: 0, favorited: 1, threshold: 2 }), 1);
+  assert.equal(nextLowYieldBatchStreak({ current: 1, favorited: 1, threshold: 2 }), 2);
+  assert.equal(nextLowYieldBatchStreak({ current: 2, favorited: 4, threshold: 2 }), 0);
 });
 
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {

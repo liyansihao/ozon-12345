@@ -620,6 +620,7 @@ test("runner activates a ready-to-sell product in the verified FBS warehouse bef
     costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
     state,
     target: 1,
+    now: () => new Date("2026-07-15T00:00:00Z"),
     warehouseId: 1020005022957960,
     initialStock: 1,
     confirmationAttempts: 2,
