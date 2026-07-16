@@ -127,6 +127,17 @@ test("fresh seller files are verified discovery while keyword files remain explo
   });
 });
 
+test("repeated submitted sellers outrank ordinary exploration without becoming verified", () => {
+  const strictSeller = "https://www.ozon.ru/seller/strict/";
+  const submittedSeller = "https://www.ozon.ru/seller/submitted/";
+  const search = "https://www.ozon.ru/search/?text=kids&is_global=true";
+  assert.deepEqual(prioritizeSourceUrls([search, submittedSeller, strictSeller], {
+    freshSourceUrls: [search],
+    qualifiedFreshSourceUrls: [submittedSeller],
+    verifiedFreshSourceUrls: [strictSeller],
+  }), [strictSeller, submittedSeller, search]);
+});
+
 test("fresh sellers expand into bounded price and sorting variants", () => {
   const seller = "https://www.ozon.ru/seller/new-store/";
   const expanded = expandFreshSellerSourceUrls([seller]);

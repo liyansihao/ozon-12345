@@ -741,6 +741,7 @@ export function prioritizeSourceUrls(urls, {
   highYieldSources = [],
   yieldRows = [],
   freshSourceUrls = [],
+  qualifiedFreshSourceUrls = [],
   verifiedFreshSourceUrls = [],
 } = {}) {
   const successfulCounts = new Map();
@@ -752,6 +753,7 @@ export function prioritizeSourceUrls(urls, {
   const familyScores = observedTitleFamilyScores(yieldRows);
   const familyPenalties = exhaustedSourceFamilyPenalties(yieldRows);
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
+  const qualifiedFreshKeys = new Set(qualifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedSellerKeys = new Set(verifiedFreshSourceUrls
     .filter((url) => canonicalSellerUrl(url))
@@ -764,13 +766,16 @@ export function prioritizeSourceUrls(urls, {
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
     const familyPenalty = familyPenalties.get(key) || 0;
     const baseTier = verifiedSellerKeys.has(familyKey)
-      ? 3
-      : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
+      ? 4
+      : qualifiedFreshKeys.has(familyKey)
+        ? 3
+        : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
     const tier = familyPenalty < 0
       ? (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
       + (freshKeys.has(familyKey) ? 200_000 : 0)
+      + (qualifiedFreshKeys.has(familyKey) ? 300_000 : 0)
       + (verifiedFreshKeys.has(familyKey) ? 400_000 : 0)
       + familyPenalty;
     const group = groups.get(key) || { index, priority, tier, urls: [] };
@@ -780,7 +785,7 @@ export function prioritizeSourceUrls(urls, {
     groups.set(key, group);
   });
   const ordered = [];
-  for (const tier of [3, 2, 1, 0]) {
+  for (const tier of [4, 3, 2, 1, 0]) {
     const ranked = [...groups.values()]
       .filter((group) => group.tier === tier)
       .sort((left, right) => right.priority - left.priority || left.index - right.index);
@@ -1526,9 +1531,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     yieldRows,
     freshSourceUrls: [
       ...classifiedFreshUrls.explorationUrls,
-      ...submittedSellerUrls,
       ...derivedSearchUrls,
     ],
+    qualifiedFreshSourceUrls: submittedSellerUrls,
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
       verifiedFreshUrls: [...classifiedFreshUrls.verifiedSellerUrls, ...publishedSourcePages],
       verifiedHistoricalUrls: verifiedSellerUrls,
