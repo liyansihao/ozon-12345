@@ -211,7 +211,10 @@ export function shouldDeferSourceAfterNonFbsSample(stats = {}, limit = 6) {
   const attempted = Math.max(0, Number(stats.attempted) || 0);
   const nonPureFbs = Math.max(0, Number(stats.nonPureFbs) || 0);
   const favorited = Math.max(0, Number(stats.favorited) || 0);
-  return attempted >= threshold && favorited === 0 && nonPureFbs === attempted;
+  return nonPureFbs >= threshold
+    && attempted >= threshold
+    && favorited === 0
+    && nonPureFbs / attempted >= 0.8;
 }
 
 export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
