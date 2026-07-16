@@ -958,6 +958,105 @@ test("runner activates a ready-to-sell product in the verified FBS warehouse bef
   }]);
 });
 
+test("runner backs off a transient stock rejection and does not retry a duplicated reconciliation immediately", async () => {
+  const sku = "stock-transient";
+  const state = fakeState({
+    [sku]: {
+      status: "processing",
+      data: {
+        sku,
+        submitted: true,
+        submission_pending: true,
+        offer_id: `mz-${sku}`,
+        store_id: 7,
+        prepared_at: "2026-07-15T00:00:00.000Z",
+      },
+    },
+  });
+  let stockCalls = 0;
+  const client = clientFor([{ id: 901, sku }], {
+    findImportLog: async () => ({ sku, offer_id: `mz-${sku}`, import_status: "all_imported" }),
+    findOnlineProduct: async () => ({
+      id: 902,
+      product_id: 903,
+      sku: 904,
+      offer_id: `mz-${sku}`,
+      online_status: "ready_to_sell",
+      stock: 0,
+    }),
+    updateProductStock: async () => {
+      stockCalls += 1;
+      return { result: [{ updated: false, errors: [{ code: "TOO_MANY_REQUESTS", message: "Stock is updated too frequently" }] }] };
+    },
+  });
+
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    warehouseId: 1020005022957960,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(stockCalls, 1);
+  const latest = state.entries().find((entry) => entry.sku === sku);
+  assert.equal(latest.status, "processing");
+  assert.equal(latest.data.reason, "stock-activation-rejected");
+  assert.ok(Date.parse(latest.data.next_reconcile_at) > Date.parse("2026-07-15T10:00:00.000Z"));
+});
+
+test("runner terminalizes an explicit FBP-only stock rejection without repeating it", async () => {
+  const sku = "stock-fbp-only";
+  const state = fakeState({
+    [sku]: {
+      status: "processing",
+      data: {
+        sku,
+        submitted: true,
+        submission_pending: true,
+        offer_id: `mz-${sku}`,
+        store_id: 7,
+        prepared_at: "2026-07-15T00:00:00.000Z",
+      },
+    },
+  });
+  let stockCalls = 0;
+  const client = clientFor([{ id: 911, sku }], {
+    findImportLog: async () => ({ sku, offer_id: `mz-${sku}`, import_status: "all_imported" }),
+    findOnlineProduct: async () => ({
+      id: 912,
+      product_id: 913,
+      sku: 914,
+      offer_id: `mz-${sku}`,
+      online_status: "ready_to_sell",
+      stock: 0,
+    }),
+    updateProductStock: async () => {
+      stockCalls += 1;
+      return { result: [{ updated: false, errors: [{ code: "CB_DELIVERY_ONLY_FBP", message: "tags validation failed" }] }] };
+    },
+  });
+
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    warehouseId: 1020005022957960,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(stockCalls, 1);
+  const latest = state.entries().find((entry) => entry.sku === sku);
+  assert.equal(latest.status, "failed");
+  assert.equal(latest.data.reason, "stock-activation-terminal-rejected");
+});
+
 test("runner counts only a final imported task that is selling with positive stock", async () => {
   const state = fakeState();
   const client = clientFor([{ id: 92, sku: 3301105092 }], {

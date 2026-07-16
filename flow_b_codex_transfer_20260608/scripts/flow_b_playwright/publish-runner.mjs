@@ -121,10 +121,18 @@ function hasTerminalModerationDecline(product) {
   });
 }
 
+function hasTerminalStockActivationRejection(stockUpdate) {
+  return (stockUpdate?.result || []).some((row) => (row?.errors || []).some((error) => (
+    String(error?.code || "").toUpperCase() === "CB_DELIVERY_ONLY_FBP"
+  )));
+}
+
 function isTerminalSubmittedFailure(entry) {
   const data = entry?.data || entry || {};
   const reason = String(data.reason || "");
-  if (["daily-product-limit", "import-failed", "reconciliation-store-not-configured"].includes(reason)) return true;
+  if (["daily-product-limit", "import-failed", "reconciliation-store-not-configured", "stock-activation-terminal-rejected"].includes(reason)) return true;
+  if (reason === "stock-activation-rejected"
+    && hasTerminalStockActivationRejection(data?.final_result?.stock_update || data?.stock_update)) return true;
   const moderationProduct = data?.final_result?.online_product || data?.online_product;
   const targetStoreId = Number(data?.store_id);
   const evidenceStoreId = Number(moderationProduct?.shop_id);
@@ -407,7 +415,9 @@ export function createPublishRunner({
           if (!updated) {
             return {
               ok: false,
-              reason: "stock-activation-rejected",
+              reason: hasTerminalStockActivationRejection(lastStockUpdate)
+                ? "stock-activation-terminal-rejected"
+                : "stock-activation-rejected",
               import_log: importLog,
               online_product: onlineProduct,
               stock_update: lastStockUpdate,
@@ -611,6 +621,8 @@ export function createPublishRunner({
         const retryablePending = submitted && [
           "publish-final-status-timeout",
           "online-product-not-selling",
+          "stock-activation-failed",
+          "stock-activation-rejected",
         ].includes(reason);
         await state.transition(sku, retryablePending ? "processing" : "failed", {
           ...submissionState,
@@ -1036,12 +1048,18 @@ export function createPublishRunner({
     let submittedPending = 0;
     let dryCandidates = 0;
 
-    async function handleCandidate(item) {
-      const sku = asSku(item);
+    async function handleCandidate(inputItem) {
+      const sku = asSku(inputItem);
       if (state.hasPublished(sku)) return { status: "ignored", sku };
 
-      const restoredStatus = state.statusOf?.(sku);
-      const restoredEntry = restoredBySku.get(String(sku));
+      const latestEntry = typeof state.entries === "function"
+        ? state.entries().find((entry) => String(entry.sku) === String(sku))
+        : null;
+      const restoredStatus = latestEntry?.status ?? state.statusOf?.(sku);
+      const restoredEntry = latestEntry || restoredBySku.get(String(sku));
+      const item = latestEntry
+        ? mergeCandidateFacts({ ...inputItem, ...(latestEntry.data || {}), sku }, facts.get(String(sku)) || {})
+        : inputItem;
       if (restoredStatus === "failed" && isTerminalSubmittedFailure(restoredEntry)) {
         return { status: "ignored", sku, reason: "terminal-submission-failure" };
       }
@@ -1115,6 +1133,8 @@ export function createPublishRunner({
                 "publish-final-status-timeout",
                 "online-product-not-selling",
                 "reconciliation-online-product-missing",
+                "stock-activation-failed",
+                "stock-activation-rejected",
               ].includes(reason);
               const reconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0) + 1;
               await state.transition(sku, retryablePending ? "processing" : "failed", {
