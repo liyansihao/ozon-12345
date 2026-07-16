@@ -295,6 +295,18 @@ test("full-funnel source yield promotes repeated pure-FBS favorites over rejecte
   assert.deepEqual(prioritizeSourceUrls([rejected, pureFbs], { yieldRows: rows }), [pureFbs, rejected]);
 });
 
+test("deeper pages inherit source yield within the same price band", () => {
+  const winner = "https://www.ozon.ru/seller/winner/?currency_price=500.000%3B";
+  const pageTwo = `${winner}&page=2`;
+  const unproven = "https://www.ozon.ru/seller/unproven/?currency_price=500.000%3B";
+  assert.deepEqual(prioritizeSourceUrls([unproven, pageTwo], {
+    yieldRows: [
+      { source_url: winner, sku: "winner-1", status: "published" },
+      { source_url: winner, sku: "winner-2", status: "published" },
+    ],
+  }), [pageTwo, unproven]);
+});
+
 test("derived search discovery is explored before exhausted historical sources", () => {
   const known = "https://www.ozon.ru/seller/known/";
   const fresh = "https://www.ozon.ru/search/?text=fresh&is_global=true";

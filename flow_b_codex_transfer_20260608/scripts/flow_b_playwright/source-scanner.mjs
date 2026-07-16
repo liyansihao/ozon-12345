@@ -335,10 +335,11 @@ function sourceYieldKey(value) {
   try {
     const url = new URL(String(value));
     url.searchParams.delete("sorting");
+    url.searchParams.delete("page");
     return url.toString();
   } catch {
     return String(value || "")
-      .replace(/([?&])sorting=[^&]*&?/gi, "$1")
+      .replace(/([?&])(?:sorting|page)=[^&]*&?/gi, "$1")
       .replace(/[?&]$/, "");
   }
 }
