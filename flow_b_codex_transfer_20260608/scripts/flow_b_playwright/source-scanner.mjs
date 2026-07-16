@@ -385,7 +385,7 @@ function isSearchSource(value) {
   }
 }
 
-function sourceYieldKey(value) {
+export function sourceYieldKey(value) {
   try {
     const url = new URL(String(value));
     url.searchParams.delete("sorting");
@@ -610,7 +610,7 @@ export function verifiedPrioritySourceUrls({
   ])];
 }
 
-function fullFunnelSourceScores(rows) {
+export function fullFunnelSourceScores(rows) {
   const sources = new Map();
   const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
   for (const row of rows || []) {

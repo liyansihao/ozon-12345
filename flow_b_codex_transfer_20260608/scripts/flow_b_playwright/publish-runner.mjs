@@ -4,7 +4,13 @@ import path from "node:path";
 import * as defaultPolicy from "./publish-policy.mjs";
 import { canonicalProductUrl } from "./publish-state.mjs";
 import { mapOzonCategory } from "./category-commission.mjs";
-import { observedTitleFamilyScores, productTitleFamily, productTitlePriority } from "./source-scanner.mjs";
+import {
+  fullFunnelSourceScores,
+  observedTitleFamilyScores,
+  productTitleFamily,
+  productTitlePriority,
+  sourceYieldKey,
+} from "./source-scanner.mjs";
 import { AdaptiveConcurrency, hasReusableCandidateFacts, isFatalBrowserError, loadCandidateFacts, mergeCandidateFacts } from "./continuous-runtime.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
@@ -135,16 +141,18 @@ function reconciliationBackoffMs(attempts) {
   return Math.min(180_000, 60_000 + (count - 10) * 30_000);
 }
 
-export function prioritizePublishCandidates(items, preflightPureSkus = new Set(), familyScores = {}) {
+export function prioritizePublishCandidates(items, preflightPureSkus = new Set(), familyScores = {}, sourceScores = new Map()) {
   return [...items]
     .map((item, index) => ({
       item,
       index,
       purePreflight: preflightPureSkus.has(String(item?.sku ?? item?.id ?? "")) ? 1 : 0,
+      sourcePriority: Number(sourceScores?.get?.(sourceYieldKey(item?.source_url)) || 0),
       priority: Number(familyScores[productTitleFamily(item?.title)] || 0) + productTitlePriority(item?.title),
       salePrice: Number(item?.sell_price ?? item?.price ?? item?.price_info?.sell_price) || 0,
     }))
     .sort((left, right) => right.purePreflight - left.purePreflight
+      || right.sourcePriority - left.sourcePriority
       || right.priority - left.priority
       || right.salePrice - left.salePrice
       || left.index - right.index)
@@ -183,15 +191,19 @@ async function loadPreflightPureSkus(runDir) {
   return result;
 }
 
-async function loadObservedTitleFamilyScores(runDir) {
+async function loadObservedPublishFeedback(runDir) {
   try {
     const text = await fs.readFile(path.join(runDir, "source_yield.jsonl"), "utf8");
-    return observedTitleFamilyScores(text.split(/\n/).filter(Boolean).flatMap((line) => {
+    const rows = text.split(/\n/).filter(Boolean).flatMap((line) => {
       try { return [JSON.parse(line)]; } catch { return []; }
-    }));
+    });
+    return {
+      familyScores: observedTitleFamilyScores(rows),
+      sourceScores: fullFunnelSourceScores(rows),
+    };
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    return {};
+    return { familyScores: {}, sourceScores: new Map() };
   }
 }
 
@@ -958,7 +970,7 @@ export function createPublishRunner({
       })
       : favorites;
     const preflightPureSkus = await loadPreflightPureSkus(runDir);
-    const familyScores = await loadObservedTitleFamilyScores(runDir);
+    const { familyScores, sourceScores } = await loadObservedPublishFeedback(runDir);
     const isReconciliationCandidate = (item) => item?.reconcile_only === true
       || item?.submitted === true
       || item?.submission_pending === true;
@@ -966,6 +978,7 @@ export function createPublishRunner({
       runnableFavorites.filter((item) => !isReconciliationCandidate(item)),
       preflightPureSkus,
       familyScores,
+      sourceScores,
     );
     const dueReconciliations = prioritizePublishCandidates(
       [...delayedSubmissions, ...runnableFavorites.filter(isReconciliationCandidate)].filter((item) => {
@@ -974,6 +987,7 @@ export function createPublishRunner({
       }),
       preflightPureSkus,
       familyScores,
+      sourceScores,
     );
     const candidates = interleaveCandidateBatches(freshCandidates, dueReconciliations, workerCount);
     let published = Number(state.runPublishedCount?.() ?? 0);

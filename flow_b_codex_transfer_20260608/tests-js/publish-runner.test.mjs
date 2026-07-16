@@ -100,6 +100,19 @@ test("publish candidates use current strict title-family feedback before static 
   ], new Set(), scores).map((item) => item.sku), ["toy", "socks"]);
 });
 
+test("publish candidates prefer a productive source over a stronger static title guess", () => {
+  const strongSource = "https://www.ozon.ru/search/?text=productive&currency_price=150.000%3B";
+  const weakSource = "https://www.ozon.ru/search/?text=dry&currency_price=150.000%3B";
+  const sourceScores = new Map([
+    [strongSource, 50_000],
+    [weakSource, 0],
+  ]);
+  assert.deepEqual(prioritizePublishCandidates([
+    { sku: "static-underwear", title: "Комплект трусов", source_url: weakSource },
+    { sku: "productive-toy", title: "Детская игрушка", source_url: strongSource },
+  ], new Set(), {}, sourceScores).map((item) => item.sku), ["productive-toy", "static-underwear"]);
+});
+
 test("fresh favorites are scheduled before a large restored reconciliation backlog", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-fresh-fairness-"));
   const restored = {};
