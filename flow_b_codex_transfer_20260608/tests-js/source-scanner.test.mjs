@@ -521,6 +521,30 @@ test("skip-retained removes a historically successful seller after a recent dry 
   }), []);
 });
 
+test("skip-retained removes a seller whose recent preflight yield falls below ten percent", () => {
+  const source = "https://www.ozon.ru/seller/weak-retained/";
+  const yieldRows = [
+    ...Array.from({ length: 8 }, (_, index) => ({
+      source_url: source,
+      sku: `old-win-${index}`,
+      status: "published",
+      at: `2026-07-15T00:${String(index).padStart(2, "0")}:00Z`,
+    })),
+    { source_url: source, sku: "recent-one", status: "favorited", at: "2026-07-16T00:00:00Z" },
+    ...Array.from({ length: 11 }, (_, index) => ({
+      source_url: `${source}?page=2`,
+      sku: `recent-reject-${index}`,
+      status: "rejected",
+      at: `2026-07-16T00:${String(index + 1).padStart(2, "0")}:00Z`,
+    })),
+  ];
+  assert.deepEqual(retainedRowsForCollection([{ source_url: source, links: [{ href: "weak" }] }], {
+    skipRetained: true,
+    highYieldSources: [source],
+    yieldRows,
+  }), []);
+});
+
 test("retained high-yield matching keeps successful and rejected price bands separate", () => {
   const fifty = "https://www.ozon.ru/seller/winner/?currency_price=50.000%3B";
   const fiveHundred = "https://www.ozon.ru/seller/winner/?currency_price=500.000%3B";

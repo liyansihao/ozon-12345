@@ -655,7 +655,8 @@ function exhaustedSellerFamilyPenalties(rows) {
       recent.push(event);
       if (recent.length >= 12) break;
     }
-    if (recent.length >= 12 && recent.every((event) => !event.productive)) return [[key, -500_000]];
+    const recentProductive = recent.filter((event) => event.productive).length;
+    if (recent.length >= 12 && recentProductive / recent.length < 0.1) return [[key, -500_000]];
     return attempted >= 12 && productive / attempted < 0.1 ? [[key, -250_000]] : [];
   }));
 }
