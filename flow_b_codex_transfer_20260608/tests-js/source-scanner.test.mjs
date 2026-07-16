@@ -40,6 +40,7 @@ import {
   observedTitleFamilyScores,
   createScannerLogger,
   favoriteFailureDisposition,
+  shouldDeferSourceAfterNonFbsSample,
   favoritePriceSkipReason,
   favoriteTitleSkipReason,
   nextLowYieldBatchStreak,
@@ -66,6 +67,14 @@ import {
   expandPublishedSourcePages,
   fullFunnelSourceScores,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+
+test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
+  assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 5, nonPureFbs: 5, favorited: 0 }, 6), false);
+  assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 6, nonPureFbs: 6, favorited: 0 }, 6), true);
+  assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 7, nonPureFbs: 6, favorited: 0 }, 6), false);
+  assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 8, nonPureFbs: 7, favorited: 1 }, 6), false);
+  assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 20, nonPureFbs: 20, favorited: 0 }, 0), false);
+});
 
 test("collection deadline stops an in-flight producer tranche", () => {
   const env = { FLOW_B_DEADLINE_AT: "2026-07-14T22:00:29.809Z" };
