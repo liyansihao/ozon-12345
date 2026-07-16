@@ -760,6 +760,13 @@ export function createPublishRunner({
         if (targetConfigCache) targetConfigCache.commissionTree = commissionTree;
       }
       const value = { ...resolved, commissionTree, warehouseId: targetWarehouseId || null };
+      recordMetric("store_targets.jsonl", {
+        store_id: Number(resolved.store?.id || spec.id),
+        store_name: resolved.store?.name ?? resolved.store?.title ?? spec.needle,
+        warehouse_id: targetWarehouseId || null,
+        warehouse_source: Number(spec.warehouseId) > 0 ? "configured" : "erp-discovered",
+        watermark_id: Number(resolved.watermark?.id || watermarkId),
+      });
       resolvedTargetsThisRun.set(cacheKey, value);
       if (targetConfigCache) {
         if (targetPlan.length === 1) targetConfigCache.value = value;

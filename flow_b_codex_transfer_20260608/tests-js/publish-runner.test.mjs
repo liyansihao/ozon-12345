@@ -443,6 +443,7 @@ test("runner rotates at the local per-store daily cap without submitting an over
 });
 
 test("runner syncs and verifies a missing warehouse before rotating into a store", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-store-target-"));
   const state = fakeState();
   const shopIds = [];
   const syncCalls = [];
@@ -480,6 +481,7 @@ test("runner syncs and verifies a missing warehouse before rotating into a store
     client,
     costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
     state,
+    runDir,
     target: 1,
     storeTargets: [
       { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960 },
@@ -494,6 +496,13 @@ test("runner syncs and verifies a missing warehouse before rotating into a store
   assert.deepEqual(syncCalls, [[106637]]);
   assert.deepEqual(shopIds, [106637]);
   assert.equal(state.records[0].store_id, 106637);
+  const targetEvents = (await fs.readFile(path.join(runDir, "store_targets.jsonl"), "utf8"))
+    .trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  assert.ok(targetEvents.some((event) => event.store_id === 106637
+    && event.warehouse_id === 2020005022957960
+    && event.watermark_id === 60822
+    && event.warehouse_source === "erp-discovered"));
+  await fs.rm(runDir, { recursive: true, force: true });
 });
 
 test("runner caches an unavailable store between consumer rounds instead of repeating warehouse sync", async () => {
