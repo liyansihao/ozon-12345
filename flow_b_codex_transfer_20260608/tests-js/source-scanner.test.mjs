@@ -53,6 +53,7 @@ import {
   collectionRuntimeState,
   remainingCollectionCooldown,
   sourceAdaptiveConcurrency,
+  sourceScanLinkTarget,
   nextDetailPacingState,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
@@ -1382,6 +1383,12 @@ test("source scanning yields after a bounded tranche so new publish feedback can
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 8, maximumBatches: 8, pendingSources: 100 }), true);
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 8, maximumBatches: 8, pendingSources: 0 }), false);
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 80, maximumBatches: 0, pendingSources: 100 }), false);
+});
+
+test("source scrolling keeps bounded dedup headroom above the per-source consumer limit", () => {
+  assert.equal(sourceScanLinkTarget(24), 48);
+  assert.equal(sourceScanLinkTarget(1), 12);
+  assert.equal(sourceScanLinkTarget(24, 3), 72);
 });
 
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {

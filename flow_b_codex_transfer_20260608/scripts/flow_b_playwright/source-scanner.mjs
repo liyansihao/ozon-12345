@@ -1601,7 +1601,13 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   return total;
 }
 
-async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSteps }) {
+export function sourceScanLinkTarget(perSourceLimit, multiplier = 2) {
+  const limit = Math.max(1, Number(perSourceLimit) || 24);
+  const headroom = Math.max(1, Number(multiplier) || 2);
+  return Math.max(12, Math.ceil(limit * headroom));
+}
+
+async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSteps, linkTarget }) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
   await waitForContent(page, 20000);
   await sleep(initialWait);
@@ -1653,6 +1659,10 @@ async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSt
       });
     }
     if (blocked) { stopReason = "blocked_or_empty"; break; }
+    if (Number(linkTarget) > 0 && links.size >= Number(linkTarget)) {
+      stopReason = "link_target_reached";
+      break;
+    }
     const nearBottom = state.y + state.viewport >= state.height - 100;
     stable = links.size === lastLinkCount && nearBottom && Math.abs(state.y - lastY) < 20 && Math.abs(state.height - lastHeight) < 20 ? stable + 1 : 0;
     noNew = links.size === lastLinkCount ? noNew + 1 : 0;
@@ -1822,12 +1832,14 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     initial: workers,
     max: Math.max(workers, envNumber(env, "FLOW_B_MAX_TAB_WORKERS", 12)),
   });
+  const perSourceLinkLimit = envNumber(env, "FLOW_B_MAX_LINKS_PER_SOURCE", 24);
   const options = {
     steps: envNumber(env, "FLOW_B_MAX_SCROLL_STEPS", 24),
     ratio: envNumber(env, "FLOW_B_SCROLL_RATIO", 0.82),
     delay: envNumber(env, "FLOW_B_SCROLL_DELAY", 0.65) * 1000,
     initialWait: envNumber(env, "FLOW_B_MAOZI_INITIAL_WAIT", 8) * 1000,
     maxNoNewSteps: envNumber(env, "FLOW_B_MAX_NO_NEW_LINK_STEPS", 45),
+    linkTarget: envNumber(env, "FLOW_B_SOURCE_LINK_TARGET", sourceScanLinkTarget(perSourceLinkLimit)),
   };
   const lowDeltaThreshold = envNumber(env, "FLOW_B_LOW_DELTA_THRESHOLD", 1);
   const lowDeltaBatchLimit = envNumber(env, "FLOW_B_LOW_DELTA_BATCH_LIMIT", 2);
@@ -1901,7 +1913,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     }
 
     if (favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
-      const baseLinkLimit = envNumber(env, "FLOW_B_MAX_LINKS_PER_SOURCE", 24);
+      const baseLinkLimit = perSourceLinkLimit;
       const retainedRows = orderRowsBySourceYield(retainedRowsForCollection(records, {
         skipRetained: env.FLOW_B_SKIP_RETAINED === "1",
         provenOnly: env.FLOW_B_RETAINED_PROVEN_ONLY === "1",
@@ -2003,7 +2015,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           maozi,
           links: limitLinksPerSource(
             batchRows.map((row, index) => ({ ...row, source_url: batch[index] })),
-            envNumber(env, "FLOW_B_MAX_LINKS_PER_SOURCE", 24),
+            perSourceLinkLimit,
             titleFamilyScores,
           ),
           target: targetFavorites,
