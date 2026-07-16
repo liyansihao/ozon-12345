@@ -792,23 +792,25 @@ export function deepVerifiedSellerSourceVariants(
     recentVerified.push(seller);
     if (recentVerified.length >= maximum) break;
   }
-  const deepPublishedSellers = new Set((yieldRows || []).flatMap((row) => {
-    if (String(row?.status || "") !== "published") return [];
-    try {
-      const page = Number(new URL(String(row?.source_url || "")).searchParams.get("page"));
-      const seller = canonicalSellerUrl(row?.seller_url) || canonicalSellerUrl(row?.source_url);
-      return seller && page >= 4 && page <= 5 ? [seller] : [];
-    } catch {
-      return [];
-    }
-  }));
+  const deepestPublishedPage = new Map();
+  for (const row of yieldRows || []) {
+    if (String(row?.status || "") !== "published") continue;
+    const seller = canonicalSellerUrl(row?.seller_url) || canonicalSellerUrl(row?.source_url);
+    if (!seller) continue;
+    let page = 1;
+    try { page = Number(new URL(String(row?.source_url || "")).searchParams.get("page")) || 1; }
+    catch {}
+    deepestPublishedPage.set(seller, Math.max(deepestPublishedPage.get(seller) || 1, page));
+  }
   const firstPages = expandFreshSellerSourceUrls(recentVerified);
   const expanded = [...firstPages];
   const pages = [...new Set((resultPages || []).map(Number)
     .filter((page) => Number.isInteger(page) && page > 1 && page <= 6))];
   for (const source of firstPages) {
     for (const page of pages) {
-      if (page === 6 && !deepPublishedSellers.has(canonicalSellerUrl(source))) continue;
+      const seller = canonicalSellerUrl(source);
+      const maximumPage = Math.min(6, Math.max(3, (deepestPublishedPage.get(seller) || 1) + 1));
+      if (page > maximumPage) continue;
       const url = new URL(source);
       url.searchParams.set("page", String(page));
       expanded.push(url.toString());

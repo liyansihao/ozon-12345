@@ -1105,20 +1105,24 @@ test("repeated submitted seller feedback becomes bounded exploration only", () =
   assert.deepEqual(verifiedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/c/"]);
 });
 
-test("repeated strict-success sellers receive bounded page four through six variants", () => {
+test("repeated strict-success sellers explore only one page beyond their deepest strict result", () => {
   const rows = [
     { status: "published", sku: "a-1", seller_url: "https://www.ozon.ru/seller/a/", source_url: "https://www.ozon.ru/seller/a/?page=5" },
     { status: "published", sku: "a-2", seller_url: "https://www.ozon.ru/seller/a/?miniapp=1" },
     { status: "published", sku: "b-1", seller_url: "https://www.ozon.ru/seller/b/" },
     { status: "published", sku: "b-2", seller_url: "https://www.ozon.ru/seller/b/" },
+    { status: "published", sku: "c-1", seller_url: "https://www.ozon.ru/seller/c/", source_url: "https://www.ozon.ru/seller/c/?page=3" },
+    { status: "published", sku: "c-2", seller_url: "https://www.ozon.ru/seller/c/" },
   ];
   const variants = deepVerifiedSellerSourceVariants(rows);
-  assert.equal(variants.length, 77);
+  assert.equal(variants.length, 91);
   assert.ok(variants.some((url) => url.includes("currency_price=500.000%3B")
     && url.includes("sorting=discount")
     && url.includes("page=6")));
-  assert.ok(variants.some((url) => url.includes("/seller/b/") && url.includes("page=5")));
-  assert.ok(variants.every((url) => !url.includes("/seller/b/") || !url.includes("page=6")));
+  assert.ok(variants.some((url) => url.includes("/seller/b/") && url.includes("page=3")));
+  assert.ok(variants.every((url) => !url.includes("/seller/b/") || Number(new URL(url).searchParams.get("page") || 1) <= 3));
+  assert.ok(variants.some((url) => url.includes("/seller/c/") && url.includes("page=4")));
+  assert.ok(variants.every((url) => !url.includes("/seller/c/") || Number(new URL(url).searchParams.get("page") || 1) <= 4));
   assert.ok(variants.every((url) => Number(new URL(url).searchParams.get("page") || 1) <= 6));
 });
 
