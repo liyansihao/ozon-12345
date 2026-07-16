@@ -556,6 +556,7 @@ export function expandPublishedSourcePages(urls, yieldRows = [], resultPages = [
 }
 
 export function expandNextPublishedDiscoveryPages(yieldRows = []) {
+  const maximumEvidencePage = 8;
   const expanded = [];
   const seen = new Set();
   for (const row of yieldRows || []) {
@@ -564,7 +565,7 @@ export function expandNextPublishedDiscoveryPages(yieldRows = []) {
     try { url = new URL(String(row?.source_url || "")); } catch { continue; }
     if (!isSearchSource(url) && !isHighlightSource(url)) continue;
     const currentPage = Number(url.searchParams.get("page") || 1);
-    if (!Number.isInteger(currentPage) || currentPage < 1 || currentPage >= 5) continue;
+    if (!Number.isInteger(currentPage) || currentPage < 1 || currentPage >= maximumEvidencePage) continue;
     url.hash = "";
     url.searchParams.delete("miniapp");
     url.searchParams.set("page", String(currentPage + 1));
