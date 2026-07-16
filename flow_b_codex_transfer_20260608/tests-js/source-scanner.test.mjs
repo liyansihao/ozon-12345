@@ -1107,16 +1107,18 @@ test("repeated submitted seller feedback becomes bounded exploration only", () =
 
 test("repeated strict-success sellers receive bounded page four through six variants", () => {
   const rows = [
-    { status: "published", sku: "a-1", seller_url: "https://www.ozon.ru/seller/a/" },
+    { status: "published", sku: "a-1", seller_url: "https://www.ozon.ru/seller/a/", source_url: "https://www.ozon.ru/seller/a/?page=5" },
     { status: "published", sku: "a-2", seller_url: "https://www.ozon.ru/seller/a/?miniapp=1" },
     { status: "published", sku: "b-1", seller_url: "https://www.ozon.ru/seller/b/" },
+    { status: "published", sku: "b-2", seller_url: "https://www.ozon.ru/seller/b/" },
   ];
   const variants = deepVerifiedSellerSourceVariants(rows);
-  assert.equal(variants.length, 42);
+  assert.equal(variants.length, 77);
   assert.ok(variants.some((url) => url.includes("currency_price=500.000%3B")
     && url.includes("sorting=discount")
     && url.includes("page=6")));
-  assert.ok(variants.every((url) => !url.includes("/seller/b/")));
+  assert.ok(variants.some((url) => url.includes("/seller/b/") && url.includes("page=5")));
+  assert.ok(variants.every((url) => !url.includes("/seller/b/") || !url.includes("page=6")));
   assert.ok(variants.every((url) => Number(new URL(url).searchParams.get("page") || 1) <= 6));
 });
 

@@ -792,12 +792,23 @@ export function deepVerifiedSellerSourceVariants(
     recentVerified.push(seller);
     if (recentVerified.length >= maximum) break;
   }
+  const deepPublishedSellers = new Set((yieldRows || []).flatMap((row) => {
+    if (String(row?.status || "") !== "published") return [];
+    try {
+      const page = Number(new URL(String(row?.source_url || "")).searchParams.get("page"));
+      const seller = canonicalSellerUrl(row?.seller_url) || canonicalSellerUrl(row?.source_url);
+      return seller && page >= 4 && page <= 5 ? [seller] : [];
+    } catch {
+      return [];
+    }
+  }));
   const firstPages = expandFreshSellerSourceUrls(recentVerified);
   const expanded = [...firstPages];
   const pages = [...new Set((resultPages || []).map(Number)
     .filter((page) => Number.isInteger(page) && page > 1 && page <= 6))];
   for (const source of firstPages) {
     for (const page of pages) {
+      if (page === 6 && !deepPublishedSellers.has(canonicalSellerUrl(source))) continue;
       const url = new URL(source);
       url.searchParams.set("page", String(page));
       expanded.push(url.toString());
