@@ -1436,6 +1436,53 @@ test("runner persists backoff after an imported product is still not selling", a
   assert.equal(retry.data.next_reconcile_at, "2026-07-15T07:00:30.000Z");
 });
 
+test("long-running unchanged reconciliation aligns its backoff with ERP sync cadence", async () => {
+  const state = fakeState({
+    delayed: {
+      status: "processing",
+      data: {
+        store_id: 104965,
+        submitted: true,
+        submission_pending: true,
+        offer_id: "mz-150726-long-delay",
+        profit_rate: 55,
+        reconcile_attempts: 11,
+        reason: "online-product-not-selling",
+      },
+    },
+  });
+  const client = clientFor([], {
+    resolvePublishTarget: async () => ({
+      store: { id: 104965, name: "丽丽1号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async ({ offerId }) => ({
+      id: 178,
+      sku: 0,
+      offer_id: offerId,
+      online_status: "unknown",
+      stock: 0,
+      errors: [],
+    }),
+  });
+
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T07:00:00.000Z"),
+    storeTargets: [{ id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960 }],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  const retry = state.transitions.at(-1);
+  assert.equal(retry.data.reconcile_attempts, 12);
+  assert.equal(retry.data.next_reconcile_at, "2026-07-15T07:02:00.000Z");
+});
+
 test("runner confirms an exact selling online offer even while its import log is stale pending", async () => {
   const state = fakeState({
     4854106079: {

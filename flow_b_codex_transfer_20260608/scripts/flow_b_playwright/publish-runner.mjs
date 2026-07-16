@@ -129,6 +129,12 @@ function isTerminalSubmittedFailure(entry) {
   return !evidenceBelongsToAnotherStore && hasTerminalModerationDecline(moderationProduct);
 }
 
+function reconciliationBackoffMs(attempts) {
+  const count = Math.max(1, Number(attempts) || 1);
+  if (count <= 10) return Math.min(60_000, 10_000 + count * 5_000);
+  return Math.min(180_000, 60_000 + (count - 10) * 30_000);
+}
+
 export function prioritizePublishCandidates(items, preflightPureSkus = new Set(), familyScores = {}) {
   return [...items]
     .map((item, index) => ({
@@ -996,7 +1002,7 @@ export function createPublishRunner({
                 submitted: true,
                 ...(retryablePending ? {
                   reconcile_attempts: reconcileAttempts,
-                  next_reconcile_at: new Date(now().getTime() + Math.min(60_000, 10_000 + reconcileAttempts * 5_000)).toISOString(),
+                  next_reconcile_at: new Date(now().getTime() + reconciliationBackoffMs(reconcileAttempts)).toISOString(),
                 } : {}),
               });
               return { status: retryablePending ? "ignored" : "failed", sku, reason };
@@ -1074,7 +1080,7 @@ export function createPublishRunner({
               import_log: importLog,
               submitted: true,
               reconcile_attempts: reconcileAttempts,
-              next_reconcile_at: new Date(now().getTime() + Math.min(60_000, 10_000 + reconcileAttempts * 5_000)).toISOString(),
+              next_reconcile_at: new Date(now().getTime() + reconciliationBackoffMs(reconcileAttempts)).toISOString(),
             });
             return { status: "ignored", sku, reason: "reconciliation-import-pending" };
           }
