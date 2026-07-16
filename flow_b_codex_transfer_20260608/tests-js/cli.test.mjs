@@ -61,7 +61,7 @@ test("store target environment parses an ordered verified rotation plan", () => 
   ]);
   assert.deepEqual(parseStoreTargets({}), [
     { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
-    { id: 106640, needle: "丽丽三号", warehouseId: null, requireWarehouse: true },
+    { id: 106640, needle: "丽丽三号", warehouseId: 1020005023295220, requireWarehouse: true },
     { id: 106644, needle: "丽丽四号", warehouseId: null, requireWarehouse: true },
     { id: 106646, needle: "丽丽五号", warehouseId: null, requireWarehouse: true },
     { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
