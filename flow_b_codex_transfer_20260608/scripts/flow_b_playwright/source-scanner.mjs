@@ -415,7 +415,7 @@ export function expandFreshSellerSourceUrls(urls = []) {
   return expanded;
 }
 
-export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["150.000;"]) {
+export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["150.000;"], resultPages = [1]) {
   const stopWords = new Set([
     "для", "или", "при", "это", "этот", "эта", "эти", "шт", "штук", "цвет", "размер",
     "женский", "женская", "женские", "мужской", "мужская", "детский", "детская", "детские",
@@ -424,8 +424,9 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
   const seen = new Set();
   const queryGroups = [];
   const bands = [...new Set((priceBands || []).map((value) => String(value || "").trim()).filter(Boolean))];
+  const pages = [...new Set((resultPages || []).map(Number).filter((value) => Number.isInteger(value) && value > 0))];
   const maximum = Math.max(0, Number(limit) || 0);
-  if (maximum === 0 || bands.length === 0) return queries;
+  if (maximum === 0 || bands.length === 0 || pages.length === 0) return queries;
   for (const row of [...(yieldRows || [])].reverse()) {
     if (row?.status !== "published") continue;
     const words = String(row?.title || "").toLowerCase().match(/[а-яё]{4,}/gi) || [];
@@ -440,7 +441,7 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     ].filter((candidate) => candidate.length >= 2).map((candidate) => candidate.join(" "));
     if (candidates.length > 0) queryGroups.push([...new Set(candidates)]);
   }
-  const recentGroupLimit = Math.max(2, Math.floor(maximum / (bands.length * 2)));
+  const recentGroupLimit = Math.max(2, Math.floor(maximum / (bands.length * pages.length * 2)));
   queryGroups.splice(recentGroupLimit);
   const rounds = Math.max(0, ...queryGroups.map((group) => group.length));
   for (let round = 0; round < rounds; round += 1) {
@@ -448,15 +449,18 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
       const query = group[round];
       if (!query) continue;
       for (const band of bands) {
-        const key = `${query}\0${band}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        const url = new URL("https://www.ozon.ru/search/");
-        url.searchParams.set("text", query);
-        url.searchParams.set("is_global", "true");
-        url.searchParams.set("currency_price", band);
-        queries.push(url.toString());
-        if (queries.length >= maximum) return queries;
+        for (const page of pages) {
+          const key = `${query}\0${band}\0${page}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const url = new URL("https://www.ozon.ru/search/");
+          url.searchParams.set("text", query);
+          url.searchParams.set("is_global", "true");
+          url.searchParams.set("currency_price", band);
+          if (page > 1) url.searchParams.set("page", String(page));
+          queries.push(url.toString());
+          if (queries.length >= maximum) return queries;
+        }
       }
     }
   }
@@ -1158,10 +1162,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   }
   const derivedPriceBands = String(env.FLOW_B_DERIVED_SEARCH_PRICE_BANDS || "150.000;")
     .split(",").map((value) => value.trim()).filter(Boolean);
+  const derivedResultPages = String(env.FLOW_B_DERIVED_SEARCH_PAGES || "1")
+    .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 0);
   const derivedSearchUrls = deriveSearchSourceUrls(
     yieldRows,
     envNumber(env, "FLOW_B_DERIVED_SEARCH_SOURCES", 200),
     derivedPriceBands,
+    derivedResultPages,
   );
   const verifiedSellerUrls = verifiedSellerSourceUrls(yieldRows);
   const urls = filterProductiveSourceVariants(

@@ -231,6 +231,21 @@ test("derived search budget reserves room for sibling queries from recent winner
   assert.ok(!texts.includes(`товар победитель ${"а".repeat(4)}`));
 });
 
+test("derived search can explore deeper result pages as distinct sources", () => {
+  const urls = deriveSearchSourceUrls([
+    { status: "published", title: "Комплект трусов слипы хлопковые" },
+  ], 4, ["500.000;"], [1, 2]);
+  assert.deepEqual(urls.map((url) => ({
+    text: new URL(url).searchParams.get("text"),
+    page: new URL(url).searchParams.get("page"),
+  })), [
+    { text: "комплект трусов слипы", page: null },
+    { text: "комплект трусов слипы", page: "2" },
+    { text: "комплект трусов", page: null },
+    { text: "комплект трусов", page: "2" },
+  ]);
+});
+
 test("derived search discovery can be disabled with a zero budget", () => {
   assert.deepEqual(deriveSearchSourceUrls([{ status: "published", title: "Новый успешный товар" }], 0), []);
 });
