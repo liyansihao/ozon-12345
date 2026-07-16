@@ -706,9 +706,18 @@ export function repeatedSubmittedSellerSourceUrls(yieldRows, minimumSubmittedSku
 }
 
 export function repeatedSubmittedSellerSourceVariants(yieldRows, minimumSubmittedSkus = 2, limit = 50) {
-  return expandFreshSellerSourceUrls(
+  const firstPages = expandFreshSellerSourceUrls(
     repeatedSubmittedSellerSourceUrls(yieldRows, minimumSubmittedSkus, limit),
   );
+  const expanded = [...firstPages];
+  for (const source of firstPages) {
+    for (const page of [2, 3]) {
+      const url = new URL(source);
+      url.searchParams.set("page", String(page));
+      expanded.push(url.toString());
+    }
+  }
+  return [...new Set(expanded)];
 }
 
 export function verifiedPrioritySourceUrls({

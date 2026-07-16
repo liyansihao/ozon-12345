@@ -971,9 +971,12 @@ test("repeated submitted seller feedback becomes bounded exploration only", () =
   ];
   assert.deepEqual(repeatedSubmittedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/a/"]);
   const variants = repeatedSubmittedSellerSourceVariants(rows);
-  assert.equal(variants.length, 7);
+  assert.equal(variants.length, 21);
   assert.equal(variants[0], "https://www.ozon.ru/seller/a/");
   assert.ok(variants.some((url) => url.includes("currency_price=500.000%3B") && url.includes("sorting=rating")));
+  assert.ok(variants.some((url) => url.includes("currency_price=500.000%3B")
+    && url.includes("sorting=rating")
+    && url.includes("page=3")));
   assert.deepEqual(verifiedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/c/"]);
 });
 
