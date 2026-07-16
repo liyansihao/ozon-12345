@@ -44,6 +44,7 @@ import {
   softBlockCooldownState,
   sourceBatchCooldownState,
   collectionRuntimeState,
+  sourceAdaptiveConcurrency,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
   withTimeout,
@@ -1108,6 +1109,17 @@ test("collection pacing and cooldown state persists across producer tranches", (
   assert.equal(resumed.detailSoftBlockStreak, 3);
   assert.equal(resumed.detailBlockedUntil, 12345);
   assert.notEqual(collectionRuntimeState(`${key}-other`), first);
+});
+
+test("source adaptive concurrency keeps stable progress across producer tranches", () => {
+  const key = `adaptive-${Date.now()}-${Math.random()}`;
+  const first = sourceAdaptiveConcurrency(key, { initial: 3, max: 6, stableWindow: 2 });
+  first.recordSuccess();
+  first.recordSuccess();
+  assert.equal(first.current, 4);
+  const resumed = sourceAdaptiveConcurrency(key, { initial: 3, max: 6, stableWindow: 2 });
+  assert.equal(resumed, first);
+  assert.equal(resumed.current, 4);
 });
 
 test("favorite collection prioritizes observed profitable title families stably", () => {

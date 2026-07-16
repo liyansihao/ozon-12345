@@ -22,6 +22,20 @@ export function collectionRuntimeState(key) {
   return collectionRuntimeStates.get(normalized);
 }
 
+export function sourceAdaptiveConcurrency(key, options = {}) {
+  const runtime = collectionRuntimeState(key);
+  const min = Math.max(1, Number(options.min ?? 2));
+  const max = Math.max(min, Number(options.max ?? 12));
+  const stableWindow = Math.max(1, Number(options.stableWindow ?? 12));
+  const existing = runtime.sourceAdaptiveConcurrency;
+  if (existing
+    && existing.min === min
+    && existing.max === max
+    && existing.stableWindow === stableWindow) return existing;
+  runtime.sourceAdaptiveConcurrency = new AdaptiveConcurrency({ ...options, min, max, stableWindow });
+  return runtime.sourceAdaptiveConcurrency;
+}
+
 export function collectionDeadlineMs(env = process.env) {
   const value = Date.parse(String(env.FLOW_B_DEADLINE_AT || ""));
   return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
@@ -1553,8 +1567,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     }),
   });
   if (!pending.length) return { outFile: outputPath, records: records.length, pending: 0 };
+  const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const workers = Math.max(1, envNumber(env, "FLOW_B_TAB_WORKERS", 4));
-  const adaptiveWorkers = new AdaptiveConcurrency({
+  const adaptiveWorkers = sourceAdaptiveConcurrency(favoriteLog, {
     initial: workers,
     max: Math.max(workers, envNumber(env, "FLOW_B_MAX_TAB_WORKERS", 12)),
   });
@@ -1571,7 +1586,6 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const targetFavorites = envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000);
   const attempted = await loadExcludedSkus(outputPath, env);
   emit(`favorite exclusions loaded: ${attempted.size}`);
-  const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const maozi = await openMaoziPage(context, { forceNew: true });
   try {
     await waitForContent(maozi, 15000);
