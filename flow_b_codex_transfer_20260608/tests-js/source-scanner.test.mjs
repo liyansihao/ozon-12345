@@ -313,6 +313,29 @@ test("an exhausted one-hit seller yields to an untried verified seller family", 
   }), [untried, exhausted]);
 });
 
+test("a recent twelve-SKU dry tail overrides older seller wins", () => {
+  const staleWinner = "https://www.ozon.ru/seller/stale-winner/";
+  const untried = "https://www.ozon.ru/seller/untried/";
+  const rows = [
+    ...Array.from({ length: 16 }, (_, index) => ({
+      at: `2026-07-15T00:${String(index).padStart(2, "0")}:00Z`,
+      source_url: staleWinner,
+      sku: `old-win-${index}`,
+      status: "published",
+    })),
+    ...Array.from({ length: 12 }, (_, index) => ({
+      at: `2026-07-16T00:${String(index).padStart(2, "0")}:00Z`,
+      source_url: `${staleWinner}?page=${index + 2}`,
+      sku: `recent-reject-${index}`,
+      status: "rejected",
+    })),
+  ];
+  assert.deepEqual(prioritizeSourceUrls([staleWinner, untried], {
+    yieldRows: rows,
+    verifiedFreshSourceUrls: [staleWinner, untried],
+  }), [untried, staleWinner]);
+});
+
 test("deeper pages inherit source yield within the same price band", () => {
   const winner = "https://www.ozon.ru/seller/winner/?currency_price=500.000%3B";
   const pageTwo = `${winner}&page=2`;

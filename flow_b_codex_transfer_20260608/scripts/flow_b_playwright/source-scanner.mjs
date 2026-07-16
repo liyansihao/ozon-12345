@@ -590,18 +590,34 @@ function fullFunnelSourceScores(rows) {
 
 function exhaustedSellerFamilyPenalties(rows) {
   const families = new Map();
-  for (const row of rows || []) {
+  (rows || []).forEach((row, order) => {
     const key = sourceUrlKey(row?.source_url);
     const sku = String(row?.sku || "").trim();
     const status = String(row?.status || "");
-    if (!canonicalSellerUrl(key) || !sku || !["favorited", "published", "rejected", "skipped"].includes(status)) continue;
-    const outcomes = families.get(key) || new Map();
-    outcomes.set(sku, Boolean(outcomes.get(sku)) || status === "favorited" || status === "published");
-    families.set(key, outcomes);
-  }
-  return new Map([...families].flatMap(([key, outcomes]) => {
-    const attempted = outcomes.size;
-    const productive = [...outcomes.values()].filter(Boolean).length;
+    if (!canonicalSellerUrl(key) || !sku || !["favorited", "published", "rejected", "skipped"].includes(status)) return;
+    const family = families.get(key) || { outcomes: new Map(), events: [] };
+    const productive = status === "favorited" || status === "published";
+    family.outcomes.set(sku, Boolean(family.outcomes.get(sku)) || productive);
+    family.events.push({
+      sku,
+      productive,
+      time: Date.parse(row?.at || row?.timestamp || "") || 0,
+      order,
+    });
+    families.set(key, family);
+  });
+  return new Map([...families].flatMap(([key, family]) => {
+    const attempted = family.outcomes.size;
+    const productive = [...family.outcomes.values()].filter(Boolean).length;
+    const recent = [];
+    const seen = new Set();
+    for (const event of [...family.events].sort((left, right) => right.time - left.time || right.order - left.order)) {
+      if (seen.has(event.sku)) continue;
+      seen.add(event.sku);
+      recent.push(event);
+      if (recent.length >= 12) break;
+    }
+    if (recent.length >= 12 && recent.every((event) => !event.productive)) return [[key, -500_000]];
     return attempted >= 12 && productive / attempted < 0.1 ? [[key, -250_000]] : [];
   }));
 }
