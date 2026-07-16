@@ -59,6 +59,7 @@ import {
   verifiedPrioritySourceUrls,
   filterProductiveSourceVariants,
   expandPublishedSourcePages,
+  fullFunnelSourceScores,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("collection deadline stops an in-flight producer tranche", () => {
@@ -348,6 +349,17 @@ test("full-funnel source yield promotes repeated pure-FBS favorites over rejecte
     ...Array.from({ length: 5 }, (_, i) => ({ source_url: pureFbs, sku: `f-${i}`, status: "favorited" })),
   ];
   assert.deepEqual(prioritizeSourceUrls([rejected, pureFbs], { yieldRows: rows }), [pureFbs, rejected]);
+});
+
+test("full-funnel scores put a fully dry explored source below untried supply", () => {
+  const dry = "https://www.ozon.ru/search/?text=dry-consumer&currency_price=150.000%3B";
+  const scores = fullFunnelSourceScores(Array.from({ length: 8 }, (_, index) => ({
+    source_url: dry,
+    sku: `dry-consumer-${index}`,
+    status: "skipped",
+    reason: "non-pure-fbs",
+  })));
+  assert.ok(scores.get(dry) < 0);
 });
 
 test("strict submissions are a stronger leading source signal than favorites", () => {

@@ -742,7 +742,8 @@ export function fullFunnelSourceScores(rows) {
     const submitted = [...outcomes.values()].filter((rank) => rank === outcomeRank.submitted).length;
     const pureFbs = [...outcomes.values()].filter((rank) => rank === outcomeRank.favorited).length;
     const qualifiedYield = published + submitted * 0.65 + pureFbs * 0.35;
-    const score = ((qualifiedYield + 0.5) / (attempted + 5)) * 100_000
+    const targetYield = isPriceBandedSource(key) ? 0.2 : 0.1;
+    const score = ((qualifiedYield - attempted * targetYield) / (attempted + 5)) * 100_000
       + Math.log1p(published) * 1000
       + Math.log1p(submitted) * 500
       + Math.log1p(pureFbs) * 100;
