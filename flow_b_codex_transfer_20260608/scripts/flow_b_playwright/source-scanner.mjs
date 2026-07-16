@@ -214,7 +214,7 @@ export function shouldDeferSourceAfterNonFbsSample(stats = {}, limit = 6) {
   const overwhelminglyNonFbs = nonPureFbs / attempted >= 0.8;
   return overwhelminglyNonFbs && (
     (nonPureFbs >= threshold && attempted >= threshold && favorited === 0)
-    || (attempted >= threshold * 2 && favorited <= 1)
+    || (attempted >= threshold + 2 && favorited <= 1)
   );
 }
 
