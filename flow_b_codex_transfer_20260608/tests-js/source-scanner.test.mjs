@@ -44,6 +44,7 @@ import {
   withTimeout,
   createFavoriteWorkerPage,
   readFavoriteSkusWithTimeout,
+  readFavoriteCountWithTimeout,
   deriveSearchSourceUrls,
   verifiedSellerSourceUrls,
   verifiedPrioritySourceUrls,
@@ -91,6 +92,13 @@ test("favorite SKU telemetry has a bounded lifecycle", async () => {
   await assert.rejects(
     readFavoriteSkusWithTimeout(() => new Promise(() => {}), 5),
     /favorite SKU telemetry timed out after 5ms/,
+  );
+});
+
+test("favorite count telemetry has a bounded lifecycle", async () => {
+  await assert.rejects(
+    readFavoriteCountWithTimeout(() => new Promise(() => {}), 5),
+    /favorite count telemetry timed out after 5ms/,
   );
 });
 

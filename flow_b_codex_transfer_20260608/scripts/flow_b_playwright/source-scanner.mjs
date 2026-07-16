@@ -70,6 +70,14 @@ export function readFavoriteSkusWithTimeout(operation, timeoutMs = 10_000) {
   );
 }
 
+export function readFavoriteCountWithTimeout(operation, timeoutMs = 10_000) {
+  return withTimeout(
+    Promise.resolve().then(operation),
+    timeoutMs,
+    "favorite count telemetry",
+  );
+}
+
 export async function waitForMovingDeadline({ getDeadline, now = () => Date.now(), sleep: wait = sleep }) {
   while (true) {
     const remaining = Number(getDeadline()) - Number(now());
@@ -1187,7 +1195,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     }
     let favoriteState;
     try {
-      favoriteState = await favoriteCount(maozi);
+      favoriteState = await readFavoriteCountWithTimeout(
+        () => favoriteCount(maozi),
+        envNumber(env, "FLOW_B_FAVORITE_TELEMETRY_TIMEOUT_MS", 10_000),
+      );
     } catch (error) {
       emit(`favorite count telemetry unavailable at scan start; relying on authenticated token and capacity response: ${error?.message || error}`);
       favoriteState = { total: 0, authenticated: true };
@@ -1313,7 +1324,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       if (afterWait) await sleep(afterWait);
       let observedFavoriteAfter = favoriteBefore;
       try {
-        favoriteState = await favoriteCount(maozi);
+        favoriteState = await readFavoriteCountWithTimeout(
+          () => favoriteCount(maozi),
+          envNumber(env, "FLOW_B_FAVORITE_TELEMETRY_TIMEOUT_MS", 10_000),
+        );
         observedFavoriteAfter = favoriteState.authenticated ? favoriteState.total : null;
       } catch (error) {
         emit(`favorite count telemetry unavailable; retaining claimed total ${favoriteBefore}: ${error?.message || error}`);
