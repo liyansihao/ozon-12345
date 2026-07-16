@@ -343,19 +343,61 @@ function sourceYieldKey(value) {
   }
 }
 
+function sourceEvidenceKey(value, { keepSorting = false } = {}) {
+  try {
+    const url = new URL(String(value));
+    url.searchParams.delete("page");
+    if (!keepSorting) url.searchParams.delete("sorting");
+    return url.toString();
+  } catch {
+    return String(value || "");
+  }
+}
+
 export function filterProductiveSourceVariants(urls, yieldRows = []) {
   const publishedBands = new Set((yieldRows || [])
     .filter((row) => row?.status === "published")
-    .map((row) => sourceYieldKey(row?.source_url))
+    .map((row) => sourceEvidenceKey(row?.source_url))
+    .filter(Boolean));
+  const publishedStrategies = new Set((yieldRows || [])
+    .filter((row) => row?.status === "published")
+    .map((row) => sourceEvidenceKey(row?.source_url, { keepSorting: true }))
     .filter(Boolean));
   return (urls || []).filter((value) => {
     let parsed;
     try { parsed = new URL(String(value)); } catch { return true; }
-    if (parsed.searchParams.get("sorting") === "price") return false;
+    if (parsed.searchParams.get("sorting") === "price"
+      && !publishedStrategies.has(sourceEvidenceKey(value, { keepSorting: true }))) return false;
     const band = parsed.searchParams.get("currency_price");
     if (!["50.000;", "120.000;"].includes(band)) return true;
-    return publishedBands.has(sourceYieldKey(value));
+    return publishedBands.has(sourceEvidenceKey(value));
   });
+}
+
+export function expandPublishedSourcePages(urls, yieldRows = [], resultPages = []) {
+  const expanded = [...(urls || [])];
+  const seen = new Set(expanded);
+  const pages = [...new Set((resultPages || []).map(Number)
+    .filter((value) => Number.isInteger(value) && value > 1))];
+  const published = [...new Set((yieldRows || [])
+    .filter((row) => row?.status === "published" && /^https?:\/\//i.test(String(row?.source_url || "")))
+    .map((row) => String(row.source_url)))];
+  for (const source of published) {
+    if (!seen.has(source)) {
+      seen.add(source);
+      expanded.push(source);
+    }
+    for (const page of pages) {
+      let url;
+      try { url = new URL(source); } catch { continue; }
+      url.searchParams.set("page", String(page));
+      const value = url.toString();
+      if (seen.has(value)) continue;
+      seen.add(value);
+      expanded.push(value);
+    }
+  }
+  return expanded;
 }
 
 export function expandHighYieldSourceUrls(urls, yieldRows = []) {
@@ -1171,8 +1213,17 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     derivedResultPages,
   );
   const verifiedSellerUrls = verifiedSellerSourceUrls(yieldRows);
+  const publishedSourcePages = expandPublishedSourcePages(
+    [],
+    yieldRows,
+    String(env.FLOW_B_PUBLISHED_SOURCE_PAGES || "")
+      .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 1),
+  );
   const urls = filterProductiveSourceVariants(
-    [...new Set(expandHighYieldSourceUrls([...inputUrls, ...verifiedSellerUrls, ...derivedSearchUrls], yieldRows))],
+    [...new Set([
+      ...expandHighYieldSourceUrls([...inputUrls, ...verifiedSellerUrls, ...derivedSearchUrls], yieldRows),
+      ...publishedSourcePages,
+    ])],
     yieldRows,
   );
   let records = [];
@@ -1187,7 +1238,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     yieldRows,
     freshSourceUrls: [...classifiedFreshUrls.explorationUrls, ...derivedSearchUrls],
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
-      verifiedFreshUrls: classifiedFreshUrls.verifiedSellerUrls,
+      verifiedFreshUrls: [...classifiedFreshUrls.verifiedSellerUrls, ...publishedSourcePages],
       verifiedHistoricalUrls: verifiedSellerUrls,
       derivedSearchUrls,
       prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",

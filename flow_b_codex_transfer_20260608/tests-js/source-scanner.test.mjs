@@ -49,6 +49,7 @@ import {
   verifiedSellerSourceUrls,
   verifiedPrioritySourceUrls,
   filterProductiveSourceVariants,
+  expandPublishedSourcePages,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("collection deadline stops an in-flight producer tranche", () => {
@@ -150,10 +151,11 @@ test("published sources expand into prioritized sorting variants without duplica
 
 test("legacy low-price variants require exact-band publication evidence", () => {
   const proven50 = "https://www.ozon.ru/seller/proven/?currency_price=50.000%3B";
+  const provenPrice = `${proven50}&sorting=price`;
   const urls = [
     proven50,
     `${proven50}&sorting=rating`,
-    `${proven50}&sorting=price`,
+    provenPrice,
     "https://www.ozon.ru/seller/unproven/?currency_price=50.000%3B",
     "https://www.ozon.ru/seller/unproven/?currency_price=120.000%3B",
     "https://www.ozon.ru/seller/unproven/?currency_price=150.000%3B",
@@ -161,11 +163,25 @@ test("legacy low-price variants require exact-band publication evidence", () => 
   ];
   assert.deepEqual(filterProductiveSourceVariants(urls, [
     { source_url: proven50, sku: "winner", status: "published" },
+    { source_url: provenPrice, sku: "price-winner", status: "published" },
   ]), [
     proven50,
     `${proven50}&sorting=rating`,
+    provenPrice,
     "https://www.ozon.ru/seller/unproven/?currency_price=150.000%3B",
     "https://www.ozon.ru/seller/unproven/?currency_price=500.000%3B",
+  ]);
+});
+
+test("strictly published sources expand into deeper result pages", () => {
+  const published = "https://www.ozon.ru/seller/proven/?currency_price=50.000%3B&sorting=price";
+  assert.deepEqual(expandPublishedSourcePages([], [
+    { source_url: published, sku: "winner", status: "published" },
+    { source_url: "https://www.ozon.ru/seller/rejected/", sku: "nope", status: "rejected" },
+  ], [2, 3]), [
+    published,
+    `${published}&page=2`,
+    `${published}&page=3`,
   ]);
 });
 
