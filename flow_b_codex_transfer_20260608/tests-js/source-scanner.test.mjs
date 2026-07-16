@@ -513,6 +513,31 @@ test("a Global search price band yields after eight recent dry publish outcomes"
   }), [untriedSeller, drySearch]);
 });
 
+test("four consecutive explicit non-pure FBS cards demote only that search price band", () => {
+  const drySearch = "https://www.ozon.ru/search/?text=fbo-only&is_global=true&currency_price=500.000%3B";
+  const genericDrySearch = "https://www.ozon.ru/search/?text=generic-dry&is_global=true&currency_price=500.000%3B";
+  const untriedSeller = "https://www.ozon.ru/seller/untried-after-fbo/";
+  assert.deepEqual(prioritizeSourceUrls([drySearch, untriedSeller], {
+    freshSourceUrls: [drySearch],
+    yieldRows: Array.from({ length: 4 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-16T07:00:00.000Z") + index * 1000).toISOString(),
+      source_url: drySearch,
+      sku: `fbo-only-${index}`,
+      status: "skipped",
+      reason: "non-pure-fbs",
+    })),
+  }), [untriedSeller, drySearch]);
+  assert.deepEqual(prioritizeSourceUrls([genericDrySearch, untriedSeller], {
+    freshSourceUrls: [genericDrySearch],
+    yieldRows: Array.from({ length: 4 }, (_, index) => ({
+      source_url: genericDrySearch,
+      sku: `generic-dry-${index}`,
+      status: "rejected",
+      reason: "1688-no-reliable-match",
+    })),
+  }), [genericDrySearch, untriedSeller]);
+});
+
 test("a dry search price band cannot demote a productive sibling price band", () => {
   const productive = "https://www.ozon.ru/search/?text=banded-family&is_global=true&currency_price=150.000%3B";
   const dry = "https://www.ozon.ru/search/?text=banded-family&is_global=true&currency_price=1000.000%3B";

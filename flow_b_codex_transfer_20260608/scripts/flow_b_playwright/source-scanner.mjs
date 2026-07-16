@@ -714,6 +714,7 @@ function exhaustedSourceFamilyPenalties(rows) {
     family.events.push({
       sku,
       productive,
+      explicitNonPureFbs: /non-pure-fbs/i.test(String(row?.reason || "")),
       time: Date.parse(row?.at || row?.timestamp || "") || 0,
       order,
     });
@@ -732,6 +733,9 @@ function exhaustedSourceFamilyPenalties(rows) {
       if (recent.length >= dryThreshold) break;
     }
     const recentProductive = recent.filter((event) => event.productive).length;
+    if (family.search
+      && recent.length >= 4
+      && recent.slice(0, 4).every((event) => event.explicitNonPureFbs)) return [[key, -500_000]];
     if (recent.length >= dryThreshold && recentProductive / recent.length < 0.1) return [[key, -500_000]];
     return attempted >= dryThreshold && productive / attempted < 0.1 ? [[key, -250_000]] : [];
   }));
