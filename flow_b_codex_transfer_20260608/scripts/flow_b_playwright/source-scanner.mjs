@@ -1073,6 +1073,17 @@ export function excludedSkusFromHistories({ stateTexts = [], favoriteTexts = [] 
   return excluded;
 }
 
+export function favoritedSkusFromHistory(text) {
+  const skus = new Set();
+  for (const line of String(text || "").split(/\r?\n/)) {
+    try {
+      const event = JSON.parse(line);
+      if (event?.status === "favorited" && event?.sku) skus.add(String(event.sku));
+    } catch {}
+  }
+  return skus;
+}
+
 async function loadExcludedSkus(outputPath, env) {
   const stateFiles = [
     path.join(path.dirname(outputPath), "sku_states.jsonl"),
@@ -1090,10 +1101,13 @@ async function loadExcludedSkus(outputPath, env) {
     }
     return texts;
   };
-  const excluded = excludedSkusFromHistories({
-    stateTexts: await readHistories(stateFiles),
-    favoriteTexts: await readHistories(favoriteFiles),
-  });
+  const stateTexts = await readHistories(stateFiles);
+  const favoriteTexts = await readHistories(favoriteFiles);
+  const excluded = excludedSkusFromHistories({ stateTexts, favoriteTexts });
+  let currentFavoriteText = "";
+  try { currentFavoriteText = await fs.readFile(path.resolve(favoriteFiles[0]), "utf8"); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  for (const sku of favoritedSkusFromHistory(currentFavoriteText)) excluded.add(sku);
   if (env.FLOW_B_EXCLUDED_SKUS) {
     for (const sku of String(env.FLOW_B_EXCLUDED_SKUS).split(/[,\s]+/).filter(Boolean)) excluded.add(sku);
   }

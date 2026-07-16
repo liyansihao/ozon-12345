@@ -8,6 +8,7 @@ import {
   listingModeSkipReason,
   effectiveFavoriteTotal,
   excludedSkusFromHistories,
+  favoritedSkusFromHistory,
   expandHighYieldSourceUrls,
   isFavoriteSessionAuthenticated,
   isFavoriteCapacityReached,
@@ -1381,4 +1382,13 @@ test("cross-run seeds skip deterministic outcomes but retry transient favorite f
     ].join("\n")],
   });
   assert.deepEqual([...excluded].sort(), ["missing-mode", "non-fbs", "published", "unprofitable"]);
+});
+
+test("same-run cooldown fallback advances past successfully favorited SKUs", () => {
+  const text = [
+    JSON.stringify({ sku: "accepted", status: "favorited" }),
+    JSON.stringify({ sku: "retry-soft-block", status: "failed", error: "Ozon detail soft blocked" }),
+    JSON.stringify({ sku: "rejected", status: "rejected", reason: "non-pure-fbs" }),
+  ].join("\n");
+  assert.deepEqual([...favoritedSkusFromHistory(text)], ["accepted"]);
 });
