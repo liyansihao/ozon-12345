@@ -352,6 +352,16 @@ function sourceUrlPriority(value) {
   return proven + global + targetFamily;
 }
 
+function observedSearchFamilyPriority(value, familyScores = {}) {
+  try {
+    const query = new URL(String(value || "")).searchParams.get("text");
+    if (!query) return 0;
+    return Number(familyScores[productTitleFamily(query)] || 0) * 100;
+  } catch {
+    return 0;
+  }
+}
+
 function sourceUrlKey(value) {
   try {
     const url = new URL(String(value));
@@ -661,6 +671,7 @@ export function prioritizeSourceUrls(urls, {
     successfulCounts.set(key, (successfulCounts.get(key) || 0) + 1);
   }
   const funnelScores = fullFunnelSourceScores(yieldRows);
+  const familyScores = observedTitleFamilyScores(yieldRows);
   const familyPenalties = exhaustedSellerFamilyPenalties(yieldRows);
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
@@ -672,11 +683,13 @@ export function prioritizeSourceUrls(urls, {
     const key = sourceUrlKey(url);
     const yieldKey = sourceYieldKey(url);
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
-    const tier = verifiedSellerKeys.has(key) ? 3 : verifiedFreshKeys.has(key) ? 2 : freshKeys.has(key) ? 1 : 0;
-    const priority = sourceUrlPriority(url) + yieldPriority
+    const familyPenalty = familyPenalties.get(key) || 0;
+    const baseTier = verifiedSellerKeys.has(key) ? 3 : verifiedFreshKeys.has(key) ? 2 : freshKeys.has(key) ? 1 : 0;
+    const tier = familyPenalty < 0 && canonicalSellerUrl(url) ? Math.min(baseTier, 1) : baseTier;
+    const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
       + (freshKeys.has(key) ? 200_000 : 0)
       + (verifiedFreshKeys.has(key) ? 400_000 : 0)
-      + (familyPenalties.get(key) || 0);
+      + familyPenalty;
     const group = groups.get(key) || { index, priority, tier, urls: [] };
     group.priority = Math.max(group.priority, priority);
     group.tier = Math.max(group.tier, tier);

@@ -338,6 +338,26 @@ test("a recent twelve-SKU dry tail overrides older seller wins", () => {
   }), [untried, staleWinner]);
 });
 
+test("a dry verified seller yields its fixed tier to productive Global discovery", () => {
+  const staleSeller = "https://www.ozon.ru/seller/stale-verified/";
+  const toySearch = "https://www.ozon.ru/search/?text=%D0%B4%D0%B5%D1%82%D1%81%D0%BA%D0%B0%D1%8F+%D0%B8%D0%B3%D1%80%D1%83%D1%88%D0%BA%D0%B0&is_global=true";
+  const rows = [
+    { source_url: staleSeller, sku: "old-win", status: "published", at: "2026-07-15T00:00:00Z" },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      source_url: `${staleSeller}?page=${index + 2}`,
+      sku: `dry-${index}`,
+      status: "rejected",
+      at: `2026-07-16T00:${String(index).padStart(2, "0")}:00Z`,
+    })),
+    { source_url: toySearch, sku: "toy-win", title_family: "toy", status: "published" },
+  ];
+  assert.deepEqual(prioritizeSourceUrls([staleSeller, toySearch], {
+    yieldRows: rows,
+    freshSourceUrls: [toySearch],
+    verifiedFreshSourceUrls: [staleSeller, toySearch],
+  }), [toySearch, staleSeller]);
+});
+
 test("deeper pages inherit source yield within the same price band", () => {
   const winner = "https://www.ozon.ru/seller/winner/?currency_price=500.000%3B";
   const pageTwo = `${winner}&page=2`;
@@ -851,6 +871,18 @@ test("recent strict publications promote productive title families ahead of stat
     { href: "socks", text: "Носки для девочек" },
     { href: "toy", text: "Детская игрушка погремушка" },
   ], scores).map((link) => link.href), ["toy", "socks"]);
+});
+
+test("strict title-family feedback promotes matching Global search sources", () => {
+  const socks = "https://www.ozon.ru/search/?text=%D0%BD%D0%BE%D1%81%D0%BA%D0%B8+%D0%B4%D0%BB%D1%8F+%D0%B4%D0%B5%D0%B2%D0%BE%D1%87%D0%B5%D0%BA&is_global=true";
+  const toy = "https://www.ozon.ru/search/?text=%D0%B4%D0%B5%D1%82%D1%81%D0%BA%D0%B0%D1%8F+%D0%B8%D0%B3%D1%80%D1%83%D1%88%D0%BA%D0%B0+%D0%BF%D0%BE%D0%B3%D1%80%D0%B5%D0%BC%D1%83%D1%88%D0%BA%D0%B0&is_global=true";
+  assert.deepEqual(prioritizeSourceUrls([socks, toy], {
+    yieldRows: [
+      { sku: "toy-1", status: "published", title_family: "toy" },
+      { sku: "toy-2", status: "published", title_family: "toy" },
+      { sku: "socks-1", status: "skipped", title_family: "socks" },
+    ],
+  }), [toy, socks]);
 });
 
 test("favorite title preflight rejects proven low-yield oversized categories", () => {
