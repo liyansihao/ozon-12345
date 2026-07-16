@@ -490,6 +490,53 @@ test("runner rechecks store health after rotating and pauses when every configur
   assert.deepEqual(result.store_switches.map((entry) => entry.reason), ["submission-stall", "all-store-imports-stalled"]);
 });
 
+test("runner rate-limits repeated unavailable store-switch diagnostics during a stalled rotation", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-store-switch-throttle-"));
+  const state = fakeState({
+    "store-3-old-1": { status: "processing", data: { store_id: 106640, submitted: true, prepared_at: "2026-07-15T09:00:00.000Z" } },
+    "store-3-old-2": { status: "processing", data: { store_id: 106640, submitted: true, prepared_at: "2026-07-15T09:01:00.000Z" } },
+    "store-4-old-1": { status: "processing", data: { store_id: 106644, submitted: true, prepared_at: "2026-07-15T09:02:00.000Z" } },
+    "store-4-old-2": { status: "processing", data: { store_id: 106644, submitted: true, prepared_at: "2026-07-15T09:03:00.000Z" } },
+  });
+  const client = clientFor([{ id: 210, sku: 210 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: `store-${storeId}` },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "pending" }),
+    findOnlineProduct: async () => null,
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    target: 1,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    totalStoreUsageSeed: { 106637: 100 },
+    pendingStoreStallMs: 60_000,
+    pendingStoreStallCount: 2,
+    pendingStoreRetryMs: 300_000,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+      { id: 106644, needle: "丽丽四号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  });
+
+  await runner.run();
+  await runner.run();
+  await runner.run();
+
+  const events = (await fs.readFile(path.join(runDir, "store_switches.jsonl"), "utf8"))
+    .trim().split(/\n+/).map((line) => JSON.parse(line));
+  assert.equal(events.filter((event) => event.from_store_id === 106644
+    && event.to_store_id === 106637
+    && event.reason === "store-total-limit").length, 1);
+});
+
 test("persistent rotation wraps from the last stalled store to an earlier recovered store", async () => {
   let current = new Date("2026-07-15T10:00:00.000Z");
   let favorites = [{ id: 501, sku: 501 }];

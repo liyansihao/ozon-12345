@@ -326,6 +326,7 @@ export function createPublishRunner({
   let storeUsageDay = null;
   const lastOnlineSyncAt = new Map();
   const unavailableStoreUntil = new Map();
+  const lastStoreSwitchDiagnosticAt = new Map();
   let lastAllStoresStalledAt = 0;
   const adaptive = new AdaptiveConcurrency({ initial: workerCount, max: Math.max(workerCount, Number(maxConcurrency) || workerCount) });
 
@@ -885,14 +886,21 @@ export function createPublishRunner({
           haltReason = null;
           return nextConfig;
         } catch (error) {
-          recordMetric("store_switches.jsonl", {
+          const event = {
             from_store_id: fromStoreId,
             to_store_id: targetPlan[activeTargetIndex].id,
             reason: error?.code === "STORE_DAILY_LIMIT"
               ? "daily-product-limit"
               : error?.code === "STORE_TOTAL_LIMIT" ? "store-total-limit" : "store-target-unavailable",
             error: String(error?.message || error),
-          });
+          };
+          const diagnosticKey = `${event.from_store_id}:${event.to_store_id}:${event.reason}`;
+          const diagnosticAt = now().getTime();
+          const lastDiagnosticAt = Number(lastStoreSwitchDiagnosticAt.get(diagnosticKey) || 0);
+          if (diagnosticAt - lastDiagnosticAt >= Math.max(60_000, Number(pendingStoreRetryMs) || 0)) {
+            lastStoreSwitchDiagnosticAt.set(diagnosticKey, diagnosticAt);
+            recordMetric("store_switches.jsonl", event);
+          }
         }
       }
       activeTargetIndex = startingIndex;
