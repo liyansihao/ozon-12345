@@ -812,6 +812,8 @@ export function deepVerifiedSellerSourceVariants(
       const maximumPage = Math.min(6, Math.max(3, (deepestPublishedPage.get(seller) || 1) + 1));
       if (page > maximumPage) continue;
       const url = new URL(source);
+      const priceBand = url.searchParams.get("currency_price");
+      if (page >= 4 && priceBand && priceBand !== "500.000;") continue;
       url.searchParams.set("page", String(page));
       expanded.push(url.toString());
     }

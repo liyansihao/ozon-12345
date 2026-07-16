@@ -1115,7 +1115,7 @@ test("repeated strict-success sellers explore only one page beyond their deepest
     { status: "published", sku: "c-2", seller_url: "https://www.ozon.ru/seller/c/" },
   ];
   const variants = deepVerifiedSellerSourceVariants(rows);
-  assert.equal(variants.length, 91);
+  assert.equal(variants.length, 75);
   assert.ok(variants.some((url) => url.includes("currency_price=500.000%3B")
     && url.includes("sorting=discount")
     && url.includes("page=6")));
@@ -1123,6 +1123,12 @@ test("repeated strict-success sellers explore only one page beyond their deepest
   assert.ok(variants.every((url) => !url.includes("/seller/b/") || Number(new URL(url).searchParams.get("page") || 1) <= 3));
   assert.ok(variants.some((url) => url.includes("/seller/c/") && url.includes("page=4")));
   assert.ok(variants.every((url) => !url.includes("/seller/c/") || Number(new URL(url).searchParams.get("page") || 1) <= 4));
+  assert.ok(variants.every((url) => {
+    const parsed = new URL(url);
+    return Number(parsed.searchParams.get("page") || 1) < 4
+      || !parsed.searchParams.has("currency_price")
+      || parsed.searchParams.get("currency_price") === "500.000;";
+  }));
   assert.ok(variants.every((url) => Number(new URL(url).searchParams.get("page") || 1) <= 6));
 });
 
