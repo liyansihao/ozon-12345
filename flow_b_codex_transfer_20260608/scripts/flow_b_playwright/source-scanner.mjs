@@ -555,6 +555,26 @@ export function expandPublishedSourcePages(urls, yieldRows = [], resultPages = [
   return expanded;
 }
 
+export function expandNextPublishedDiscoveryPages(yieldRows = []) {
+  const expanded = [];
+  const seen = new Set();
+  for (const row of yieldRows || []) {
+    if (String(row?.status || "") !== "published") continue;
+    let url;
+    try { url = new URL(String(row?.source_url || "")); } catch { continue; }
+    if (!isSearchSource(url) && !isHighlightSource(url)) continue;
+    if (Number(url.searchParams.get("page") || 1) !== 3) continue;
+    url.hash = "";
+    url.searchParams.delete("miniapp");
+    url.searchParams.set("page", "4");
+    const value = url.toString();
+    if (seen.has(value)) continue;
+    seen.add(value);
+    expanded.push(value);
+  }
+  return expanded;
+}
+
 export function expandHighYieldSourceUrls(urls, yieldRows = []) {
   const expanded = [...urls];
   const seen = new Set(expanded);
@@ -1833,9 +1853,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     String(env.FLOW_B_PUBLISHED_SOURCE_PAGES || "")
       .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 1),
   );
+  const nextPublishedDiscoveryPages = expandNextPublishedDiscoveryPages(yieldRows);
   const urls = filterProductiveSourceVariants(
     [...new Set([
       ...publishedSourcePages,
+      ...nextPublishedDiscoveryPages,
       ...expandHighYieldSourceUrls([
         ...inputUrls,
         ...verifiedSellerUrls,
@@ -1867,6 +1889,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         ...classifiedFreshUrls.verifiedSellerUrls,
         ...deepVerifiedSellerVariants,
         ...publishedSourcePages,
+        ...nextPublishedDiscoveryPages,
       ],
       verifiedHistoricalUrls: verifiedSellerUrls,
       derivedSearchUrls,

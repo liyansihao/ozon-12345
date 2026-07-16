@@ -70,6 +70,7 @@ import {
   verifiedPrioritySourceUrls,
   filterProductiveSourceVariants,
   expandPublishedSourcePages,
+  expandNextPublishedDiscoveryPages,
   fullFunnelSourceScores,
   fatalSourceBatchError,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
@@ -281,6 +282,21 @@ test("strictly published sources expand into deeper result pages", () => {
     published,
     `${published}&page=2`,
     `${published}&page=3`,
+  ]);
+});
+
+test("strict page-three discovery sources probe only their exact page four sibling", () => {
+  const highlight = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating&page=3";
+  const search = "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=3";
+  assert.deepEqual(expandNextPublishedDiscoveryPages([
+    { source_url: highlight, sku: "highlight-win", status: "published" },
+    { source_url: `${highlight}&miniapp=1`, sku: "highlight-win-2", status: "published" },
+    { source_url: search, sku: "search-win", status: "published" },
+    { source_url: "https://www.ozon.ru/seller/proven/?page=3", sku: "seller-win", status: "published" },
+    { source_url: "https://www.ozon.ru/highlight/rejected/?page=3", sku: "nope", status: "rejected" },
+  ]), [
+    "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating&page=4",
+    "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=4",
   ]);
 });
 
