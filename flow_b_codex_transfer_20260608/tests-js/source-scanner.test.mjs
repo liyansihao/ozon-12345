@@ -601,6 +601,22 @@ test("verified source variants finish their tier before ordinary sources", () =>
   }), [verifiedPage, verified, verifiedVariant, ordinary]);
 });
 
+test("bounded deep pages rotate seller families before taking another same-seller page", () => {
+  const sellerA = "https://www.ozon.ru/seller/deep-a/";
+  const sellerB = "https://www.ozon.ru/seller/deep-b/";
+  const urls = [
+    `${sellerA}?page=4`,
+    `${sellerA}?page=4&sorting=rating`,
+    `${sellerA}?page=5`,
+    `${sellerA}?page=5&sorting=rating`,
+    `${sellerB}?page=4`,
+  ];
+  assert.deepEqual(prioritizeSourceUrls(urls, {
+    verifiedFreshSourceUrls: [sellerA, sellerB],
+    boundedDeepFreshSourceUrls: urls,
+  }).slice(0, 3), [urls[0], urls[1], urls[4]]);
+});
+
 test("a fresh search family with twelve recent dry candidates yields to an untried source", () => {
   const drySearch = "https://www.ozon.ru/search/?text=dry-family&is_global=true&sorting=rating";
   const untriedSeller = "https://www.ozon.ru/seller/untried-family/";

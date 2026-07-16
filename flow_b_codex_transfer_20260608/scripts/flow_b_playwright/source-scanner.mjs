@@ -509,17 +509,6 @@ function sourceEvidenceKey(value, { keepSorting = false } = {}) {
   }
 }
 
-function sourcePageKey(value) {
-  try {
-    const url = new URL(String(value));
-    url.searchParams.delete("sorting");
-    url.searchParams.delete("currency_price");
-    return url.toString();
-  } catch {
-    return String(value || "");
-  }
-}
-
 export function filterProductiveSourceVariants(urls, yieldRows = []) {
   const publishedBands = new Set((yieldRows || [])
     .filter((row) => row?.status === "published")
@@ -933,7 +922,7 @@ export function prioritizeSourceUrls(urls, {
     const boundedDeep = boundedDeepFreshKeys.has(sourceNonFbsSampleKey(url));
     const key = isPriceBandedSource(url)
       ? yieldKey
-      : boundedDeep ? `bounded-deep:${sourcePageKey(url)}` : familyKey;
+      : boundedDeep ? `bounded-deep:${familyKey}` : familyKey;
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
     const familyPenalty = familyPenalties.get(isPriceBandedSource(url) ? yieldKey : familyKey) || 0;
     const baseTier = verifiedSellerKeys.has(familyKey)
