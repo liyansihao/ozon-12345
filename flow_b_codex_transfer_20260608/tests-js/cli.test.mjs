@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { parseCli, parseDailyStoreUsageSeed, parseStoreTargets } from "../scripts/flow_b_playwright.mjs";
+import { parseCli, parseDailyStoreUsageSeed, parseStoreTargets, parseStoreTotalUsageSeed } from "../scripts/flow_b_playwright.mjs";
 
 test("publish CLI uses strict production defaults", () => {
   const parsed = parseCli(["publish", "/tmp/flow-run"], {});
@@ -77,4 +77,14 @@ test("daily store usage seed is date-scoped so it cannot leak into the next day"
   assert.throws(() => parseDailyStoreUsageSeed({
     FLOW_B_STORE_DAILY_USAGE_SEED: JSON.stringify({ date: "15-07-2026", usage: { 106637: 45 } }),
   }), /STORE_DAILY_USAGE_SEED/i);
+});
+
+test("total store usage seed persists the verified per-store target across day rollover", () => {
+  assert.deepEqual(parseStoreTotalUsageSeed({
+    FLOW_B_STORE_TOTAL_USAGE_SEED: JSON.stringify({ 106637: 94, 106640: 0 }),
+  }), { 106637: 94, 106640: 0 });
+  assert.deepEqual(parseStoreTotalUsageSeed({}), {});
+  assert.throws(() => parseStoreTotalUsageSeed({
+    FLOW_B_STORE_TOTAL_USAGE_SEED: JSON.stringify({ 106637: -1 }),
+  }), /STORE_TOTAL_USAGE_SEED/i);
 });

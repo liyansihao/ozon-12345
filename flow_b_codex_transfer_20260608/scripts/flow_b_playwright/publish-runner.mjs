@@ -220,6 +220,8 @@ export function createPublishRunner({
   dailyStoreLimit = 100,
   dailyStoreTimeZone = "Asia/Shanghai",
   dailyStoreUsageSeed = null,
+  totalStoreLimit = 100,
+  totalStoreUsageSeed = {},
   warehouseSyncAttempts = 2,
   warehouseSyncIntervalMs = 5000,
   unavailableStoreRetryMs = 1_800_000,
@@ -249,6 +251,10 @@ export function createPublishRunner({
   if (!Number.isInteger(configuredDailyStoreLimit) || configuredDailyStoreLimit <= 0) {
     throw new TypeError("dailyStoreLimit must be a positive integer");
   }
+  const configuredTotalStoreLimit = Number(totalStoreLimit);
+  if (!Number.isInteger(configuredTotalStoreLimit) || configuredTotalStoreLimit <= 0) {
+    throw new TypeError("totalStoreLimit must be a positive integer");
+  }
   const targetPlan = Array.isArray(storeTargets) && storeTargets.length > 0
     ? storeTargets.map((entry) => ({
       id: Number(entry?.id),
@@ -269,6 +275,8 @@ export function createPublishRunner({
   const storeSwitches = [];
   const storeDailyUsage = new Map();
   const storeDailyLimits = new Map();
+  const storeTotalUsage = new Map();
+  const storeTotalReservations = new Set();
   let storeUsageDay = null;
   const lastOnlineSyncAt = new Map();
   const unavailableStoreUntil = new Map();
@@ -397,12 +405,24 @@ export function createPublishRunner({
     if (!publishResult?.ok) return { ok: false, reason: publishResult?.reason || "publish-not-confirmed", publish_result: publishResult ?? null };
     const submittedStoreId = Number(targetConfig.store.id);
     storeDailyUsage.set(submittedStoreId, Number(storeDailyUsage.get(submittedStoreId) || 0) + 1);
+    const reservationKey = `${submittedStoreId}:${sku}`;
+    if (!storeTotalReservations.has(reservationKey)) {
+      storeTotalReservations.add(reservationKey);
+      storeTotalUsage.set(submittedStoreId, Number(storeTotalUsage.get(submittedStoreId) || 0) + 1);
+    }
     recordMetric("store_daily_usage.jsonl", {
       store_id: submittedStoreId,
       sku,
       usage: storeDailyUsage.get(submittedStoreId),
       limit: storeDailyLimits.get(submittedStoreId) || configuredDailyStoreLimit,
       event: "submission-accepted",
+    });
+    recordMetric("store_total_usage.jsonl", {
+      store_id: submittedStoreId,
+      sku,
+      usage: storeTotalUsage.get(submittedStoreId),
+      limit: configuredTotalStoreLimit,
+      event: "submission-reserved",
     });
     await maybeSyncOnlineShop(targetConfig);
     const confirmation = await confirmPublication(sku, payload, targetConfig);
@@ -530,6 +550,12 @@ export function createPublishRunner({
             next_reconcile_at: new Date(now().getTime() + 10_000).toISOString(),
           } : {}),
         });
+        if (!retryablePending && submitted) {
+          const reservationKey = `${Number(targetConfig.store.id)}:${sku}`;
+          if (storeTotalReservations.delete(reservationKey)) {
+            storeTotalUsage.set(Number(targetConfig.store.id), Math.max(0, Number(storeTotalUsage.get(Number(targetConfig.store.id)) || 0) - 1));
+          }
+        }
         return { status: retryablePending ? "submitted" : "failed", sku, source_url: item.source_url ?? null, reason };
       }
 
@@ -567,6 +593,26 @@ export function createPublishRunner({
   async function run() {
     await state.load?.();
     const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
+    storeTotalUsage.clear();
+    storeTotalReservations.clear();
+    for (const [storeId, usage] of Object.entries(totalStoreUsageSeed || {})) {
+      const id = Number(storeId);
+      const count = Number(usage);
+      if (id > 0 && Number.isInteger(count) && count >= 0) storeTotalUsage.set(id, count);
+    }
+    for (const entry of restoredEntries) {
+      const data = entry?.data || {};
+      const entryStoreId = Number(data.store_id || 0);
+      const sku = String(entry?.sku ?? data.sku ?? "").trim();
+      if (!(entryStoreId > 0) || !sku) continue;
+      const publishedEntry = entry.status === "published";
+      const pendingEntry = ["processing", "failed"].includes(entry.status)
+        && !isTerminalSubmittedFailure(entry)
+        && (data.submitted === true || data.submission_pending === true);
+      if (!publishedEntry && !pendingEntry) continue;
+      storeTotalUsage.set(entryStoreId, Number(storeTotalUsage.get(entryStoreId) || 0) + 1);
+      if (pendingEntry) storeTotalReservations.add(`${entryStoreId}:${sku}`);
+    }
     const currentUsageDay = localDateKey(now(), dailyStoreTimeZone);
     if (storeUsageDay !== currentUsageDay) {
       storeUsageDay = currentUsageDay;
@@ -654,6 +700,11 @@ export function createPublishRunner({
       );
       storeDailyLimits.set(spec.id, effectiveDailyLimit);
       storeDailyUsage.set(spec.id, effectiveDailyUsage);
+      if (!allowExhausted && Number(storeTotalUsage.get(spec.id) || 0) >= configuredTotalStoreLimit) {
+        const error = new Error(`verified total target exhausted for store ${spec.id}`);
+        error.code = "STORE_TOTAL_LIMIT";
+        throw error;
+      }
       if (!allowExhausted && effectiveDailyUsage >= effectiveDailyLimit) {
         const error = new Error(`daily creation quota exhausted for store ${spec.id}`);
         error.code = "STORE_DAILY_LIMIT";
@@ -737,7 +788,9 @@ export function createPublishRunner({
           recordMetric("store_switches.jsonl", {
             from_store_id: fromStoreId,
             to_store_id: targetPlan[activeTargetIndex].id,
-            reason: error?.code === "STORE_DAILY_LIMIT" ? "daily-product-limit" : "store-target-unavailable",
+            reason: error?.code === "STORE_DAILY_LIMIT"
+              ? "daily-product-limit"
+              : error?.code === "STORE_TOTAL_LIMIT" ? "store-total-limit" : "store-target-unavailable",
             error: String(error?.message || error),
           });
         }
@@ -749,7 +802,9 @@ export function createPublishRunner({
     try {
       targetConfig = await resolveTargetConfig(activeTargetIndex);
     } catch (error) {
-      haltReason = error?.code === "STORE_DAILY_LIMIT" ? "daily-product-limit" : "store-target-unavailable";
+      haltReason = error?.code === "STORE_DAILY_LIMIT"
+        ? "daily-product-limit"
+        : error?.code === "STORE_TOTAL_LIMIT" ? "store-total-limit" : "store-target-unavailable";
       targetConfig = await advanceStore(haltReason, { store: { id: targetPlan[activeTargetIndex].id } });
       if (!targetConfig) throw error;
     }
@@ -889,6 +944,10 @@ export function createPublishRunner({
               import_log: importLog,
               reconciled_at: now().toISOString(),
             });
+            const reservationKey = `${Number(reconciliationTarget.store.id)}:${sku}`;
+            if (storeTotalReservations.delete(reservationKey)) {
+              storeTotalUsage.set(Number(reconciliationTarget.store.id), Math.max(0, Number(storeTotalUsage.get(Number(reconciliationTarget.store.id)) || 0) - 1));
+            }
             return { status: "failed", sku, source_url: item.source_url ?? null, reason };
           }
           if (["all_imported", "imported"].includes(importStatus)) {
@@ -1008,10 +1067,12 @@ export function createPublishRunner({
       && (!deadlineAt || Date.now() < Date.parse(deadlineAt))
       && (dryLimit === 0 || dryCandidates < dryLimit)) {
       const activeStoreId = Number(targetConfig.store.id);
-      const remainingStoreQuota = Number(storeDailyLimits.get(activeStoreId) || configuredDailyStoreLimit)
+      const remainingDailyStoreQuota = Number(storeDailyLimits.get(activeStoreId) || configuredDailyStoreLimit)
         - Number(storeDailyUsage.get(activeStoreId) || 0);
+      const remainingTotalStoreQuota = configuredTotalStoreLimit - Number(storeTotalUsage.get(activeStoreId) || 0);
+      const remainingStoreQuota = Math.min(remainingDailyStoreQuota, remainingTotalStoreQuota);
       if (remainingStoreQuota <= 0) {
-        haltReason = "daily-product-limit";
+        haltReason = remainingTotalStoreQuota <= 0 ? "store-total-limit" : "daily-product-limit";
         const nextConfig = await advanceStore(haltReason, targetConfig);
         if (nextConfig) {
           targetConfig = nextConfig;
@@ -1055,7 +1116,8 @@ export function createPublishRunner({
       const currentStoreId = Number(targetConfig.store.id);
       const currentStoreLimit = Number(storeDailyLimits.get(currentStoreId) || configuredDailyStoreLimit);
       if (Number(storeDailyUsage.get(currentStoreId) || 0) >= currentStoreLimit) haltReason = "daily-product-limit";
-      if (haltReason === "daily-product-limit") {
+      else if (Number(storeTotalUsage.get(currentStoreId) || 0) >= configuredTotalStoreLimit) haltReason = "store-total-limit";
+      if (["daily-product-limit", "store-total-limit"].includes(haltReason)) {
         const nextConfig = await advanceStore(haltReason, targetConfig);
         if (nextConfig) targetConfig = nextConfig;
       }
@@ -1078,6 +1140,7 @@ export function createPublishRunner({
       active_store_id: Number(targetConfig?.store?.id || 0),
       store_switches: storeSwitches,
       store_submitted_usage: Object.fromEntries([...storeDailyUsage].map(([id, usage]) => [String(id), usage])),
+      store_total_usage: Object.fromEntries([...storeTotalUsage].map(([id, usage]) => [String(id), usage])),
       store_confirmed_count: Object.fromEntries(
         [...(typeof state.entries === "function" ? state.entries() : [])]
           .filter((entry) => entry.status === "published" && Number(entry.data?.store_id) > 0)

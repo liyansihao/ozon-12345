@@ -84,6 +84,27 @@ export function parseDailyStoreUsageSeed(env = process.env) {
   return { date: String(value.date), usage };
 }
 
+export function parseStoreTotalUsageSeed(env = process.env) {
+  const source = String(env.FLOW_B_STORE_TOTAL_USAGE_SEED || "").trim();
+  if (!source) return {};
+  let value;
+  try { value = JSON.parse(source); }
+  catch { throw new Error("FLOW_B_STORE_TOTAL_USAGE_SEED must be valid JSON"); }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("FLOW_B_STORE_TOTAL_USAGE_SEED must be an object");
+  }
+  const usage = {};
+  for (const [storeId, count] of Object.entries(value)) {
+    const id = Number(storeId);
+    const numericCount = Number(count);
+    if (!(id > 0) || !Number.isInteger(numericCount) || numericCount < 0) {
+      throw new Error("FLOW_B_STORE_TOTAL_USAGE_SEED entries require a positive store ID and non-negative integer count");
+    }
+    usage[id] = numericCount;
+  }
+  return usage;
+}
+
 export function parseCli(argv, env = process.env) {
   const args = [...argv];
   if (!args.length || args.includes("--help") || args.includes("-h")) return { command: "help" };
@@ -181,6 +202,8 @@ async function createPublishingSession(context, options, env, shared) {
       dailyStoreLimit: Math.max(1, Number(env.FLOW_B_DAILY_STORE_LIMIT) || 100),
       dailyStoreTimeZone: env.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
       dailyStoreUsageSeed: parseDailyStoreUsageSeed(env),
+      totalStoreLimit: Math.max(1, Number(env.FLOW_B_STORE_TOTAL_LIMIT) || 100),
+      totalStoreUsageSeed: parseStoreTotalUsageSeed(env),
       warehouseSyncAttempts: Math.max(1, Number(env.FLOW_B_WAREHOUSE_SYNC_ATTEMPTS) || 2),
       warehouseSyncIntervalMs: Math.max(0, Number(env.FLOW_B_WAREHOUSE_SYNC_INTERVAL_MS) || 5000),
       unavailableStoreRetryMs: Math.max(0, Number(env.FLOW_B_UNAVAILABLE_STORE_RETRY_MS) || 1_800_000),

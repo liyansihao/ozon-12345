@@ -236,6 +236,37 @@ test("date-scoped prior-run usage rotates after the combined store total reaches
   assert.deepEqual(shopIds, [106637, 106640]);
 });
 
+test("verified lifetime store target rotates independently of the daily quota", async () => {
+  const state = fakeState();
+  const shopIds = [];
+  const client = clientFor([{ id: 211, sku: 211 }, { id: 212, sku: 212 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽三号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 2,
+    dailyStoreLimit: 100,
+    totalStoreLimit: 100,
+    totalStoreUsageSeed: { 106637: 99, 106640: 0 },
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+  assert.equal(result.published, 2);
+  assert.deepEqual(shopIds, [106637, 106640]);
+  assert.deepEqual(result.store_total_usage, { "106637": 100, "106640": 1 });
+  assert.deepEqual(result.store_switches, [{ from_store_id: 106637, to_store_id: 106640, reason: "store-total-limit" }]);
+});
+
 test("a stalled pending-import backlog keeps reconciliation but routes fresh work to the next store", async () => {
   const state = fakeState({
     "old-1": { status: "processing", data: { store_id: 106637, submitted: true, prepared_at: "2026-07-15T09:00:00.000Z" } },
