@@ -1878,6 +1878,32 @@ test("repeated consumer rounds refresh store quota but reuse commission configur
   assert.equal(commissionCalls, 1);
 });
 
+test("one persistent publisher session reuses a freshly verified target for sixty seconds", async () => {
+  const cache = {};
+  let targetCalls = 0;
+  const client = clientFor([], {
+    resolvePublishTarget: async () => {
+      targetCalls += 1;
+      return {
+        store: { id: 104965, name: "丽丽1号", product_limit: { daily_create: { usage: 0, limit: 100 } } },
+        watermark: { id: 60822, name: "lysh" },
+      };
+    },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state: fakeState(),
+    target: 1,
+    targetConfigCache: cache,
+  });
+
+  await runner.run();
+  await runner.run();
+
+  assert.equal(targetCalls, 1);
+});
+
 test("source outcomes persist to the cross-run yield history", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-yield-run-"));
   const historyDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-yield-history-"));

@@ -193,6 +193,7 @@ async function createPublishingSession(context, options, env, shared) {
       dryCandidateLimit: Math.max(0, Number(env.FLOW_B_MAX_DRY_CANDIDATES) || 0),
       deadlineAt: env.FLOW_B_DEADLINE_AT || null,
       targetConfigCache: shared.targetConfigCache || null,
+      targetRefreshIntervalMs: Math.max(0, Number(env.FLOW_B_TARGET_REFRESH_INTERVAL_MS) || 60_000),
       sourceYieldHistoryPath: env.FLOW_B_SOURCE_YIELD_HISTORY || path.join(ROOT, "data/flow_b/source_yield_history.jsonl"),
       confirmationAttempts: Math.max(1, Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) || 6),
       confirmationIntervalMs: Math.max(0, Number(env.FLOW_B_CONFIRMATION_INTERVAL_MS) || 2000),

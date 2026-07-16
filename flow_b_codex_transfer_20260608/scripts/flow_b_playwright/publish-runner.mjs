@@ -229,6 +229,7 @@ export function createPublishRunner({
   dryCandidateLimit = 0,
   deadlineAt = null,
   targetConfigCache = null,
+  targetRefreshIntervalMs = 60_000,
   sourceYieldHistoryPath = null,
   confirmationAttempts = 6,
   confirmationIntervalMs = 2000,
@@ -648,6 +649,7 @@ export function createPublishRunner({
       unavailableStoreUntil.clear();
       if (targetConfigCache?.targets) targetConfigCache.targets = {};
       if (targetConfigCache?.value) delete targetConfigCache.value;
+      if (targetConfigCache?.targetResolvedAt) delete targetConfigCache.targetResolvedAt;
     }
     for (const entry of restoredEntries) {
       const data = entry?.data || {};
@@ -775,10 +777,17 @@ export function createPublishRunner({
       });
       resolvedTargetsThisRun.set(cacheKey, value);
       if (targetConfigCache) {
-        if (targetPlan.length === 1) targetConfigCache.value = value;
+        if (targetPlan.length === 1) {
+          targetConfigCache.value = value;
+          targetConfigCache.targetResolvedAt = now().getTime();
+        }
         else {
           targetConfigCache.targets ||= {};
           targetConfigCache.targets[cacheKey] = value;
+          if (!targetConfigCache.targetResolvedAt || typeof targetConfigCache.targetResolvedAt !== "object") {
+            targetConfigCache.targetResolvedAt = {};
+          }
+          targetConfigCache.targetResolvedAt[cacheKey] = now().getTime();
         }
       }
       return value;
@@ -786,7 +795,31 @@ export function createPublishRunner({
 
     async function resolveTargetConfig(index, options = {}) {
       const allowExhausted = options.allowExhausted === true;
-      const cacheKey = String(targetPlan[index].id);
+      const spec = targetPlan[index];
+      const cacheKey = String(spec.id);
+      const cachedValue = targetPlan.length === 1
+        ? targetConfigCache?.value
+        : targetConfigCache?.targets?.[cacheKey];
+      const cachedAt = targetPlan.length === 1
+        ? Number(targetConfigCache?.targetResolvedAt || 0)
+        : Number(targetConfigCache?.targetResolvedAt?.[cacheKey] || 0);
+      const cacheFresh = cachedValue
+        && now().getTime() - cachedAt < Math.max(0, Number(targetRefreshIntervalMs) || 0);
+      if (cacheFresh && (allowExhausted || storeDailyLimits.has(spec.id))) {
+        if (!allowExhausted && Number(storeTotalUsage.get(spec.id) || 0) >= configuredTotalStoreLimit) {
+          const error = new Error(`verified total target exhausted for store ${spec.id}`);
+          error.code = "STORE_TOTAL_LIMIT";
+          throw error;
+        }
+        if (!allowExhausted
+          && Number(storeDailyUsage.get(spec.id) || 0) >= Number(storeDailyLimits.get(spec.id) || configuredDailyStoreLimit)) {
+          const error = new Error(`daily creation quota exhausted for store ${spec.id}`);
+          error.code = "STORE_DAILY_LIMIT";
+          throw error;
+        }
+        resolvedTargetsThisRun.set(cacheKey, cachedValue);
+        return cachedValue;
+      }
       if (!allowExhausted) return resolveTargetConfigUncached(index, options);
       if (resolvedTargetsThisRun.has(cacheKey)) return resolvedTargetsThisRun.get(cacheKey);
       if (resolvingTargetsThisRun.has(cacheKey)) return resolvingTargetsThisRun.get(cacheKey);
