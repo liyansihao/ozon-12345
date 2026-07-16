@@ -473,6 +473,24 @@ test("a fresh search family with twelve recent dry candidates yields to an untri
   }), [untriedSeller, drySearch]);
 });
 
+test("a dry search price band cannot demote a productive sibling price band", () => {
+  const productive = "https://www.ozon.ru/search/?text=banded-family&is_global=true&currency_price=150.000%3B";
+  const dry = "https://www.ozon.ru/search/?text=banded-family&is_global=true&currency_price=1000.000%3B";
+  const untriedSeller = "https://www.ozon.ru/seller/untried-after-band/";
+  assert.deepEqual(prioritizeSourceUrls([dry, untriedSeller, productive], {
+    freshSourceUrls: [productive, dry],
+    yieldRows: [
+      { at: "2026-07-16T06:00:00.000Z", source_url: productive, sku: "winner", status: "published" },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        at: new Date(Date.parse("2026-07-16T07:00:00.000Z") + index * 1000).toISOString(),
+        source_url: dry,
+        sku: `dry-band-${index}`,
+        status: "rejected",
+      })),
+    ],
+  }), [productive, untriedSeller, dry]);
+});
+
 test("source variants use a bounded two-item burst before rotating families", () => {
   const urls = [
     "https://www.ozon.ru/seller/a/",
