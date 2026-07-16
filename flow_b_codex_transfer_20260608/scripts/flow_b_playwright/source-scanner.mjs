@@ -776,6 +776,7 @@ function exhaustedSourceFamilyPenalties(rows) {
   });
   return new Map([...families].flatMap(([key, family]) => {
     const dryThreshold = family.priceBanded ? 8 : 12;
+    const minimumYield = family.priceBanded ? 0.2 : 0.1;
     const attempted = family.outcomes.size;
     const productive = [...family.outcomes.values()].filter(Boolean).length;
     const recent = [];
@@ -790,8 +791,8 @@ function exhaustedSourceFamilyPenalties(rows) {
     if (family.priceBanded
       && recent.length >= 4
       && recent.slice(0, 4).every((event) => event.explicitNonPureFbs)) return [[key, -500_000]];
-    if (recent.length >= dryThreshold && recentProductive / recent.length < 0.1) return [[key, -500_000]];
-    return attempted >= dryThreshold && productive / attempted < 0.1 ? [[key, -250_000]] : [];
+    if (recent.length >= dryThreshold && recentProductive / recent.length < minimumYield) return [[key, -500_000]];
+    return attempted >= dryThreshold && productive / attempted < minimumYield ? [[key, -250_000]] : [];
   }));
 }
 

@@ -600,6 +600,21 @@ test("four explicit non-pure outcomes demote only the affected highlight price b
   }), [productive, untriedSeller, dry]);
 });
 
+test("a highlight band below twenty percent recent yield gives way to untried supply", () => {
+  const weak = "https://www.ozon.ru/highlight/tovary-so-vsego-mira-155600/?currency_price=500.000%3B";
+  const untriedSeller = "https://www.ozon.ru/seller/untried-after-weak-highlight/";
+  assert.deepEqual(prioritizeSourceUrls([weak, untriedSeller], {
+    freshSourceUrls: [weak],
+    yieldRows: Array.from({ length: 8 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-16T07:00:00.000Z") + index * 1000).toISOString(),
+      source_url: weak,
+      sku: `weak-highlight-${index}`,
+      status: index === 7 ? "submitted" : "skipped",
+      reason: index === 7 ? undefined : "non-pure-fbs",
+    })),
+  }), [untriedSeller, weak]);
+});
+
 test("source variants use a bounded two-item burst before rotating families", () => {
   const urls = [
     "https://www.ozon.ru/seller/a/",
