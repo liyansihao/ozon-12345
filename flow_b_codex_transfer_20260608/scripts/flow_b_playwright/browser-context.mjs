@@ -98,7 +98,12 @@ export async function launchFlowContext(options) {
   }
 }
 
-export async function openMaoziPage(context, { settleMs = 1000, forceNew = false } = {}) {
+export async function openMaoziPage(context, {
+  settleMs = 1000,
+  forceNew = false,
+  recoveryTimeoutMs = 5000,
+  recoveryPollMs = 100,
+} = {}) {
   const available = () => context.pages().filter((page) => typeof page.isClosed !== "function" || !page.isClosed());
   let page = forceNew ? null : available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
   if (!page) {
@@ -107,7 +112,12 @@ export async function openMaoziPage(context, { settleMs = 1000, forceNew = false
   }
   if (settleMs > 0) await delay(settleMs);
   if (typeof page.isClosed === "function" && page.isClosed()) {
-    page = available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
+    const deadline = Date.now() + Math.max(0, Number(recoveryTimeoutMs) || 0);
+    do {
+      page = available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
+      if (page || Date.now() >= deadline) break;
+      await delay(Math.max(1, Number(recoveryPollMs) || 1));
+    } while (true);
   }
   if (!page) throw new Error("Maozi SSO page closed without leaving an authenticated ERP page");
   return page;

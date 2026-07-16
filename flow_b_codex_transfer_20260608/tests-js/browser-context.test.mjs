@@ -91,6 +91,33 @@ test("Maozi navigation reuses an existing authenticated page", async () => {
   assert.equal(newPageCalls, 0);
 });
 
+test("force-new Maozi navigation waits for a delayed authenticated replacement after SSO closes", async () => {
+  let pageChecks = 0;
+  let openedClosed = false;
+  const replacement = {
+    url: () => "https://ozon.maozierp.com/#/product/favorite",
+    isClosed: () => false,
+  };
+  const opened = {
+    url: () => "https://sso.maozierp.com/login",
+    isClosed: () => openedClosed,
+    goto: async () => { openedClosed = true; },
+  };
+  const context = {
+    pages: () => {
+      pageChecks += 1;
+      return pageChecks >= 3 ? [replacement] : [];
+    },
+    newPage: async () => opened,
+  };
+  assert.equal(await openMaoziPage(context, {
+    forceNew: true,
+    settleMs: 0,
+    recoveryTimeoutMs: 50,
+    recoveryPollMs: 1,
+  }), replacement);
+});
+
 test("browser options reject a missing or invalid extension manifest", async () => {
   const extensionDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-extension-"));
   assert.throws(() => resolveBrowserOptions({ FLOW_B_PW_PROFILE: "/tmp/profile" }, "/tmp/cft"), /FLOW_B_EXTENSION_DIR/);
