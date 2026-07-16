@@ -323,10 +323,11 @@ function sourceUrlKey(value) {
     const url = new URL(String(value));
     url.searchParams.delete("sorting");
     url.searchParams.delete("currency_price");
+    url.searchParams.delete("page");
     return url.toString();
   } catch {
     return String(value || "")
-      .replace(/([?&])(?:sorting|currency_price)=[^&]*&?/gi, "$1")
+      .replace(/([?&])(?:sorting|currency_price|page)=[^&]*&?/gi, "$1")
       .replace(/[?&]$/, "");
   }
 }
@@ -1222,8 +1223,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   );
   const urls = filterProductiveSourceVariants(
     [...new Set([
-      ...expandHighYieldSourceUrls([...inputUrls, ...verifiedSellerUrls, ...derivedSearchUrls], yieldRows),
       ...publishedSourcePages,
+      ...expandHighYieldSourceUrls([...inputUrls, ...verifiedSellerUrls, ...derivedSearchUrls], yieldRows),
     ])],
     yieldRows,
   );

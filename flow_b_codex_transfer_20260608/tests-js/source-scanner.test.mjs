@@ -341,10 +341,11 @@ test("explicitly promoted strict-derived searches join the verified priority tie
 test("verified source variants finish their tier before ordinary sources", () => {
   const verified = "https://www.ozon.ru/search/?text=winner&is_global=true";
   const verifiedVariant = `${verified}&sorting=rating`;
+  const verifiedPage = `${verified}&page=2`;
   const ordinary = "https://www.ozon.ru/seller/ordinary/";
-  assert.deepEqual(prioritizeSourceUrls([verified, verifiedVariant, ordinary], {
+  assert.deepEqual(prioritizeSourceUrls([ordinary, verifiedPage, verified, verifiedVariant], {
     verifiedFreshSourceUrls: [verified],
-  }), [verified, verifiedVariant, ordinary]);
+  }), [verifiedPage, verified, verifiedVariant, ordinary]);
 });
 
 test("source variants use a bounded two-item burst before rotating families", () => {
