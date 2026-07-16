@@ -1623,6 +1623,17 @@ export function sourceScanLinkTarget(perSourceLimit, multiplier = 2) {
   return Math.max(12, Math.ceil(limit * headroom));
 }
 
+export function sourceScanLinkTargetForSource(url, {
+  perSourceLimit = 24,
+  boundedDeepUrls = [],
+} = {}) {
+  const key = sourceNonFbsSampleKey(url);
+  const bounded = boundedDeepUrls instanceof Set
+    ? boundedDeepUrls.has(key) || boundedDeepUrls.has(String(url))
+    : (boundedDeepUrls || []).some((value) => sourceNonFbsSampleKey(value) === key);
+  return sourceScanLinkTarget(perSourceLimit, bounded ? 1.5 : 2);
+}
+
 async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSteps, linkTarget }) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
   await waitForContent(page, 20000);
@@ -1790,6 +1801,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     String(env.FLOW_B_DEEP_VERIFIED_SELLER_PAGES || "2,3,4,5")
       .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 1),
   );
+  const boundedDeepFreshSourceUrls = deepVerifiedSellerVariants.filter((url) => {
+    try { return Number(new URL(url).searchParams.get("page")) >= 4; }
+    catch { return false; }
+  });
+  const boundedDeepFreshSourceKeys = new Set(
+    boundedDeepFreshSourceUrls.map(sourceNonFbsSampleKey).filter(Boolean),
+  );
   const submittedSellerUrls = repeatedSubmittedSellerSourceUrls(
     yieldRows,
     envNumber(env, "FLOW_B_SUBMITTED_SELLER_MIN_SKUS", 2),
@@ -1830,10 +1848,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...derivedSearchUrls,
     ],
     qualifiedFreshSourceUrls: submittedSellerSourceVariants,
-    boundedDeepFreshSourceUrls: deepVerifiedSellerVariants.filter((url) => {
-      try { return Number(new URL(url).searchParams.get("page")) >= 4; }
-      catch { return false; }
-    }),
+    boundedDeepFreshSourceUrls,
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
       verifiedFreshUrls: [
         ...classifiedFreshUrls.verifiedSellerUrls,
@@ -2010,7 +2025,15 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       const batchRows = await Promise.all(batch.map((url) => scanSourceWithPage({
         context,
         url,
-        options,
+        options: {
+          ...options,
+          linkTarget: String(env.FLOW_B_SOURCE_LINK_TARGET || "").trim()
+            ? options.linkTarget
+            : sourceScanLinkTargetForSource(url, {
+              perSourceLimit,
+              boundedDeepUrls: boundedDeepFreshSourceKeys,
+            }),
+        },
         timeoutMs: sourceScanTimeout,
         closeTimeoutMs: pageCloseTimeout,
       })

@@ -54,6 +54,7 @@ import {
   remainingCollectionCooldown,
   sourceAdaptiveConcurrency,
   sourceScanLinkTarget,
+  sourceScanLinkTargetForSource,
   nextDetailPacingState,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
@@ -1413,6 +1414,18 @@ test("source scrolling keeps bounded dedup headroom above the per-source consume
   assert.equal(sourceScanLinkTarget(24), 48);
   assert.equal(sourceScanLinkTarget(1), 12);
   assert.equal(sourceScanLinkTarget(24, 3), 72);
+});
+
+test("unseen proven deep pages stop at 1.5x headroom while ordinary sources keep 2x", () => {
+  const deep = "https://www.ozon.ru/seller/proven/?page=4";
+  assert.equal(sourceScanLinkTargetForSource(deep, {
+    perSourceLimit: 24,
+    boundedDeepUrls: [deep],
+  }), 36);
+  assert.equal(sourceScanLinkTargetForSource("https://www.ozon.ru/search/?text=ordinary", {
+    perSourceLimit: 24,
+    boundedDeepUrls: [deep],
+  }), 48);
 });
 
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {
