@@ -459,6 +459,20 @@ test("verified source variants finish their tier before ordinary sources", () =>
   }), [verifiedPage, verified, verifiedVariant, ordinary]);
 });
 
+test("a fresh search family with twelve recent dry candidates yields to an untried source", () => {
+  const drySearch = "https://www.ozon.ru/search/?text=dry-family&is_global=true&sorting=rating";
+  const untriedSeller = "https://www.ozon.ru/seller/untried-family/";
+  assert.deepEqual(prioritizeSourceUrls([drySearch, untriedSeller], {
+    freshSourceUrls: [drySearch],
+    yieldRows: Array.from({ length: 12 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-16T07:00:00.000Z") + index * 1000).toISOString(),
+      source_url: drySearch,
+      sku: `dry-${index}`,
+      status: "rejected",
+    })),
+  }), [untriedSeller, drySearch]);
+});
+
 test("source variants use a bounded two-item burst before rotating families", () => {
   const urls = [
     "https://www.ozon.ru/seller/a/",

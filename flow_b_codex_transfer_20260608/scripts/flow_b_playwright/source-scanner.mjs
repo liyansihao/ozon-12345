@@ -377,6 +377,14 @@ function sourceUrlKey(value) {
   }
 }
 
+function isSearchSource(value) {
+  try {
+    return /^\/search\/?$/i.test(new URL(String(value || "")).pathname);
+  } catch {
+    return false;
+  }
+}
+
 function sourceYieldKey(value) {
   try {
     const url = new URL(String(value));
@@ -628,13 +636,15 @@ function fullFunnelSourceScores(rows) {
   }));
 }
 
-function exhaustedSellerFamilyPenalties(rows) {
+function exhaustedSourceFamilyPenalties(rows) {
   const families = new Map();
   (rows || []).forEach((row, order) => {
     const key = sourceUrlKey(row?.source_url);
     const sku = String(row?.sku || "").trim();
     const status = String(row?.status || "");
-    if (!canonicalSellerUrl(key) || !sku || !["favorited", "submitted", "published", "rejected", "skipped"].includes(status)) return;
+    if ((!canonicalSellerUrl(key) && !isSearchSource(key))
+      || !sku
+      || !["favorited", "submitted", "published", "rejected", "skipped"].includes(status)) return;
     const family = families.get(key) || { outcomes: new Map(), events: [] };
     const productive = status === "favorited" || status === "submitted" || status === "published";
     family.outcomes.set(sku, Boolean(family.outcomes.get(sku)) || productive);
@@ -676,7 +686,7 @@ export function prioritizeSourceUrls(urls, {
   }
   const funnelScores = fullFunnelSourceScores(yieldRows);
   const familyScores = observedTitleFamilyScores(yieldRows);
-  const familyPenalties = exhaustedSellerFamilyPenalties(yieldRows);
+  const familyPenalties = exhaustedSourceFamilyPenalties(yieldRows);
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedSellerKeys = new Set(verifiedFreshSourceUrls
@@ -689,7 +699,9 @@ export function prioritizeSourceUrls(urls, {
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
     const familyPenalty = familyPenalties.get(key) || 0;
     const baseTier = verifiedSellerKeys.has(key) ? 3 : verifiedFreshKeys.has(key) ? 2 : freshKeys.has(key) ? 1 : 0;
-    const tier = familyPenalty < 0 && canonicalSellerUrl(url) ? Math.min(baseTier, 1) : baseTier;
+    const tier = familyPenalty < 0
+      ? (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
+      : baseTier;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
       + (freshKeys.has(key) ? 200_000 : 0)
       + (verifiedFreshKeys.has(key) ? 400_000 : 0)
@@ -725,7 +737,7 @@ export function retainedRowsForCollection(records, {
   yieldRows = [],
 } = {}) {
   const successfulKeys = new Set(highYieldSources.map(sourceYieldKey));
-  const exhaustedFamilies = exhaustedSellerFamilyPenalties(yieldRows);
+  const exhaustedFamilies = exhaustedSourceFamilyPenalties(yieldRows);
   return (records || []).filter((row) => {
     if (provenOnly && !isProvenSellerSource(row?.source_url)) return false;
     if (skipRetained && !successfulKeys.has(sourceYieldKey(row?.source_url))) return false;
