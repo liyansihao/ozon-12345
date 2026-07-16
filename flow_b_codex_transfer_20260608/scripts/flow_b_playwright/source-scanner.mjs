@@ -821,10 +821,18 @@ export function cachedExactFbsFallbackLinks(records, {
   if (maximum === 0) return [];
   const result = [];
   const seen = new Set();
-  for (const link of limitLinksPerSource(records || [], maximum, familyScores)) {
+  const eligibleRows = (records || []).map((row) => ({
+    ...row,
+    links: (row?.links || []).map((link) => ({ ...link, source_url: row.source_url }))
+      .filter((link) => {
+        const sku = skuFromProductUrl(link?.href);
+        return sku && !attempted.has(sku) && !favoriteTitleSkipReason(link?.text)
+          && Boolean(parseListingFavoriteSnapshot(link));
+      }),
+  })).filter((row) => row.links.length > 0);
+  for (const link of limitLinksPerSource(eligibleRows, maximum, familyScores)) {
     const sku = skuFromProductUrl(link?.href);
-    if (!sku || attempted.has(sku) || seen.has(sku) || favoriteTitleSkipReason(link?.text)) continue;
-    if (!parseListingFavoriteSnapshot(link)) continue;
+    if (!sku || seen.has(sku)) continue;
     seen.add(sku);
     result.push(link);
     if (result.length >= maximum) break;

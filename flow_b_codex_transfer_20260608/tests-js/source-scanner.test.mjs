@@ -466,6 +466,19 @@ test("cached fallback uses only unattempted cards with complete exact-FBS eviden
   ], { attempted: new Set(["1003"]), limit: 12 }).map((row) => row.href), [exact.href]);
 });
 
+test("cached fallback filters attempted cards before applying its per-source cap", () => {
+  const card = (sku) => ({
+    href: `https://www.ozon.ru/product/item-${sku}/`,
+    text: `Детская игрушка ${sku}`,
+    image_url: `https://ir.ozone.ru/${sku}.jpg`,
+    card_text: "999 ₽\n发货模式：FBS\n库存",
+  });
+  const survivor = card("2003");
+  assert.deepEqual(cachedExactFbsFallbackLinks([
+    { source_url: "https://www.ozon.ru/seller/a/", links: [card("2001"), card("2002"), survivor] },
+  ], { attempted: new Set(["2001", "2002"]), limit: 2 }).map((row) => row.href), [survivor.href]);
+});
+
 test("cached fallback fills a short retained tranche without duplicating its SKU", () => {
   const retained = [{ href: "https://www.ozon.ru/product/retained-1001/" }];
   const fallback = [
