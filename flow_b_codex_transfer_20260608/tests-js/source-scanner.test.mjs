@@ -678,6 +678,20 @@ test("cached fallback uses only unattempted cards with complete exact-FBS eviden
   ], { attempted: new Set(["1003"]), limit: 12 }).map((row) => row.href), [exact.href]);
 });
 
+test("cooldown fallback keeps only CNY cards whose facts can bypass Ozon detail", () => {
+  const card = (sku, currency) => ({
+    href: `https://www.ozon.ru/product/item-${sku}/`,
+    text: `Носки ${sku}`,
+    image_url: `https://ir.ozone.ru/${sku}.jpg`,
+    card_text: `99 ${currency}\n发货模式：FBS\n库存`,
+  });
+  assert.deepEqual(cachedExactFbsFallbackLinks([
+    { source_url: "https://www.ozon.ru/seller/a/", links: [card("1101", "₽"), card("1102", "¥")] },
+  ], { limit: 12, requireReusableFacts: true }).map((row) => row.href), [
+    "https://www.ozon.ru/product/item-1102/",
+  ]);
+});
+
 test("cached fallback filters attempted cards before applying its per-source cap", () => {
   const card = (sku) => ({
     href: `https://www.ozon.ru/product/item-${sku}/`,

@@ -1003,6 +1003,7 @@ export function cachedExactFbsFallbackLinks(records, {
   limit = 24,
   familyScores = {},
   yieldRows = [],
+  requireReusableFacts = false,
 } = {}) {
   const maximum = Math.max(0, Number(limit) || 0);
   if (maximum === 0) return [];
@@ -1013,8 +1014,10 @@ export function cachedExactFbsFallbackLinks(records, {
     links: (row?.links || []).map((link) => ({ ...link, source_url: row.source_url }))
       .filter((link) => {
         const sku = skuFromProductUrl(link?.href);
+        const snapshot = parseListingFavoriteSnapshot(link);
         return sku && !attempted.has(sku) && !favoriteTitleSkipReason(link?.text)
-          && Boolean(parseListingFavoriteSnapshot(link));
+          && Boolean(snapshot)
+          && (!requireReusableFacts || snapshot.price_info?.currency === "CNY");
       }),
   })).filter((row) => row.links.length > 0), yieldRows);
   for (const link of limitLinksPerSource(eligibleRows, maximum, familyScores)) {
@@ -1748,6 +1751,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         limit: envNumber(env, "FLOW_B_COOLDOWN_FBS_FALLBACK_LINKS", 24),
         familyScores: titleFamilyScores,
         yieldRows,
+        requireReusableFacts: true,
       });
       if (cooldownFallbackLinks.length > 0) {
         emit(`collecting ${cooldownFallbackLinks.length} exact-FBS cached links during Ozon cooldown`);
