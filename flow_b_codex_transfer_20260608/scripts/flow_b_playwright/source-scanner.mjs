@@ -576,6 +576,42 @@ export function expandNextPublishedDiscoveryPages(yieldRows = []) {
   return expanded;
 }
 
+export function expandRepeatedPublishedDiscoveryPageFour(yieldRows = [], minimumPublishedSkus = 2) {
+  const minimum = Math.max(2, Number(minimumPublishedSkus) || 2);
+  const publishedSkusByBand = new Map();
+  for (const row of yieldRows || []) {
+    if (String(row?.status || "") !== "published") continue;
+    const sku = String(row?.sku || "").trim();
+    let url;
+    try { url = new URL(String(row?.source_url || "")); } catch { continue; }
+    if (!sku || (!isSearchSource(url) && !isHighlightSource(url))) continue;
+    url.searchParams.delete("miniapp");
+    const key = sourceYieldKey(url);
+    const skus = publishedSkusByBand.get(key) || new Set();
+    skus.add(sku);
+    publishedSkusByBand.set(key, skus);
+  }
+  const expanded = [];
+  const seen = new Set();
+  for (const row of yieldRows || []) {
+    if (String(row?.status || "") !== "published") continue;
+    let url;
+    try { url = new URL(String(row?.source_url || "")); } catch { continue; }
+    if (!isSearchSource(url) && !isHighlightSource(url)) continue;
+    url.hash = "";
+    url.searchParams.delete("miniapp");
+    if ((publishedSkusByBand.get(sourceYieldKey(url))?.size || 0) < minimum) continue;
+    url.searchParams.set("page", "4");
+    const canonicalKey = `${url.origin}${url.pathname}?${[...url.searchParams.entries()]
+      .sort(([leftKey, leftValue], [rightKey, rightValue]) => leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue))
+      .map(([key, value]) => `${key}=${value}`).join("&")}`;
+    if (seen.has(canonicalKey)) continue;
+    seen.add(canonicalKey);
+    expanded.push(url.toString());
+  }
+  return expanded;
+}
+
 export function expandHighYieldSourceUrls(urls, yieldRows = []) {
   const expanded = [...urls];
   const seen = new Set(expanded);
@@ -973,7 +1009,7 @@ export function prioritizeSourceUrls(urls, {
     let tier = familyPenalty < 0 && !qualifiedFreshKeys.has(familyKey)
       ? boundedDeep ? 3 : (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
-    if (scanPenalty < 0) tier = 0;
+    if (scanPenalty < 0 && !boundedDeep) tier = 0;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
       + (freshKeys.has(familyKey) ? 200_000 : 0)
       + (qualifiedFreshKeys.has(familyKey) ? 300_000 : 0)
@@ -1918,15 +1954,26 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 1),
   );
   const nextPublishedDiscoveryPages = expandNextPublishedDiscoveryPages(yieldRows);
-  const boundedEvidenceSourceKeys = new Set(boundedEvidenceSourceUrls({
+  const repeatedPublishedDiscoveryPageFour = expandRepeatedPublishedDiscoveryPageFour(
+    yieldRows,
+    envNumber(env, "FLOW_B_REPEATED_DISCOVERY_MIN_PUBLISHED", 2),
+  );
+  const boundedEvidenceSources = boundedEvidenceSourceUrls({
     deepUrls: boundedDeepFreshSourceUrls,
     publishedPages: publishedSourcePages,
-    nextPublishedPages: nextPublishedDiscoveryPages,
-  }).map(sourceNonFbsSampleKey).filter(Boolean));
+    nextPublishedPages: [
+      ...nextPublishedDiscoveryPages,
+      ...repeatedPublishedDiscoveryPageFour,
+    ],
+  });
+  const boundedEvidenceSourceKeys = new Set(
+    boundedEvidenceSources.map(sourceNonFbsSampleKey).filter(Boolean),
+  );
   const urls = filterProductiveSourceVariants(
     [...new Set([
       ...publishedSourcePages,
       ...nextPublishedDiscoveryPages,
+      ...repeatedPublishedDiscoveryPageFour,
       ...expandHighYieldSourceUrls([
         ...inputUrls,
         ...verifiedSellerUrls,
@@ -1953,13 +2000,14 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...derivedSearchUrls,
     ],
     qualifiedFreshSourceUrls: submittedSellerSourceVariants,
-    boundedDeepFreshSourceUrls,
+    boundedDeepFreshSourceUrls: boundedEvidenceSources,
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
       verifiedFreshUrls: [
         ...classifiedFreshUrls.verifiedSellerUrls,
         ...deepVerifiedSellerVariants,
         ...publishedSourcePages,
         ...nextPublishedDiscoveryPages,
+        ...repeatedPublishedDiscoveryPageFour,
       ],
       verifiedHistoricalUrls: verifiedSellerUrls,
       derivedSearchUrls,

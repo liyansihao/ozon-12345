@@ -74,6 +74,7 @@ import {
   filterProductiveSourceVariants,
   expandPublishedSourcePages,
   expandNextPublishedDiscoveryPages,
+  expandRepeatedPublishedDiscoveryPageFour,
   fullFunnelSourceScores,
   fatalSourceBatchError,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
@@ -304,6 +305,23 @@ test("strict discovery sources probe only their exact next page through page fou
     "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating&page=2",
     "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=3",
     "https://www.ozon.ru/search/?text=%D0%BD%D0%BE%D1%81%D0%BA%D0%B8&is_global=true&currency_price=500.000%3B&page=4",
+  ]);
+});
+
+test("repeated strict discovery bands probe exact page four strategies", () => {
+  const base = "https://www.ozon.ru/search/?text=%D0%BD%D0%BE%D1%81%D0%BA%D0%B8&is_global=true&currency_price=500.000%3B";
+  const rating = `${base}&sorting=rating&page=2`;
+  const singleton = "https://www.ozon.ru/highlight/single/?currency_price=150.000%3B";
+  assert.deepEqual(expandRepeatedPublishedDiscoveryPageFour([
+    { source_url: base, sku: "win-1", status: "published" },
+    { source_url: rating, sku: "win-2", status: "published" },
+    { source_url: `${base}&miniapp=1`, sku: "win-1", status: "published" },
+    { source_url: singleton, sku: "single", status: "published" },
+    { source_url: singleton, sku: "nope", status: "rejected" },
+    { source_url: "https://www.ozon.ru/seller/not-discovery/?page=2", sku: "seller-win", status: "published" },
+  ]), [
+    `${base}&page=4`,
+    `${base}&sorting=rating&page=4`,
   ]);
 });
 
@@ -636,6 +654,13 @@ test("two exhausted scan variants demote an overlapping verified family", () => 
     freshSourceUrls: [untried],
     scanRows,
   }), [untried, seller]);
+  const evidenceBackedPageFour = `${seller}?page=4`;
+  assert.deepEqual(prioritizeSourceUrls([untried, evidenceBackedPageFour], {
+    verifiedFreshSourceUrls: [seller],
+    boundedDeepFreshSourceUrls: [evidenceBackedPageFour],
+    freshSourceUrls: [untried],
+    scanRows,
+  }), [evidenceBackedPageFour, untried]);
   assert.deepEqual([...exhaustedScanFamilyKeys(scanRows)], [seller]);
   assert.deepEqual([...exhaustedScanFamilyKeys([
     scanRows[0],
