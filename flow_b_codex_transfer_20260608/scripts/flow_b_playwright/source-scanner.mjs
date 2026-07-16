@@ -217,6 +217,19 @@ export function shouldDeferSourceAfterNonFbsSample(stats = {}, limit = 6) {
     && nonPureFbs / attempted >= 0.8;
 }
 
+export function nextSourceSampleStats(stats = {}, outcome = {}) {
+  const next = {
+    attempted: Math.max(0, Number(stats?.attempted) || 0),
+    nonPureFbs: Math.max(0, Number(stats?.nonPureFbs) || 0),
+    favorited: Math.max(0, Number(stats?.favorited) || 0),
+  };
+  if (!["favorited", "rejected", "failed"].includes(String(outcome?.status || ""))) return next;
+  next.attempted += 1;
+  if (outcome.status === "favorited") next.favorited += 1;
+  if (outcome.reason === "non-pure-fbs") next.nonPureFbs += 1;
+  return next;
+}
+
 export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
   const currency = String(productInfo?.price_info?.currency || "").toUpperCase();
   if (currency === "CNY" && Number(productInfo?.price_info?.sell_price) > Math.max(0, Number(maxPrice) || 0)) {
@@ -1325,12 +1338,11 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const nonFbsDeferredSources = new Set();
   const sourceOutcomeStats = new Map();
   const nonFbsSampleLimit = Math.max(0, envNumber(env, "FLOW_B_SOURCE_NON_FBS_SAMPLE_LIMIT", 6));
-  const statsForSource = (sourceBlockKey) => {
-    if (!sourceBlockKey) return null;
-    if (!sourceOutcomeStats.has(sourceBlockKey)) {
-      sourceOutcomeStats.set(sourceBlockKey, { attempted: 0, nonPureFbs: 0, favorited: 0 });
-    }
-    return sourceOutcomeStats.get(sourceBlockKey);
+  const recordSourceOutcome = (sourceSampleKey, outcome) => {
+    if (!sourceSampleKey) return null;
+    const next = nextSourceSampleStats(sourceOutcomeStats.get(sourceSampleKey), outcome);
+    sourceOutcomeStats.set(sourceSampleKey, next);
+    return next;
   };
   const apiInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_INTERVAL_MS", 750));
   const maxRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_RETRIES", 5));
@@ -1375,15 +1387,26 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const loadProduct = async (page, item) => {
     for (let attempt = 0; ; attempt += 1) {
       const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
+      const nonFbsSampleKey = sourceNonFbsSampleKey(item.source_url);
       if (sourceBlockKey && softBlockedSources.has(sourceBlockKey)) {
         const error = new Error(`source deferred after Ozon detail soft block: ${sourceBlockKey}`);
         error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
+        throw error;
+      }
+      if (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey)) {
+        const error = new Error(`source deferred after low pure-FBS yield: ${nonFbsSampleKey}`);
+        error.code = "FLOW_B_SOURCE_LOW_FBS_YIELD";
         throw error;
       }
       await reserveDetailSlot();
       if (sourceBlockKey && softBlockedSources.has(sourceBlockKey)) {
         const error = new Error(`source deferred after Ozon detail soft block: ${sourceBlockKey}`);
         error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
+        throw error;
+      }
+      if (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey)) {
+        const error = new Error(`source deferred after low pure-FBS yield: ${nonFbsSampleKey}`);
+        error.code = "FLOW_B_SOURCE_LOW_FBS_YIELD";
         throw error;
       }
       try {
@@ -1460,8 +1483,6 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           attempted.delete(item.sku);
           continue;
         }
-        const sourceStats = statsForSource(nonFbsSampleKey);
-        if (sourceStats) sourceStats.attempted += 1;
         collection.attempted += 1;
         inFlight += 1;
         try {
@@ -1496,13 +1517,13 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             total: observedTotal,
           });
           onResult({ status: "favorited", sku: productInfo.sku });
-          if (sourceStats) sourceStats.favorited += 1;
+          recordSourceOutcome(nonFbsSampleKey, { status: "favorited" });
           collection.favorited += 1;
           log(`favorite SKU ${productInfo.sku} total=${observedTotal}/${target}`);
         } catch (error) {
           if (error?.code === "FLOW_B_DEADLINE_REACHED") {
             break;
-          } else if (error?.code === "FLOW_B_SOURCE_SOFT_BLOCKED") {
+          } else if (["FLOW_B_SOURCE_SOFT_BLOCKED", "FLOW_B_SOURCE_LOW_FBS_YIELD"].includes(error?.code)) {
             attempted.delete(item.sku);
             collection.attempted -= 1;
             continue;
@@ -1513,8 +1534,8 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             log(`favorite capacity reached; ending collection at configured target ${target}`);
           } else if (favoriteFailureDisposition(error).status === "rejected") {
             const { reason } = favoriteFailureDisposition(error);
+            const sourceStats = recordSourceOutcome(nonFbsSampleKey, { status: "rejected", reason });
             if (sourceStats && reason === "non-pure-fbs") {
-              sourceStats.nonPureFbs += 1;
               if (shouldDeferSourceAfterNonFbsSample(sourceStats, nonFbsSampleLimit)) {
                 nonFbsDeferredSources.add(nonFbsSampleKey);
                 log(`source non-pure-FBS sample deferred after ${sourceStats.attempted} checks: ${nonFbsSampleKey}`);
@@ -1525,6 +1546,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             collection.rejected += 1;
             log(`favorite rejected SKU ${item.sku}: ${reason}`);
           } else {
+            recordSourceOutcome(nonFbsSampleKey, { status: "failed" });
             await record({ status: "failed", sku: item.sku, url: item.href, source_url: item.source_url || null, error: String(error?.message || error) });
             onResult({ status: "failed", sku: item.sku, error });
             collection.failed += 1;

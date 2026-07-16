@@ -41,6 +41,7 @@ import {
   createScannerLogger,
   favoriteFailureDisposition,
   shouldDeferSourceAfterNonFbsSample,
+  nextSourceSampleStats,
   sourceNonFbsSampleKey,
   favoritePriceSkipReason,
   favoriteTitleSkipReason,
@@ -76,6 +77,14 @@ test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 10, nonPureFbs: 7, favorited: 0 }, 6), false);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 8, nonPureFbs: 7, favorited: 1 }, 6), false);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 20, nonPureFbs: 20, favorited: 0 }, 0), false);
+});
+
+test("source samples count completed outcomes but not deferred queued work", () => {
+  let stats = nextSourceSampleStats(undefined, { status: "rejected", reason: "non-pure-fbs" });
+  stats = nextSourceSampleStats(stats, { status: "failed", reason: "timeout" });
+  stats = nextSourceSampleStats(stats, { status: "favorited" });
+  assert.deepEqual(stats, { attempted: 3, nonPureFbs: 1, favorited: 1 });
+  assert.deepEqual(nextSourceSampleStats(stats, { status: "deferred" }), stats);
 });
 
 test("non-pure-FBS sampling isolates seller page and sorting variants", () => {
