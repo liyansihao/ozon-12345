@@ -1651,6 +1651,18 @@ export function sourceScanLinkTarget(perSourceLimit, multiplier = 2) {
   return Math.max(12, Math.ceil(limit * headroom));
 }
 
+export function boundedEvidenceSourceUrls({
+  deepUrls = [],
+  publishedPages = [],
+  nextPublishedPages = [],
+} = {}) {
+  return [...new Set([
+    ...(deepUrls || []),
+    ...(publishedPages || []),
+    ...(nextPublishedPages || []),
+  ].filter(Boolean))];
+}
+
 export function sourceScanLinkTargetForSource(url, {
   perSourceLimit = 24,
   boundedDeepUrls = [],
@@ -1839,9 +1851,6 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     try { return Number(new URL(url).searchParams.get("page")) >= 4; }
     catch { return false; }
   });
-  const boundedDeepFreshSourceKeys = new Set(
-    boundedDeepFreshSourceUrls.map(sourceNonFbsSampleKey).filter(Boolean),
-  );
   const submittedSellerUrls = repeatedSubmittedSellerSourceUrls(
     yieldRows,
     envNumber(env, "FLOW_B_SUBMITTED_SELLER_MIN_SKUS", 2),
@@ -1855,6 +1864,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 1),
   );
   const nextPublishedDiscoveryPages = expandNextPublishedDiscoveryPages(yieldRows);
+  const boundedEvidenceSourceKeys = new Set(boundedEvidenceSourceUrls({
+    deepUrls: boundedDeepFreshSourceUrls,
+    publishedPages: publishedSourcePages,
+    nextPublishedPages: nextPublishedDiscoveryPages,
+  }).map(sourceNonFbsSampleKey).filter(Boolean));
   const urls = filterProductiveSourceVariants(
     [...new Set([
       ...publishedSourcePages,
@@ -2068,7 +2082,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
             ? options.linkTarget
             : sourceScanLinkTargetForSource(url, {
               perSourceLimit: perSourceLinkLimit,
-              boundedDeepUrls: boundedDeepFreshSourceKeys,
+              boundedDeepUrls: boundedEvidenceSourceKeys,
             }),
         },
         timeoutMs: sourceScanTimeout,

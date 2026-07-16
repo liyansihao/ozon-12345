@@ -55,6 +55,7 @@ import {
   sourceAdaptiveConcurrency,
   sourceScanLinkTarget,
   sourceScanLinkTargetForSource,
+  boundedEvidenceSourceUrls,
   nextDetailPacingState,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
@@ -1501,6 +1502,22 @@ test("unseen proven deep pages stop at 1.5x headroom while ordinary sources keep
     perSourceLimit: 24,
     boundedDeepUrls: [deep],
   }), 48);
+});
+
+test("strict discovery pages share bounded scan headroom with proven deep pages", () => {
+  const deep = "https://www.ozon.ru/seller/proven/?page=4";
+  const strictPage = "https://www.ozon.ru/search/?text=strict&is_global=true&page=3";
+  const nextStrictPage = "https://www.ozon.ru/search/?text=strict&is_global=true&page=4";
+  const bounded = boundedEvidenceSourceUrls({
+    deepUrls: [deep],
+    publishedPages: [strictPage],
+    nextPublishedPages: [nextStrictPage, strictPage],
+  });
+  assert.deepEqual(bounded, [deep, strictPage, nextStrictPage]);
+  assert.equal(sourceScanLinkTargetForSource(strictPage, {
+    perSourceLimit: 24,
+    boundedDeepUrls: bounded,
+  }), 36);
 });
 
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {
