@@ -36,6 +36,11 @@ export function sourceAdaptiveConcurrency(key, options = {}) {
   return runtime.sourceAdaptiveConcurrency;
 }
 
+export function sourceAdaptiveStableWindow(env = {}) {
+  const configured = Number(env.FLOW_B_SOURCE_STABLE_WINDOW);
+  return Number.isFinite(configured) ? Math.max(1, Math.floor(configured)) : 12;
+}
+
 export function nextDetailPacingState({
   intervalMs,
   stableSuccesses = 0,
@@ -2096,6 +2101,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const adaptiveWorkers = sourceAdaptiveConcurrency(favoriteLog, {
     initial: workers,
     max: Math.max(workers, envNumber(env, "FLOW_B_MAX_TAB_WORKERS", 12)),
+    stableWindow: sourceAdaptiveStableWindow(env),
   });
   const perSourceLinkLimit = envNumber(env, "FLOW_B_MAX_LINKS_PER_SOURCE", 24);
   const options = {

@@ -53,6 +53,7 @@ import {
   collectionRuntimeState,
   remainingCollectionCooldown,
   sourceAdaptiveConcurrency,
+  sourceAdaptiveStableWindow,
   sourceScanLinkTarget,
   sourceScanLinkTargetForSource,
   boundedEvidenceSourceUrls,
@@ -1539,6 +1540,12 @@ test("source adaptive concurrency keeps stable progress across producer tranches
   const resumed = sourceAdaptiveConcurrency(key, { initial: 3, max: 6, stableWindow: 2 });
   assert.equal(resumed, first);
   assert.equal(resumed.current, 4);
+});
+
+test("source adaptive ramp window is configurable but never below one", () => {
+  assert.equal(sourceAdaptiveStableWindow({}), 12);
+  assert.equal(sourceAdaptiveStableWindow({ FLOW_B_SOURCE_STABLE_WINDOW: "6" }), 6);
+  assert.equal(sourceAdaptiveStableWindow({ FLOW_B_SOURCE_STABLE_WINDOW: "0" }), 1);
 });
 
 test("detail pacing ramps down only after stable loads and resets on soft block", () => {
