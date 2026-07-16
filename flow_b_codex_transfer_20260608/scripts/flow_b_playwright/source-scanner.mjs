@@ -425,6 +425,8 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     ].filter((candidate) => candidate.length >= 2).map((candidate) => candidate.join(" "));
     if (candidates.length > 0) queryGroups.push([...new Set(candidates)]);
   }
+  const recentGroupLimit = Math.max(2, Math.floor(maximum / (bands.length * 2)));
+  queryGroups.splice(recentGroupLimit);
   const rounds = Math.max(0, ...queryGroups.map((group) => group.length));
   for (let round = 0; round < rounds; round += 1) {
     for (const group of queryGroups) {

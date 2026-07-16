@@ -192,6 +192,19 @@ test("derived search can probe multiple price bands without merging their yield"
   ]);
 });
 
+test("derived search budget reserves room for sibling queries from recent winners", () => {
+  const rows = Array.from({ length: 42 }, (_, index) => ({
+    status: "published",
+    title: `Товар победитель ${"а".repeat(index + 4)} коллекция`,
+  }));
+  const urls = deriveSearchSourceUrls(rows, 80, ["150.000;", "500.000;"]);
+  const texts = urls.map((url) => new URL(url).searchParams.get("text"));
+  assert.equal(urls.length, 80);
+  assert.ok(texts.includes(`товар победитель ${"а".repeat(45)}`));
+  assert.ok(texts.includes("товар победитель"));
+  assert.ok(!texts.includes(`товар победитель ${"а".repeat(4)}`));
+});
+
 test("derived search discovery can be disabled with a zero budget", () => {
   assert.deepEqual(deriveSearchSourceUrls([{ status: "published", title: "Новый успешный товар" }], 0), []);
 });
