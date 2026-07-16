@@ -51,6 +51,7 @@ import {
   readFavoriteSkusWithTimeout,
   readFavoriteCountWithTimeout,
   deriveSearchSourceUrls,
+  repeatedSubmittedSellerSourceUrls,
   verifiedSellerSourceUrls,
   verifiedPrioritySourceUrls,
   filterProductiveSourceVariants,
@@ -850,6 +851,19 @@ test("verified FBS seller feedback becomes a unique next-round source", () => {
     "https://www.ozon.ru/seller/d/",
     "https://www.ozon.ru/seller/e/",
   ]);
+});
+
+test("repeated submitted seller feedback becomes bounded exploration only", () => {
+  const rows = [
+    { status: "favorited", sku: "a-1", seller_url: "https://www.ozon.ru/seller/a/?miniapp=1" },
+    { status: "submitted", sku: "a-1", source_url: "https://www.ozon.ru/search/?text=a" },
+    { status: "submitted", sku: "a-2", seller_url: "https://www.ozon.ru/seller/a/" },
+    { status: "submitted", sku: "b-1", seller_url: "https://www.ozon.ru/seller/b/" },
+    { status: "published", sku: "c-1", seller_url: "https://www.ozon.ru/seller/c/" },
+    { status: "published", sku: "c-2", seller_url: "https://www.ozon.ru/seller/c/" },
+  ];
+  assert.deepEqual(repeatedSubmittedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/a/"]);
+  assert.deepEqual(verifiedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/c/"]);
 });
 
 test("favorite preflight accepts only an explicit pure FBS mode", () => {

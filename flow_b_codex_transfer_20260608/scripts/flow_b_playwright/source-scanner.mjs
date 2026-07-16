@@ -630,6 +630,34 @@ export function verifiedSellerSourceUrls(yieldRows, minimumPublishedSkus = 2) {
   return [...sellers].filter(([, skus]) => skus.size >= minimum).map(([url]) => url);
 }
 
+export function repeatedSubmittedSellerSourceUrls(yieldRows, minimumSubmittedSkus = 2, limit = 50) {
+  const minimum = Math.max(2, Number(minimumSubmittedSkus) || 2);
+  const maximum = Math.max(0, Number(limit) || 0);
+  if (maximum === 0) return [];
+  const observedSellerBySku = new Map();
+  for (const row of yieldRows || []) {
+    const sku = String(row?.sku || "").trim();
+    const url = canonicalSellerUrl(row?.seller_url);
+    if (sku && url) observedSellerBySku.set(sku, url);
+  }
+  const sellers = new Map();
+  for (const row of [...(yieldRows || [])].reverse()) {
+    if (String(row?.status || "") !== "submitted") continue;
+    const sku = String(row?.sku || "").trim();
+    const url = canonicalSellerUrl(row?.seller_url)
+      || canonicalSellerUrl(row?.source_url)
+      || observedSellerBySku.get(sku);
+    if (!url || !sku) continue;
+    const skus = sellers.get(url) || new Set();
+    skus.add(sku);
+    sellers.set(url, skus);
+  }
+  return [...sellers]
+    .filter(([, skus]) => skus.size >= minimum)
+    .slice(0, maximum)
+    .map(([url]) => url);
+}
+
 export function verifiedPrioritySourceUrls({
   verifiedFreshUrls = [],
   verifiedHistoricalUrls = [],
@@ -1462,6 +1490,12 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     yieldRows,
     envNumber(env, "FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED", 2),
   );
+  const verifiedSellerSet = new Set(verifiedSellerUrls);
+  const submittedSellerUrls = repeatedSubmittedSellerSourceUrls(
+    yieldRows,
+    envNumber(env, "FLOW_B_SUBMITTED_SELLER_MIN_SKUS", 2),
+    envNumber(env, "FLOW_B_SUBMITTED_SELLER_SOURCES", 50),
+  ).filter((url) => !verifiedSellerSet.has(url));
   const publishedSourcePages = expandPublishedSourcePages(
     [],
     yieldRows,
@@ -1471,7 +1505,12 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const urls = filterProductiveSourceVariants(
     [...new Set([
       ...publishedSourcePages,
-      ...expandHighYieldSourceUrls([...inputUrls, ...verifiedSellerUrls, ...derivedSearchUrls], yieldRows),
+      ...expandHighYieldSourceUrls([
+        ...inputUrls,
+        ...verifiedSellerUrls,
+        ...submittedSellerUrls,
+        ...derivedSearchUrls,
+      ], yieldRows),
     ])],
     yieldRows,
   );
@@ -1485,7 +1524,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const pending = prioritizeSourceUrls(urls.filter((url) => !done.has(url)), {
     highYieldSources,
     yieldRows,
-    freshSourceUrls: [...classifiedFreshUrls.explorationUrls, ...derivedSearchUrls],
+    freshSourceUrls: [
+      ...classifiedFreshUrls.explorationUrls,
+      ...submittedSellerUrls,
+      ...derivedSearchUrls,
+    ],
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
       verifiedFreshUrls: [...classifiedFreshUrls.verifiedSellerUrls, ...publishedSourcePages],
       verifiedHistoricalUrls: verifiedSellerUrls,
