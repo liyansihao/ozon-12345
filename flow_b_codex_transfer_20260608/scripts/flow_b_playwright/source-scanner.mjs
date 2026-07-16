@@ -595,12 +595,15 @@ export function prioritizeSourceUrls(urls, {
   const funnelScores = fullFunnelSourceScores(yieldRows);
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
+  const verifiedSellerKeys = new Set(verifiedFreshSourceUrls
+    .filter((url) => canonicalSellerUrl(url))
+    .map(sourceUrlKey));
   const groups = new Map();
   [...urls].forEach((url, index) => {
     const key = sourceUrlKey(url);
     const yieldKey = sourceYieldKey(url);
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
-    const tier = verifiedFreshKeys.has(key) ? 2 : freshKeys.has(key) ? 1 : 0;
+    const tier = verifiedSellerKeys.has(key) ? 3 : verifiedFreshKeys.has(key) ? 2 : freshKeys.has(key) ? 1 : 0;
     const priority = sourceUrlPriority(url) + yieldPriority
       + (freshKeys.has(key) ? 200_000 : 0)
       + (verifiedFreshKeys.has(key) ? 400_000 : 0);
@@ -611,7 +614,7 @@ export function prioritizeSourceUrls(urls, {
     groups.set(key, group);
   });
   const ordered = [];
-  for (const tier of [2, 1, 0]) {
+  for (const tier of [3, 2, 1, 0]) {
     const ranked = [...groups.values()]
       .filter((group) => group.tier === tier)
       .sort((left, right) => right.priority - left.priority || left.index - right.index);

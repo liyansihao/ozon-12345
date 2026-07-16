@@ -335,7 +335,20 @@ test("explicitly promoted strict-derived searches join the verified priority tie
   assert.deepEqual(prioritizeSourceUrls([seller, derived], {
     freshSourceUrls: [derived],
     verifiedFreshSourceUrls: [seller, derived],
-  }), [derived, seller]);
+  }), [seller, derived]);
+});
+
+test("verified strict-success sellers outrank a higher-yield verified search page", () => {
+  const seller = "https://www.ozon.ru/seller/strict-winner/";
+  const search = "https://www.ozon.ru/search/?text=historical&is_global=true";
+  assert.deepEqual(prioritizeSourceUrls([search, seller], {
+    yieldRows: Array.from({ length: 5 }, (_, index) => ({
+      source_url: search,
+      sku: `winner-${index}`,
+      status: "published",
+    })),
+    verifiedFreshSourceUrls: [search, seller],
+  }), [seller, search]);
 });
 
 test("verified source variants finish their tier before ordinary sources", () => {
