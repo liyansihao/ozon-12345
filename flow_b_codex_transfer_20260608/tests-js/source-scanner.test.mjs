@@ -18,6 +18,7 @@ import {
   prioritizeFavoriteLinks,
   prioritizeSourceUrls,
   parseFavoriteProductSnapshot,
+  parseListingFavoriteSnapshot,
   requiresFavoriteSession,
   retainedReplayLimit,
   scanSourceWithPage,
@@ -624,6 +625,28 @@ test("listing cards reject only explicit non-pure modes before opening product d
   assert.equal(listingModeSkipReason("商品\n发货模式：暂无数据\n库存"), null);
   assert.equal(listingModeSkipReason("商品\n发货模式：--\n库存"), null);
   assert.equal(listingModeSkipReason("card without plugin telemetry"), null);
+});
+
+test("a complete exact-FBS listing card becomes a cheap favorite snapshot", () => {
+  assert.deepEqual(parseListingFavoriteSnapshot({
+    href: "https://www.ozon.ru/product/sample-3423207591/",
+    text: "Детский набор аксессуаров",
+    image_url: "https://ir.ozone.ru/s3/image.jpg",
+    source_url: "https://www.ozon.ru/seller/miaowu/?page=2",
+    card_text: "1099 ₽\nДетский набор аксессуаров\n发货模式：FBS\n库存",
+  }), {
+    sku: "3423207591",
+    coverImage: "https://ir.ozone.ru/s3/image.jpg",
+    price_info: { sell_price: 1099, currency: "RUB" },
+    title: "Детский набор аксессуаров",
+    seller_url: "https://www.ozon.ru/seller/miaowu/",
+  });
+  assert.equal(parseListingFavoriteSnapshot({
+    href: "https://www.ozon.ru/product/sample-1/",
+    text: "Unknown",
+    image_url: "https://ir.ozone.ru/s3/image.jpg",
+    card_text: "100 ₽\n发货模式：暂无数据",
+  }), null);
 });
 
 test("missing shipping mode is a deterministic rejection, not an infinite retry", () => {

@@ -864,6 +864,30 @@ export function parseFavoriteProductSnapshot({ url, title, ogTitle, ogImage, pri
   };
 }
 
+export function parseListingFavoriteSnapshot(link) {
+  const cardText = String(link?.card_text || "");
+  const mode = cardText.match(/(?:^|\n)\s*发货模式\s*[：:]\s*([^\n]+)/i)?.[1]?.trim() || "";
+  if (!isPureFbs(mode)) return null;
+  const sku = skuFromProductUrl(link?.href);
+  const coverImage = String(link?.image_url || "").trim();
+  const title = String(link?.text || "").trim();
+  const priceMatch = cardText.match(/([0-9][0-9\s\u00a0\u2009\u202f]*(?:[,.][0-9]+)?)\s*([¥₽₸])/);
+  const sellPrice = Number(String(priceMatch?.[1] || "")
+    .replace(/[\s\u00a0\u2009\u202f]/g, "")
+    .replace(",", "."));
+  if (!sku || !coverImage || !title || !(sellPrice > 0)) return null;
+  return {
+    sku,
+    coverImage,
+    price_info: {
+      sell_price: sellPrice,
+      currency: priceMatch[2] === "¥" ? "CNY" : priceMatch[2] === "₸" ? "KZT" : "RUB",
+    },
+    title,
+    seller_url: canonicalSellerUrl(link?.source_url),
+  };
+}
+
 async function favoriteCount(page) {
   const result = await retryMaoziPageFetch(() => page.evaluate(async () => {
     let token = "";
@@ -970,6 +994,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
       source_url: typeof link === "object" ? link?.source_url : null,
       text: typeof link === "object" ? link?.text : "",
       card_text: typeof link === "object" ? link?.card_text : "",
+      image_url: typeof link === "object" ? link?.image_url : "",
     });
   }
   const workerCount = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_WORKERS", envNumber(env, "FLOW_B_TAB_WORKERS", 4)));
@@ -1070,7 +1095,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           if (listingModeReason) throw new Error(`${listingModeReason}: SKU ${item.sku}`);
           const titleReason = favoriteTitleSkipReason(item.text);
           if (titleReason) throw new Error(`${titleReason}: SKU ${item.sku}`);
-          const productInfo = await loadProduct(page, item);
+          const productInfo = parseListingFavoriteSnapshot(item) || await loadProduct(page, item);
           const detailTitleReason = favoriteTitleSkipReason(productInfo.title);
           if (detailTitleReason) throw new Error(`${detailTitleReason}: SKU ${item.sku}`);
           const priceReason = favoritePriceSkipReason(productInfo, envNumber(env, "FLOW_B_MAX_SOURCE_PRICE_CNY", 1000));
@@ -1160,11 +1185,16 @@ async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSt
         height: document.body?.scrollHeight || 0,
         viewport: innerHeight,
         text: text.slice(0, 900),
-        links: [...document.querySelectorAll('a[href*="/product/"]')].map((anchor) => ({
-          href: String(anchor.href || "").split("?")[0],
-          text: String(anchor.innerText || anchor.title || "").trim().slice(0, 120),
-          card_text: String(anchor.closest('div[data-index]')?.innerText || "").trim().slice(0, 500),
-        })),
+        links: [...document.querySelectorAll('a[href*="/product/"]')].map((anchor) => {
+          const card = anchor.closest('div[data-index]');
+          const image = card?.querySelector('img[src]');
+          return {
+            href: String(anchor.href || "").split("?")[0],
+            text: String(anchor.innerText || anchor.title || "").trim().slice(0, 120),
+            card_text: String(card?.innerText || "").trim().slice(0, 500),
+            image_url: String(image?.currentSrc || image?.src || ""),
+          };
+        }),
       };
     });
     title = state.title;
@@ -1176,6 +1206,7 @@ async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSt
       links.set(link.href, {
         text: link.text || prior.text || "",
         card_text: link.card_text || prior.card_text || "",
+        image_url: link.image_url || prior.image_url || "",
       });
     }
     if (blocked) { stopReason = "blocked_or_empty"; break; }
