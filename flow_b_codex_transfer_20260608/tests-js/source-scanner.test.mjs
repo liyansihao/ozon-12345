@@ -63,6 +63,7 @@ import {
   deriveSearchSourceUrls,
   repeatedSubmittedSellerSourceVariants,
   repeatedSubmittedSellerSourceUrls,
+  deepVerifiedSellerSourceVariants,
   verifiedSellerSourceUrls,
   verifiedPrioritySourceUrls,
   filterProductiveSourceVariants,
@@ -1033,6 +1034,21 @@ test("repeated submitted seller feedback becomes bounded exploration only", () =
     && url.includes("sorting=rating")
     && url.includes("page=3")));
   assert.deepEqual(verifiedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/c/"]);
+});
+
+test("repeated strict-success sellers receive bounded page four and five variants", () => {
+  const rows = [
+    { status: "published", sku: "a-1", seller_url: "https://www.ozon.ru/seller/a/" },
+    { status: "published", sku: "a-2", seller_url: "https://www.ozon.ru/seller/a/?miniapp=1" },
+    { status: "published", sku: "b-1", seller_url: "https://www.ozon.ru/seller/b/" },
+  ];
+  const variants = deepVerifiedSellerSourceVariants(rows);
+  assert.equal(variants.length, 35);
+  assert.ok(variants.some((url) => url.includes("currency_price=500.000%3B")
+    && url.includes("sorting=discount")
+    && url.includes("page=5")));
+  assert.ok(variants.every((url) => !url.includes("/seller/b/")));
+  assert.ok(variants.every((url) => Number(new URL(url).searchParams.get("page") || 1) <= 5));
 });
 
 test("favorite preflight accepts only an explicit pure FBS mode", () => {

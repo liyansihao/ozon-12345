@@ -773,6 +773,39 @@ export function repeatedSubmittedSellerSourceVariants(yieldRows, minimumSubmitte
   return [...new Set(expanded)];
 }
 
+export function deepVerifiedSellerSourceVariants(
+  yieldRows,
+  minimumPublishedSkus = 2,
+  limit = 20,
+  resultPages = [2, 3, 4, 5],
+) {
+  const maximum = Math.max(0, Number(limit) || 0);
+  if (maximum === 0) return [];
+  const verified = new Set(verifiedSellerSourceUrls(yieldRows, minimumPublishedSkus));
+  const recentVerified = [];
+  const seen = new Set();
+  for (const row of [...(yieldRows || [])].reverse()) {
+    if (String(row?.status || "") !== "published") continue;
+    const seller = canonicalSellerUrl(row?.seller_url) || canonicalSellerUrl(row?.source_url);
+    if (!seller || !verified.has(seller) || seen.has(seller)) continue;
+    seen.add(seller);
+    recentVerified.push(seller);
+    if (recentVerified.length >= maximum) break;
+  }
+  const firstPages = expandFreshSellerSourceUrls(recentVerified);
+  const expanded = [...firstPages];
+  const pages = [...new Set((resultPages || []).map(Number)
+    .filter((page) => Number.isInteger(page) && page > 1 && page <= 5))];
+  for (const source of firstPages) {
+    for (const page of pages) {
+      const url = new URL(source);
+      url.searchParams.set("page", String(page));
+      expanded.push(url.toString());
+    }
+  }
+  return [...new Set(expanded)];
+}
+
 export function verifiedPrioritySourceUrls({
   verifiedFreshUrls = [],
   verifiedHistoricalUrls = [],
@@ -1724,6 +1757,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     envNumber(env, "FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED", 2),
   );
   const verifiedSellerSet = new Set(verifiedSellerUrls);
+  const deepVerifiedSellerVariants = deepVerifiedSellerSourceVariants(
+    yieldRows,
+    envNumber(env, "FLOW_B_DEEP_VERIFIED_SELLER_MIN_PUBLISHED", 2),
+    envNumber(env, "FLOW_B_DEEP_VERIFIED_SELLERS", 20),
+    String(env.FLOW_B_DEEP_VERIFIED_SELLER_PAGES || "2,3,4,5")
+      .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 1),
+  );
   const submittedSellerUrls = repeatedSubmittedSellerSourceUrls(
     yieldRows,
     envNumber(env, "FLOW_B_SUBMITTED_SELLER_MIN_SKUS", 2),
@@ -1742,6 +1782,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...expandHighYieldSourceUrls([
         ...inputUrls,
         ...verifiedSellerUrls,
+        ...deepVerifiedSellerVariants,
         ...submittedSellerSourceVariants,
         ...derivedSearchUrls,
       ], yieldRows),
@@ -1764,7 +1805,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     ],
     qualifiedFreshSourceUrls: submittedSellerSourceVariants,
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
-      verifiedFreshUrls: [...classifiedFreshUrls.verifiedSellerUrls, ...publishedSourcePages],
+      verifiedFreshUrls: [
+        ...classifiedFreshUrls.verifiedSellerUrls,
+        ...deepVerifiedSellerVariants,
+        ...publishedSourcePages,
+      ],
       verifiedHistoricalUrls: verifiedSellerUrls,
       derivedSearchUrls,
       prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
