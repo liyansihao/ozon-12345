@@ -710,7 +710,15 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     .map(([key]) => key));
   const publishedGroups = [];
   const submittedGroups = [];
-  for (const row of [...(yieldRows || [])].reverse()) {
+  const recencyOrderedRows = [...(yieldRows || [])]
+    .map((row, order) => ({
+      row,
+      order,
+      time: Date.parse(row?.at || row?.timestamp || "") || 0,
+    }))
+    .sort((left, right) => right.time - left.time || right.order - left.order)
+    .map(({ row }) => row);
+  for (const row of recencyOrderedRows) {
     const group = queryGroupForRow(row);
     if (!group) continue;
     if (row?.status === "published") publishedGroups.push(group);

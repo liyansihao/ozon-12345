@@ -368,6 +368,14 @@ test("derived search budget uses the most recent strict publications first", () 
   assert.equal(new URL(urls[0]).searchParams.get("text"), "новый успешный товар");
 });
 
+test("derived search recency follows event time across concatenated run files", () => {
+  const urls = deriveSearchSourceUrls([
+    { at: "2026-07-16T15:30:00.000Z", status: "published", title: "Комплект трусов бикини" },
+    { at: "2026-07-15T09:00:00.000Z", status: "published", title: "Уховарка нержавеющая сталь" },
+  ], 1);
+  assert.equal(new URL(urls[0]).searchParams.get("text"), "комплект трусов бикини");
+});
+
 test("derived search discovery round-robins successful titles before using a second query variant", () => {
   const urls = deriveSearchSourceUrls([
     { status: "published", title: "Носки девочек хлопковые мягкие" },
