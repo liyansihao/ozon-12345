@@ -718,15 +718,24 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     }))
     .sort((left, right) => right.time - left.time || right.order - left.order)
     .map(({ row }) => row);
+  const seenEvidence = new Set();
   for (const row of recencyOrderedRows) {
     const group = queryGroupForRow(row);
     if (!group) continue;
-    if (row?.status === "published") publishedGroups.push(group);
-    else if (row?.status === "submitted" && repeatedSubmittedSources.has(sourceYieldKey(row?.source_url))) {
+    const status = String(row?.status || "");
+    const evidenceId = String(row?.sku || "").trim()
+      || String(row?.title || "").trim().toLowerCase();
+    const evidenceKey = `${status}\0${evidenceId}`;
+    if (!evidenceId || seenEvidence.has(evidenceKey)) continue;
+    if (status === "published") {
+      seenEvidence.add(evidenceKey);
+      publishedGroups.push(group);
+    } else if (status === "submitted" && repeatedSubmittedSources.has(sourceYieldKey(row?.source_url))) {
+      seenEvidence.add(evidenceKey);
       submittedGroups.push(group);
     }
   }
-  const recentGroupLimit = Math.max(2, Math.floor(maximum / (bands.length * pages.length * 2)));
+  const recentGroupLimit = Math.max(2, Math.ceil(maximum / (bands.length * pages.length * 2)));
   const leadingSubmittedLimit = Math.max(1, Math.floor(recentGroupLimit / 4));
   let submittedSlots = Math.min(submittedGroups.length, leadingSubmittedLimit);
   let publishedSlots = Math.min(publishedGroups.length, recentGroupLimit - submittedSlots);

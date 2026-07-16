@@ -376,6 +376,30 @@ test("derived search recency follows event time across concatenated run files", 
   assert.equal(new URL(urls[0]).searchParams.get("text"), "комплект трусов бикини");
 });
 
+test("duplicate strict evidence from run and history does not crowd out another winner", () => {
+  const recent = { at: "2026-07-16T15:30:00.000Z", status: "published", sku: "recent", title: "Комплект трусов бикини" };
+  const urls = deriveSearchSourceUrls([
+    recent,
+    { ...recent },
+    { at: "2026-07-16T15:20:00.000Z", status: "published", sku: "older", title: "Заколка для волос" },
+  ], 2);
+  assert.deepEqual(urls.map((url) => new URL(url).searchParams.get("text")), [
+    "комплект трусов бикини",
+    "заколка волос",
+  ]);
+});
+
+test("derived search group budget rounds up before allocating sibling query variants", () => {
+  const rows = Array.from({ length: 3 }, (_, index) => ({
+    at: new Date(Date.parse("2026-07-16T15:00:00.000Z") + index * 1000).toISOString(),
+    status: "published",
+    sku: `winner-${index}`,
+    title: `Товар победитель ${"а".repeat(index + 4)}`,
+  }));
+  const urls = deriveSearchSourceUrls(rows, 5);
+  assert.ok(urls.slice(0, 3).some((url) => new URL(url).searchParams.get("text") === `товар победитель ${"а".repeat(4)}`));
+});
+
 test("derived search discovery round-robins successful titles before using a second query variant", () => {
   const urls = deriveSearchSourceUrls([
     { status: "published", title: "Носки девочек хлопковые мягкие" },
