@@ -1892,6 +1892,14 @@ export function fatalSourceBatchError(rows = []) {
   return new Error(String(fatal.stop_reason || "fatal browser source error").replace(/^error:\s*/i, ""));
 }
 
+export function completedSourceUrls(records = []) {
+  return new Set((records || []).filter((row) => {
+    if (!row?.source_url || row?.blocked) return false;
+    return !/timed?\s*out|timeout|soft block|access denied|captcha|no connection|network|HTTP\s*0/i
+      .test(String(row?.stop_reason || ""));
+  }).map((row) => row.source_url));
+}
+
 export async function scanSources({ context, urlsFile, outFile, env = process.env, log = console.log }) {
   const emit = createScannerLogger(log, env.FLOW_B_LOG_LEVEL || "verbose");
   const inputPath = path.resolve(urlsFile);
@@ -2004,7 +2012,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     const parsed = JSON.parse(await fs.readFile(outputPath, "utf8"));
     if (Array.isArray(parsed)) records = parsed;
   } catch {}
-  const done = new Set(records.map((row) => row.source_url).filter(Boolean));
+  const done = completedSourceUrls(records);
   const highYieldSources = yieldRows.filter((row) => row?.status === "published").map((row) => row.source_url);
   const pending = prioritizeSourceUrls(urls.filter((url) => !done.has(url)), {
     highYieldSources,

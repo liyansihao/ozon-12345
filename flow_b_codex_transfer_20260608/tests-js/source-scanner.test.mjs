@@ -77,6 +77,7 @@ import {
   expandRepeatedPublishedDiscoveryPageFour,
   fullFunnelSourceScores,
   fatalSourceBatchError,
+  completedSourceUrls,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
@@ -1619,6 +1620,17 @@ test("source scan persistence counts only unique unattempted limited links", () 
     { href: "https://www.ozon.ru/product/b-201/", source_url: sourceB },
   ], new Set(["102"]));
   assert.deepEqual(Object.fromEntries(counts), { [sourceA]: 1, [sourceB]: 1 });
+});
+
+test("transient source timeouts and soft blocks remain retryable after their evidence is persisted", () => {
+  const completed = "https://www.ozon.ru/seller/completed/";
+  const timedOut = "https://www.ozon.ru/seller/timed-out/";
+  const blocked = "https://www.ozon.ru/seller/blocked/";
+  assert.deepEqual([...completedSourceUrls([
+    { source_url: completed, stop_reason: "link_target_reached", cumulative_product_link_count: 48 },
+    { source_url: timedOut, stop_reason: `error: source page lifecycle ${timedOut} timed out after 60000ms` },
+    { source_url: blocked, blocked: true, stop_reason: "blocked_or_empty" },
+  ])], [completed]);
 });
 
 test("summary scanner logging suppresses per-SKU noise but retains batch evidence", () => {
