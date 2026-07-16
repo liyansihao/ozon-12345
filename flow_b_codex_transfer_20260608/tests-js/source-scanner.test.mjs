@@ -675,6 +675,17 @@ test("final publications outweigh FBS-only source evidence", () => {
   ]).map((row) => row.source_url), [published.source_url, fbsOnly.source_url]);
 });
 
+test("strict submitted source evidence is useful but ranks below final publications", () => {
+  const fbsOnly = { source_url: "https://www.ozon.ru/seller/fbs-only/" };
+  const submitted = { source_url: "https://www.ozon.ru/seller/submitted/" };
+  const published = { source_url: "https://www.ozon.ru/seller/published/" };
+  assert.deepEqual(orderRowsBySourceYield([fbsOnly, submitted, published], [
+    ...Array.from({ length: 5 }, (_, index) => ({ source_url: fbsOnly.source_url, sku: `fbs-${index}`, status: "favorited" })),
+    { source_url: submitted.source_url, sku: "submitted-1", status: "submitted" },
+    { source_url: published.source_url, sku: "published-1", status: "published" },
+  ]).map((row) => row.source_url), [published.source_url, submitted.source_url, fbsOnly.source_url]);
+});
+
 test("equal-yield retained variants prefer the higher price floor", () => {
   const low = { source_url: "https://www.ozon.ru/seller/example/?currency_price=50.000%3B" };
   const high = { source_url: "https://www.ozon.ru/seller/example/?currency_price=500.000%3B" };

@@ -737,22 +737,26 @@ export function orderRowsBySourceYield(rows, yieldRows = []) {
   for (const row of yieldRows) {
     const key = sourceYieldKey(row?.source_url);
     if (!key || row?.status === "ignored") continue;
-    const value = stats.get(key) || { attempted: 0, published: 0, outcomeWeight: 0 };
+    const value = stats.get(key) || { attempted: 0, published: 0, submitted: 0, outcomeWeight: 0 };
     value.attempted += 1;
     if (row?.status === "published") {
       value.published += 1;
       value.outcomeWeight += 3;
+    } else if (row?.status === "submitted") {
+      value.submitted += 1;
+      value.outcomeWeight += 1.5;
     } else if (row?.status === "favorited") {
       value.outcomeWeight += 0.5;
     }
     stats.set(key, value);
   }
   return [...(rows || [])].map((row, index) => {
-    const value = stats.get(sourceYieldKey(row?.source_url)) || { attempted: 0, published: 0, outcomeWeight: 0 };
+    const value = stats.get(sourceYieldKey(row?.source_url)) || { attempted: 0, published: 0, submitted: 0, outcomeWeight: 0 };
     return {
       row,
       index,
       published: value.published,
+      submitted: value.submitted,
       score: (value.outcomeWeight + 0.5) / (value.attempted + 2),
       priceFloor: (() => {
         try { return Number.parseFloat(new URL(row?.source_url).searchParams.get("currency_price")) || 0; }
@@ -761,6 +765,7 @@ export function orderRowsBySourceYield(rows, yieldRows = []) {
     };
   }).sort((left, right) => right.score - left.score
     || right.published - left.published
+    || right.submitted - left.submitted
     || right.priceFloor - left.priceFloor
     || left.index - right.index)
     .map(({ row }) => row);
