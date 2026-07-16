@@ -564,7 +564,7 @@ export function expandNextPublishedDiscoveryPages(yieldRows = []) {
     try { url = new URL(String(row?.source_url || "")); } catch { continue; }
     if (!isSearchSource(url) && !isHighlightSource(url)) continue;
     const currentPage = Number(url.searchParams.get("page") || 1);
-    if (!Number.isInteger(currentPage) || currentPage < 1 || currentPage >= 4) continue;
+    if (!Number.isInteger(currentPage) || currentPage < 1 || currentPage >= 5) continue;
     url.hash = "";
     url.searchParams.delete("miniapp");
     url.searchParams.set("page", String(currentPage + 1));

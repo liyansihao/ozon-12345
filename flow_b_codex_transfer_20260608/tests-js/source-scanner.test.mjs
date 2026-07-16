@@ -289,7 +289,7 @@ test("strictly published sources expand into deeper result pages", () => {
   ]);
 });
 
-test("strict discovery sources probe only their exact next page through page four", () => {
+test("strict discovery sources probe only their exact next page through page five", () => {
   const highlight = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating";
   const pageTwoSearch = "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=2";
   const pageThreeSearch = "https://www.ozon.ru/search/?text=%D0%BD%D0%BE%D1%81%D0%BA%D0%B8&is_global=true&currency_price=500.000%3B&page=3";
@@ -305,6 +305,7 @@ test("strict discovery sources probe only their exact next page through page fou
     "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=150.000%3B&sorting=rating&page=2",
     "https://www.ozon.ru/search/?text=%D0%BA%D0%B5%D0%BF%D0%BA%D0%B0&is_global=true&currency_price=150.000%3B&page=3",
     "https://www.ozon.ru/search/?text=%D0%BD%D0%BE%D1%81%D0%BA%D0%B8&is_global=true&currency_price=500.000%3B&page=4",
+    "https://www.ozon.ru/search/?text=%D0%BD%D0%BE%D1%81%D0%BA%D0%B8&is_global=true&currency_price=500.000%3B&page=5",
   ]);
 });
 
