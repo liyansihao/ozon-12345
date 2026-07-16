@@ -44,6 +44,7 @@ export function parseCostOutput(text, sellPrice) {
     return { ok: false, reason: "filtered first-page price spread greater than five" };
   }
   if (!Number.isFinite(sale) || sale <= 0) return { ok: false, reason: "invalid sale price" };
+  if (cost < sale * 0.02) return { ok: false, reason: "1688 cost below 2% of sale price is not reliable" };
   if (cost >= sale * 0.85) return { ok: false, reason: "1688 cost is at least 85% of sale price" };
   return { ok: true, cost, source, prices };
 }

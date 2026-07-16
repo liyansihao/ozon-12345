@@ -50,8 +50,21 @@ test("cluster-filtered sources retain the existing spread behavior", () => {
     "P70_COST 12",
     "COST_SOURCE search_first_page_cluster_p70_similarity_filtered",
     "FILTERED_FIRST_PAGE_PRICES [1, 6, 12]",
+    "SELECTED_PRICE_CLUSTER {\"count\":3,\"strong_count\":1,\"score_sum\":3,\"rows\":[{\"level\":\"strong\",\"score\":3}]}",
   ].join("\n"), 100);
   assert.equal(result.ok, true);
+});
+
+test("rejects an implausibly low clustered cost that indicates an accessory mismatch", () => {
+  const result = parseCostOutput([
+    "P70_COST 14",
+    "COST_SOURCE search_first_page_cluster_p70_similarity_filtered",
+    "FILTERED_FIRST_PAGE_PRICES [10, 12.99, 14, 16.5]",
+    "SELECTED_PRICE_CLUSTER {\"count\":4,\"strong_count\":0,\"score_sum\":0,\"avg_score\":0,\"rows\":[{\"title\":\"iPad保护套\",\"level\":\"none\",\"score\":0}]}",
+  ].join("\n"), 3687.17);
+
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /below 2% of sale price/i);
 });
 
 test("malformed bare price tokens invalidate the evidence", () => {
