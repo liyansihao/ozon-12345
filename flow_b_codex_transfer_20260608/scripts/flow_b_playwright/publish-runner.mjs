@@ -867,6 +867,8 @@ export function createPublishRunner({
         if (entry.status === "failed" && isTerminalSubmittedFailure(entry)) return false;
         if (Number(entry.data?.store_id) !== Number(storeId)) return false;
         if (entry.data?.submitted !== true && entry.data?.submission_pending !== true) return false;
+        const importStatus = normalizedImportStatus(entry.data?.import_log || entry.data?.final_result?.import_log);
+        if (["all_imported", "imported", "nested_imported"].includes(importStatus)) return false;
         const submittedAt = Date.parse(entry.data?.prepared_at || entry.data?.selected_at || entry.data?.submitted_at || "");
         return Number.isFinite(submittedAt) && now().getTime() - submittedAt >= Math.max(0, Number(pendingStoreStallMs) || 0);
       });

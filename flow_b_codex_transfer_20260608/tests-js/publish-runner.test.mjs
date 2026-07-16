@@ -370,6 +370,63 @@ test("a stalled pending-import backlog keeps reconciliation but routes fresh wor
   assert.ok(result.store_switches.some((event) => event.from_store_id === 106637 && event.to_store_id === 106640 && event.reason === "submission-stall"));
 });
 
+test("an imported Ozon moderation backlog does not falsely stall fresh store submissions", async () => {
+  const state = fakeState({
+    "moderating-1": {
+      status: "processing",
+      data: {
+        store_id: 106637,
+        submitted: true,
+        prepared_at: "2026-07-15T09:00:00.000Z",
+        reason: "online-product-not-selling",
+        import_log: { import_status: "all_imported" },
+      },
+    },
+    "moderating-2": {
+      status: "processing",
+      data: {
+        store_id: 106637,
+        submitted: true,
+        prepared_at: "2026-07-15T09:01:00.000Z",
+        reason: "online-product-not-selling",
+        import_log: { import_status: "all_imported" },
+      },
+    },
+  });
+  const shopIds = [];
+  const client = clientFor([{ id: 211, sku: 211 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽三号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+    findImportLog: async ({ sku, offerId }) => String(sku).startsWith("moderating-")
+      ? ({ sku, offer_id: offerId, import_status: "all_imported" })
+      : ({ sku, offer_id: offerId, import_status: "all_imported" }),
+    findOnlineProduct: async ({ offerId }) => String(offerId).includes("moderating-")
+      ? ({ sku: 0, offer_id: offerId, online_status: "unknown", stock: 0 })
+      : ({ sku: 900001, offer_id: offerId, online_status: "selling", stock: 1 }),
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    pendingStoreStallMs: 60_000,
+    pendingStoreStallCount: 2,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.deepEqual(shopIds, [106637]);
+  assert.equal(result.store_switches.some((event) => event.reason === "submission-stall"), false);
+});
+
 test("runner rechecks a newly stalled import backlog between fresh publish batches", async () => {
   let current = new Date("2026-07-15T10:00:00.000Z");
   const state = fakeState();
