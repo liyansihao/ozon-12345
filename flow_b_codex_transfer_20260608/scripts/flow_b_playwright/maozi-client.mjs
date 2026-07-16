@@ -170,7 +170,11 @@ export function createMaoziClient({ transport }) {
       });
       const data = requireSuccess(response, "online product lookup");
       const rows = listRows(data, "online product lookup");
-      return rows.find((row) => String(row?.offer_id) === String(offerId)) || null;
+      const offerRows = rows.filter((row) => String(row?.offer_id) === String(offerId));
+      const targetShopId = Number(shopId);
+      const exactStoreRow = offerRows.find((row) => Number(row?.shop_id) === targetShopId);
+      if (exactStoreRow) return exactStoreRow;
+      return offerRows.find((row) => !(Number(row?.shop_id) > 0)) || null;
     },
 
     async updateProductStock({ shopId, product, warehouseId, stock = 1 } = {}) {

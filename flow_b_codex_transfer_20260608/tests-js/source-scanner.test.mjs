@@ -537,7 +537,7 @@ test("Ozon detail metadata becomes a complete Maozi favorite payload", () => {
 });
 
 test("verified FBS seller feedback becomes a unique next-round source", () => {
-  assert.deepEqual(verifiedSellerSourceUrls([
+  const rows = [
     { status: "favorited", seller_url: "https://www.ozon.ru/seller/b/?miniapp=1" },
     { status: "published", sku: "a-1", seller_url: "https://www.ozon.ru/seller/a/" },
     { status: "published", sku: "a-2", seller_url: "https://www.ozon.ru/seller/a/?miniapp=1" },
@@ -545,7 +545,13 @@ test("verified FBS seller feedback becomes a unique next-round source", () => {
     { status: "published", sku: "d-1", source_url: "https://www.ozon.ru/seller/d/?currency_price=50.000%3B" },
     { status: "published", sku: "d-2", source_url: "https://www.ozon.ru/seller/d/" },
     { status: "rejected", seller_url: "https://www.ozon.ru/seller/c/" },
-  ]), ["https://www.ozon.ru/seller/a/", "https://www.ozon.ru/seller/d/"]);
+  ];
+  assert.deepEqual(verifiedSellerSourceUrls(rows), ["https://www.ozon.ru/seller/a/", "https://www.ozon.ru/seller/d/"]);
+  assert.deepEqual(verifiedSellerSourceUrls(rows, 1), [
+    "https://www.ozon.ru/seller/a/",
+    "https://www.ozon.ru/seller/b/",
+    "https://www.ozon.ru/seller/d/",
+  ]);
 });
 
 test("favorite preflight accepts only an explicit pure FBS mode", () => {

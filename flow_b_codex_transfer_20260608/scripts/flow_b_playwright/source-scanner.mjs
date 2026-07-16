@@ -521,7 +521,8 @@ function canonicalSellerUrl(value) {
   }
 }
 
-export function verifiedSellerSourceUrls(yieldRows) {
+export function verifiedSellerSourceUrls(yieldRows, minimumPublishedSkus = 2) {
+  const minimum = Math.max(1, Number(minimumPublishedSkus) || 2);
   const sellers = new Map();
   for (const row of yieldRows || []) {
     if (String(row?.status || "") !== "published") continue;
@@ -532,7 +533,7 @@ export function verifiedSellerSourceUrls(yieldRows) {
     skus.add(sku);
     sellers.set(url, skus);
   }
-  return [...sellers].filter(([, skus]) => skus.size >= 2).map(([url]) => url);
+  return [...sellers].filter(([, skus]) => skus.size >= minimum).map(([url]) => url);
 }
 
 export function verifiedPrioritySourceUrls({
@@ -1214,7 +1215,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     derivedPriceBands,
     derivedResultPages,
   );
-  const verifiedSellerUrls = verifiedSellerSourceUrls(yieldRows);
+  const verifiedSellerUrls = verifiedSellerSourceUrls(
+    yieldRows,
+    envNumber(env, "FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED", 2),
+  );
   const publishedSourcePages = expandPublishedSourcePages(
     [],
     yieldRows,
