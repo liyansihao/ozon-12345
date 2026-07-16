@@ -399,6 +399,15 @@ test("derived searches prefer a repeatable full-funnel source over a newer one-o
   assert.equal(new URL(urls[0]).searchParams.get("text"), "комплект трусов бикини");
 });
 
+test("derived searches replay the exact productive search phrase before title siblings", () => {
+  const source = "https://www.ozon.ru/search/?text=%D1%82%D1%80%D1%83%D1%81%D0%BE%D0%B2+%D0%B1%D1%80%D0%B8%D1%84%D1%8B&is_global=true&currency_price=150.000%3B";
+  const urls = deriveSearchSourceUrls([
+    { status: "published", sku: "winner-1", source_url: source, title: "Комплект трусов бикини, 7 шт" },
+    { status: "published", sku: "winner-2", source_url: `${source}&page=2`, title: "Нижнее белье хлопковое, 3 шт" },
+  ], 1);
+  assert.equal(new URL(urls[0]).searchParams.get("text"), "трусов брифы");
+});
+
 test("duplicate strict evidence from run and history does not crowd out another winner", () => {
   const recent = { at: "2026-07-16T15:30:00.000Z", status: "published", sku: "recent", title: "Комплект трусов бикини" };
   const urls = deriveSearchSourceUrls([

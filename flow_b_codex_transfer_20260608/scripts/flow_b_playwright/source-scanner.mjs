@@ -691,13 +691,21 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     const words = String(row?.title || "").toLowerCase().match(/[а-яё]{4,}/gi) || [];
     const terms = words.filter((word) => !stopWords.has(word)).slice(0, 5);
     if (terms.length < 2) return null;
+    let observedQuery = null;
+    try {
+      const queryWords = String(new URL(String(row?.source_url || "")).searchParams.get("text") || "")
+        .toLowerCase().match(/[а-яё]{4,}/gi) || [];
+      const queryTerms = queryWords.filter((word) => !stopWords.has(word)).slice(0, 5);
+      if (queryTerms.length >= 2) observedQuery = queryTerms.join(" ");
+    } catch {}
     const candidates = [
+      observedQuery ? observedQuery.split(" ") : null,
       terms.slice(0, 3),
       terms.slice(0, 2),
       terms.slice(1, 3),
       terms.slice(0, 4),
       terms.slice(1, 4),
-    ].filter((candidate) => candidate.length >= 2).map((candidate) => candidate.join(" "));
+    ].filter((candidate) => candidate?.length >= 2).map((candidate) => candidate.join(" "));
     return candidates.length > 0 ? [...new Set(candidates)] : null;
   };
   const submittedSkusBySource = new Map();
