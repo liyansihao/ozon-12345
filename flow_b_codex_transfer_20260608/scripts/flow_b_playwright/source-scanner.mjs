@@ -895,27 +895,40 @@ export function verifiedPrioritySourceUrls({
 export function fullFunnelSourceScores(rows) {
   const sources = new Map();
   const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
-  for (const row of rows || []) {
+  (rows || []).forEach((row, order) => {
     const key = sourceYieldKey(row?.source_url);
     const sku = String(row?.sku || "").trim();
     const rank = outcomeRank[row?.status] || 0;
-    if (!key || !sku || !rank) continue;
+    if (!key || !sku || !rank) return;
     const outcomes = sources.get(key) || new Map();
-    outcomes.set(sku, Math.max(outcomes.get(sku) || 0, rank));
+    const previous = outcomes.get(sku);
+    outcomes.set(sku, {
+      rank: Math.max(previous?.rank || 0, rank),
+      time: Math.max(previous?.time || 0, Date.parse(row?.at || row?.timestamp || "") || 0),
+      order: Math.max(previous?.order ?? -1, order),
+    });
     sources.set(key, outcomes);
-  }
-  return new Map([...sources].map(([key, outcomes]) => {
-    const attempted = outcomes.size;
-    const published = [...outcomes.values()].filter((rank) => rank === outcomeRank.published).length;
-    const submitted = [...outcomes.values()].filter((rank) => rank === outcomeRank.submitted).length;
-    const pureFbs = [...outcomes.values()].filter((rank) => rank === outcomeRank.favorited).length;
+  });
+  const scoreOutcomes = (key, values) => {
+    const attempted = values.length;
+    const published = values.filter(({ rank }) => rank === outcomeRank.published).length;
+    const submitted = values.filter(({ rank }) => rank === outcomeRank.submitted).length;
+    const pureFbs = values.filter(({ rank }) => rank === outcomeRank.favorited).length;
     const qualifiedYield = published + submitted * 0.65 + pureFbs * 0.35;
     const targetYield = isPriceBandedSource(key) ? 0.2 : 0.1;
-    const score = ((qualifiedYield - attempted * targetYield) / (attempted + 5)) * 100_000
+    return ((qualifiedYield - attempted * targetYield) / (attempted + 5)) * 100_000
       + Math.log1p(published) * 1000
       + Math.log1p(submitted) * 500
       + Math.log1p(pureFbs) * 100;
-    return [key, score];
+  };
+  return new Map([...sources].map(([key, outcomes]) => {
+    const values = [...outcomes.values()];
+    const lifetimeScore = scoreOutcomes(key, values);
+    const recent = [...values]
+      .sort((left, right) => right.time - left.time || right.order - left.order)
+      .slice(0, 6);
+    const recentScore = recent.length >= 4 ? scoreOutcomes(key, recent) : Number.NEGATIVE_INFINITY;
+    return [key, Math.max(lifetimeScore, recentScore)];
   }));
 }
 
@@ -961,6 +974,7 @@ function exhaustedSourceFamilyPenalties(rows) {
       && recent.length >= 4
       && recent.slice(0, 4).every((event) => event.explicitNonPureFbs)) return [[key, -500_000]];
     if (recent.length >= dryThreshold && recentProductive / recent.length < minimumYield) return [[key, -500_000]];
+    if (recent.length >= 4 && recentProductive / recent.length >= minimumYield) return [];
     return attempted >= dryThreshold && productive / attempted < minimumYield ? [[key, -250_000]] : [];
   }));
 }

@@ -444,6 +444,34 @@ test("full-funnel source yield penalizes exhausted high-volume sources", () => {
   assert.deepEqual(prioritizeSourceUrls([exhausted, fresh], { yieldRows: rows }), [fresh, exhausted]);
 });
 
+test("a recovered hot source is ranked by its recent unique outcomes instead of stale lifetime failures", () => {
+  const recovered = "https://www.ozon.ru/search/?text=underwear&is_global=true&currency_price=1000.000%3B";
+  const merelyStable = "https://www.ozon.ru/search/?text=accessories&is_global=true&currency_price=500.000%3B";
+  const oldFailures = Array.from({ length: 60 }, (_, index) => ({
+    at: new Date(Date.parse("2026-07-14T00:00:00.000Z") + index * 1000).toISOString(),
+    source_url: recovered,
+    sku: `old-failure-${index}`,
+    status: "rejected",
+  }));
+  const stableRows = Array.from({ length: 6 }, (_, index) => ({
+    at: new Date(Date.parse("2026-07-15T00:00:00.000Z") + index * 1000).toISOString(),
+    source_url: merelyStable,
+    sku: `stable-${index}`,
+    status: index < 3 ? "published" : "rejected",
+  }));
+  const recentRecovery = Array.from({ length: 4 }, (_, index) => ({
+    at: new Date(Date.parse("2026-07-16T15:00:00.000Z") + index * 1000).toISOString(),
+    source_url: `${recovered}&page=${index + 4}`,
+    sku: `recent-win-${index}`,
+    status: "published",
+  }));
+
+  assert.deepEqual(prioritizeSourceUrls([merelyStable, recovered], {
+    yieldRows: [...oldFailures, ...stableRows, ...recentRecovery],
+    verifiedFreshSourceUrls: [merelyStable, recovered],
+  }), [recovered, merelyStable]);
+});
+
 test("full-funnel source yield promotes repeated pure-FBS favorites over rejected sources", () => {
   const rejected = "https://www.ozon.ru/seller/rejected/";
   const pureFbs = "https://www.ozon.ru/seller/pure-fbs/";
