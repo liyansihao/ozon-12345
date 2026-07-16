@@ -970,14 +970,24 @@ export function createPublishRunner({
             const existing = confirmed.online_product;
             if (!confirmed.ok || !existing) {
               const reason = confirmed.reason || "reconciliation-online-product-missing";
-              await state.transition(sku, "failed", {
+              const retryablePending = [
+                "publish-final-status-timeout",
+                "online-product-not-selling",
+                "reconciliation-online-product-missing",
+              ].includes(reason);
+              const reconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0) + 1;
+              await state.transition(sku, retryablePending ? "processing" : "failed", {
                 ...item,
                 reason,
                 import_log: importLog,
                 final_result: confirmed,
                 submitted: true,
+                ...(retryablePending ? {
+                  reconcile_attempts: reconcileAttempts,
+                  next_reconcile_at: new Date(now().getTime() + Math.min(60_000, 10_000 + reconcileAttempts * 5_000)).toISOString(),
+                } : {}),
               });
-              return { status: "failed", sku, reason };
+              return { status: retryablePending ? "ignored" : "failed", sku, reason };
             }
             await state.recordPublished({
               ...item,
