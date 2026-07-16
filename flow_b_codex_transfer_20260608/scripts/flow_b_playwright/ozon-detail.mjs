@@ -108,6 +108,8 @@ export function createOzonDetailProvider({
             title: document.title,
             text: document.body?.innerText || "",
             webPriceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
+            sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
+              || document.querySelector('a[href*="/seller/"]')?.href || "",
           })).catch(() => null);
           const diagnostic = `${payload?.title || ""} ${payload?.text?.slice(0, 1000) || ""}`;
           if (/доступ ограничен|access denied|captcha/i.test(diagnostic)) throw new Error(`Ozon detail is blocked for SKU ${sku}`);
@@ -123,6 +125,7 @@ export function createOzonDetailProvider({
           ...parseOzonDetailText(payload.text, fallback, payload.webPriceText),
           detail_url: payload.url,
           detail_title: payload.title,
+          seller_url: String(payload.sellerUrl || "").trim() || null,
         };
         adaptive.recordSuccess();
         return result;

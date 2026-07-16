@@ -52,6 +52,7 @@ test("Playwright detail provider reuses its page until the pool closes", async (
       url: "https://www.ozon.ru/product/test-123/",
       title: "Ozon item",
       text: "title\n¥ 99\n发货模式： FBS\n跟卖最低价： ¥ 80\n选品标签：x",
+      sellerUrl: "https://www.ozon.ru/seller/high-yield-123/?miniapp=1",
     }),
     close: async () => { closed = true; },
   };
@@ -60,6 +61,7 @@ test("Playwright detail provider reuses its page until the pool closes", async (
   assert.equal(detail.mode, "FBS");
   assert.equal(detail.follow_min, 80);
   assert.equal(detail.detail_url, "https://www.ozon.ru/product/test-123/");
+  assert.equal(detail.seller_url, "https://www.ozon.ru/seller/high-yield-123/?miniapp=1");
   assert.equal(closed, false);
   await provider.close();
   assert.equal(closed, true);

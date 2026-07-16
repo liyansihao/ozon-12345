@@ -546,6 +546,7 @@ export function createPublishRunner({
         client.getCategoryBySku(sku),
       ]));
       const detail = { ...item, ...(detailResult || {}) };
+      if (!item.seller_url && detail.seller_url) item.seller_url = detail.seller_url;
 
       // Reuse the central policy for mode/category checks before paying the 1688 cost.
       const earlyReason = policy.preflightSkipReason({ ...detail, economy: ECONOMY_SENTINEL });
