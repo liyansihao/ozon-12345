@@ -155,7 +155,7 @@ export function createMaoziClient({ transport }) {
     async findImportLog({ shopId, sku, offerId } = {}) {
       const response = await transport(ENDPOINTS.importLogs, {
         method: "GET",
-        query: { page: 1, page_size: 10, shop_id: shopId, sku: String(sku ?? "") },
+        query: { page: 1, page_size: 100, shop_id: shopId, sku: String(sku ?? "") },
       });
       const data = requireSuccess(response, "import logs lookup");
       const rows = listRows(data, "import logs lookup");
@@ -166,7 +166,7 @@ export function createMaoziClient({ transport }) {
     async findOnlineProduct({ shopId, offerId } = {}) {
       const response = await transport(ENDPOINTS.onlineProducts, {
         method: "GET",
-        query: { page: 1, page_size: 10, shop_id: shopId, offer_id: String(offerId ?? "") },
+        query: { page: 1, page_size: 100, shop_id: shopId, offer_id: String(offerId ?? "") },
       });
       const data = requireSuccess(response, "online product lookup");
       const rows = listRows(data, "online product lookup");

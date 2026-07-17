@@ -207,13 +207,13 @@ test("client only treats explicit Maozi publish success as success", async () =>
 test("client verifies the final ERP import log and exact online offer", async () => {
   const transport = makeTransport({
     "/api.product.import_logs/index": (path, request) => {
-      assert.deepEqual(request.query, { page: 1, page_size: 10, shop_id: 104965, sku: "3301105092" });
+      assert.deepEqual(request.query, { page: 1, page_size: 100, shop_id: 104965, sku: "3301105092" });
       return { status: 200, json: { code: 1, data: { data: [
         { sku: 3301105092, offer_id: "mz-140726-105092", import_status: "all_imported" },
       ] } } };
     },
     "/api.product.online/lists": (path, request) => {
-      assert.deepEqual(request.query, { page: 1, page_size: 10, shop_id: 104965, offer_id: "mz-140726-105092" });
+      assert.deepEqual(request.query, { page: 1, page_size: 100, shop_id: 104965, offer_id: "mz-140726-105092" });
       return { status: 200, json: { code: 1, data: { data: [
         { shop_id: 106637, sku: 9999999999, offer_id: "mz-140726-105092", online_status: "selling", stock: 5 },
         { shop_id: 104965, sku: 5069587484, offer_id: "mz-140726-105092", online_status: "ready_to_sell", stock: 0 },
@@ -227,6 +227,45 @@ test("client verifies the final ERP import log and exact online offer", async ()
   assert.deepEqual(await client.findOnlineProduct({ shopId: 104965, offerId: "mz-140726-105092" }), {
     shop_id: 104965, sku: 5069587484, offer_id: "mz-140726-105092", online_status: "ready_to_sell", stock: 0,
   });
+});
+
+test("exact ERP lookups keep matches beyond the old ten-row response window", async () => {
+  const importMatch = { sku: 3301105092, offer_id: "mz-wide-import", import_status: "all_imported" };
+  const onlineMatch = {
+    shop_id: 104965,
+    sku: 5069587484,
+    offer_id: "mz-wide-online",
+    online_status: "selling",
+    stock: 1,
+  };
+  const transport = makeTransport({
+    "/api.product.import_logs/index": (path, request) => ({
+      status: 200,
+      json: {
+        code: 1,
+        data: {
+          data: request.query.page_size >= 100
+            ? [...Array.from({ length: 24 }, (_, index) => ({ sku: `other-${index}` })), importMatch]
+            : Array.from({ length: 10 }, (_, index) => ({ sku: `other-${index}` })),
+        },
+      },
+    }),
+    "/api.product.online/lists": (path, request) => ({
+      status: 200,
+      json: {
+        code: 1,
+        data: {
+          data: request.query.page_size >= 100
+            ? [...Array.from({ length: 24 }, (_, index) => ({ offer_id: `other-${index}` })), onlineMatch]
+            : Array.from({ length: 10 }, (_, index) => ({ offer_id: `other-${index}` })),
+        },
+      },
+    }),
+  });
+  const client = createMaoziClient({ transport });
+
+  assert.deepEqual(await client.findImportLog({ shopId: 104965, sku: "3301105092" }), importMatch);
+  assert.deepEqual(await client.findOnlineProduct({ shopId: 104965, offerId: "mz-wide-online" }), onlineMatch);
 });
 
 test("client ignores a same-offer online record explicitly owned by another store", async () => {
