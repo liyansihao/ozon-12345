@@ -76,6 +76,7 @@ import {
   exhaustedScanFamilyKeys,
   nextDetailPacingState,
   favoriteDetailPacingOptions,
+  sourceAfterScanWaitMs,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
   withTimeout,
@@ -2046,6 +2047,14 @@ test("production detail pacing does not ramp below its baseline unless explicitl
     FLOW_B_FAVORITE_DETAIL_INTERVAL_MS: "3000",
     FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS: "2500",
   }).minIntervalMs, 2500);
+});
+
+test("source batches replace the fixed ten-second idle with bounded adaptive pacing", () => {
+  assert.equal(sourceAfterScanWaitMs({}, { detailIntervalMs: 3000 }, 60_000), 6000);
+  assert.equal(sourceAfterScanWaitMs({}, { detailIntervalMs: 4000 }, 60_000), 8000);
+  assert.equal(sourceAfterScanWaitMs({}, { detailIntervalMs: 5000 }, 60_000), 10_000);
+  assert.equal(sourceAfterScanWaitMs({ FLOW_B_MAOZI_AFTER_SCAN_WAIT: "2" }, { detailIntervalMs: 5000 }, 60_000), 2000);
+  assert.equal(sourceAfterScanWaitMs({}, { detailIntervalMs: 3000 }, 2500), 2500);
 });
 
 test("favorite collection prioritizes observed profitable title families stably", () => {

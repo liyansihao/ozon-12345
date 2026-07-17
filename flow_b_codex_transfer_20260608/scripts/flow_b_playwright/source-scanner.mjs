@@ -323,6 +323,16 @@ export function favoriteDetailPacingOptions(env = {}) {
   };
 }
 
+export function sourceAfterScanWaitMs(env = {}, runtime = {}, remainingMs = Number.POSITIVE_INFINITY) {
+  const configuredMs = Math.max(0, envNumber(env, "FLOW_B_MAOZI_AFTER_SCAN_WAIT", 10) * 1000);
+  const detailIntervalMs = Math.max(
+    0,
+    Number(runtime?.detailIntervalMs) || favoriteDetailPacingOptions(env).baseIntervalMs,
+  );
+  const adaptiveMs = Math.max(3000, detailIntervalMs * 2);
+  return Math.max(0, Math.min(configuredMs, adaptiveMs, Number(remainingMs)));
+}
+
 export function collectionDeadlineMs(env = process.env) {
   const value = Date.parse(String(env.FLOW_B_DEADLINE_AT || ""));
   return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
@@ -2844,8 +2854,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           });
         }
       }
-      const afterWait = sourceCooldown.blocked ? 0 : Math.min(
-        envNumber(env, "FLOW_B_MAOZI_AFTER_SCAN_WAIT", 10) * 1000,
+      const afterWait = sourceCooldown.blocked ? 0 : sourceAfterScanWaitMs(
+        env,
+        runtime,
         Math.max(0, collectionDeadlineMs(env) - Date.now()),
       );
       if (afterWait) await sleep(afterWait);
