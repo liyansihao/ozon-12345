@@ -1285,7 +1285,7 @@ export function repeatedSubmittedSellerSourceVariants(yieldRows, minimumSubmitte
 export function deepVerifiedSellerSourceVariants(
   yieldRows,
   minimumPublishedSkus = 2,
-  limit = 20,
+  limit = 50,
   resultPages = [2, 3, 4, 5, 6, 7, 8, 9, 10],
 ) {
   const maximum = Math.max(0, Number(limit) || 0);
@@ -2526,7 +2526,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const deepVerifiedSellerVariants = deepVerifiedSellerSourceVariants(
     yieldRows,
     envNumber(env, "FLOW_B_DEEP_VERIFIED_SELLER_MIN_PUBLISHED", 2),
-    envNumber(env, "FLOW_B_DEEP_VERIFIED_SELLERS", 20),
+    envNumber(env, "FLOW_B_DEEP_VERIFIED_SELLERS", 50),
     String(env.FLOW_B_DEEP_VERIFIED_SELLER_PAGES || "2,3,4,5,6,7,8,9,10")
       .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 1),
   );

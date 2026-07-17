@@ -1744,6 +1744,19 @@ test("deep verified sellers can advance beyond page six while staying one page a
   }));
 });
 
+test("deep verified exploration keeps the full bounded pool of proven sellers", () => {
+  const rows = [];
+  for (let index = 1; index <= 21; index += 1) {
+    rows.push(
+      { status: "published", sku: `seller-${index}-a`, seller_url: `https://www.ozon.ru/seller/seller-${index}/` },
+      { status: "published", sku: `seller-${index}-b`, seller_url: `https://www.ozon.ru/seller/seller-${index}/` },
+    );
+  }
+  const variants = deepVerifiedSellerSourceVariants(rows);
+  assert.ok(variants.some((url) => url.includes("/seller/seller-1/")));
+  assert.ok(variants.some((url) => url.includes("/seller/seller-21/")));
+});
+
 test("favorite preflight accepts only an explicit pure FBS mode", () => {
   assert.equal(favoriteModeSkipReason("FBS"), null);
   assert.equal(favoriteModeSkipReason("FBS, RFBS"), "non-pure-fbs");
