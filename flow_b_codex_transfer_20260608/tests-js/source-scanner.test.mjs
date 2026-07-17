@@ -622,8 +622,14 @@ test("derived searches prefer concrete product terms over demographic-only phras
     sku: "cosmetics-winner",
     source_url: source,
     title: "Набор для девочек детской декоративной косметики чемоданчик",
-  }], 1);
+  }], 10);
   assert.equal(new URL(urls[0]).searchParams.get("text"), "декоративной косметики чемоданчик");
+  assert.ok(urls.every((url) => ![
+    "набор девочек детской",
+    "девочек детской",
+    "набор девочек детской декоративной",
+    "девочек детской декоративной",
+  ].includes(new URL(url).searchParams.get("text"))));
 });
 
 test("duplicate strict evidence from run and history does not crowd out another winner", () => {

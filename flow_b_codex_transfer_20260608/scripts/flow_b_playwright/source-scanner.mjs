@@ -910,7 +910,10 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
   const maximum = Math.max(0, Number(limit) || 0);
   if (maximum === 0 || bands.length === 0 || pages.length === 0) return queries;
   const isGenericQueryWord = (word) => /^(?:набор[а-яё]*|детск[а-яё]*|девоч[а-яё]*|мальчик[а-яё]*|женск[а-яё]*|мужск[а-яё]*)$/i.test(String(word || ""));
-  const isLowInformationQuery = (candidate) => candidate.every(isGenericQueryWord);
+  const isLowInformationQuery = (candidate) => {
+    const concreteCount = candidate.filter((word) => !isGenericQueryWord(word)).length;
+    return concreteCount === 0 || (candidate.length >= 3 && concreteCount < 2);
+  };
   const queryGroupForRow = (row) => {
     const words = String(row?.title || "").toLowerCase().match(/[а-яё]{4,}/gi) || [];
     const terms = words.filter((word) => !stopWords.has(word)).slice(0, 6);
