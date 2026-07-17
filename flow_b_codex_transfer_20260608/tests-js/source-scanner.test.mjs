@@ -1105,6 +1105,23 @@ test("explicit strict-derived searches join qualified rotation without promotion
   }), [submittedSeller]);
 });
 
+test("strict-derived priority is bounded while the remaining exploration sources stay available", () => {
+  const seller = "https://www.ozon.ru/seller/submitted/";
+  const derived = [1, 2, 3].map((index) => `https://www.ozon.ru/search/?text=winner-${index}&is_global=true`);
+  assert.deepEqual(qualifiedPrioritySourceUrls({
+    submittedSellerUrls: [seller],
+    derivedSearchUrls: derived,
+    prioritizeDerived: true,
+    derivedPriorityLimit: 2,
+  }), [seller, derived[0], derived[1]]);
+  assert.deepEqual(verifiedPrioritySourceUrls({
+    verifiedFreshUrls: [seller],
+    derivedSearchUrls: derived,
+    prioritizeDerived: true,
+    derivedPriorityLimit: 2,
+  }), [seller, derived[0], derived[1]]);
+});
+
 test("verified strict-success sellers outrank a higher-yield verified search page", () => {
   const seller = "https://www.ozon.ru/seller/strict-winner/";
   const search = "https://www.ozon.ru/search/?text=historical&is_global=true";

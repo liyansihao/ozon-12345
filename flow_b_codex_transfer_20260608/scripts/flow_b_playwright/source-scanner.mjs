@@ -1335,11 +1335,15 @@ export function verifiedPrioritySourceUrls({
   verifiedHistoricalUrls = [],
   derivedSearchUrls = [],
   prioritizeDerived = false,
+  derivedPriorityLimit = Number.POSITIVE_INFINITY,
 } = {}) {
+  const maximumDerived = Number.isFinite(Number(derivedPriorityLimit))
+    ? Math.max(0, Math.floor(Number(derivedPriorityLimit)))
+    : derivedSearchUrls.length;
   return [...new Set([
     ...verifiedFreshUrls,
     ...verifiedHistoricalUrls,
-    ...(prioritizeDerived ? derivedSearchUrls : []),
+    ...(prioritizeDerived ? derivedSearchUrls.slice(0, maximumDerived) : []),
   ])];
 }
 
@@ -1347,10 +1351,14 @@ export function qualifiedPrioritySourceUrls({
   submittedSellerUrls = [],
   derivedSearchUrls = [],
   prioritizeDerived = false,
+  derivedPriorityLimit = Number.POSITIVE_INFINITY,
 } = {}) {
+  const maximumDerived = Number.isFinite(Number(derivedPriorityLimit))
+    ? Math.max(0, Math.floor(Number(derivedPriorityLimit)))
+    : derivedSearchUrls.length;
   return [...new Set([
     ...submittedSellerUrls,
-    ...(prioritizeDerived ? derivedSearchUrls : []),
+    ...(prioritizeDerived ? derivedSearchUrls.slice(0, maximumDerived) : []),
   ])];
 }
 
@@ -2509,6 +2517,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     derivedPriceBands,
     derivedResultPages,
   );
+  const derivedPriorityLimit = Math.max(0, envNumber(env, "FLOW_B_DERIVED_PRIORITY_SOURCES", 80));
   const verifiedSellerUrls = verifiedSellerSourceUrls(
     yieldRows,
     verifiedSellerMinimumPublished(env),
@@ -2585,6 +2594,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       submittedSellerUrls: submittedSellerSourceVariants,
       derivedSearchUrls,
       prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
+      derivedPriorityLimit,
     }),
     boundedDeepFreshSourceUrls: boundedEvidenceSources,
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
@@ -2598,6 +2608,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       verifiedHistoricalUrls: verifiedSellerUrls,
       derivedSearchUrls,
       prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
+      derivedPriorityLimit,
     }),
   });
   if (!pending.length) return { outFile: outputPath, records: records.length, pending: 0 };
