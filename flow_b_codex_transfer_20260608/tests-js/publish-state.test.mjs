@@ -97,6 +97,23 @@ test("restored state exposes a defensive snapshot for delayed submission reconci
   });
 });
 
+test("state exposes one defensive SKU entry without copying the full history", async () => {
+  await withTempDir(async (dir) => {
+    const state = createPublishState({ runDir: dir, publishedCsv: path.join(dir, "published.csv") });
+    await state.transition("direct", "processing", { store_id: 106637, nested: { attempt: 1 } });
+
+    const entry = state.entryOf("direct");
+    assert.deepEqual(entry, {
+      sku: "direct",
+      status: "processing",
+      data: { store_id: 106637, nested: { attempt: 1 } },
+    });
+    entry.data.store_id = 0;
+    assert.equal(state.entryOf("direct").data.store_id, 106637);
+    assert.equal(state.entryOf("missing"), null);
+  });
+});
+
 test("cross-run pending seeds restore only latest submitted work as reconciliation-only", async () => {
   await withTempDir(async (dir) => {
     const seedPath = path.join(dir, "prior-run-states.jsonl");

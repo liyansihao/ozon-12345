@@ -1113,9 +1113,11 @@ export function createPublishRunner({
       const sku = asSku(inputItem);
       if (state.hasPublished(sku)) return { status: "ignored", sku };
 
-      const latestEntry = typeof state.entries === "function"
-        ? state.entries().find((entry) => String(entry.sku) === String(sku))
-        : null;
+      const latestEntry = typeof state.entryOf === "function"
+        ? state.entryOf(sku)
+        : typeof state.entries === "function"
+          ? state.entries().find((entry) => String(entry.sku) === String(sku))
+          : null;
       const restoredStatus = latestEntry?.status ?? state.statusOf?.(sku);
       const restoredEntry = latestEntry || restoredBySku.get(String(sku));
       const item = latestEntry

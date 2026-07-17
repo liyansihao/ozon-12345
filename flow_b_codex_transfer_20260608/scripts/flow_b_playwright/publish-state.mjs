@@ -459,6 +459,18 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
     }));
   }
 
+  function entryOf(skuValue) {
+    const sku = normalizeSku(skuValue);
+    if (sku === null) return null;
+    const value = states.get(sku);
+    if (!value) return null;
+    return {
+      sku,
+      status: value.status,
+      data: { ...(value.data || {}) },
+    };
+  }
+
   function summary(target) {
     return writeSummary(target);
   }
@@ -494,6 +506,6 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
     });
   }
 
-  const api = { load, transition, hasPublished, statusOf, entries, runPublishedCount, summary, recordPublished, recordSelected };
+  const api = { load, transition, hasPublished, statusOf, entryOf, entries, runPublishedCount, summary, recordPublished, recordSelected };
   return api;
 }
