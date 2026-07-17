@@ -117,3 +117,21 @@ test("pending source caps can group page variants into one source family", async
     sourceKey: (row) => String(row.source_url).split("?")[0],
   }).map((row) => row.sku), ["101", "201", "102"]);
 });
+
+test("pending priority is applied before the global limit without bypassing source caps", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-priority-"));
+  const queue = createCandidateQueue(path.join(dir, "candidate_queue.jsonl"));
+  await queue.load();
+  await queue.discover([
+    { ...card("101", "source-a"), score: 1 },
+    { ...card("102", "source-a"), score: 100 },
+    { ...card("201", "source-b"), score: 50 },
+    { ...card("301", "source-c"), score: 75 },
+  ]);
+
+  assert.deepEqual(queue.pending({
+    limit: 3,
+    perSourceLimit: 2,
+    priority: (row) => ({ "101": 1, "102": 100, "201": 50, "301": 75 }[row.sku]),
+  }).map((row) => row.sku), ["102", "301", "201"]);
+});

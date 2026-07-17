@@ -104,6 +104,7 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
       limit = Number.POSITIVE_INFINITY,
       perSourceLimit = Number.POSITIVE_INFINITY,
       sourceKey = (row) => row?.source_url,
+      priority = () => 0,
       nowMs = Date.now(),
     } = {}) {
       const maximum = Number.isFinite(Number(limit)) ? Math.max(0, Math.floor(Number(limit))) : Number.POSITIVE_INFINITY;
@@ -119,9 +120,15 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
         if (Number.isFinite(retryAt) && retryAt > Number(nowMs)) continue;
         eligible.push({ ...row });
       }
-      if (!Number.isFinite(sourceMaximum)) return eligible.slice(0, maximum);
+      const ranked = eligible.map((row, index) => {
+        let score = 0;
+        try { score = Number(priority(row)) || 0; } catch {}
+        return { row, index, score };
+      }).sort((left, right) => right.score - left.score || left.index - right.index)
+        .map(({ row }) => row);
+      if (!Number.isFinite(sourceMaximum)) return ranked.slice(0, maximum);
       const groups = new Map();
-      for (const row of eligible) {
+      for (const row of ranked) {
         let source = "";
         try { source = String(sourceKey(row) || "").trim(); } catch {}
         source ||= `sku:${row.sku}`;

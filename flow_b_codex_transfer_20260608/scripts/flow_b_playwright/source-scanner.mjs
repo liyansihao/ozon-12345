@@ -2674,6 +2674,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     .map((row) => sourceNonFbsSampleKey(row?.source_url))
     .filter(Boolean));
   const titleFamilyScores = observedTitleFamilyScores(yieldRows);
+  const candidateSourceScores = fullFunnelSourceScores(yieldRows);
   const derivedPriceBands = String(env.FLOW_B_DERIVED_SEARCH_PRICE_BANDS || "150.000;")
     .split(",").map((value) => value.trim()).filter(Boolean);
   const derivedResultPages = String(env.FLOW_B_DERIVED_SEARCH_PAGES || "1")
@@ -2814,6 +2815,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     limit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48),
     perSourceLimit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_PER_SOURCE_DRAIN", 6),
     sourceKey: (row) => sourceCollectionBlockKey(row?.source_url) || row?.source_url,
+    priority: (row) => favoriteLinkPriority(row, titleFamilyScores)
+      + Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
   });
   if (!pending.length && !recoveredCandidates.length) {
     return { outFile: outputPath, records: records.length, pending: 0 };
