@@ -581,7 +581,8 @@ export function shouldDeferSourceAfterNonFbsSample(stats = {}, limit = 6) {
 
 export function adaptiveNonFbsSampleLimit(limit, productive = false) {
   const configured = Math.max(0, Math.floor(Number(limit) || 0));
-  if (productive || configured <= 3) return configured;
+  if (productive && configured >= 4) return Math.max(configured, 8);
+  if (configured <= 3) return configured;
   return configured - 1;
 }
 

@@ -201,10 +201,12 @@ test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 20, nonPureFbs: 20, favorited: 0 }, 0), false);
 });
 
-test("unproven sources use one fewer FBS sample while productive sources retain the configured evidence", () => {
+test("unproven sources use one fewer FBS sample while proven sources receive a bounded deeper sample", () => {
   assert.equal(adaptiveNonFbsSampleLimit(4, false), 3);
-  assert.equal(adaptiveNonFbsSampleLimit(4, true), 4);
+  assert.equal(adaptiveNonFbsSampleLimit(4, true), 8);
   assert.equal(adaptiveNonFbsSampleLimit(3, false), 3);
+  assert.equal(adaptiveNonFbsSampleLimit(3, true), 3);
+  assert.equal(adaptiveNonFbsSampleLimit(8, true), 8);
   assert.equal(adaptiveNonFbsSampleLimit(0, false), 0);
 });
 
