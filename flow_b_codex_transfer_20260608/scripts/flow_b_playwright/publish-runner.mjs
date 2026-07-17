@@ -262,6 +262,25 @@ function buildPayload(item, detail, economy, targetConfig, now) {
   };
 }
 
+function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, detail, category, profitThreshold }) {
+  return {
+    sku,
+    sell_price: salePrice,
+    purchase_price: purchasePrice,
+    package_weight: productInfo.weight ?? detail.weight ?? 1,
+    package_length: productInfo.depth ?? productInfo.length ?? detail.depth ?? detail.length ?? 20,
+    package_width: productInfo.width ?? detail.width ?? 20,
+    package_height: productInfo.height ?? detail.height ?? 20,
+    china_fee: 0,
+    ad_rate: 0,
+    other_rate: 1,
+    logistics: "CEL",
+    profit_value: profitThreshold,
+    profit_type: "percentage",
+    cate: category.mapped,
+  };
+}
+
 export function createPublishRunner({
   client,
   detailProvider = client,
@@ -597,9 +616,6 @@ export function createPublishRunner({
       const salePrice = policy.selectSalePrice(detail);
       if (!(Number(salePrice) > 0)) return skip(item, "missing-sale-price");
 
-      const cost = await timed(sku, "1688_cost", () => costBridge.estimate({ ...detail, sell_price: salePrice }, runDir));
-      if (!cost?.ok) return skip(item, normalizeCostFailureReason(cost), { cost });
-
       const productInfo = categoryData?.product_info || {};
       const category = mapOzonCategory(
         categoryData?.cate,
@@ -607,22 +623,44 @@ export function createPublishRunner({
         salePrice,
         cnyRubRate,
       );
-      const calc = await timed(sku, "profit_calculation", () => client.calculateProfit({
+      let optimisticCalc = null;
+      try {
+        optimisticCalc = await timed(sku, "profit_upper_bound", () => client.calculateProfit(profitCalculationInput({
+          sku,
+          salePrice,
+          purchasePrice: 0.01,
+          productInfo,
+          detail,
+          category,
+          profitThreshold,
+        })));
+      } catch {
+        // This fast-path must never replace the original exact calculation on transient ERP failures.
+      }
+      const optimisticEconomy = economyResult(optimisticCalc);
+      const optimisticRateValue = optimisticEconomy?.price_list?.profit_rate;
+      const optimisticRate = optimisticRateValue === null || optimisticRateValue === undefined || optimisticRateValue === ""
+        ? Number.NaN
+        : Number(optimisticRateValue);
+      if (Number.isFinite(optimisticRate) && optimisticRate <= profitThreshold) {
+        return skip(item, `profit-upper-bound<=${profitThreshold}`, {
+          profit_upper_bound: optimisticEconomy.price_list,
+          optimistic_purchase_price: 0.01,
+        });
+      }
+
+      const cost = await timed(sku, "1688_cost", () => costBridge.estimate({ ...detail, sell_price: salePrice }, runDir));
+      if (!cost?.ok) return skip(item, normalizeCostFailureReason(cost), { cost });
+
+      const calc = await timed(sku, "profit_calculation", () => client.calculateProfit(profitCalculationInput({
         sku,
-        sell_price: salePrice,
-        purchase_price: cost.cost,
-        package_weight: productInfo.weight ?? detail.weight ?? 1,
-        package_length: productInfo.depth ?? productInfo.length ?? detail.depth ?? detail.length ?? 20,
-        package_width: productInfo.width ?? detail.width ?? 20,
-        package_height: productInfo.height ?? detail.height ?? 20,
-        china_fee: 0,
-        ad_rate: 0,
-        other_rate: 1,
-        logistics: "CEL",
-        profit_value: profitThreshold,
-        profit_type: "percentage",
-        cate: category.mapped,
-      }));
+        salePrice,
+        purchasePrice: cost.cost,
+        productInfo,
+        detail,
+        category,
+        profitThreshold,
+      })));
       if (Number(calc?.cnyrub_rate) > 0) cnyRubRate = Number(calc.cnyrub_rate);
       const economy = economyResult(calc);
       const preflightReason = policy.preflightSkipReason({ ...detail, economy });

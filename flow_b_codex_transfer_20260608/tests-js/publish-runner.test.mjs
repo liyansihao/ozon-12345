@@ -1391,7 +1391,7 @@ test("runner rejects profit rate exactly 30 and never publishes it", async () =>
   const result = await runner.run();
   assert.equal(result.published, 0);
   assert.equal(publishCalls, 0);
-  assert.ok(state.transitions.some((event) => event.status === "skipped" && event.data.reason === "profit_rate<=30"));
+  assert.ok(state.transitions.some((event) => event.status === "skipped" && event.data.reason === "profit-upper-bound<=30"));
 });
 
 test("runner reconciles restored failed SKU without resubmitting", async () => {
@@ -2304,6 +2304,70 @@ test("runner requires an explicit CEL Economy result and positive category fee",
   assert.equal(result.published, 0);
   assert.ok(state.transitions.some((event) => event.sku === "5" && event.data.reason === "missing-cel-economy"));
   assert.ok(state.transitions.some((event) => event.sku === "6" && event.data.reason === "cate_fee<=0"));
+});
+
+test("runner prunes an impossible profit candidate before spending a 1688 lookup", async () => {
+  const state = fakeState();
+  let costCalls = 0;
+  let profitCalls = 0;
+  const client = clientFor([{ id: 61, sku: 61 }], {
+    calculateProfit: async (input) => {
+      profitCalls += 1;
+      assert.equal(input.purchase_price, 0.01);
+      return economy(30);
+    },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: {
+      estimate: async () => {
+        costCalls += 1;
+        return { ok: true, cost: 20 };
+      },
+    },
+    state,
+    target: 1,
+    threshold: 30,
+    runDir: "/tmp/run",
+  }).run();
+
+  assert.equal(result.published, 0);
+  assert.equal(profitCalls, 1);
+  assert.equal(costCalls, 0);
+  assert.ok(state.transitions.some((event) => event.sku === "61"
+    && event.status === "skipped"
+    && event.data.reason === "profit-upper-bound<=30"
+    && event.data.profit_upper_bound.profit_rate === 30));
+});
+
+test("runner falls back to the exact profit path when the optimistic precheck fails", async () => {
+  const state = fakeState();
+  let costCalls = 0;
+  let profitCalls = 0;
+  const client = clientFor([{ id: 62, sku: 62 }], {
+    calculateProfit: async () => {
+      profitCalls += 1;
+      if (profitCalls === 1) throw new Error("temporary precheck outage");
+      return economy(45);
+    },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: {
+      estimate: async () => {
+        costCalls += 1;
+        return { ok: true, cost: 20 };
+      },
+    },
+    state,
+    target: 1,
+    threshold: 30,
+    runDir: "/tmp/run",
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(profitCalls, 2);
+  assert.equal(costCalls, 1);
 });
 
 test("runner builds the exact one-row payload and stops at target", async () => {
