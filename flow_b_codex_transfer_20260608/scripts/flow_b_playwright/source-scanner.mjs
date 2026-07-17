@@ -2799,6 +2799,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const recoveredCandidates = candidateQueue.pending({
     attempted,
     limit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48),
+    perSourceLimit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_PER_SOURCE_DRAIN", 6),
   });
   if (!pending.length && !recoveredCandidates.length) {
     return { outFile: outputPath, records: records.length, pending: 0 };

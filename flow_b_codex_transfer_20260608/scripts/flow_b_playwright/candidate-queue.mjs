@@ -99,16 +99,44 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
       return row;
     },
 
-    pending({ attempted = new Set(), limit = Number.POSITIVE_INFINITY, nowMs = Date.now() } = {}) {
+    pending({
+      attempted = new Set(),
+      limit = Number.POSITIVE_INFINITY,
+      perSourceLimit = Number.POSITIVE_INFINITY,
+      nowMs = Date.now(),
+    } = {}) {
       const maximum = Number.isFinite(Number(limit)) ? Math.max(0, Math.floor(Number(limit))) : Number.POSITIVE_INFINITY;
       if (maximum === 0) return [];
-      const rows = [];
+      const sourceMaximum = Number.isFinite(Number(perSourceLimit))
+        ? Math.max(0, Math.floor(Number(perSourceLimit)))
+        : Number.POSITIVE_INFINITY;
+      if (sourceMaximum === 0) return [];
+      const eligible = [];
       for (const row of latest.values()) {
         if (!PENDING_STATUSES.has(String(row?.status || "")) || attempted.has(String(row.sku))) continue;
         const retryAt = Date.parse(row?.retry_at || "");
         if (Number.isFinite(retryAt) && retryAt > Number(nowMs)) continue;
-        rows.push({ ...row });
-        if (rows.length >= maximum) break;
+        eligible.push({ ...row });
+      }
+      if (!Number.isFinite(sourceMaximum)) return eligible.slice(0, maximum);
+      const groups = new Map();
+      for (const row of eligible) {
+        const source = String(row?.source_url || "").trim() || `sku:${row.sku}`;
+        const values = groups.get(source) || [];
+        if (values.length < sourceMaximum) values.push(row);
+        groups.set(source, values);
+      }
+      const rows = [];
+      for (let round = 0; rows.length < maximum; round += 1) {
+        let added = false;
+        for (const values of groups.values()) {
+          if (values[round]) {
+            rows.push(values[round]);
+            added = true;
+            if (rows.length >= maximum) break;
+          }
+        }
+        if (!added) break;
       }
       return rows;
     },

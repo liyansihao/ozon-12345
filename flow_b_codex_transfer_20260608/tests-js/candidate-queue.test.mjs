@@ -81,3 +81,21 @@ test("deferred candidates respect retry_at without becoming terminal", async () 
   assert.deepEqual(queue.pending({ nowMs: Date.parse("2026-07-17T12:09:59.999Z") }), []);
   assert.deepEqual(queue.pending({ nowMs: Date.parse("2026-07-17T12:10:00.000Z") }).map((row) => row.sku), ["100"]);
 });
+
+test("pending candidates round-robin sources and cap one source per consumer tranche", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-fair-"));
+  const queue = createCandidateQueue(path.join(dir, "candidate_queue.jsonl"));
+  await queue.load();
+  await queue.discover([
+    card("101", "source-a"),
+    card("102", "source-a"),
+    card("103", "source-a"),
+    card("201", "source-b"),
+    card("202", "source-b"),
+    card("301", "source-c"),
+  ]);
+
+  assert.deepEqual(queue.pending({ limit: 6, perSourceLimit: 2 }).map((row) => row.sku), [
+    "101", "201", "301", "102", "202",
+  ]);
+});
