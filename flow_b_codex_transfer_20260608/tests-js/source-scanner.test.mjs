@@ -28,6 +28,8 @@ import {
   requiresFavoriteSession,
   retainedReplayLimit,
   scanSourceWithPage,
+  closeReusablePages,
+  ensureReusablePageSlots,
   classifyFreshSourceUrls,
   expandFreshSellerSourceUrls,
   retryMaoziPageFetch,
@@ -187,6 +189,66 @@ test("source page creation is included in the lifecycle timeout", async () => {
     }),
     /source page lifecycle .* timed out after 10ms/,
   );
+});
+
+test("source page slots are reused across tranche batches and invalidated after failure", async () => {
+  let created = 0;
+  let closed = 0;
+  const context = {
+    newPage: async () => {
+      created += 1;
+      let isClosed = false;
+      return {
+        id: created,
+        isClosed: () => isClosed,
+        close: async () => { if (!isClosed) closed += 1; isClosed = true; },
+      };
+    },
+  };
+  const pagePool = [];
+  const first = await scanSourceWithPage({
+    context,
+    url: "https://www.ozon.ru/search/?text=one",
+    options: {},
+    timeoutMs: 100,
+    closeTimeoutMs: 5,
+    pagePool,
+    pageIndex: 0,
+    scan: async (page) => ({ page_id: page.id }),
+  });
+  const second = await scanSourceWithPage({
+    context,
+    url: "https://www.ozon.ru/search/?text=two",
+    options: {},
+    timeoutMs: 100,
+    closeTimeoutMs: 5,
+    pagePool,
+    pageIndex: 0,
+    scan: async (page) => ({ page_id: page.id }),
+  });
+  assert.equal(first.page_id, 1);
+  assert.equal(second.page_id, 1);
+  assert.equal(created, 1);
+  assert.equal(closed, 0);
+
+  await assert.rejects(scanSourceWithPage({
+    context,
+    url: "https://www.ozon.ru/search/?text=broken",
+    options: {},
+    timeoutMs: 100,
+    closeTimeoutMs: 5,
+    pagePool,
+    pageIndex: 0,
+    scan: async () => { throw new Error("broken source page"); },
+  }), /broken source page/);
+  assert.equal(closed, 1);
+  assert.equal(pagePool[0], null);
+
+  await ensureReusablePageSlots(context, pagePool, 1, 100);
+  assert.equal(created, 2);
+  await closeReusablePages(pagePool, 5);
+  assert.equal(closed, 2);
+  assert.equal(pagePool.length, 0);
 });
 
 test("favorite worker page creation has a bounded lifecycle", async () => {

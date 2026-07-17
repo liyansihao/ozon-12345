@@ -208,6 +208,26 @@ export async function createFavoriteWorkerPage(context, timeoutMs = 10_000) {
   }
 }
 
+function isReusablePageOpen(page) {
+  return Boolean(page) && (typeof page.isClosed !== "function" || !page.isClosed());
+}
+
+export async function ensureReusablePageSlots(context, pages, count, timeoutMs = 10_000) {
+  const target = Math.max(0, Number(count) || 0);
+  await Promise.all(Array.from({ length: target }, async (_, index) => {
+    if (isReusablePageOpen(pages[index])) return;
+    pages[index] = await createFavoriteWorkerPage(context, timeoutMs);
+  }));
+  return pages.slice(0, target);
+}
+
+export async function closeReusablePages(pages, timeoutMs = 5_000) {
+  const closing = pages.splice(0, pages.length);
+  await Promise.all(closing.map((page) => isReusablePageOpen(page)
+    ? withTimeout(page.close(), timeoutMs, "reusable page close").catch(() => {})
+    : Promise.resolve()));
+}
+
 export function readFavoriteSkusWithTimeout(operation, timeoutMs = 10_000) {
   return withTimeout(
     Promise.resolve().then(operation),
@@ -1649,7 +1669,7 @@ async function extractFavoriteProduct(page, url, timeout) {
   return parseFavoriteProductSnapshot(snapshot || { url });
 }
 
-async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, onResult = () => {} }) {
+async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, onResult = () => {}, workerPagePool = null }) {
   if (currentTotal >= target || !links.length || isCollectionDeadlineReached(env)) return currentTotal;
   let existing = new Set();
   try {
@@ -1819,11 +1839,20 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     writeChain = writeChain.then(() => fs.appendFile(logFile, `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`));
     return writeChain;
   };
-  const workers = Array.from({ length: Math.min(workerCount, queue.length) }, async () => {
-    const page = await createFavoriteWorkerPage(
+  const desiredWorkers = Math.min(workerCount, queue.length);
+  const ownsWorkerPages = !Array.isArray(workerPagePool);
+  const workerPages = ownsWorkerPages
+    ? await Promise.all(Array.from({ length: desiredWorkers }, () => createFavoriteWorkerPage(
       context,
       envNumber(env, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS", 10_000),
+    )))
+    : await ensureReusablePageSlots(
+      context,
+      workerPagePool,
+      desiredWorkers,
+      envNumber(env, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS", 10_000),
     );
+  const workers = workerPages.map(async (page) => {
     try {
       while (canClaimFavorite({ total, inFlight, target }) && !isCollectionDeadlineReached(env)) {
         const item = queue[cursor++];
@@ -1912,7 +1941,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         }
       }
     } finally {
-      await page.close().catch(() => {});
+      if (ownsWorkerPages) await page.close().catch(() => {});
     }
   });
   await Promise.all(workers);
@@ -2035,23 +2064,35 @@ export async function scanSourceWithPage({
   timeoutMs = 90_000,
   closeTimeoutMs = 5_000,
   scan = scanOne,
+  pagePool = null,
+  pageIndex = 0,
 }) {
   const label = `source page lifecycle ${url}`;
-  let page = null;
+  const reusable = Array.isArray(pagePool);
+  const slot = Math.max(0, Number(pageIndex) || 0);
+  let page = reusable && isReusablePageOpen(pagePool[slot]) ? pagePool[slot] : null;
+  if (reusable && !page) pagePool[slot] = null;
   let expired = false;
-  const pagePromise = Promise.resolve().then(() => context.newPage()).then(async (createdPage) => {
+  const pagePromise = page ? Promise.resolve(page) : Promise.resolve().then(() => context.newPage()).then(async (createdPage) => {
     if (expired) {
       await withTimeout(createdPage.close(), closeTimeoutMs, "expired source page close").catch(() => {});
       throw new Error(`${label} expired before page creation completed`);
     }
     page = createdPage;
+    if (reusable) pagePool[slot] = createdPage;
     return createdPage;
   });
   try {
     return await withTimeout(pagePromise.then((createdPage) => scan(createdPage, url, options)), timeoutMs, label);
+  } catch (error) {
+    if (reusable && page) {
+      pagePool[slot] = null;
+      await withTimeout(page.close(), closeTimeoutMs, "failed reusable source page close").catch(() => {});
+    }
+    throw error;
   } finally {
     expired = true;
-    if (page) {
+    if (!reusable && page) {
       await withTimeout(page.close(), closeTimeoutMs, "source page close").catch(() => {});
     }
   }
@@ -2243,6 +2284,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const runtime = collectionRuntimeState(favoriteLog);
   emit(`favorite exclusions loaded: ${attempted.size}`);
   const maozi = await openMaoziPage(context, { forceNew: true });
+  const sourcePagePool = [];
+  const favoriteWorkerPagePool = [];
   try {
     await waitForContent(maozi, 15000);
     if (requiresFavoriteSession(env)) {
@@ -2284,6 +2327,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           logFile: favoriteLog,
           log: emit,
           familyScores: titleFamilyScores,
+          workerPagePool: favoriteWorkerPagePool,
         });
         return {
           outFile: outputPath,
@@ -2352,6 +2396,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         logFile: favoriteLog,
         log: emit,
         familyScores: titleFamilyScores,
+        workerPagePool: favoriteWorkerPagePool,
         onResult: (result) => {
           if (result.sku) retainedAttempted += 1;
         },
@@ -2379,7 +2424,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       emit(`batch ${start - batch.length + 1}-${start} / ${pending.length} concurrency=${adaptiveWorkers.current}`);
       const sourceScanTimeout = envNumber(env, "FLOW_B_SOURCE_SCAN_TIMEOUT_MS", 90_000);
       const pageCloseTimeout = envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000);
-      const batchRows = await Promise.all(batch.map((url) => scanSourceWithPage({
+      const batchRows = await Promise.all(batch.map((url, index) => scanSourceWithPage({
         context,
         url,
         options: {
@@ -2393,6 +2438,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         },
         timeoutMs: sourceScanTimeout,
         closeTimeoutMs: pageCloseTimeout,
+        pagePool: sourcePagePool,
+        pageIndex: index,
       })
         .catch((error) => ({ source_url: url, blocked: false, stop_reason: `error: ${error.message}`, links: [], cumulative_product_link_count: 0 }))));
       const fatalBatchError = fatalSourceBatchError(batchRows);
@@ -2430,6 +2477,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           logFile: favoriteLog,
           log: emit,
           familyScores: titleFamilyScores,
+          workerPagePool: favoriteWorkerPagePool,
           onResult: (result) => {
             if (result.status === "favorited") batchFavorited += 1;
             if (result.status === "failed" && /soft blocked|access denied|captcha|timeout|failed to fetch|network|HTTP 0/i.test(String(result.error?.message || result.error || ""))) {
@@ -2497,6 +2545,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     }
     return { outFile: outputPath, records: records.length, pending: pending.length };
   } finally {
+    await closeReusablePages(sourcePagePool, envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000));
+    await closeReusablePages(favoriteWorkerPagePool, envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000));
     await maozi.close().catch(() => {});
   }
 }
