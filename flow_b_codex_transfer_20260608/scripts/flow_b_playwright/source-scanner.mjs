@@ -633,7 +633,7 @@ export function createScannerLogger(log = console.log, level = "summary") {
   return (message) => {
     const text = String(message || "").split(/\r?\n/, 1)[0].slice(0, 300);
     if (/^favorite\s+0\s+->\s+0\s+delta=0$/i.test(text)) return;
-    if (/^(?:favorite exclusions loaded:|favorite count telemetry unavailable|favorite SKU telemetry unavailable|collecting favorites from|collecting \d+ exact-FBS cached links|batch \d|source soft block cooldown|source non-pure-FBS sample deferred|yielding source tranche|favorite collection summary|favorite capacity reached|favorite \S+ ->)/i.test(text)) log(text);
+    if (/^(?:favorite exclusions loaded:|favorite count telemetry unavailable|favorite SKU telemetry unavailable|collecting favorites from|collecting \d+ exact-FBS cached links|batch \d|Ozon detail pacing interval=|source soft block cooldown|source non-pure-FBS sample deferred|yielding source tranche|favorite collection summary|favorite capacity reached|favorite \S+ ->)/i.test(text)) log(text);
   };
 }
 

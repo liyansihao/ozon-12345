@@ -2049,11 +2049,13 @@ test("summary scanner logging suppresses per-SKU noise but retains batch evidenc
   log("favorite 0 -> 0 delta=0");
   log("favorite 8 -> 10 delta=2");
   log("batch 1-8 / 120 concurrency=8");
+  log("Ozon detail pacing interval=4000ms event=soft-block");
   log("source non-pure-FBS sample deferred after 7 checks: https://www.ozon.ru/seller/dry/?sorting=rating");
   log("favorite collection summary attempted=24 favorited=6 rejected=12 failed=6");
   assert.deepEqual(messages, [
     "favorite 8 -> 10 delta=2",
     "batch 1-8 / 120 concurrency=8",
+    "Ozon detail pacing interval=4000ms event=soft-block",
     "source non-pure-FBS sample deferred after 7 checks: https://www.ozon.ru/seller/dry/?sorting=rating",
     "favorite collection summary attempted=24 favorited=6 rejected=12 failed=6",
   ]);
