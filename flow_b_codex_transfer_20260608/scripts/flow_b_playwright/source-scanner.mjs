@@ -599,6 +599,20 @@ export function nextSourceSampleStats(stats = {}, outcome = {}) {
   return next;
 }
 
+export function sourceSampleStatsFromEvents(events = []) {
+  const stats = new Map();
+  for (const event of events || []) {
+    const key = sourceNonFbsSampleKey(event?.source_url);
+    if (!key) continue;
+    if (String(event?.status || "") === "favorited") {
+      stats.set(key, { attempted: 0, nonPureFbs: 0, favorited: 0 });
+      continue;
+    }
+    stats.set(key, nextSourceSampleStats(stats.get(key), event));
+  }
+  return stats;
+}
+
 export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
   const currency = String(productInfo?.price_info?.currency || "").toUpperCase();
   if (currency === "CNY" && Number(productInfo?.price_info?.sell_price) > Math.max(0, Number(maxPrice) || 0)) {
@@ -2048,8 +2062,17 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   let detailGate = Promise.resolve();
   const softBlockedSources = new Set();
   const nonFbsDeferredSources = new Set();
-  const sourceOutcomeStats = new Map();
+  const sourceOutcomeStats = sourceSampleStatsFromEvents(await readJsonLinesIncremental(logFile));
   const nonFbsSampleLimit = Math.max(0, envNumber(env, "FLOW_B_SOURCE_NON_FBS_SAMPLE_LIMIT", 6));
+  for (const [sourceSampleKey, stats] of sourceOutcomeStats) {
+    const sourceSampleLimit = adaptiveNonFbsSampleLimit(
+      nonFbsSampleLimit,
+      productiveSourceSampleKeys.has(sourceSampleKey),
+    );
+    if (shouldDeferSourceAfterNonFbsSample(stats, sourceSampleLimit)) {
+      nonFbsDeferredSources.add(sourceSampleKey);
+    }
+  }
   const recordSourceOutcome = (sourceSampleKey, outcome) => {
     if (!sourceSampleKey) return null;
     const next = nextSourceSampleStats(sourceOutcomeStats.get(sourceSampleKey), outcome);

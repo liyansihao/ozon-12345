@@ -56,6 +56,7 @@ import {
   adaptiveNonFbsSampleLimit,
   shouldDeferSourceAfterNonFbsSample,
   nextSourceSampleStats,
+  sourceSampleStatsFromEvents,
   sourceNonFbsSampleKey,
   favoritePriceSkipReason,
   favoriteTitleSkipReason,
@@ -216,6 +217,31 @@ test("source samples count completed outcomes but not deferred queued work", () 
   stats = nextSourceSampleStats(stats, { status: "favorited" });
   assert.deepEqual(stats, { attempted: 3, nonPureFbs: 1, favorited: 1 });
   assert.deepEqual(nextSourceSampleStats(stats, { status: "deferred" }), stats);
+});
+
+test("source sample history restores only the dry tail after the latest favorite", () => {
+  const sourceA = "https://www.ozon.ru/search/?text=a";
+  const sourceB = "https://www.ozon.ru/search/?text=b";
+  const stats = sourceSampleStatsFromEvents([
+    { source_url: sourceA, status: "rejected", reason: "non-pure-fbs" },
+    { source_url: sourceA, status: "rejected", reason: "non-pure-fbs" },
+    { source_url: sourceA, status: "favorited" },
+    { source_url: sourceA, status: "rejected", reason: "non-pure-fbs" },
+    { source_url: sourceA, status: "failed" },
+    { source_url: sourceB, status: "rejected", reason: "non-pure-fbs" },
+    { source_url: sourceB, status: "rejected", reason: "non-pure-fbs" },
+    { source_url: sourceB, status: "rejected", reason: "non-pure-fbs" },
+  ]);
+  assert.deepEqual(stats.get(sourceNonFbsSampleKey(sourceA)), {
+    attempted: 2,
+    nonPureFbs: 1,
+    favorited: 0,
+  });
+  assert.deepEqual(stats.get(sourceNonFbsSampleKey(sourceB)), {
+    attempted: 3,
+    nonPureFbs: 3,
+    favorited: 0,
+  });
 });
 
 test("non-pure-FBS sampling isolates seller page and sorting variants", () => {
