@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createPublishRunner, offerIdForSku, prioritizePublishCandidates, restoredDailyStoreUsage } from "../scripts/flow_b_playwright/publish-runner.mjs";
+import { createPublishRunner, offerIdForSku, prioritizePublishCandidates, restoredDailyStoreUsage, verifiedWarehouseCandidates } from "../scripts/flow_b_playwright/publish-runner.mjs";
 
 function fakeState(initial = {}, initialRunPublished = 0) {
   const statuses = new Map(Object.entries(initial).map(([sku, value]) => [sku,
@@ -815,6 +815,14 @@ test("runner syncs and verifies a missing warehouse before rotating into a store
     && event.watermark_id === 60822
     && event.warehouse_source === "erp-discovered"));
   await fs.rm(runDir, { recursive: true, force: true });
+});
+
+test("warehouse discovery accepts one explicit ERP warehouse from supported shop list fields", () => {
+  assert.deepEqual(verifiedWarehouseCandidates({
+    warehouse: [],
+    warehouses: [{ warehouse_id: 7001, name: "FBS 五店仓" }],
+    warehouse_list: [{ warehouse_id: 7001, name: "duplicate" }],
+  }), [{ warehouse_id: 7001, name: "FBS 五店仓" }]);
 });
 
 test("runner caches an unavailable store between consumer rounds instead of repeating warehouse sync", async () => {

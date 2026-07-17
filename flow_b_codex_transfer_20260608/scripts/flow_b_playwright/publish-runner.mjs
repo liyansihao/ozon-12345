@@ -73,6 +73,19 @@ export function restoredDailyStoreUsage(entries, storeId, at = new Date(), timeZ
   return skus.size;
 }
 
+export function verifiedWarehouseCandidates(store = {}) {
+  const candidates = new Map();
+  for (const rows of [store?.warehouse, store?.warehouses, store?.warehouse_list, store?.warehouseList]) {
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      const warehouseId = Number(row?.warehouse_id || row?.id || 0);
+      if (!(warehouseId > 0) || candidates.has(warehouseId)) continue;
+      candidates.set(warehouseId, { ...row, warehouse_id: warehouseId });
+    }
+  }
+  return [...candidates.values()];
+}
+
 function rounded(value) {
   return Math.round(Number(value) * 100) / 100;
 }
@@ -796,7 +809,7 @@ export function createPublishRunner({
         error.code = "STORE_DAILY_LIMIT";
         throw error;
       }
-      let discoveredWarehouses = Array.isArray(resolved.store?.warehouse) ? resolved.store.warehouse : [];
+      let discoveredWarehouses = verifiedWarehouseCandidates(resolved.store);
       let discoveredWarehouseId = discoveredWarehouses.length === 1
         ? Number(discoveredWarehouses[0]?.warehouse_id)
         : 0;
@@ -814,7 +827,7 @@ export function createPublishRunner({
             storeId: spec.id,
             watermarkId,
           });
-          discoveredWarehouses = Array.isArray(resolved.store?.warehouse) ? resolved.store.warehouse : [];
+          discoveredWarehouses = verifiedWarehouseCandidates(resolved.store);
           discoveredWarehouseId = discoveredWarehouses.length === 1
             ? Number(discoveredWarehouses[0]?.warehouse_id)
             : 0;
