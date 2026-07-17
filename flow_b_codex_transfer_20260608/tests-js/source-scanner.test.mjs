@@ -21,6 +21,7 @@ import {
   parseFavoriteProductSnapshot,
   parseListingFavoriteSnapshot,
   reusableListingFavoriteSnapshot,
+  pruneAttemptedSourceLinks,
   requiresFavoriteSession,
   retainedReplayLimit,
   scanSourceWithPage,
@@ -1388,6 +1389,22 @@ test("production collection can require a detail recheck instead of trusting lis
   };
   assert.equal(reusableListingFavoriteSnapshot(link, { verifyDetail: true }), null);
   assert.equal(reusableListingFavoriteSnapshot(link, { verifyDetail: false })?.sku, "3423207591");
+});
+
+test("source scan checkpoints discard attempted links while retaining scan completion evidence", () => {
+  const rows = [{
+    source_url: "https://www.ozon.ru/seller/sample/",
+    stop_reason: "link_target_reached",
+    cumulative_product_link_count: 48,
+    links: [
+      { href: "https://www.ozon.ru/product/old-101/", card_text: "large" },
+      { href: "https://www.ozon.ru/product/new-102/", card_text: "small" },
+    ],
+  }];
+  assert.deepEqual(pruneAttemptedSourceLinks(rows, new Set(["101"])), [{
+    ...rows[0],
+    links: [rows[0].links[1]],
+  }]);
 });
 
 test("missing shipping mode is a deterministic rejection, not an infinite retry", () => {

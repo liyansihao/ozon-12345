@@ -1402,6 +1402,17 @@ function skuFromProductUrl(value) {
   return String(value || "").match(/\/product\/(?:[^/?#]*-)?(\d+)(?:[/?#]|$)/)?.[1] || "";
 }
 
+export function pruneAttemptedSourceLinks(records, attempted = new Set()) {
+  if (!(attempted instanceof Set) || attempted.size === 0) return records || [];
+  return (records || []).map((row) => ({
+    ...row,
+    links: (row?.links || []).filter((link) => {
+      const sku = skuFromProductUrl(link?.href);
+      return !sku || !attempted.has(sku);
+    }),
+  }));
+}
+
 export function parseFavoriteProductSnapshot({ url, title, ogTitle, ogImage, priceText, sellerUrl }) {
   const sku = skuFromProductUrl(url);
   if (!sku) throw new Error("Ozon product SKU is missing");
@@ -2133,6 +2144,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   let completedSourceBatches = 0;
   const targetFavorites = envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000);
   const attempted = await loadExcludedSkus(outputPath, env);
+  records = pruneAttemptedSourceLinks(records, attempted);
   const runtime = collectionRuntimeState(favoriteLog);
   emit(`favorite exclusions loaded: ${attempted.size}`);
   const maozi = await openMaoziPage(context, { forceNew: true });
@@ -2373,7 +2385,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         favorite_count_delta: delta,
       })));
       await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      await fs.writeFile(outputPath, JSON.stringify(records, null, 2));
+      await fs.writeFile(outputPath, JSON.stringify(records));
       emit(`favorite ${batchFavoriteBefore} -> ${favoriteAfter} delta=${delta}`);
       favoriteBefore = favoriteAfter;
       if (sourceCooldown.blocked) break;
