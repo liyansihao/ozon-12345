@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ozon 五店轮换上架"
+  short_description: "安全运行、诊断和交接 Ozon 五店轮换上架流水线"
+  default_prompt: "Use $ozon-five-store-publisher to inspect the current run, preserve its browser session, and continue the five-store publishing workflow safely."
