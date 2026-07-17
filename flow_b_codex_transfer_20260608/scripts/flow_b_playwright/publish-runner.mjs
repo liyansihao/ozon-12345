@@ -890,6 +890,7 @@ export function createPublishRunner({
         watermarkNeedle,
         storeId: spec.id,
         watermarkId,
+        includeUserProfile: true,
       });
       const dailyCreate = resolved.store?.product_limit?.daily_create;
       const dailyLimit = Number(dailyCreate?.limit);
@@ -932,6 +933,7 @@ export function createPublishRunner({
             watermarkNeedle,
             storeId: spec.id,
             watermarkId,
+            includeUserProfile: true,
           });
           discoveredWarehouses = verifiedWarehouseCandidates(resolved.store);
           discoveredWarehouseId = discoveredWarehouses.length === 1

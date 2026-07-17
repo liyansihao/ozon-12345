@@ -78,6 +78,34 @@ test("publish target pins the verified store and watermark IDs", async () => {
   });
 });
 
+test("publish target can merge the ERP user-profile warehouse for the same verified store", async () => {
+  const transport = makeTransport({
+    "/api.shop/lists": { status: 200, json: { code: 1, data: [{ id: 106646, name: "丽丽五号", warehouse: [] }] } },
+    "/api.watermark/templates": { status: 200, json: { code: 1, data: [{ id: 60822, name: "lysh" }] } },
+    "/api.user/info": {
+      status: 200,
+      json: { code: 1, data: { shop: [{ id: 106646, name: "丽丽五号", warehouse: [{ warehouse_id: 7005, name: "五号 FBS 仓" }] }] } },
+    },
+  });
+  const client = createMaoziClient({ transport });
+
+  assert.deepEqual(await client.resolvePublishTarget({
+    storeNeedle: "丽丽五号",
+    watermarkNeedle: "lysh",
+    storeId: 106646,
+    watermarkId: 60822,
+    includeUserProfile: true,
+  }), {
+    store: {
+      id: 106646,
+      name: "丽丽五号",
+      warehouse: [],
+      user_profile: { id: 106646, name: "丽丽五号", warehouse: [{ warehouse_id: 7005, name: "五号 FBS 仓" }] },
+    },
+    watermark: { id: 60822, name: "lysh" },
+  });
+});
+
 test("client validates endpoint request shapes for category and profit lookups", async () => {
   const transport = makeTransport({
     "/api.tool/get_category_by_sku": { status: 200, json: { code: 1, data: { cate: [1, 2, 3], product_info: { weight: 12 } } } },

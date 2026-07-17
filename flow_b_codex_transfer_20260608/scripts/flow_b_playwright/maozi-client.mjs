@@ -14,6 +14,7 @@ const ENDPOINTS = Object.freeze({
   batchUpdateStock: "/api.product.online/batch_update_stock",
   syncWarehouses: "/api.shop/sync_warehouse",
   syncOnlineShops: "/api.product.online/sync_shop",
+  userInfo: "/api.user/info",
 });
 
 function successResponse(response) {
@@ -104,6 +105,12 @@ export function createMaoziClient({ transport }) {
     return listRows(data, "watermarks");
   }
 
+  async function listUserShops() {
+    const data = requireSuccess(await transport(ENDPOINTS.userInfo, { method: "GET" }), "user profile");
+    const rows = data?.shop ?? data?.user?.shop;
+    return Array.isArray(rows) ? rows : [];
+  }
+
   return {
     getFavoritePage,
     listFavorites,
@@ -116,7 +123,7 @@ export function createMaoziClient({ transport }) {
       return data;
     },
 
-    async resolvePublishTarget({ storeNeedle, watermarkNeedle, storeId, watermarkId }) {
+    async resolvePublishTarget({ storeNeedle, watermarkNeedle, storeId, watermarkId, includeUserProfile = false }) {
       if (!String(storeNeedle || "").trim()) throw new Error("store needle is required");
       if (!String(watermarkNeedle || "").trim()) throw new Error("watermark needle is required");
       const [shops, watermarks] = await Promise.all([listShops(), listWatermarks()]);
@@ -126,7 +133,15 @@ export function createMaoziClient({ transport }) {
       const watermark = watermarkId === undefined ? namedWatermark : watermarks.find((row) => String(row?.id) === String(watermarkId));
       if (!store) throw new Error(`verified store ID not found: ${storeId}`);
       if (!watermark) throw new Error(`verified watermark ID not found: ${watermarkId}`);
-      return { store, watermark };
+      let profileStore = null;
+      if (includeUserProfile) {
+        const profileShops = await listUserShops().catch(() => []);
+        profileStore = profileShops.find((row) => String(row?.id) === String(store.id)) || null;
+      }
+      return {
+        store: profileStore ? { ...store, user_profile: profileStore } : store,
+        watermark,
+      };
     },
 
     async getCategoryBySku(sku) {
