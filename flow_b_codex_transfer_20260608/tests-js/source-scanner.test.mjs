@@ -351,6 +351,32 @@ test("recent repeated submissions override an old dry-family penalty for bounded
   }), [submittedSeller, promotedSearch]);
 });
 
+test("a qualified seller with a newer dry tail loses its historical fixed tier", () => {
+  const staleSubmittedSeller = "https://www.ozon.ru/seller/stale-qualified/";
+  const productiveSearch = "https://www.ozon.ru/search/?text=productive&is_global=true";
+  const rows = [
+    ...["old-submitted-1", "old-submitted-2"].map((sku, index) => ({
+      at: new Date(Date.parse("2026-07-16T06:00:00.000Z") + index * 1000).toISOString(),
+      source_url: staleSubmittedSeller,
+      sku,
+      status: "submitted",
+    })),
+    ...Array.from({ length: 12 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-16T08:00:00.000Z") + index * 1000).toISOString(),
+      source_url: `${staleSubmittedSeller}?page=${2 + Math.floor(index / 4)}&sorting=rating`,
+      sku: `recent-non-fbs-${index}`,
+      status: "rejected",
+      reason: "non-pure-fbs",
+    })),
+    { at: "2026-07-16T08:30:00.000Z", source_url: productiveSearch, sku: "search-win", status: "published" },
+  ];
+  assert.deepEqual(prioritizeSourceUrls([staleSubmittedSeller, productiveSearch], {
+    yieldRows: rows,
+    qualifiedFreshSourceUrls: [staleSubmittedSeller],
+    verifiedFreshSourceUrls: [productiveSearch],
+  }), [productiveSearch, staleSubmittedSeller]);
+});
+
 test("fresh sellers expand into bounded price and sorting variants", () => {
   const seller = "https://www.ozon.ru/seller/new-store/";
   const expanded = expandFreshSellerSourceUrls([seller]);

@@ -1211,7 +1211,7 @@ export function prioritizeSourceUrls(urls, {
       : qualifiedFreshKeys.has(familyKey)
         ? 3
         : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
-    let tier = familyPenalty < 0 && !qualifiedFreshKeys.has(familyKey)
+    let tier = familyPenalty < 0
       ? boundedDeep ? 3 : (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
     if (scanPenalty < 0 && !boundedDeep) tier = 0;
