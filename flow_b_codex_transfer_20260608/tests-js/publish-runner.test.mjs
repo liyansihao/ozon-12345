@@ -908,6 +908,8 @@ test("runner syncs and verifies a missing warehouse before rotating into a store
   assert.ok(targetEvents.some((event) => event.store_id === 106637
     && event.warehouse_id === 2020005022957960
     && event.watermark_id === 60822
+    && event.daily_usage === 0
+    && event.daily_limit === 100
     && event.warehouse_source === "erp-discovered"));
   await fs.rm(runDir, { recursive: true, force: true });
 });

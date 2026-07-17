@@ -865,6 +865,8 @@ export function createPublishRunner({
             type: String(warehouse?.type || warehouse?.warehouse_type || "").trim() || null,
             status: String(warehouse?.status || "").trim() || null,
           })),
+          daily_usage: effectiveDailyUsage,
+          daily_limit: effectiveDailyLimit,
           watermark_id: Number(resolved.watermark?.id || watermarkId),
         });
         await metricsChain;
@@ -885,6 +887,8 @@ export function createPublishRunner({
         store_name: resolved.store?.name ?? resolved.store?.title ?? spec.needle,
         warehouse_id: targetWarehouseId || null,
         warehouse_source: Number(spec.warehouseId) > 0 ? "configured" : "erp-discovered",
+        daily_usage: effectiveDailyUsage,
+        daily_limit: effectiveDailyLimit,
         watermark_id: Number(resolved.watermark?.id || watermarkId),
       });
       resolvedTargetsThisRun.set(cacheKey, value);
