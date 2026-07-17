@@ -683,6 +683,7 @@ export function productTitleFamily(value) {
   if (/чехол|ремеш(?:ок|к)?/i.test(text)) return "case_strap";
   if (/человек[- ]?паук|spider[- ]?man|супергер|мстител|marvel/i.test(text)) return "superhero";
   if (/трус|нижн(?:ее|его|ем)?\s+бель|бюст|лифчик/i.test(text)) return "underwear";
+  if (/сквиш|антистресс|squish/i.test(text)) return "squish";
   if (/мягк(?:ая|ие|ой)?\s+(?:плюшев|игруш)|плюшев|спрунк|sprunki/i.test(text)) return "plush";
   if (/аккумулятор|батаре[яй]|электроинструмент|power\s*tool/i.test(text)) return "electronics";
   if (/конструктор|building\s*blocks?|блочн(?:ая|ый)|moc\b/i.test(text)) return "building";
@@ -699,6 +700,7 @@ export function productTitlePriority(value) {
   return {
     socks: 700,
     underwear: 650,
+    squish: 625,
     headwear: 575,
     building: 525,
     other: 400,

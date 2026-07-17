@@ -2092,11 +2092,26 @@ test("title family priority follows observed strict-publication conversion", () 
   assert.equal(productTitleFamily("Фигурка героя"), "figure");
   assert.equal(productTitleFamily("Летняя кепка для кошек"), "pet");
   assert.equal(productTitleFamily("Детский игровой столик для игр с водой"), "bulky_kids");
+  assert.equal(productTitleFamily("Сквиш лапка антистресс"), "squish");
   assert.ok(productTitlePriority("Носки для девочек") > productTitlePriority("Плюшевая игрушка Sprunki"));
   assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Фигурка героя"));
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Браслет с кулоном"));
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Летняя кепка для кошек"));
   assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Детский игровой столик для игр с водой"));
+  assert.ok(productTitlePriority("Сквиш лапка антистресс") > productTitlePriority("Большая картина"));
+});
+
+test("strict squish conversion promotes squish listings without borrowing broad other-family yield", () => {
+  const scores = observedTitleFamilyScores([
+    { sku: "squish-1", status: "published", title: "Сквиш лапка антистресс" },
+    { sku: "squish-2", status: "published", title: "Сквиш Стич коллекционный" },
+    { sku: "other-1", status: "skipped", title: "Форма для котлет" },
+  ]);
+  assert.ok(scores.squish > scores.other);
+  assert.deepEqual(prioritizeFavoriteLinks([
+    { href: "ordinary", text: "Обычный товар для дома" },
+    { href: "squish", text: "Сквиш лапка антистресс" },
+  ], scores).map((link) => link.href), ["squish", "ordinary"]);
 });
 
 test("recent strict publications promote productive title families ahead of static guesses", () => {
