@@ -348,7 +348,7 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
           || ["all_failed", "failed"].includes(importStatus)) continue;
         applyLoadedEvent({
           sku,
-          status: "processing",
+          status,
           data: {
             ...data,
             submitted: true,

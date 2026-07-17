@@ -125,7 +125,7 @@ test("cross-run pending seeds restore only latest submitted work as reconciliati
     assert.equal(entries.get("pending").status, "processing");
     assert.equal(entries.get("pending").data.reconcile_only, true);
     assert.equal(entries.get("pending").data.cross_run_seed, true);
-    assert.equal(entries.get("failed-retry").status, "processing");
+    assert.equal(entries.get("failed-retry").status, "failed");
     assert.equal(entries.get("local-wins").status, "skipped");
     assert.equal(entries.has("terminal"), false);
     assert.equal(entries.has("not-submitted"), false);
