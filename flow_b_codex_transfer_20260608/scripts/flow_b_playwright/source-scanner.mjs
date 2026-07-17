@@ -357,6 +357,10 @@ function envNumber(env, name, fallback) {
   return Number.isFinite(value) ? value : fallback;
 }
 
+export function verifiedSellerMinimumPublished(env = process.env) {
+  return Math.max(2, Math.floor(envNumber(env, "FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED", 2)));
+}
+
 export function retainedReplayLimit(env = process.env) {
   return Math.max(0, Math.floor(envNumber(env, "FLOW_B_MAX_RETAINED_LINKS", 12)));
 }
@@ -2308,7 +2312,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   );
   const verifiedSellerUrls = verifiedSellerSourceUrls(
     yieldRows,
-    envNumber(env, "FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED", 2),
+    verifiedSellerMinimumPublished(env),
   );
   const verifiedSellerSet = new Set(verifiedSellerUrls);
   const deepVerifiedSellerVariants = deepVerifiedSellerSourceVariants(

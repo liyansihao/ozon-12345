@@ -72,6 +72,9 @@ export function validate24hAcceptanceEnv(env = process.env) {
   requireFlag(env, "FLOW_B_VERIFY_LISTING_FBS_DETAIL");
   requireFlag(env, "FLOW_B_1688_PERSISTENT_POOL");
   requireFlag(env, "FLOW_B_PROBE_INACTIVE_STORES");
+  if (Number(env.FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED) < 2) {
+    throw new Error("FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED must be at least 2");
+  }
   const initialPublishWorkers = Number(env.FLOW_B_PUBLISH_WORKERS);
   const maxPublishWorkers = Number(env.FLOW_B_MAX_PUBLISH_WORKERS);
   if (initialPublishWorkers !== 8 || maxPublishWorkers !== 12) {

@@ -83,6 +83,7 @@ import {
   repeatedSubmittedSellerSourceUrls,
   deepVerifiedSellerSourceVariants,
   verifiedSellerSourceUrls,
+  verifiedSellerMinimumPublished,
   verifiedPrioritySourceUrls,
   qualifiedPrioritySourceUrls,
   filterProductiveSourceVariants,
@@ -101,6 +102,12 @@ import {
   writeJsonArrayCached,
   shouldWriteSourceCheckpoint,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+
+test("verified seller promotion requires at least two strict publications", () => {
+  assert.equal(verifiedSellerMinimumPublished({}), 2);
+  assert.equal(verifiedSellerMinimumPublished({ FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED: "1" }), 2);
+  assert.equal(verifiedSellerMinimumPublished({ FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED: "4" }), 4);
+});
 
 test("JSONL seed reads reuse unchanged files and only parse appended bytes", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-jsonl-cache-"));
