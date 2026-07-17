@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   clearObservedPublishFeedbackCache,
   createPublishRunner,
+  duplicateTitleKey,
   loadObservedPublishFeedback,
   normalizeCostFailureReason,
   observedPublishFeedbackCacheStats,
@@ -15,6 +16,18 @@ import {
   restoredDailyStoreUsage,
   verifiedWarehouseCandidates,
 } from "../scripts/flow_b_playwright/publish-runner.mjs";
+
+test("duplicate title keys require a long exact normalized title", () => {
+  assert.equal(duplicateTitleKey("Комплект трусов"), null);
+  assert.equal(
+    duplicateTitleKey("Плюшевый коврик-пазл из 10 частей!"),
+    duplicateTitleKey(" плюшевый коврик пазл из 10 частей "),
+  );
+  assert.notEqual(
+    duplicateTitleKey("Плюшевый коврик-пазл из 10 частей"),
+    duplicateTitleKey("Плюшевый коврик-пазл из 12 частей"),
+  );
+});
 
 test("publish feedback reuses an unchanged source-yield history and refreshes after append", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-publish-feedback-"));
@@ -129,6 +142,63 @@ function clientFor(items, overrides = {}) {
     ...overrides,
   };
 }
+
+test("runner skips an exact long-title duplicate before Ozon detail and 1688", async () => {
+  const title = "Плюшевый коврик-пазл из десяти частей для малышей";
+  const state = fakeState({
+    existing: {
+      status: "published",
+      data: { sku: "existing", title, store_id: 7, published_at: "2026-07-17T00:00:00Z" },
+    },
+  });
+  let detailCalls = 0;
+  let costCalls = 0;
+  const client = clientFor([{ sku: "duplicate", title }], {
+    getProductDetail: async () => { detailCalls += 1; throw new Error("must not load detail"); },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => { costCalls += 1; return { ok: true, cost: 20 }; } },
+    state,
+    target: 1,
+    runDir: "/tmp/run",
+  }).run();
+
+  assert.equal(result.published, 0);
+  assert.equal(detailCalls, 0);
+  assert.equal(costCalls, 0);
+  assert.ok(state.transitions.some((event) => event.sku === "duplicate"
+    && event.status === "skipped"
+    && event.data.reason === "duplicate-title"
+    && event.data.duplicate_of_sku === "existing"));
+});
+
+test("concurrent exact-title candidates reserve only one store submission", async () => {
+  const title = "Плюшевый коврик-пазл из десяти частей для малышей";
+  const state = fakeState();
+  let publishCalls = 0;
+  const client = clientFor([
+    { sku: "first", title },
+    { sku: "second", title },
+  ], {
+    getProductDetail: async (sku) => ({ sku, mode: "FBS", title, current_price: 100, follow_min: 90 }),
+    publish: async () => { publishCalls += 1; return { ok: true, response: { code: 1 } }; },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 2,
+    concurrency: 2,
+    runDir: "/tmp/run",
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(publishCalls, 1);
+  assert.equal(state.selections.length, 1);
+  assert.ok(state.transitions.some((event) => event.status === "skipped"
+    && event.data.reason === "duplicate-title"));
+});
 
 test("publish candidates prioritize observed strict-yield titles independently of API order", () => {
   const items = [

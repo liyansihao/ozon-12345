@@ -22,6 +22,11 @@ const ECONOMY_SENTINEL = Object.freeze({
 });
 const observedPublishFeedbackCompositeCache = new Map();
 
+export function duplicateTitleKey(value) {
+  const normalized = defaultPolicy.normalizeName(value);
+  return normalized.length >= 24 ? normalized : null;
+}
+
 export function normalizeCostFailureReason(cost = {}) {
   const evidence = `${cost?.reason || ""} ${cost?.error?.code || ""} ${cost?.error?.message || ""}`.trim();
   if (/timed?\s*out|timeout/i.test(evidence)) return "1688-timeout";
@@ -414,6 +419,7 @@ export function createPublishRunner({
   const unavailableStoreUntil = new Map();
   const lastStoreSwitchDiagnosticAt = new Map();
   const lastStoreTargetMetrics = new Map();
+  const selectedTitleOwners = new Map();
   let lastAllStoresStalledAt = 0;
   const adaptive = new AdaptiveConcurrency({ initial: workerCount, max: Math.max(workerCount, Number(maxConcurrency) || workerCount) });
 
@@ -729,6 +735,12 @@ export function createPublishRunner({
         prepared_at: now().toISOString(),
         selected_at: now().toISOString(),
       };
+      const titleKey = duplicateTitleKey(submissionState.title);
+      const duplicateOwner = titleKey ? selectedTitleOwners.get(titleKey) : null;
+      if (duplicateOwner && duplicateOwner !== sku) {
+        return skip(item, "duplicate-title", { duplicate_of_sku: duplicateOwner });
+      }
+      if (titleKey) selectedTitleOwners.set(titleKey, sku);
       await state.recordSelected?.(submissionState);
       await state.transition(sku, "processing", submissionState);
       const finalResult = await timed(sku, "maozi_publish_and_confirm", () => publishSerial(sku, payload, targetConfig));
@@ -794,6 +806,15 @@ export function createPublishRunner({
   async function run() {
     await state.load?.();
     const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
+    selectedTitleOwners.clear();
+    for (const entry of restoredEntries) {
+      const data = entry?.data || {};
+      const sku = String(entry?.sku ?? data.sku ?? "").trim();
+      const reservesTitle = entry?.status === "published"
+        || (entry?.status === "processing" && (data.submitted === true || data.submission_pending === true));
+      const titleKey = reservesTitle ? duplicateTitleKey(data.title) : null;
+      if (sku && titleKey && !selectedTitleOwners.has(titleKey)) selectedTitleOwners.set(titleKey, sku);
+    }
     storeTotalUsage.clear();
     storeTotalReservations.clear();
     for (const [storeId, usage] of Object.entries(totalStoreUsageSeed || {})) {
@@ -1247,6 +1268,13 @@ export function createPublishRunner({
           return { status: "failed", sku, reason: "favorite-delete-failed" };
         }
         return { status: "ignored", sku };
+      }
+      if (!isReconciliationCandidate(item)) {
+        const titleKey = duplicateTitleKey(item?.title);
+        const duplicateOwner = titleKey ? selectedTitleOwners.get(titleKey) : null;
+        if (duplicateOwner && duplicateOwner !== sku) {
+          return { ...await skip(item, "duplicate-title", { duplicate_of_sku: duplicateOwner }), attempted: true };
+        }
       }
       if (restoredStatus === "processing" || restoredStatus === "failed") {
         let reconciliationTarget = targetConfig;
