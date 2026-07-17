@@ -1192,6 +1192,30 @@ test("verified strict-success sellers outrank a higher-yield verified search pag
   }), [seller, search]);
 });
 
+test("repeated strict-success Global searches rotate with verified sellers", () => {
+  const firstSeller = "https://www.ozon.ru/seller/strict-first/";
+  const secondSeller = "https://www.ozon.ru/seller/strict-second/";
+  const search = "https://www.ozon.ru/search/?text=briefs&is_global=true&currency_price=1000.000%3B";
+  const yieldRows = [
+    { source_url: search, sku: "search-win-1", status: "published" },
+    { source_url: `${search}&page=3`, sku: "search-win-2", status: "published" },
+  ];
+  assert.deepEqual(prioritizeSourceUrls([firstSeller, secondSeller, search], {
+    yieldRows,
+    verifiedFreshSourceUrls: [firstSeller, secondSeller, search],
+  }), [firstSeller, search, secondSeller]);
+});
+
+test("one lucky Global success remains below verified seller rotation", () => {
+  const firstSeller = "https://www.ozon.ru/seller/strict-first/";
+  const secondSeller = "https://www.ozon.ru/seller/strict-second/";
+  const search = "https://www.ozon.ru/search/?text=lucky&is_global=true&currency_price=1000.000%3B";
+  assert.deepEqual(prioritizeSourceUrls([firstSeller, secondSeller, search], {
+    yieldRows: [{ source_url: search, sku: "one-win", status: "published" }],
+    verifiedFreshSourceUrls: [firstSeller, secondSeller, search],
+  }), [firstSeller, secondSeller, search]);
+});
+
 test("verified source variants finish their tier before ordinary sources", () => {
   const verified = "https://www.ozon.ru/search/?text=winner&is_global=true";
   const verifiedVariant = `${verified}&sorting=rating`;

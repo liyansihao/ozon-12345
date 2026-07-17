@@ -1517,6 +1517,16 @@ export function prioritizeSourceUrls(urls, {
     const key = sourceYieldKey(source);
     successfulCounts.set(key, (successfulCounts.get(key) || 0) + 1);
   }
+  const strictSuccessSkusBySource = new Map();
+  for (const row of yieldRows) {
+    if (String(row?.status || "") !== "published") continue;
+    const key = sourceYieldKey(row?.source_url);
+    const sku = String(row?.sku || "").trim();
+    if (!key || !sku) continue;
+    const skus = strictSuccessSkusBySource.get(key) || new Set();
+    skus.add(sku);
+    strictSuccessSkusBySource.set(key, skus);
+  }
   const funnelScores = fullFunnelSourceScores(yieldRows);
   const familyScores = observedTitleFamilyScores(yieldRows);
   const familyPenalties = exhaustedSourceFamilyPenalties(yieldRows);
@@ -1543,8 +1553,14 @@ export function prioritizeSourceUrls(urls, {
     const effectiveFamilyPenalty = Math.min(familyPenalty, sellerFamilyPenalty);
     const scanFamilyKey = isPriceBandedSource(url) ? yieldKey : familyKey;
     const scanPenalty = exhaustedScanFamilies.has(scanFamilyKey) ? -600_000 : 0;
+    const repeatedStrictGlobal = /(?:[?&]is_global=true(?:&|$)|ozon-global|tovary-iz-kitaya)/i.test(String(url))
+      && (strictSuccessSkusBySource.get(yieldKey)?.size || 0) >= 2
+      && yieldPriority > 0
+      && effectiveFamilyPenalty >= 0
+      && scanPenalty >= 0;
     const baseTier = verifiedSellerKeys.has(familyKey)
       ? 4
+      : repeatedStrictGlobal ? 3
       : qualifiedFreshKeys.has(familyKey)
         ? 3
         : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
