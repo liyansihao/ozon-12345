@@ -11,7 +11,9 @@ import {
   listingModeSkipReason,
   effectiveFavoriteTotal,
   excludedSkusFromHistories,
+  excludedSkusFromEventHistories,
   favoritedSkusFromHistory,
+  favoritedSkusFromEvents,
   expandHighYieldSourceUrls,
   isFavoriteSessionAuthenticated,
   isFavoriteCapacityReached,
@@ -121,6 +123,27 @@ test("JSONL seed reads reuse unchanged files and only parse appended bytes", asy
   assert.deepEqual((await readJsonLinesIncremental(filename)).map((row) => row.sku), ["4"]);
   assert.equal(jsonLinesFileCacheStats(filename).full_reads, 2);
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("parsed exclusion histories preserve latest-state and retry semantics", () => {
+  const excluded = excludedSkusFromEventHistories({
+    stateEventGroups: [[
+      { sku: "retry-later", status: "skipped" },
+      { sku: "retry-later", status: "failed" },
+      { sku: "published", status: "published" },
+    ]],
+    favoriteEventGroups: [[
+      { sku: "deterministic", status: "rejected", reason: "non-pure-fbs" },
+      { sku: "currency-recheck", status: "rejected", reason: "non-cny-sale-price" },
+      { sku: "missing-mode", status: "failed", error: "missing-shipping-mode: timeout" },
+      { sku: "transient", status: "failed", error: "page timeout" },
+    ]],
+  });
+  assert.deepEqual([...excluded].sort(), ["deterministic", "missing-mode", "published"]);
+  assert.deepEqual([...favoritedSkusFromEvents([
+    { sku: "one", status: "favorited" },
+    { sku: "two", status: "rejected" },
+  ])], ["one"]);
 });
 
 test("source scan array checkpoints reuse memory and replace files atomically", async () => {

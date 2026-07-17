@@ -1538,44 +1538,50 @@ export function fillRetainedFallbackLinks(retained, fallback, limit = 24) {
 }
 
 export function terminalSkusFromJsonl(text) {
+  return terminalSkusFromEvents(parseJsonLinesChunk(text).rows);
+}
+
+export function terminalSkusFromEvents(events = []) {
   const latest = new Map();
-  for (const line of String(text || "").split(/\r?\n/)) {
-    try {
-      const event = JSON.parse(line);
-      const sku = String(event?.sku ?? "").trim();
-      if (sku) latest.set(sku, String(event?.status || ""));
-    } catch {}
+  for (const event of events || []) {
+    const sku = String(event?.sku ?? "").trim();
+    if (sku) latest.set(sku, String(event?.status || ""));
   }
   return new Set([...latest].filter(([, status]) => status === "skipped" || status === "published").map(([sku]) => sku));
 }
 
 export function excludedSkusFromHistories({ stateTexts = [], favoriteTexts = [] } = {}) {
+  return excludedSkusFromEventHistories({
+    stateEventGroups: stateTexts.map((text) => parseJsonLinesChunk(text).rows),
+    favoriteEventGroups: favoriteTexts.map((text) => parseJsonLinesChunk(text).rows),
+  });
+}
+
+export function excludedSkusFromEventHistories({ stateEventGroups = [], favoriteEventGroups = [] } = {}) {
   const excluded = new Set();
-  for (const text of stateTexts) {
-    for (const sku of terminalSkusFromJsonl(text)) excluded.add(sku);
+  for (const events of stateEventGroups) {
+    for (const sku of terminalSkusFromEvents(events)) excluded.add(sku);
   }
-  for (const text of favoriteTexts) {
-    for (const line of String(text || "").split(/\r?\n/)) {
-      try {
-        const event = JSON.parse(line);
-        const deterministicMissingMode = event?.status === "failed" && /^missing-shipping-mode:/i.test(String(event?.error || ""));
-        const needsCurrencyRecheck = event?.status === "rejected" && event?.reason === "non-cny-sale-price";
-        if (((event?.status === "rejected" && !needsCurrencyRecheck) || deterministicMissingMode) && event?.sku) {
-          excluded.add(String(event.sku));
-        }
-      } catch {}
+  for (const events of favoriteEventGroups) {
+    for (const event of events || []) {
+      const deterministicMissingMode = event?.status === "failed" && /^missing-shipping-mode:/i.test(String(event?.error || ""));
+      const needsCurrencyRecheck = event?.status === "rejected" && event?.reason === "non-cny-sale-price";
+      if (((event?.status === "rejected" && !needsCurrencyRecheck) || deterministicMissingMode) && event?.sku) {
+        excluded.add(String(event.sku));
+      }
     }
   }
   return excluded;
 }
 
 export function favoritedSkusFromHistory(text) {
+  return favoritedSkusFromEvents(parseJsonLinesChunk(text).rows);
+}
+
+export function favoritedSkusFromEvents(events = []) {
   const skus = new Set();
-  for (const line of String(text || "").split(/\r?\n/)) {
-    try {
-      const event = JSON.parse(line);
-      if (event?.status === "favorited" && event?.sku) skus.add(String(event.sku));
-    } catch {}
+  for (const event of events || []) {
+    if (event?.status === "favorited" && event?.sku) skus.add(String(event.sku));
   }
   return skus;
 }
@@ -1590,20 +1596,16 @@ async function loadExcludedSkus(outputPath, env) {
     ...String(env.FLOW_B_FAVORITE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
   ];
   const readHistories = async (filenames) => {
-    const texts = [];
+    const eventGroups = [];
     for (const filename of [...new Set(filenames.map((value) => path.resolve(value)))]) {
-      try { texts.push(await fs.readFile(filename, "utf8")); }
-      catch (error) { if (error.code !== "ENOENT") throw error; }
+      eventGroups.push(await readJsonLinesIncremental(filename));
     }
-    return texts;
+    return eventGroups;
   };
-  const stateTexts = await readHistories(stateFiles);
-  const favoriteTexts = await readHistories(favoriteFiles);
-  const excluded = excludedSkusFromHistories({ stateTexts, favoriteTexts });
-  let currentFavoriteText = "";
-  try { currentFavoriteText = await fs.readFile(path.resolve(favoriteFiles[0]), "utf8"); }
-  catch (error) { if (error.code !== "ENOENT") throw error; }
-  for (const sku of favoritedSkusFromHistory(currentFavoriteText)) excluded.add(sku);
+  const stateEventGroups = await readHistories(stateFiles);
+  const favoriteEventGroups = await readHistories(favoriteFiles);
+  const excluded = excludedSkusFromEventHistories({ stateEventGroups, favoriteEventGroups });
+  for (const sku of favoritedSkusFromEvents(favoriteEventGroups[0] || [])) excluded.add(sku);
   if (env.FLOW_B_EXCLUDED_SKUS) {
     for (const sku of String(env.FLOW_B_EXCLUDED_SKUS).split(/[,\s]+/).filter(Boolean)) excluded.add(sku);
   }
