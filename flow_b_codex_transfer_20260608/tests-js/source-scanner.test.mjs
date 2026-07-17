@@ -112,6 +112,7 @@ import {
   shouldWriteSourceCheckpoint,
   sourceBatchPrefetchAllowed,
   sourceBatchCollectionMode,
+  shouldScanSourcesDuringDetailCooldown,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("verified seller promotion requires at least two strict publications", () => {
@@ -346,6 +347,33 @@ test("detail cooldown keeps source discovery running in queue-only mode", () => 
     cooldownRemainingMs: 0,
     sourceBlocked: false,
   }), "done");
+});
+
+test("detail cooldown becomes quiet when backlog is full or recovery is near", () => {
+  assert.equal(shouldScanSourcesDuringDetailCooldown({
+    cooldownRemainingMs: 600_000,
+    readyCandidateCount: 48,
+    backlogTarget: 48,
+    quietWindowMs: 90_000,
+  }), false);
+  assert.equal(shouldScanSourcesDuringDetailCooldown({
+    cooldownRemainingMs: 60_000,
+    readyCandidateCount: 10,
+    backlogTarget: 48,
+    quietWindowMs: 90_000,
+  }), false);
+  assert.equal(shouldScanSourcesDuringDetailCooldown({
+    cooldownRemainingMs: 600_000,
+    readyCandidateCount: 10,
+    backlogTarget: 48,
+    quietWindowMs: 90_000,
+  }), true);
+  assert.equal(shouldScanSourcesDuringDetailCooldown({
+    cooldownRemainingMs: 0,
+    readyCandidateCount: 48,
+    backlogTarget: 48,
+    quietWindowMs: 90_000,
+  }), true);
 });
 
 test("one hung source page times out without blocking the batch", async () => {

@@ -388,6 +388,19 @@ export function sourceBatchCollectionMode({
   return "collect";
 }
 
+export function shouldScanSourcesDuringDetailCooldown({
+  cooldownRemainingMs,
+  readyCandidateCount,
+  backlogTarget,
+  quietWindowMs,
+}) {
+  const remaining = Math.max(0, Number(cooldownRemainingMs) || 0);
+  if (remaining === 0) return true;
+  const target = Math.max(1, Number(backlogTarget) || 1);
+  if (Number(readyCandidateCount) >= target) return false;
+  return remaining > Math.max(0, Number(quietWindowMs) || 0);
+}
+
 export async function withTimeout(operation, timeoutMs, label = "operation") {
   const timeout = Math.max(1, Number(timeoutMs) || 1);
   let timer;
@@ -2810,13 +2823,22 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   records = pruneAttemptedSourceLinks(records, attempted);
   const candidateQueue = createCandidateQueue(path.join(path.dirname(outputPath), "candidate_queue.jsonl"));
   await candidateQueue.load();
-  const recoveredCandidates = candidateQueue.pending({
+  const candidateDrainLimit = Math.max(1, envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48));
+  const candidatePerSourceDrain = Math.max(1, envNumber(env, "FLOW_B_CANDIDATE_QUEUE_PER_SOURCE_DRAIN", 6));
+  const candidateBacklogTarget = Math.max(1, Math.min(
+    candidateDrainLimit,
+    envNumber(env, "FLOW_B_CANDIDATE_QUEUE_BACKLOG_TARGET", candidateDrainLimit),
+  ));
+  const pendingCandidateOptions = {
     attempted,
-    limit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48),
-    perSourceLimit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_PER_SOURCE_DRAIN", 6),
+    perSourceLimit: candidatePerSourceDrain,
     sourceKey: (row) => sourceCollectionBlockKey(row?.source_url) || row?.source_url,
     priority: (row) => favoriteLinkPriority(row, titleFamilyScores)
       + Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
+  };
+  const recoveredCandidates = candidateQueue.pending({
+    ...pendingCandidateOptions,
+    limit: candidateDrainLimit,
   });
   if (!pending.length && !recoveredCandidates.length) {
     return { outFile: outputPath, records: records.length, pending: 0 };
@@ -2906,6 +2928,25 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           return sku && !attempted.has(sku);
         }));
         emit(`Ozon detail cooldown queue-only cached=${queued} remaining=${cooldownRemaining}ms`);
+      }
+      const readyCandidateCount = candidateQueue.pending({
+        ...pendingCandidateOptions,
+        limit: candidateBacklogTarget,
+      }).length;
+      if (!shouldScanSourcesDuringDetailCooldown({
+        cooldownRemainingMs: cooldownRemaining,
+        readyCandidateCount,
+        backlogTarget: candidateBacklogTarget,
+        quietWindowMs: envNumber(env, "FLOW_B_DETAIL_COOLDOWN_SOURCE_QUIET_MS", 90_000),
+      })) {
+        emit(`Ozon cooldown source quiet ready=${readyCandidateCount} remaining=${cooldownRemaining}ms`);
+        return {
+          outFile: outputPath,
+          records: records.length,
+          pending: pending.length,
+          candidate_backlog: readyCandidateCount,
+          cooldown_remaining_ms: cooldownRemaining,
+        };
       }
     }
 
@@ -3031,6 +3072,19 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     for (let start = 0; prefetchedBatch || start < pending.length;) {
       if (isCollectionDeadlineReached(env)) break;
       if (favoriteBefore !== null && favoriteBefore >= targetFavorites) break;
+      const loopCooldownRemaining = remainingCollectionCooldown(runtime);
+      if (loopCooldownRemaining > 0) {
+        const readyCandidateCount = candidateQueue.pending({
+          ...pendingCandidateOptions,
+          limit: candidateBacklogTarget,
+        }).length;
+        if (!shouldScanSourcesDuringDetailCooldown({
+          cooldownRemainingMs: loopCooldownRemaining,
+          readyCandidateCount,
+          backlogTarget: candidateBacklogTarget,
+          quietWindowMs: envNumber(env, "FLOW_B_DETAIL_COOLDOWN_SOURCE_QUIET_MS", 90_000),
+        })) break;
+      }
       const batchWork = prefetchedBatch || startSourceBatch(start);
       prefetchedBatch = null;
       const batch = batchWork.batch;
