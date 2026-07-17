@@ -96,6 +96,7 @@ import {
   jsonArrayFileCacheStats,
   readJsonArrayCached,
   writeJsonArrayCached,
+  shouldWriteSourceCheckpoint,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("JSONL seed reads reuse unchanged files and only parse appended bytes", async () => {
@@ -140,6 +141,15 @@ test("source scan array checkpoints reuse memory and replace files atomically", 
   assert.deepEqual(JSON.parse(await fs.readFile(filename, "utf8")), [{ source_url: "one" }, { source_url: "two" }]);
   await assert.rejects(fs.access(`${filename}.tmp`));
   await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("large source checkpoints flush on a bounded completed-batch interval", () => {
+  assert.equal(shouldWriteSourceCheckpoint(1, 4), false);
+  assert.equal(shouldWriteSourceCheckpoint(3, 4), false);
+  assert.equal(shouldWriteSourceCheckpoint(4, 4), true);
+  assert.equal(shouldWriteSourceCheckpoint(8, 4), true);
+  assert.equal(shouldWriteSourceCheckpoint(1, 1), true);
+  assert.equal(shouldWriteSourceCheckpoint(4, 0), true);
 });
 
 test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {

@@ -182,6 +182,11 @@ export async function writeJsonArrayCached(filename, rows) {
   });
 }
 
+export function shouldWriteSourceCheckpoint(completedBatches, interval = 4) {
+  const every = Math.max(1, Number(interval) || 1);
+  return Number(completedBatches) > 0 && Number(completedBatches) % every === 0;
+}
+
 export function collectionRuntimeState(key) {
   const normalized = String(key || "default");
   if (!collectionRuntimeStates.has(normalized)) {
@@ -2383,6 +2388,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const sourcePagePool = reusablePools.sourcePages;
   const favoriteWorkerPagePool = reusablePools.favoritePages;
   let keepReusablePages = true;
+  let sourceCheckpointDirty = false;
+  const sourceCheckpointBatchInterval = envNumber(env, "FLOW_B_SOURCE_CHECKPOINT_BATCH_INTERVAL", 4);
   try {
     await waitForContent(maozi, 15000);
     if (requiresFavoriteSession(env)) {
@@ -2624,8 +2631,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         favorite_count_after: favoriteAfter,
         favorite_count_delta: delta,
       })));
-      await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      await writeJsonArrayCached(outputPath, records);
+      sourceCheckpointDirty = true;
+      if (shouldWriteSourceCheckpoint(completedSourceBatches, sourceCheckpointBatchInterval)) {
+        await writeJsonArrayCached(outputPath, records);
+        sourceCheckpointDirty = false;
+      }
       emit(`favorite ${batchFavoriteBefore} -> ${favoriteAfter} delta=${delta}`);
       favoriteBefore = favoriteAfter;
       if (sourceCooldown.blocked) break;
@@ -2645,12 +2655,16 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     keepReusablePages = false;
     throw error;
   } finally {
-    if (!keepReusablePages || isCollectionDeadlineReached(env)) {
-      await closeRuntimeReusablePagePools(
-        runtime,
-        envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000),
-      );
+    try {
+      if (sourceCheckpointDirty) await writeJsonArrayCached(outputPath, records);
+    } finally {
+      if (!keepReusablePages || isCollectionDeadlineReached(env)) {
+        await closeRuntimeReusablePagePools(
+          runtime,
+          envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000),
+        );
+      }
+      await maozi.close().catch(() => {});
     }
-    await maozi.close().catch(() => {});
   }
 }
