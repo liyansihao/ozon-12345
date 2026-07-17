@@ -36,11 +36,26 @@ function countByStore(rows, storeIds) {
   return counts;
 }
 
+function dayKey(value, timeZone) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${byType.year}-${byType.month}-${byType.day}`;
+}
+
 export function buildStatusSnapshot({
   config = {},
   published = [],
   selected = [],
+  skuStateEvents = [],
   storeTargetEvents = [],
+  storeDailyUsageEvents = [],
   runtimeErrors = [],
   observedAt = new Date().toISOString(),
 } = {}) {
@@ -63,6 +78,7 @@ export function buildStatusSnapshot({
     Date.parse(left.published_at || left.timestamp || "") - Date.parse(right.published_at || right.timestamp || "")
   ));
   const strictByStore = countByStore(strict, storeIds);
+  const strictKeys = new Set(strict.map((row) => `${Number(row?.store_id || 0)}:${String(row?.sku || "").trim()}`));
   const remainingByStore = Object.fromEntries(storeIds.map((id) => [
     String(id),
     Math.max(0, perStoreTarget - Number(strictByStore[String(id)] || 0)),
@@ -76,17 +92,55 @@ export function buildStatusSnapshot({
       selectedUnique.set(`${storeId}:${sku}`, row);
     }
   }
+  const latestSkuStates = new Map();
+  for (const event of skuStateEvents || []) {
+    const sku = String(event?.sku ?? event?.data?.sku ?? "").trim();
+    if (sku) latestSkuStates.set(sku, event);
+  }
+  const pendingConfirmationByStore = Object.fromEntries(storeIds.map((id) => [String(id), 0]));
+  for (const row of selectedUnique.values()) {
+    const sku = String(row?.sku || "").trim();
+    const storeId = Number(row?.store_id || 0);
+    const key = String(storeId);
+    const state = latestSkuStates.get(sku);
+    if (!(key in pendingConfirmationByStore)
+      || strictKeys.has(`${storeId}:${sku}`)
+      || state?.status !== "processing") continue;
+    pendingConfirmationByStore[key] += 1;
+  }
   const latestStoreTargets = new Map();
   for (const event of storeTargetEvents || []) {
     const storeId = Number(event?.store_id || 0);
     if (storeId > 0) latestStoreTargets.set(String(storeId), event);
   }
+  const dailyTimeZone = String(config.daily_store_timezone || "UTC");
+  const observedDay = dayKey(anchorMs, dailyTimeZone);
+  const latestDailyUsage = new Map();
+  for (const event of storeDailyUsageEvents || []) {
+    const storeId = Number(event?.store_id || 0);
+    const at = Date.parse(event?.at || event?.timestamp || "");
+    if (!(storeId > 0)
+      || !Number.isFinite(at)
+      || at > anchorMs
+      || dayKey(at, dailyTimeZone) !== observedDay) continue;
+    const key = String(storeId);
+    const previous = latestDailyUsage.get(key);
+    if (!previous || at >= previous.at) latestDailyUsage.set(key, { ...event, at });
+  }
   const quotaByStore = Object.fromEntries(storeIds.map((id) => {
     const event = latestStoreTargets.get(String(id));
-    const dailyUsage = Number(event?.daily_usage);
-    const dailyLimit = Number(event?.daily_limit);
+    const usageEvent = latestDailyUsage.get(String(id));
+    const verifiedUsage = Number(event?.daily_usage);
+    const submittedUsage = Number(usageEvent?.usage);
+    const dailyUsage = Math.max(
+      Number.isFinite(verifiedUsage) ? verifiedUsage : 0,
+      Number.isFinite(submittedUsage) ? submittedUsage : 0,
+    );
+    const verifiedLimit = Number(event?.daily_limit);
+    const submittedLimit = Number(usageEvent?.limit);
+    const dailyLimit = verifiedLimit > 0 ? verifiedLimit : submittedLimit;
     return [String(id), {
-      daily_usage: Number.isFinite(dailyUsage) ? dailyUsage : null,
+      daily_usage: Number.isFinite(verifiedUsage) || Number.isFinite(submittedUsage) ? dailyUsage : null,
       daily_limit: dailyLimit > 0 ? dailyLimit : null,
       daily_remaining: dailyLimit > 0 && Number.isFinite(dailyUsage) ? Math.max(0, dailyLimit - dailyUsage) : null,
       available: event ? event.available !== false : null,
@@ -99,7 +153,12 @@ export function buildStatusSnapshot({
     const dailyRemaining = quotaByStore[key].daily_remaining;
     return [key, dailyRemaining === null
       ? 0
-      : Math.max(0, Number(remainingByStore[key] || 0) - dailyRemaining)];
+      : Math.max(
+        0,
+        Number(remainingByStore[key] || 0)
+          - Number(pendingConfirmationByStore[key] || 0)
+          - dailyRemaining,
+      )];
   }));
   const nextQuotaResetAt = config.daily_store_timezone === "UTC"
     ? new Date(Date.UTC(
@@ -167,9 +226,12 @@ export function buildStatusSnapshot({
     selected: { total: selectedUnique.size, by_store: countByStore([...selectedUnique.values()], storeIds) },
     quota: {
       by_store: quotaByStore,
+      pending_confirmation_by_store: pendingConfirmationByStore,
       shortfall_by_store: quotaShortfallByStore,
-      constrained_stores: Object.entries(quotaShortfallByStore)
-        .filter(([, shortfall]) => shortfall > 0).map(([storeId]) => storeId),
+      constrained_stores: storeIds.map(String).filter((storeId) => (
+        Number(quotaShortfallByStore[storeId] || 0) > 0
+          || quotaByStore[storeId]?.available === false
+      )),
       next_reset_at: nextQuotaResetAt,
     },
     rolling,
@@ -211,7 +273,9 @@ export async function snapshotRun(runDir, observedAt = new Date().toISOString())
     },
     published: await readJsonLines(path.join(root, "published.jsonl")),
     selected: await readJsonLines(path.join(root, "selected.jsonl")),
+    skuStateEvents: await readJsonLines(path.join(root, "sku_states.jsonl")),
     storeTargetEvents: await readJsonLines(path.join(root, "store_targets.jsonl")),
+    storeDailyUsageEvents: await readJsonLines(path.join(root, "store_daily_usage.jsonl")),
     runtimeErrors: await readJsonLines(path.join(root, "runtime_errors.jsonl")),
     observedAt,
   });

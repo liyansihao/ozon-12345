@@ -26,9 +26,16 @@ test("compact status reports strict per-store progress and rolling speed", () =>
       { sku: "ok-1", store_id: 2, profit_rate: 31 },
       { sku: "waiting", store_id: 3, profit_rate: 45 },
     ],
+    skuStateEvents: [
+      { sku: "waiting", status: "processing", data: { store_id: 3, submitted: true } },
+    ],
     storeTargetEvents: [
       { at: "2026-07-17T01:00:00.000Z", store_id: 2, warehouse_id: 2002, daily_usage: 3, daily_limit: 100 },
       { at: "2026-07-17T01:01:00.000Z", store_id: 3, available: false, reason: "warehouse-unavailable-after-sync", daily_usage: 100, daily_limit: 100 },
+    ],
+    storeDailyUsageEvents: [
+      { at: "2026-07-17T01:45:00.000Z", store_id: 2, usage: 30, limit: 100, event: "submission-accepted" },
+      { at: "2026-07-16T23:59:00.000Z", store_id: 2, usage: 99, limit: 100, event: "submission-accepted" },
     ],
     runtimeErrors: [{ at: "2026-07-17T01:30:00.000Z" }],
     observedAt: "2026-07-17T02:00:00.000Z",
@@ -45,10 +52,10 @@ test("compact status reports strict per-store progress and rolling speed", () =>
   assert.equal(snapshot.pace_35.passed, false);
   assert.equal(snapshot.runtime_errors.total, 1);
   assert.deepEqual(snapshot.quota.by_store, {
-    "2": { daily_usage: 3, daily_limit: 100, daily_remaining: 97, available: true, warehouse_id: 2002, reason: null },
+    "2": { daily_usage: 30, daily_limit: 100, daily_remaining: 70, available: true, warehouse_id: 2002, reason: null },
     "3": { daily_usage: 100, daily_limit: 100, daily_remaining: 0, available: false, warehouse_id: null, reason: "warehouse-unavailable-after-sync" },
   });
-  assert.deepEqual(snapshot.quota.shortfall_by_store, { "2": 0, "3": 1 });
+  assert.deepEqual(snapshot.quota.shortfall_by_store, { "2": 0, "3": 0 });
   assert.deepEqual(snapshot.quota.constrained_stores, ["3"]);
   assert.equal(snapshot.quota.next_reset_at, "2026-07-18T00:00:00.000Z");
   assert.ok(JSON.stringify(snapshot).length < 2500);
