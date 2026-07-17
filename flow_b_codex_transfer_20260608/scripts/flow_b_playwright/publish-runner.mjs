@@ -285,6 +285,7 @@ export function createPublishRunner({
   deadlineAt = null,
   targetConfigCache = null,
   targetRefreshIntervalMs = 60_000,
+  targetMetricHeartbeatMs = 1_800_000,
   sourceYieldHistoryPath = null,
   confirmationAttempts = 6,
   confirmationIntervalMs = 2000,
@@ -358,6 +359,7 @@ export function createPublishRunner({
   const lastOnlineSyncAt = new Map();
   const unavailableStoreUntil = new Map();
   const lastStoreSwitchDiagnosticAt = new Map();
+  const lastStoreTargetMetrics = new Map();
   let lastAllStoresStalledAt = 0;
   const adaptive = new AdaptiveConcurrency({ initial: workerCount, max: Math.max(workerCount, Number(maxConcurrency) || workerCount) });
 
@@ -371,6 +373,18 @@ export function createPublishRunner({
         await fs.appendFile(sourceYieldHistoryPath, `${JSON.stringify(event)}\n`);
       }
     });
+  }
+
+  function recordStoreTargetMetric(row) {
+    const key = String(Number(row?.store_id || 0));
+    const signature = JSON.stringify(row);
+    const currentTime = now().getTime();
+    const previous = lastStoreTargetMetrics.get(key);
+    const heartbeat = Math.max(0, Number(targetMetricHeartbeatMs) || 0);
+    if (previous?.signature === signature && heartbeat > 0 && currentTime - previous.at < heartbeat) return false;
+    lastStoreTargetMetrics.set(key, { signature, at: currentTime });
+    recordMetric("store_targets.jsonl", row);
+    return true;
   }
 
   async function timed(sku, stage, operation) {
@@ -843,7 +857,7 @@ export function createPublishRunner({
       }
       const targetWarehouseId = Number(spec.warehouseId || discoveredWarehouseId || 0);
       if (spec.requireWarehouse && !(targetWarehouseId > 0)) {
-        recordMetric("store_targets.jsonl", {
+        recordStoreTargetMetric({
           store_id: Number(resolved.store?.id || spec.id),
           store_name: resolved.store?.name ?? resolved.store?.title ?? spec.needle,
           available: false,
@@ -872,7 +886,7 @@ export function createPublishRunner({
         if (targetConfigCache) targetConfigCache.commissionTree = commissionTree;
       }
       const value = { ...resolved, commissionTree, warehouseId: targetWarehouseId || null };
-      recordMetric("store_targets.jsonl", {
+      recordStoreTargetMetric({
         store_id: Number(resolved.store?.id || spec.id),
         store_name: resolved.store?.name ?? resolved.store?.title ?? spec.needle,
         warehouse_id: targetWarehouseId || null,

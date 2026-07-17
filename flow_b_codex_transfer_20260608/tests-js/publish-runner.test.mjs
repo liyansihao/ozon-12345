@@ -2373,6 +2373,44 @@ test("one persistent publisher session reuses a freshly verified target for sixt
   assert.equal(targetCalls, 1);
 });
 
+test("unchanged store-target evidence is compacted to a bounded heartbeat", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-target-heartbeat-"));
+  let current = new Date("2026-07-17T00:00:00.000Z");
+  let targetCalls = 0;
+  const client = clientFor([], {
+    resolvePublishTarget: async () => {
+      targetCalls += 1;
+      return {
+        store: { id: 104965, name: "丽丽1号", product_limit: { daily_create: { usage: 0, limit: 100 } } },
+        watermark: { id: 60822, name: "lysh" },
+      };
+    },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state: fakeState(),
+    runDir,
+    target: 1,
+    targetConfigCache: {},
+    targetRefreshIntervalMs: 0,
+    targetMetricHeartbeatMs: 1_800_000,
+    now: () => current,
+  });
+
+  await runner.run();
+  current = new Date("2026-07-17T00:01:00.000Z");
+  await runner.run();
+  current = new Date("2026-07-17T00:31:00.000Z");
+  await runner.run();
+
+  assert.equal(targetCalls, 3);
+  const rows = (await fs.readFile(path.join(runDir, "store_targets.jsonl"), "utf8"))
+    .trim().split("\n").map(JSON.parse);
+  assert.equal(rows.length, 2);
+  await fs.rm(runDir, { recursive: true, force: true });
+});
+
 test("source outcomes persist to the cross-run yield history", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-yield-run-"));
   const historyDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-yield-history-"));
