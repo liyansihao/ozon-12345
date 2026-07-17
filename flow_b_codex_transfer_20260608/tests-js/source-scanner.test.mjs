@@ -111,6 +111,7 @@ import {
   writeJsonArrayCached,
   shouldWriteSourceCheckpoint,
   sourceBatchPrefetchAllowed,
+  sourceBatchCollectionMode,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("verified seller promotion requires at least two strict publications", () => {
@@ -318,6 +319,33 @@ test("collection cooldown exposes only its remaining bounded wait", () => {
   assert.equal(remainingCollectionCooldown({ detailBlockedUntil: 10_000 }, 4_000), 6_000);
   assert.equal(remainingCollectionCooldown({ detailBlockedUntil: 10_000 }, 10_000), 0);
   assert.equal(remainingCollectionCooldown({}, 10_000), 0);
+});
+
+test("detail cooldown keeps source discovery running in queue-only mode", () => {
+  assert.equal(sourceBatchCollectionMode({
+    favoriteTotal: 10,
+    target: 1000,
+    cooldownRemainingMs: 60_000,
+    sourceBlocked: false,
+  }), "queue-only");
+  assert.equal(sourceBatchCollectionMode({
+    favoriteTotal: 10,
+    target: 1000,
+    cooldownRemainingMs: 0,
+    sourceBlocked: true,
+  }), "queue-only");
+  assert.equal(sourceBatchCollectionMode({
+    favoriteTotal: 10,
+    target: 1000,
+    cooldownRemainingMs: 0,
+    sourceBlocked: false,
+  }), "collect");
+  assert.equal(sourceBatchCollectionMode({
+    favoriteTotal: 1000,
+    target: 1000,
+    cooldownRemainingMs: 0,
+    sourceBlocked: false,
+  }), "done");
 });
 
 test("one hung source page times out without blocking the batch", async () => {

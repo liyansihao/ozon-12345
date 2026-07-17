@@ -375,6 +375,19 @@ export function remainingCollectionCooldown(state = {}, now = Date.now()) {
   return Math.max(0, (Number(state?.detailBlockedUntil) || 0) - Number(now));
 }
 
+export function sourceBatchCollectionMode({
+  favoriteTotal,
+  target,
+  cooldownRemainingMs,
+  sourceBlocked,
+}) {
+  if (favoriteTotal !== null && favoriteTotal !== undefined && Number(favoriteTotal) >= Number(target)) return "done";
+  if (sourceBlocked || Number(cooldownRemainingMs) > 0 || favoriteTotal === null || favoriteTotal === undefined) {
+    return "queue-only";
+  }
+  return "collect";
+}
+
 export async function withTimeout(operation, timeoutMs, label = "operation") {
   const timeout = Math.max(1, Number(timeoutMs) || 1);
   let timer;
@@ -2884,41 +2897,16 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         requireReusableFacts: true,
       });
       if (cooldownFallbackLinks.length > 0) {
-        emit(`collecting ${cooldownFallbackLinks.length} exact-FBS cached links during Ozon cooldown`);
-        favoriteBefore = await collectWithCandidateQueue({
-          context,
-          maozi,
-          links: cooldownFallbackLinks,
-          target: targetFavorites,
-          currentTotal: favoriteBefore,
-          env,
-          attempted,
-          logFile: favoriteLog,
-          log: emit,
-          familyScores: titleFamilyScores,
-          productiveSourceSampleKeys,
-          workerPagePool: favoriteWorkerPagePool,
-        });
-        return {
-          outFile: outputPath,
-          records: records.length,
-          pending: pending.length,
-          cooldown_fallback_attempted: cooldownFallbackLinks.length,
-          cooldown_remaining_ms: remainingCollectionCooldown(runtime),
-        };
+        const queued = await candidateQueue.discover(cooldownFallbackLinks.filter((link) => {
+          const sku = skuFromProductUrl(link?.href);
+          return sku && !attempted.has(sku);
+        }));
+        emit(`Ozon detail cooldown queue-only cached=${queued} remaining=${cooldownRemaining}ms`);
       }
-      await waitForMovingDeadline({
-        getDeadline: () => Math.min(runtime.detailBlockedUntil, collectionDeadlineMs(env)),
-      });
-      return {
-        outFile: outputPath,
-        records: records.length,
-        pending: pending.length,
-        cooldown_remaining_ms: remainingCollectionCooldown(runtime),
-      };
     }
 
-    if (favoriteBefore !== null && favoriteBefore < targetFavorites && recoveredCandidates.length) {
+    if (remainingCollectionCooldown(runtime) === 0
+      && favoriteBefore !== null && favoriteBefore < targetFavorites && recoveredCandidates.length) {
       emit(`resuming ${recoveredCandidates.length} persisted product candidates`);
       favoriteBefore = await collectWithCandidateQueue({
         context,
@@ -2935,7 +2923,8 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       });
     }
 
-    if (favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
+    if (remainingCollectionCooldown(runtime) === 0
+      && favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
       const baseLinkLimit = perSourceLinkLimit;
       const retainedRows = orderRowsBySourceYield(retainedRowsForCollection(records, {
         skipRetained: env.FLOW_B_SKIP_RETAINED === "1",
@@ -3081,16 +3070,27 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         prefetchedBatch = startSourceBatch(start);
         start = prefetchedBatch.nextStart;
       }
-      let eligibleCounts = null;
-      if (favoriteBefore !== null && !sourceCooldown.blocked) {
+      const collectionLinks = limitLinksPerSource(
+        batchRows.map((row, index) => ({ ...row, source_url: batch[index] })),
+        perSourceLinkLimit,
+        titleFamilyScores,
+      );
+      const eligibleCounts = eligibleLinkCountsBySource(collectionLinks, attempted);
+      const collectionMode = sourceBatchCollectionMode({
+        favoriteTotal: favoriteBefore,
+        target: targetFavorites,
+        cooldownRemainingMs: remainingCollectionCooldown(runtime),
+        sourceBlocked: sourceCooldown.blocked,
+      });
+      if (collectionMode === "queue-only") {
+        const queued = await candidateQueue.discover(collectionLinks.filter((link) => {
+          const sku = skuFromProductUrl(link?.href);
+          return sku && !attempted.has(sku);
+        }));
+        if (queued > 0) emit(`queued ${queued} source candidates without detail during cooldown`);
+      } else if (collectionMode === "collect") {
         let collectionSoftBlocked = false;
         let batchFavorited = 0;
-        const collectionLinks = limitLinksPerSource(
-          batchRows.map((row, index) => ({ ...row, source_url: batch[index] })),
-          perSourceLinkLimit,
-          titleFamilyScores,
-        );
-        eligibleCounts = eligibleLinkCountsBySource(collectionLinks, attempted);
         favoriteBefore = await collectWithCandidateQueue({
           context,
           maozi,
