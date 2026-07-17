@@ -21,6 +21,8 @@ function validEnv() {
     FLOW_B_TAB_WORKERS: "3",
     FLOW_B_MAX_TAB_WORKERS: "4",
     FLOW_B_FAVORITE_DETAIL_INTERVAL_MS: "4000",
+    FLOW_B_CONFIRMATION_ATTEMPTS: "1",
+    FLOW_B_CONFIRMATION_INTERVAL_MS: "0",
     FLOW_B_1688_PERSISTENT_POOL: "1",
     FLOW_B_1688_WORKERS: "4",
     FLOW_B_VERIFY_LISTING_FBS_DETAIL: "1",
@@ -99,6 +101,10 @@ test("24-hour acceptance preflight rejects disabled quality and reuse controls",
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_FAVORITE_DETAIL_INTERVAL_MS: "3000" }),
     /favorite detail interval must be at least 4000ms/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_CONFIRMATION_ATTEMPTS: "6" }),
+    /confirmation attempts must equal 1/,
   );
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_DAILY_STORE_TIMEZONE: "Asia\/Shanghai" }),

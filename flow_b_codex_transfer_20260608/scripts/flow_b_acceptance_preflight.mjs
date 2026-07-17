@@ -87,6 +87,12 @@ export function validate24hAcceptanceEnv(env = process.env) {
   if (!(favoriteDetailIntervalMs >= 4_000)) {
     throw new Error("favorite detail interval must be at least 4000ms");
   }
+  if (Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) !== 1) {
+    throw new Error("confirmation attempts must equal 1");
+  }
+  if (Number(env.FLOW_B_CONFIRMATION_INTERVAL_MS) !== 0) {
+    throw new Error("confirmation interval must equal 0ms");
+  }
   if (Number(env.FLOW_B_1688_WORKERS) !== 4) throw new Error("FLOW_B_1688_WORKERS must equal 4");
   const unavailableRetryMs = Number(env.FLOW_B_UNAVAILABLE_STORE_RETRY_MS);
   if (!(unavailableRetryMs > 0) || unavailableRetryMs > 300_000) {
@@ -107,6 +113,7 @@ export function validate24hAcceptanceEnv(env = process.env) {
       producer: [3, 4],
       sourcing_1688: 4,
       favorite_detail_interval_ms: favoriteDetailIntervalMs,
+      confirmation_attempts: 1,
     },
   };
 }
