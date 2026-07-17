@@ -1728,6 +1728,22 @@ test("repeated strict-success sellers explore only one page beyond their deepest
   assert.ok(variants.every((url) => Number(new URL(url).searchParams.get("page") || 1) <= 6));
 });
 
+test("deep verified sellers can advance beyond page six while staying one page ahead", () => {
+  const rows = [
+    { status: "published", sku: "deep-1", seller_url: "https://www.ozon.ru/seller/deep/", source_url: "https://www.ozon.ru/seller/deep/?page=6" },
+    { status: "published", sku: "deep-2", seller_url: "https://www.ozon.ru/seller/deep/", source_url: "https://www.ozon.ru/seller/deep/?page=5" },
+  ];
+  const variants = deepVerifiedSellerSourceVariants(rows, 2, 20, [7, 8, 9, 10]);
+  assert.ok(variants.some((url) => Number(new URL(url).searchParams.get("page") || 1) === 7));
+  assert.ok(variants.every((url) => Number(new URL(url).searchParams.get("page") || 1) <= 7));
+  assert.ok(variants.every((url) => {
+    const parsed = new URL(url);
+    return Number(parsed.searchParams.get("page") || 1) < 4
+      || !parsed.searchParams.has("currency_price")
+      || parsed.searchParams.get("currency_price") === "500.000;";
+  }));
+});
+
 test("favorite preflight accepts only an explicit pure FBS mode", () => {
   assert.equal(favoriteModeSkipReason("FBS"), null);
   assert.equal(favoriteModeSkipReason("FBS, RFBS"), "non-pure-fbs");

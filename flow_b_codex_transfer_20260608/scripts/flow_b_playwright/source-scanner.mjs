@@ -1286,7 +1286,7 @@ export function deepVerifiedSellerSourceVariants(
   yieldRows,
   minimumPublishedSkus = 2,
   limit = 20,
-  resultPages = [2, 3, 4, 5, 6],
+  resultPages = [2, 3, 4, 5, 6, 7, 8, 9, 10],
 ) {
   const maximum = Math.max(0, Number(limit) || 0);
   if (maximum === 0) return [];
@@ -1314,11 +1314,11 @@ export function deepVerifiedSellerSourceVariants(
   const firstPages = expandFreshSellerSourceUrls(recentVerified);
   const expanded = [...firstPages];
   const pages = [...new Set((resultPages || []).map(Number)
-    .filter((page) => Number.isInteger(page) && page > 1 && page <= 6))];
+    .filter((page) => Number.isInteger(page) && page > 1 && page <= 10))];
   for (const source of firstPages) {
     for (const page of pages) {
       const seller = canonicalSellerUrl(source);
-      const maximumPage = Math.min(6, Math.max(3, (deepestPublishedPage.get(seller) || 1) + 1));
+      const maximumPage = Math.min(10, Math.max(3, (deepestPublishedPage.get(seller) || 1) + 1));
       if (page > maximumPage) continue;
       const url = new URL(source);
       const priceBand = url.searchParams.get("currency_price");
@@ -2527,7 +2527,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     yieldRows,
     envNumber(env, "FLOW_B_DEEP_VERIFIED_SELLER_MIN_PUBLISHED", 2),
     envNumber(env, "FLOW_B_DEEP_VERIFIED_SELLERS", 20),
-    String(env.FLOW_B_DEEP_VERIFIED_SELLER_PAGES || "2,3,4,5,6")
+    String(env.FLOW_B_DEEP_VERIFIED_SELLER_PAGES || "2,3,4,5,6,7,8,9,10")
       .split(",").map(Number).filter((value) => Number.isInteger(value) && value > 1),
   );
   const boundedDeepFreshSourceUrls = deepVerifiedSellerVariants.filter((url) => {

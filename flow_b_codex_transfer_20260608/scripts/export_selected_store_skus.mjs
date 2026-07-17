@@ -43,6 +43,10 @@ function selectedRow(event, runDir) {
 }
 
 export async function exportSelectedStoreSkus({ runDirs, outputDir }) {
+  const resolvedOutputDir = path.resolve(outputDir);
+  if (runDirs.some((runDir) => path.resolve(runDir) === resolvedOutputDir)) {
+    throw new Error("output directory must not be a source run directory");
+  }
   const byAssignment = new Map();
   for (const runDir of runDirs) {
     let text = "";

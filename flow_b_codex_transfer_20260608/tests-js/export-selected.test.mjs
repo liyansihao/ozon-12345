@@ -29,3 +29,19 @@ test("selected export deduplicates assignments and always writes all five store 
   assert.doesNotMatch(storeTwo, /2815247918/);
   assert.equal((await fs.readFile(path.join(out, "selected_store_106646.csv"), "utf8")).trim().split("\n").length, 1);
 });
+
+test("selected export refuses to overwrite a live run directory", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-selected-export-guard-"));
+  const run = path.join(root, "run");
+  await fs.mkdir(run);
+  await fs.writeFile(path.join(run, "selected.jsonl"), `${JSON.stringify({
+    sku: "102",
+    data: { sku: "102", store_id: 106640, profit_rate: 31 },
+  })}\n`);
+
+  await assert.rejects(
+    exportSelectedStoreSkus({ runDirs: [run], outputDir: run }),
+    /output directory must not be a source run directory/u,
+  );
+  await assert.rejects(fs.access(path.join(run, "selected_all_stores.csv")));
+});
