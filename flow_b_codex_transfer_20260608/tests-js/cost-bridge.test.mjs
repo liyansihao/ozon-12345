@@ -294,6 +294,74 @@ test("same cover image shares one in-flight 1688 query and persists reusable cac
   });
 });
 
+test("uncached 1688 estimates use and close an injected long-lived worker pool", async () => {
+  await withTempDir(async (runDir) => {
+    let workerRuns = 0;
+    let closes = 0;
+    const bridge = createCostBridge({
+      workerPool: {
+        run: async ({ image }) => {
+          workerRuns += 1;
+          assert.match(image, /pool-1\.jpg$/);
+          return {
+            code: 0,
+            stdout: [
+              "COST_SOURCE search_first_page_p70_similarity_filtered",
+              "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+              "P70_COST 11",
+            ].join("\n"),
+            stderr: "",
+          };
+        },
+        close: async () => { closes += 1; },
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => { throw new Error("one-shot process should not run"); },
+    });
+    const result = await bridge.estimate({
+      sku: "pool-1",
+      cover_image: "https://img.example/pool.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, true);
+    assert.equal(workerRuns, 1);
+    await bridge.close();
+    assert.equal(closes, 1);
+  });
+});
+
+test("persistent worker infrastructure failure falls back to the one-shot process", async () => {
+  await withTempDir(async (runDir) => {
+    let fallbackRuns = 0;
+    const bridge = createCostBridge({
+      workerPool: {
+        run: async () => { throw Object.assign(new Error("worker unavailable"), { code: "worker-failed" }); },
+        close: async () => {},
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        fallbackRuns += 1;
+        return {
+          code: 0,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+            "P70_COST 11",
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    });
+    const result = await bridge.estimate({
+      sku: "fallback-1",
+      cover_image: "https://img.example/fallback.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, true);
+    assert.equal(fallbackRuns, 1);
+  });
+});
+
 test("shared cache reuses a reliable 1688 result across independent run directories", async () => {
   await withTempDir(async (root) => {
     const firstRun = path.join(root, "run-1");

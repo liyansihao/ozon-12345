@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createJsonLineWorkerPool } from "./json-line-worker-pool.mjs";
 
 const RELIABLE_SOURCES = new Set([
   "search_first_page_p70_similarity_filtered",
@@ -118,11 +119,52 @@ export function createCostBridge({
   download = defaultDownload,
   sharedCachePath = null,
   seedCacheFiles = [],
+  workerPool = null,
+  workerScriptPath = path.resolve(import.meta.dirname, "../flow_b_1688_worker.py"),
+  workerCount = Number(process.env.FLOW_B_1688_WORKERS || 4),
 } = {}) {
   const inFlight = new Map();
   const cacheByRun = new Map();
   const crossRunKeysByRun = new Map();
   let cacheWriteChain = Promise.resolve();
+  let ownedWorkerPool = null;
+  let persistentWorkersDisabled = process.env.FLOW_B_1688_PERSISTENT_POOL === "0";
+
+  function activeWorkerPool() {
+    if (persistentWorkersDisabled) return null;
+    if (workerPool) return workerPool;
+    if (runProcess !== defaultRunProcess) return null;
+    if (!ownedWorkerPool) {
+      ownedWorkerPool = createJsonLineWorkerPool({
+        command: python,
+        args: ["-u", path.resolve(workerScriptPath), "--script", path.resolve(scriptPath)],
+        size: Math.max(1, Number(workerCount) || 1),
+      });
+    }
+    return ownedWorkerPool;
+  }
+
+  async function run1688Process(imagePath, timeout) {
+    const pool = activeWorkerPool();
+    if (pool) {
+      try {
+        return await pool.run({ image: String(imagePath) }, timeout);
+      } catch (error) {
+        if (error?.code === "worker-timeout") throw error;
+        persistentWorkersDisabled = true;
+        if (ownedWorkerPool) {
+          await ownedWorkerPool.close().catch(() => {});
+          ownedWorkerPool = null;
+        }
+      }
+    }
+    return runProcess({
+      command: python,
+      args: [path.resolve(scriptPath), imagePath],
+      cwd: path.resolve(process.cwd()),
+      timeout,
+    });
+  }
 
   function cacheKey(item) {
     const imageUrl = String(item?.cover_image || "").trim();
@@ -203,12 +245,10 @@ export function createCostBridge({
         }
 
         processStarted = true;
-        const result = await runProcess({
-          command: python,
-          args: [path.resolve(scriptPath), imagePath],
-          cwd: path.resolve(process.cwd()),
-          timeout: Number(process.env.FLOW_B_1688_ITEM_TIMEOUT || 90) * 1000,
-        });
+        const result = await run1688Process(
+          imagePath,
+          Number(process.env.FLOW_B_1688_ITEM_TIMEOUT || 90) * 1000,
+        );
         const stdout = String(result?.stdout || "");
         const stderr = String(result?.stderr || "");
         const combined = `${stdout}${stderr ? `\nSTDERR:\n${stderr}` : ""}`;
@@ -292,6 +332,10 @@ export function createCostBridge({
 
   return {
     estimate,
-    async close() {},
+    async close() {
+      await workerPool?.close?.().catch(() => {});
+      await ownedWorkerPool?.close?.().catch(() => {});
+      ownedWorkerPool = null;
+    },
   };
 }
