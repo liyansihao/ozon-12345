@@ -22,6 +22,13 @@ const ECONOMY_SENTINEL = Object.freeze({
 });
 const observedPublishFeedbackCompositeCache = new Map();
 
+export function normalizeCostFailureReason(cost = {}) {
+  const evidence = `${cost?.reason || ""} ${cost?.error?.code || ""} ${cost?.error?.message || ""}`.trim();
+  if (/timed?\s*out|timeout/i.test(evidence)) return "1688-timeout";
+  if (/image|download|http\s*\d|fetch/i.test(evidence)) return "1688-image-fetch-failed";
+  return "1688-no-reliable-match";
+}
+
 function asSku(item) {
   const sku = String(item?.sku ?? item?.id ?? "").trim();
   if (!sku) throw new Error("candidate SKU is required");
@@ -591,7 +598,7 @@ export function createPublishRunner({
       if (!(Number(salePrice) > 0)) return skip(item, "missing-sale-price");
 
       const cost = await timed(sku, "1688_cost", () => costBridge.estimate({ ...detail, sell_price: salePrice }, runDir));
-      if (!cost?.ok) return skip(item, cost?.reason || cost?.error?.code || "unreliable-1688-cost", { cost });
+      if (!cost?.ok) return skip(item, normalizeCostFailureReason(cost), { cost });
 
       const productInfo = categoryData?.product_info || {};
       const category = mapOzonCategory(

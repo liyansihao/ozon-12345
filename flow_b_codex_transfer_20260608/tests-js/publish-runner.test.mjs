@@ -8,6 +8,7 @@ import {
   clearObservedPublishFeedbackCache,
   createPublishRunner,
   loadObservedPublishFeedback,
+  normalizeCostFailureReason,
   observedPublishFeedbackCacheStats,
   offerIdForSku,
   prioritizePublishCandidates,
@@ -104,6 +105,14 @@ function economy(rate = 40, overrides = {}) {
     }],
   };
 }
+
+test("1688 failures use bounded summary reasons while retaining raw cost evidence separately", () => {
+  assert.equal(normalizeCostFailureReason({
+    reason: "extreme price spread without strong main cluster [3.2, 6.5, 36.4, 65.0]",
+  }), "1688-no-reliable-match");
+  assert.equal(normalizeCostFailureReason({ reason: "worker timed out after 120000ms" }), "1688-timeout");
+  assert.equal(normalizeCostFailureReason({ error: { code: "IMAGE_DOWNLOAD_FAILED" } }), "1688-image-fetch-failed");
+});
 
 function clientFor(items, overrides = {}) {
   return {
