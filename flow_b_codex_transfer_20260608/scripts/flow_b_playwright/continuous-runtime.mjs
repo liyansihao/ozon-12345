@@ -47,7 +47,51 @@ export function clearCandidateFactsCache() {
 
 export function candidateFactsCacheStats(runDir) {
   const filename = path.resolve(runDir, "favorite_collection.jsonl");
-  return { full_reads: Number(candidateFactsCache.get(filename)?.fullReads || 0) };
+  const cached = candidateFactsCache.get(filename);
+  return {
+    full_reads: Number(cached?.fullReads || 0),
+    append_reads: Number(cached?.appendReads || 0),
+    bytes_read: Number(cached?.bytesRead || 0),
+  };
+}
+
+function applyCandidateHistoryLines(text, facts, preflightPureSkus) {
+  const source = String(text || "");
+  const complete = /\r?\n$/.test(source);
+  const lines = source.split(/\r?\n/);
+  if (complete) lines.pop();
+  const tail = complete ? "" : (lines.pop() || "");
+  const applyLine = (line) => {
+    try {
+      const row = JSON.parse(line);
+      if (row?.status !== "favorited" || !row?.sku) return false;
+      const sku = String(row.sku);
+      facts.set(sku, mergeCandidateFacts({}, row));
+      if (row?.preflight_mode === "FBS") preflightPureSkus.add(sku);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  for (const line of lines) applyLine(line);
+  const tailParsed = tail ? applyLine(tail) : false;
+  return { tail, tailParsed };
+}
+
+async function readFileSlice(filename, start, length) {
+  const buffer = Buffer.allocUnsafe(length);
+  const handle = await fs.open(filename, "r");
+  let bytesRead = 0;
+  try {
+    while (bytesRead < length) {
+      const result = await handle.read(buffer, bytesRead, length - bytesRead, start + bytesRead);
+      if (!(result.bytesRead > 0)) break;
+      bytesRead += result.bytesRead;
+    }
+  } finally {
+    await handle.close();
+  }
+  return buffer.subarray(0, bytesRead);
 }
 
 async function loadCandidateHistoryFile(filename) {
@@ -59,7 +103,14 @@ async function loadCandidateHistoryFile(filename) {
     if (error.code !== "ENOENT") throw error;
     const missing = candidateFactsCache.get(absolute);
     if (missing?.missing) return missing;
-    const value = { missing: true, facts: new Map(), preflightPureSkus: new Set(), fullReads: 0 };
+    const value = {
+      missing: true,
+      facts: new Map(),
+      preflightPureSkus: new Set(),
+      fullReads: 0,
+      appendReads: 0,
+      bytesRead: 0,
+    };
     candidateFactsCache.set(absolute, value);
     return value;
   }
@@ -68,25 +119,50 @@ async function loadCandidateHistoryFile(filename) {
     && Number(cached.ino) === Number(stat.ino)
     && Number(cached.size) === Number(stat.size)
     && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached;
+  const sameFile = cached && !cached.missing && Number(cached.ino) === Number(stat.ino);
+  if (sameFile && Number(stat.size) > Number(cached.size)) {
+    const length = Number(stat.size) - Number(cached.size);
+    const appended = await readFileSlice(absolute, Number(cached.size), length);
+    const appendedText = appended.toString("utf8");
+    // A parsed unterminated tail is safe to extend only when the append begins
+    // with its record delimiter. Otherwise fall back to a correctness-first
+    // full read because the previous JSON value may have been rewritten.
+    if (!cached.tailParsed || /^\r?\n/.test(appendedText)) {
+      const facts = new Map(cached.facts);
+      const preflightPureSkus = new Set(cached.preflightPureSkus);
+      const parseText = cached.tailParsed ? appendedText : `${cached.tail || ""}${appendedText}`;
+      const parsed = applyCandidateHistoryLines(parseText, facts, preflightPureSkus);
+      const value = {
+        ino: stat.ino,
+        size: Number(cached.size) + appended.length,
+        mtimeMs: appended.length === length ? stat.mtimeMs : Number.NaN,
+        facts,
+        preflightPureSkus,
+        tail: parsed.tail,
+        tailParsed: parsed.tailParsed,
+        fullReads: Number(cached.fullReads || 0),
+        appendReads: Number(cached.appendReads || 0) + 1,
+        bytesRead: Number(cached.bytesRead || 0) + appended.length,
+      };
+      candidateFactsCache.set(absolute, value);
+      return value;
+    }
+  }
   const facts = new Map();
   const preflightPureSkus = new Set();
   const text = await fs.readFile(absolute, "utf8");
-  for (const line of text.split(/\r?\n/)) {
-    try {
-      const row = JSON.parse(line);
-      if (row?.status !== "favorited" || !row?.sku) continue;
-      const sku = String(row.sku);
-      facts.set(sku, mergeCandidateFacts({}, row));
-      if (row?.preflight_mode === "FBS") preflightPureSkus.add(sku);
-    } catch {}
-  }
+  const parsed = applyCandidateHistoryLines(text, facts, preflightPureSkus);
   candidateFactsCache.set(absolute, {
     ino: stat.ino,
     size: stat.size,
     mtimeMs: stat.mtimeMs,
     facts,
     preflightPureSkus,
+    tail: parsed.tail,
+    tailParsed: parsed.tailParsed,
     fullReads: Number(cached?.fullReads || 0) + 1,
+    appendReads: Number(cached?.appendReads || 0),
+    bytesRead: Number(cached?.bytesRead || 0) + Buffer.byteLength(text),
   });
   return candidateFactsCache.get(absolute);
 }

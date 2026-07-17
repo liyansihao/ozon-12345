@@ -20,7 +20,7 @@ import {
   loadPreflightPureSkus,
 } from "../scripts/flow_b_playwright/continuous-runtime.mjs";
 
-test("candidate facts reuse an unchanged favorite history and refresh after append", async () => {
+test("candidate facts reuse an unchanged favorite history and parse only appended bytes", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-facts-"));
   const seedDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-seed-"));
   const filename = path.join(runDir, "favorite_collection.jsonl");
@@ -54,6 +54,20 @@ test("candidate facts reuse an unchanged favorite history and refresh after appe
   })}\n`);
   const refreshed = await loadCandidateFacts(runDir, [seedFilename]);
   assert.equal(refreshed.get("two")?.title, "second");
+  const appendStats = candidateFactsCacheStats(runDir);
+  assert.equal(appendStats.full_reads, 1);
+  assert.equal(appendStats.append_reads, 1);
+  assert.equal(appendStats.bytes_read, (await fs.stat(filename)).size);
+
+  await fs.writeFile(filename, `${JSON.stringify({
+    sku: "three",
+    status: "favorited",
+    title: "replacement after truncate",
+    sell_price: 101,
+  })}\n`);
+  const replaced = await loadCandidateFacts(runDir, [seedFilename]);
+  assert.equal(replaced.has("two"), false);
+  assert.equal(replaced.get("three")?.title, "replacement after truncate");
   assert.equal(candidateFactsCacheStats(runDir).full_reads, 2);
   await fs.rm(runDir, { recursive: true, force: true });
   await fs.rm(seedDir, { recursive: true, force: true });
