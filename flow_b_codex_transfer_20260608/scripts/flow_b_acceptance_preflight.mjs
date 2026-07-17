@@ -77,6 +77,10 @@ export function validate24hAcceptanceEnv(env = process.env) {
   const maxTabs = Number(env.FLOW_B_MAX_TAB_WORKERS);
   if (initialTabs !== 3 || maxTabs !== 4) throw new Error("producer concurrency must be 3..4");
   if (Number(env.FLOW_B_1688_WORKERS) !== 4) throw new Error("FLOW_B_1688_WORKERS must equal 4");
+  const unavailableRetryMs = Number(env.FLOW_B_UNAVAILABLE_STORE_RETRY_MS);
+  if (!(unavailableRetryMs > 0) || unavailableRetryMs > 300_000) {
+    throw new Error("unavailable store retry must be at most 300000ms");
+  }
   const storeIds = parseTargets(env);
   return {
     ok: true,
