@@ -134,6 +134,29 @@ test("nonzero review decisions preserve the 1688 reliability reason", async () =
   });
 });
 
+test("opaque terminal 1688 failures remain cached after evidence compaction", async () => {
+  await withTempDir(async (runDir) => {
+    let runs = 0;
+    const bridge = createCostBridge({
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        return { code: 2, stdout: "opaque terminal failure", stderr: "" };
+      },
+    });
+    const item = {
+      sku: "opaque-terminal-1",
+      cover_image: "https://img.example/opaque-terminal.jpg",
+      sell_price: 100,
+    };
+    assert.equal((await bridge.estimate(item, runDir)).ok, false);
+    const cached = await bridge.estimate({ ...item, sku: "opaque-terminal-2" }, runDir);
+    assert.equal(cached.ok, false);
+    assert.equal(cached.shared_cache, true);
+    assert.equal(runs, 1);
+  });
+});
+
 test("estimate reuses parseable cached output without redownloading or rerunning", async () => {
   await withTempDir(async (runDir) => {
     const imagesDir = path.join(runDir, "images");

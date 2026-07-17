@@ -23,6 +23,15 @@ export function compactCostOutput(text) {
     .join("\n");
 }
 
+function compactTerminalCostOutput(text, reason) {
+  const compact = compactCostOutput(text);
+  if (compact) return compact;
+  const safeReason = String(reason || "cached terminal 1688 failure")
+    .replace(/\s+/g, " ")
+    .trim();
+  return `REASON ${safeReason || "cached terminal 1688 failure"}\nP70_COST None`;
+}
+
 function parsePrices(value) {
   try {
     const parsed = JSON.parse(value);
@@ -188,7 +197,9 @@ export function createCostBridge({
         if (!parsed?.entries || typeof parsed.entries !== "object") return {};
         return Object.fromEntries(Object.entries(parsed.entries).map(([key, entry]) => [key, {
           ...entry,
-          output: compactCostOutput(entry?.output),
+          output: entry?.terminal
+            ? compactTerminalCostOutput(entry?.output)
+            : compactCostOutput(entry?.output),
         }]));
       } catch (error) {
         if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
@@ -323,7 +334,7 @@ export function createCostBridge({
       if (result?.outputPath && (result?.ok || result?.reason)) {
         const output = await fs.readFile(result.outputPath, "utf8");
         cache.entries[key] = {
-          output: compactCostOutput(output),
+          output: compactTerminalCostOutput(output, result.reason),
           terminal: true,
           process_code: result.process_code,
           source_image: String(item.cover_image),
