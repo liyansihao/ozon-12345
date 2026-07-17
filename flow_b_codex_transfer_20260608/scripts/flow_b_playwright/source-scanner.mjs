@@ -1450,6 +1450,10 @@ export function parseListingFavoriteSnapshot(link) {
   };
 }
 
+export function reusableListingFavoriteSnapshot(link, { verifyDetail = false } = {}) {
+  return verifyDetail ? null : parseListingFavoriteSnapshot(link);
+}
+
 async function favoriteCount(page) {
   const result = await retryMaoziPageFetch(() => page.evaluate(async () => {
     let token = "";
@@ -1725,7 +1729,9 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           if (listingModeReason) throw new Error(`${listingModeReason}: SKU ${item.sku}`);
           const titleReason = favoriteTitleSkipReason(item.text);
           if (titleReason) throw new Error(`${titleReason}: SKU ${item.sku}`);
-          const productInfo = parseListingFavoriteSnapshot(item) || await loadProduct(page, item);
+          const productInfo = reusableListingFavoriteSnapshot(item, {
+            verifyDetail: env.FLOW_B_VERIFY_LISTING_FBS_DETAIL === "1",
+          }) || await loadProduct(page, item);
           const detailTitleReason = favoriteTitleSkipReason(productInfo.title);
           if (detailTitleReason) throw new Error(`${detailTitleReason}: SKU ${item.sku}`);
           const priceReason = favoritePriceSkipReason(productInfo, envNumber(env, "FLOW_B_MAX_SOURCE_PRICE_CNY", 1000));

@@ -20,6 +20,7 @@ import {
   prioritizeSourceUrls,
   parseFavoriteProductSnapshot,
   parseListingFavoriteSnapshot,
+  reusableListingFavoriteSnapshot,
   requiresFavoriteSession,
   retainedReplayLimit,
   scanSourceWithPage,
@@ -1375,6 +1376,18 @@ test("a complete exact-FBS listing card becomes a cheap favorite snapshot", () =
     image_url: "https://ir.ozone.ru/s3/image.jpg",
     card_text: "100 ₽\n发货模式：暂无数据",
   }), null);
+});
+
+test("production collection can require a detail recheck instead of trusting listing FBS telemetry", () => {
+  const link = {
+    href: "https://www.ozon.ru/product/sample-3423207591/",
+    text: "Детский набор аксессуаров",
+    image_url: "https://ir.ozone.ru/s3/image.jpg",
+    source_url: "https://www.ozon.ru/seller/miaowu/",
+    card_text: "1099 ₽\n发货模式：FBS\n库存",
+  };
+  assert.equal(reusableListingFavoriteSnapshot(link, { verifyDetail: true }), null);
+  assert.equal(reusableListingFavoriteSnapshot(link, { verifyDetail: false })?.sku, "3423207591");
 });
 
 test("missing shipping mode is a deterministic rejection, not an infinite retry", () => {
