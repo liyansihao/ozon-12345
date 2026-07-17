@@ -54,7 +54,10 @@ export function selectPrewarmCandidates({ favoriteEvents = [], stateEvents = [],
   const candidates = [];
   for (const [sku, event] of latestFavorite) {
     if (event?.status !== "favorited" || excludedSkus.has(sku)) continue;
-    if (["published", "skipped"].includes(String(latestState.get(sku)?.status || ""))) continue;
+    const latest = latestState.get(sku);
+    const latestData = eventPayload(latest);
+    if (["published", "skipped"].includes(String(latest?.status || ""))
+      || latestData.submitted === true || latestData.submission_pending === true) continue;
     const fact = facts.get(sku) || {};
     const sellPrice = Number(fact.sale_price ?? fact.sell_price);
     if (!fact.title || !/^https?:\/\//iu.test(String(fact.cover_image || ""))
@@ -72,7 +75,9 @@ export function selectPrewarmCandidates({ favoriteEvents = [], stateEvents = [],
   return candidates;
 }
 
-export async function prewarmCandidateCosts({ candidates = [], bridge, runDir, concurrency = 4, onProgress = () => {} } = {}) {
+export async function prewarmCandidateCosts({
+  candidates = [], bridge, runDir, concurrency = 4, onProgress = () => {}, onResult = () => {},
+} = {}) {
   if (!bridge || typeof bridge.estimate !== "function") throw new TypeError("bridge.estimate is required");
   const queue = [...candidates];
   const summary = {
@@ -80,27 +85,30 @@ export async function prewarmCandidateCosts({ candidates = [], bridge, runDir, c
     completed: 0,
     cache_hits: 0,
     cache_misses: 0,
-    reliable: 0,
-    rejected: 0,
+    seed_price_accepted: 0,
+    rule_rejected: 0,
     errors: 0,
   };
   let cursor = 0;
   async function worker() {
     while (cursor < queue.length) {
       const item = queue[cursor++];
+      let result;
       try {
-        const result = await bridge.estimate(item, runDir);
+        result = await bridge.estimate(item, runDir);
         if (result?.cached) summary.cache_hits += 1;
         else summary.cache_misses += 1;
-        if (result?.ok) summary.reliable += 1;
-        else if (result?.reason) summary.rejected += 1;
+        if (result?.ok) summary.seed_price_accepted += 1;
+        else if (result?.reason) summary.rule_rejected += 1;
         else summary.errors += 1;
-      } catch {
+      } catch (error) {
+        result = { ok: false, error: { code: error?.code || "prewarm-exception", message: String(error?.message || error) } };
         summary.cache_misses += 1;
         summary.errors += 1;
       } finally {
         summary.completed += 1;
         onProgress({ ...summary });
+        onResult({ item, result });
       }
     }
   }
@@ -136,6 +144,7 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     workerCount: Math.max(1, Number(values.workers) || 4),
   });
   let lastReported = 0;
+  const failures = [];
   try {
     const summary = await prewarmCandidateCosts({
       candidates,
@@ -148,9 +157,25 @@ async function main(argv = process.argv.slice(2), env = process.env) {
           process.stderr.write(`prewarm ${progress.completed}/${progress.candidates}\n`);
         }
       },
+      onResult({ item, result }) {
+        if (!result?.error) return;
+        failures.push({
+          at: new Date().toISOString(),
+          sku: String(item?.sku || ""),
+          cover_image: String(item?.cover_image || ""),
+          code: String(result.error.code || "prewarm-error"),
+          error: String(result.error.message || result.error),
+        });
+      },
     });
     const report = { generated_at: new Date().toISOString(), ...summary };
     await fs.mkdir(path.resolve(values["run-dir"]), { recursive: true });
+    if (failures.length > 0) {
+      await fs.appendFile(
+        path.join(path.resolve(values["run-dir"]), "prewarm_1688_failures.jsonl"),
+        `${failures.map((row) => JSON.stringify(row)).join("\n")}\n`,
+      );
+    }
     await fs.writeFile(path.join(path.resolve(values["run-dir"]), "prewarm_1688_summary.json"), `${JSON.stringify(report, null, 2)}\n`);
     process.stdout.write(`${JSON.stringify(report)}\n`);
     return report;
