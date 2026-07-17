@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureMaoziLogin, ensureMaoziPluginLogin, openMaoziPage } from "./browser-context.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError } from "./continuous-runtime.mjs";
-import { isPureFbs } from "./publish-policy.mjs";
+import { isPureFbs, prohibitedCategorySkipReason } from "./publish-policy.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_SOURCE_YIELD_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/source_yield_history.jsonl");
@@ -563,6 +563,7 @@ export function favoriteFailureDisposition(error) {
   if (/^missing-shipping-mode:/i.test(message)) return { status: "rejected", reason: "missing-shipping-mode" };
   if (/^source-price-above-limit:/i.test(message)) return { status: "rejected", reason: "source-price-above-limit" };
   if (/^oversized-low-yield-title:/i.test(message)) return { status: "rejected", reason: "oversized-low-yield-title" };
+  if (/^prohibited-category:/i.test(message)) return { status: "rejected", reason: "prohibited-category" };
   return { status: "failed", reason: null };
 }
 
@@ -623,6 +624,8 @@ export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
 
 export function favoriteTitleSkipReason(value) {
   const title = String(value || "");
+  const prohibitedReason = prohibitedCategorySkipReason(title);
+  if (prohibitedReason) return prohibitedReason;
   if (/зеркал|ванн(?:а|ы|ой|ую|е|у)|раковин|пианино|спортивн\w*\s+площад|турник.*брусь|(?:wall|bathroom)\s+mirror|bath\s*tub|digital\s+piano/i.test(title)) {
     return "oversized-low-yield-title";
   }

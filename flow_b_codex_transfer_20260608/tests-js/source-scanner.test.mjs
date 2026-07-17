@@ -2271,6 +2271,17 @@ test("favorite title preflight rejects proven low-yield oversized categories", (
   });
 });
 
+test("favorite title preflight moves deterministic prohibited categories before Ozon detail", () => {
+  assert.equal(favoriteTitleSkipReason("5-HTP 100 мг витамины для сна"), "prohibited-category");
+  assert.equal(favoriteTitleSkipReason("Сухой корм для кошек"), "prohibited-category");
+  assert.equal(favoriteTitleSkipReason("Чехол для смартфона"), "prohibited-category");
+  assert.equal(favoriteTitleSkipReason("Игрушка антистресс для детей"), null);
+  assert.deepEqual(favoriteFailureDisposition(new Error("prohibited-category: SKU 1")), {
+    status: "rejected",
+    reason: "prohibited-category",
+  });
+});
+
 test("low-yield feedback uses actual batch favorites instead of the concurrently drained queue total", () => {
   assert.equal(nextLowYieldBatchStreak({ current: 0, favorited: 1, threshold: 2 }), 1);
   assert.equal(nextLowYieldBatchStreak({ current: 1, favorited: 1, threshold: 2 }), 2);

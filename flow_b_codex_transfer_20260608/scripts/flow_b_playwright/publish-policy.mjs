@@ -1,5 +1,11 @@
 const PROHIBITED = [/еда|пищ|корм|food/i, /одеж|плать|fashion|服装/i, /телефон|смартфон|ноутбук|3c/i, /жидк|спрей|порош|клей|масло|лекар|витамин/i, /манекен|anatomical|人体模型/i];
 
+export function prohibitedCategorySkipReason(value) {
+  return PROHIBITED.some((pattern) => pattern.test(String(value || "")))
+    ? "prohibited-category"
+    : null;
+}
+
 export function normalizeName(value) {
   return String(value ?? "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
 }
@@ -38,7 +44,7 @@ function isCelEconomyResult(result) {
 export function preflightSkipReason(item) {
   const text = `${item.title ?? ""} ${item.category ?? ""}`;
   if (!isPureFbs(item.mode)) return "non-pure-fbs";
-  if (PROHIBITED.find((pattern) => pattern.test(text))) return "prohibited-category";
+  if (prohibitedCategorySkipReason(text)) return "prohibited-category";
   return isCelEconomyResult(item.economy) ? null : "missing-cel-economy";
 }
 
