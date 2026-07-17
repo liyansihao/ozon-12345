@@ -59,6 +59,9 @@ export function validate24hAcceptanceEnv(env = process.env) {
   requireNumber(env, "FLOW_B_TARGET_PUBLISH_COUNT", 500);
   requireNumber(env, "FLOW_B_DAILY_STORE_LIMIT", 100);
   requireNumber(env, "FLOW_B_STORE_TOTAL_LIMIT", 100);
+  if (String(env.FLOW_B_DAILY_STORE_TIMEZONE || "") !== "UTC") {
+    throw new Error("FLOW_B_DAILY_STORE_TIMEZONE must equal UTC");
+  }
   requireNumber(env, "FLOW_B_PROFIT_THRESHOLD", 30);
   requireNumber(env, "FLOW_B_WATERMARK_ID", 60822);
   if (String(env.FLOW_B_WATERMARK_NEEDLE || "").trim() !== "lysh") {

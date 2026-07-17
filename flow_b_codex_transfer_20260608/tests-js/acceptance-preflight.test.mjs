@@ -11,6 +11,7 @@ function validEnv() {
     FLOW_B_TARGET_PUBLISH_COUNT: "500",
     FLOW_B_DAILY_STORE_LIMIT: "100",
     FLOW_B_STORE_TOTAL_LIMIT: "100",
+    FLOW_B_DAILY_STORE_TIMEZONE: "UTC",
     FLOW_B_PROFIT_THRESHOLD: "30",
     FLOW_B_EXCLUDED_SKUS: "2815247918",
     FLOW_B_WATERMARK_ID: "60822",
@@ -83,5 +84,9 @@ test("24-hour acceptance preflight rejects disabled quality and reuse controls",
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_UNAVAILABLE_STORE_RETRY_MS: "1800000" }),
     /unavailable store retry must be at most 300000ms/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_DAILY_STORE_TIMEZONE: "Asia\/Shanghai" }),
+    /FLOW_B_DAILY_STORE_TIMEZONE must equal UTC/,
   );
 });

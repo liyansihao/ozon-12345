@@ -428,6 +428,7 @@ async function runAcceptance(context, options, env) {
     watermark_id: Number(env.FLOW_B_WATERMARK_ID || 60822),
     warehouse_id: env.FLOW_B_WAREHOUSE_ID ? Number(env.FLOW_B_WAREHOUSE_ID) : null,
     initial_stock: Math.max(1, Number(env.FLOW_B_INITIAL_STOCK) || 1),
+    daily_store_timezone: env.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
     initial_concurrency: Number(env.FLOW_B_PUBLISH_WORKERS || 8),
     max_concurrency: Number(env.FLOW_B_MAX_PUBLISH_WORKERS || 12),
   });

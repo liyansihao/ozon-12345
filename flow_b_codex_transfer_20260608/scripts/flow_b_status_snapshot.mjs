@@ -94,6 +94,20 @@ export function buildStatusSnapshot({
       reason: event?.reason ? String(event.reason) : null,
     }];
   }));
+  const quotaShortfallByStore = Object.fromEntries(storeIds.map((id) => {
+    const key = String(id);
+    const dailyRemaining = quotaByStore[key].daily_remaining;
+    return [key, dailyRemaining === null
+      ? 0
+      : Math.max(0, Number(remainingByStore[key] || 0) - dailyRemaining)];
+  }));
+  const nextQuotaResetAt = config.daily_store_timezone === "UTC"
+    ? new Date(Date.UTC(
+      new Date(anchorMs).getUTCFullYear(),
+      new Date(anchorMs).getUTCMonth(),
+      new Date(anchorMs).getUTCDate() + 1,
+    )).toISOString()
+    : null;
   const rolling = {};
   for (const minutes of [15, 30, 60, 120]) {
     const windowMs = minutes * 60_000;
@@ -151,7 +165,13 @@ export function buildStatusSnapshot({
       passed: targetReachedMs !== null && Number(activePerHour) >= 35,
     },
     selected: { total: selectedUnique.size, by_store: countByStore([...selectedUnique.values()], storeIds) },
-    quota: { by_store: quotaByStore },
+    quota: {
+      by_store: quotaByStore,
+      shortfall_by_store: quotaShortfallByStore,
+      constrained_stores: Object.entries(quotaShortfallByStore)
+        .filter(([, shortfall]) => shortfall > 0).map(([storeId]) => storeId),
+      next_reset_at: nextQuotaResetAt,
+    },
     rolling,
     runtime_errors: {
       total: runtimeErrors.length,
