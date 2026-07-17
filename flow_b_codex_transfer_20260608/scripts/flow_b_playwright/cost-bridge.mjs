@@ -75,9 +75,9 @@ function safeSku(value) {
   return sku;
 }
 
-async function defaultDownload(url, destinationPath) {
+async function defaultDownload(url, destinationPath, { timeout = 15_000 } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30000);
+  const timer = setTimeout(() => controller.abort(), Math.max(1_000, Number(timeout) || 15_000));
   try {
     const response = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -90,6 +90,14 @@ async function defaultDownload(url, destinationPath) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function isTransientDownloadError(error) {
+  const message = String(error?.message || error || "");
+  const status = Number(message.match(/HTTP\s+(\d{3})/i)?.[1]);
+  if (status > 0) return [408, 425, 429].includes(status) || status >= 500;
+  return /aborted|aborterror|timed?\s*out|timeout|econnreset|econnrefused|enotfound|eai_again|network|socket/i.test(message)
+    || ["ABORT_ERR", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(String(error?.code || "").toUpperCase());
 }
 
 function defaultRunProcess({ command, args, cwd, timeout = 90000 }) {
@@ -139,6 +147,9 @@ export function createCostBridge({
   workerPool = null,
   workerScriptPath = path.resolve(import.meta.dirname, "../flow_b_1688_worker.py"),
   workerCount = Number(process.env.FLOW_B_1688_WORKERS || 4),
+  downloadAttempts = 3,
+  downloadTimeoutMs = 15_000,
+  sleep: wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const inFlight = new Map();
   const cacheByRun = new Map();
@@ -146,6 +157,22 @@ export function createCostBridge({
   let cacheWriteChain = Promise.resolve();
   let ownedWorkerPool = null;
   let persistentWorkersDisabled = process.env.FLOW_B_1688_PERSISTENT_POOL === "0";
+
+  async function downloadImage(url, destinationPath) {
+    const attempts = Math.max(1, Number(downloadAttempts) || 1);
+    let lastError;
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        await download(url, destinationPath, { timeout: Math.max(1_000, Number(downloadTimeoutMs) || 15_000) });
+        return;
+      } catch (error) {
+        lastError = error;
+        if (!isTransientDownloadError(error) || attempt + 1 >= attempts) throw error;
+        await wait(500 * (attempt + 1));
+      }
+    }
+    throw lastError;
+  }
 
   function activeWorkerPool() {
     if (persistentWorkersDisabled) return null;
@@ -263,7 +290,7 @@ export function createCostBridge({
         if (!(await readableFile(imagePath))) {
           const imageUrl = String(item?.cover_image || "").trim();
           if (!/^https?:\/\//i.test(imageUrl)) throw Object.assign(new Error("valid cover image URL is required"), { code: "invalid-cover-image" });
-          await download(imageUrl, imagePath);
+          await downloadImage(imageUrl, imagePath);
           if (!(await readableFile(imagePath))) throw Object.assign(new Error("cover image download produced no file"), { code: "empty-image" });
         }
 

@@ -276,6 +276,67 @@ test("estimate rejects path traversal attempts structurally", async () => {
   });
 });
 
+test("transient image downloads retry with bounded backoff before running 1688", async () => {
+  await withTempDir(async (runDir) => {
+    let downloads = 0;
+    let runs = 0;
+    const delays = [];
+    const bridge = createCostBridge({
+      download: async (_url, destinationPath) => {
+        downloads += 1;
+        if (downloads < 3) throw new Error("image download HTTP 503");
+        await fs.writeFile(destinationPath, "image");
+      },
+      sleep: async (ms) => { delays.push(ms); },
+      runProcess: async () => {
+        runs += 1;
+        return {
+          code: 0,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+            "P70_COST 11",
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    });
+
+    const result = await bridge.estimate({
+      sku: "retry-download",
+      cover_image: "https://img.example/retry.jpg",
+      sell_price: 100,
+    }, runDir);
+
+    assert.equal(result.ok, true);
+    assert.equal(downloads, 3);
+    assert.equal(runs, 1);
+    assert.deepEqual(delays, [500, 1000]);
+  });
+});
+
+test("deterministic image HTTP errors do not retry", async () => {
+  await withTempDir(async (runDir) => {
+    let downloads = 0;
+    const bridge = createCostBridge({
+      download: async () => {
+        downloads += 1;
+        throw new Error("image download HTTP 404");
+      },
+      sleep: async () => { throw new Error("404 must not back off"); },
+      runProcess: async () => { throw new Error("1688 must not run without an image"); },
+    });
+    const result = await bridge.estimate({
+      sku: "missing-image",
+      cover_image: "https://img.example/missing.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, false);
+    assert.equal(downloads, 1);
+    assert.match(result.error.message, /HTTP 404/);
+  });
+});
+
 test("estimate persists partial process evidence on timeout", async () => {
   await withTempDir(async (runDir) => {
     const bridge = createCostBridge({
