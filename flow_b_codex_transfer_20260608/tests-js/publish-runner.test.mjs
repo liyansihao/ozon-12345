@@ -194,6 +194,55 @@ test("fresh favorites are scheduled before a large restored reconciliation backl
   assert.equal(events[0], "publish:fresh-900");
 });
 
+test("cross-window candidate facts bypass duplicate Ozon detail while retaining downstream gates", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-cross-window-facts-"));
+  const seedFile = path.join(runDir, "previous-favorites.jsonl");
+  await fs.writeFile(seedFile, `${JSON.stringify({
+    status: "favorited",
+    preflight_mode: "FBS",
+    sku: "seeded-900",
+    shipping_mode: "FBS",
+    sale_price: 259,
+    source_currency: "RUB",
+    title: "Детский аксессуар",
+    cover_image: "https://img.example/seeded-900.jpg",
+    source_url: "https://www.ozon.ru/seller/proven/",
+  })}\n`);
+  let detailCalls = 0;
+  let categoryCalls = 0;
+  let costCalls = 0;
+  let estimatedSalePrice = null;
+  const state = fakeState();
+  const client = clientFor([{ sku: "seeded-900", sell_price: 22.64 }], {
+    getProductDetail: async () => { detailCalls += 1; throw new Error("detail should be reused"); },
+    getCategoryBySku: async () => {
+      categoryCalls += 1;
+      return { cate: [11, 22, "1,12.00"], product_info: { weight: 100, depth: 20, width: 10, height: 5 } };
+    },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async (item) => {
+      costCalls += 1;
+      estimatedSalePrice = item.sell_price;
+      return { ok: true, cost: 5 };
+    } },
+    state,
+    runDir,
+    target: 1,
+    candidateFactSeedFiles: [seedFile],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(detailCalls, 0);
+  assert.equal(categoryCalls, 1);
+  assert.equal(costCalls, 1);
+  assert.equal(estimatedSalePrice, 22.64);
+  await fs.rm(runDir, { recursive: true, force: true });
+});
+
 test("offer IDs retain the complete SKU and cannot collide on a six-digit suffix", () => {
   const now = new Date("2026-07-15T00:00:00Z");
   assert.equal(offerIdForSku("4799637133", now), "mz-150726-4799637133");
