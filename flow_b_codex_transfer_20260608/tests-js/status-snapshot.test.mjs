@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildStatusSnapshot } from "../scripts/flow_b_status_snapshot.mjs";
+import { buildStatusSnapshot, compactStatusSnapshot } from "../scripts/flow_b_status_snapshot.mjs";
 
 test("compact status reports strict per-store progress and rolling speed", () => {
   const snapshot = buildStatusSnapshot({
@@ -84,4 +84,56 @@ test("35 per hour pace uses time to complete every store quota, not the idle 24 
   assert.equal(snapshot.pace_35.hours_to_target, 0.1);
   assert.equal(snapshot.pace_35.active_per_hour, 40);
   assert.equal(snapshot.pace_35.passed, true);
+});
+
+test("token-light status keeps acceptance blockers without verbose store metadata", () => {
+  const compact = compactStatusSnapshot({
+    observed_at: "2026-07-17T02:00:00.000Z",
+    window: { elapsed_hours: 2, remaining_seconds: 79_200, complete: false },
+    strict: {
+      total: 40,
+      target: 500,
+      per_hour: 20,
+      by_store: { "2": 40, "3": 0 },
+      remaining_by_store: { "2": 60, "3": 100 },
+      passed: false,
+    },
+    selected: { total: 42, by_store: { "2": 42, "3": 0 } },
+    rolling: { 15: { count: 9, per_hour: 36 }, 30: { count: 20, per_hour: 40 }, 60: { count: 30, per_hour: 30 }, 120: { count: 40, per_hour: 20 } },
+    quota: {
+      pending_confirmation_by_store: { "2": 2, "3": 0 },
+      shortfall_by_store: { "2": 2, "3": 0 },
+      constrained_stores: ["2", "3"],
+      next_reset_at: "2026-07-18T00:00:00.000Z",
+      by_store: {
+        "2": { daily_usage: 42, daily_remaining: 58, available: true, warehouse_id: 2002, reason: null },
+        "3": { daily_usage: 0, daily_remaining: 100, available: false, warehouse_id: null, reason: "warehouse-unavailable-after-sync" },
+      },
+    },
+    runtime_errors: { total: 1, last_at: "2026-07-17T01:59:00.000Z" },
+    pace_35: { active_per_hour: 20, required_remaining_per_hour: 38.33, passed: false },
+  });
+
+  assert.deepEqual(compact, {
+    at: "2026-07-17T02:00:00.000Z",
+    elapsed_h: 2,
+    remaining_s: 79_200,
+    strict: 40,
+    target: 500,
+    rate_h: 20,
+    by_store: { "2": 40, "3": 0 },
+    selected: 42,
+    pending: { "2": 2, "3": 0 },
+    rolling_h: { "15": 36, "30": 40, "60": 30, "120": 20 },
+    constrained: ["2", "3"],
+    shortfall: { "2": 2, "3": 0 },
+    unavailable: { "3": "warehouse-unavailable-after-sync" },
+    next_reset_at: "2026-07-18T00:00:00.000Z",
+    errors: 1,
+    pace35: false,
+    required_h: 38.33,
+    complete: false,
+    passed: false,
+  });
+  assert.ok(JSON.stringify(compact).length < 650);
 });

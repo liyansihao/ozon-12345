@@ -242,6 +242,35 @@ export function buildStatusSnapshot({
   };
 }
 
+export function compactStatusSnapshot(snapshot = {}) {
+  const quotaByStore = snapshot?.quota?.by_store || {};
+  const unavailable = Object.fromEntries(Object.entries(quotaByStore)
+    .filter(([, value]) => value?.available === false)
+    .map(([storeId, value]) => [storeId, String(value?.reason || "unavailable")]));
+  return {
+    at: snapshot?.observed_at || null,
+    elapsed_h: snapshot?.window?.elapsed_hours ?? null,
+    remaining_s: snapshot?.window?.remaining_seconds ?? null,
+    strict: Number(snapshot?.strict?.total || 0),
+    target: Number(snapshot?.strict?.target || 0),
+    rate_h: Number(snapshot?.strict?.per_hour || 0),
+    by_store: snapshot?.strict?.by_store || {},
+    selected: Number(snapshot?.selected?.total || 0),
+    pending: snapshot?.quota?.pending_confirmation_by_store || {},
+    rolling_h: Object.fromEntries(Object.entries(snapshot?.rolling || {})
+      .map(([minutes, value]) => [minutes, Number(value?.per_hour || 0)])),
+    constrained: snapshot?.quota?.constrained_stores || [],
+    shortfall: snapshot?.quota?.shortfall_by_store || {},
+    unavailable,
+    next_reset_at: snapshot?.quota?.next_reset_at || null,
+    errors: Number(snapshot?.runtime_errors?.total || 0),
+    pace35: snapshot?.pace_35?.passed === true,
+    required_h: snapshot?.pace_35?.required_remaining_per_hour ?? null,
+    complete: snapshot?.window?.complete === true,
+    passed: snapshot?.strict?.passed === true,
+  };
+}
+
 async function readJson(filename, fallback = {}) {
   try { return JSON.parse(await fs.readFile(filename, "utf8")); } catch (error) {
     if (error?.code === "ENOENT" || error instanceof SyntaxError) return fallback;
@@ -284,9 +313,10 @@ export async function snapshotRun(runDir, observedAt = new Date().toISOString())
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const runDir = process.argv[2];
   if (!runDir) {
-    console.error("usage: node scripts/flow_b_status_snapshot.mjs RUN_DIR");
+    console.error("usage: node scripts/flow_b_status_snapshot.mjs RUN_DIR [--compact]");
     process.exitCode = 2;
   } else {
-    console.log(JSON.stringify(await snapshotRun(runDir)));
+    const snapshot = await snapshotRun(runDir);
+    console.log(JSON.stringify(process.argv.includes("--compact") ? compactStatusSnapshot(snapshot) : snapshot));
   }
 }
