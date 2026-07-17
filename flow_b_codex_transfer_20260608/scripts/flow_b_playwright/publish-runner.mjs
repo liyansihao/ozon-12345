@@ -17,6 +17,7 @@ const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
   price_list: { logistics_name: "CEL", logistics_speed: "economy" },
 });
+const observedPublishFeedbackCache = new Map();
 
 function asSku(item) {
   const sku = String(item?.sku ?? item?.id ?? "").trim();
@@ -194,18 +195,43 @@ function interleaveCandidateBatches(primary, secondary, batchSize) {
   return result;
 }
 
-async function loadObservedPublishFeedback(runDir) {
+export function clearObservedPublishFeedbackCache() {
+  observedPublishFeedbackCache.clear();
+}
+
+export function observedPublishFeedbackCacheStats(runDir) {
+  const filename = path.resolve(runDir, "source_yield.jsonl");
+  return { full_reads: Number(observedPublishFeedbackCache.get(filename)?.fullReads || 0) };
+}
+
+export async function loadObservedPublishFeedback(runDir) {
+  const filename = path.resolve(runDir, "source_yield.jsonl");
   try {
-    const text = await fs.readFile(path.join(runDir, "source_yield.jsonl"), "utf8");
+    const stat = await fs.stat(filename);
+    const cached = observedPublishFeedbackCache.get(filename);
+    if (cached
+      && Number(cached.ino) === Number(stat.ino)
+      && Number(cached.size) === Number(stat.size)
+      && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached.value;
+    const text = await fs.readFile(filename, "utf8");
     const rows = text.split(/\n/).filter(Boolean).flatMap((line) => {
       try { return [JSON.parse(line)]; } catch { return []; }
     });
-    return {
+    const value = {
       familyScores: observedTitleFamilyScores(rows),
       sourceScores: fullFunnelSourceScores(rows),
     };
+    observedPublishFeedbackCache.set(filename, {
+      ino: stat.ino,
+      size: stat.size,
+      mtimeMs: stat.mtimeMs,
+      value,
+      fullReads: Number(cached?.fullReads || 0) + 1,
+    });
+    return value;
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
+    observedPublishFeedbackCache.delete(filename);
     return { familyScores: {}, sourceScores: new Map() };
   }
 }

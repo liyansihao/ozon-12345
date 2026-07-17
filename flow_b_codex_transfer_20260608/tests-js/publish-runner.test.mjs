@@ -4,7 +4,42 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createPublishRunner, offerIdForSku, prioritizePublishCandidates, restoredDailyStoreUsage, verifiedWarehouseCandidates } from "../scripts/flow_b_playwright/publish-runner.mjs";
+import {
+  clearObservedPublishFeedbackCache,
+  createPublishRunner,
+  loadObservedPublishFeedback,
+  observedPublishFeedbackCacheStats,
+  offerIdForSku,
+  prioritizePublishCandidates,
+  restoredDailyStoreUsage,
+  verifiedWarehouseCandidates,
+} from "../scripts/flow_b_playwright/publish-runner.mjs";
+
+test("publish feedback reuses an unchanged source-yield history and refreshes after append", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-publish-feedback-"));
+  const filename = path.join(runDir, "source_yield.jsonl");
+  clearObservedPublishFeedbackCache();
+  await fs.writeFile(filename, `${JSON.stringify({
+    sku: "one",
+    source_url: "https://www.ozon.ru/seller/one/",
+    title: "Детский аксессуар",
+    status: "published",
+  })}\n`);
+
+  const first = await loadObservedPublishFeedback(runDir);
+  assert.strictEqual(await loadObservedPublishFeedback(runDir), first);
+  assert.equal(observedPublishFeedbackCacheStats(runDir).full_reads, 1);
+
+  await fs.appendFile(filename, `${JSON.stringify({
+    sku: "two",
+    source_url: "https://www.ozon.ru/seller/two/",
+    title: "Детская одежда",
+    status: "published",
+  })}\n`);
+  assert.notStrictEqual(await loadObservedPublishFeedback(runDir), first);
+  assert.equal(observedPublishFeedbackCacheStats(runDir).full_reads, 2);
+  await fs.rm(runDir, { recursive: true, force: true });
+});
 
 function fakeState(initial = {}, initialRunPublished = 0) {
   const statuses = new Map(Object.entries(initial).map(([sku, value]) => [sku,
