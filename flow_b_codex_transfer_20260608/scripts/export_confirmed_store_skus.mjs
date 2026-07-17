@@ -66,6 +66,9 @@ function confirmedRow(event, sourceFile) {
 }
 
 export async function exportConfirmedStoreSkus({ runsRoot, outputDir }) {
+  let sourceStat;
+  try { sourceStat = await fs.stat(runsRoot); } catch {}
+  if (!sourceStat?.isDirectory()) throw new Error(`confirmed source root is unavailable: ${runsRoot}`);
   const bySku = new Map();
   for (const filename of await publishedFiles(runsRoot)) {
     const text = await fs.readFile(filename, "utf8");

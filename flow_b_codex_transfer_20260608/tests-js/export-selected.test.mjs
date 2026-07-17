@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { exportSelectedStoreSkus } from "../scripts/export_selected_store_skus.mjs";
+import { exportConfirmedStoreSkus } from "../scripts/export_confirmed_store_skus.mjs";
 
 test("selected export deduplicates assignments and always writes all five store files", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-selected-export-"));
@@ -44,4 +45,26 @@ test("selected export refuses to overwrite a live run directory", async () => {
     /output directory must not be a source run directory/u,
   );
   await assert.rejects(fs.access(path.join(run, "selected_all_stores.csv")));
+});
+
+test("SKU exporters reject a missing source without overwriting prior output", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-export-missing-source-"));
+  const missing = path.join(root, "missing-run");
+  const selectedOut = path.join(root, "selected-out");
+  const confirmedOut = path.join(root, "confirmed-out");
+  await fs.mkdir(selectedOut);
+  await fs.mkdir(confirmedOut);
+  await fs.writeFile(path.join(selectedOut, "selected_all_stores.csv"), "keep-selected\n");
+  await fs.writeFile(path.join(confirmedOut, "confirmed_all_stores.csv"), "keep-confirmed\n");
+
+  await assert.rejects(
+    exportSelectedStoreSkus({ runDirs: [missing], outputDir: selectedOut }),
+    /selected source run is unavailable/u,
+  );
+  await assert.rejects(
+    exportConfirmedStoreSkus({ runsRoot: missing, outputDir: confirmedOut }),
+    /confirmed source root is unavailable/u,
+  );
+  assert.equal(await fs.readFile(path.join(selectedOut, "selected_all_stores.csv"), "utf8"), "keep-selected\n");
+  assert.equal(await fs.readFile(path.join(confirmedOut, "confirmed_all_stores.csv"), "utf8"), "keep-confirmed\n");
 });

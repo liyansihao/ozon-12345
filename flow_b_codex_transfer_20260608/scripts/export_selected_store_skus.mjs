@@ -47,6 +47,11 @@ export async function exportSelectedStoreSkus({ runDirs, outputDir }) {
   if (runDirs.some((runDir) => path.resolve(runDir) === resolvedOutputDir)) {
     throw new Error("output directory must not be a source run directory");
   }
+  for (const runDir of runDirs) {
+    let stat;
+    try { stat = await fs.stat(runDir); } catch {}
+    if (!stat?.isDirectory()) throw new Error(`selected source run is unavailable: ${runDir}`);
+  }
   const byAssignment = new Map();
   for (const runDir of runDirs) {
     let text = "";
