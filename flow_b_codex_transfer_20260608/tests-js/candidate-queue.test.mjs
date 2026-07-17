@@ -99,3 +99,21 @@ test("pending candidates round-robin sources and cap one source per consumer tra
     "101", "201", "301", "102", "202",
   ]);
 });
+
+test("pending source caps can group page variants into one source family", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-family-"));
+  const queue = createCandidateQueue(path.join(dir, "candidate_queue.jsonl"));
+  await queue.load();
+  await queue.discover([
+    card("101", "source-a?page=4"),
+    card("102", "source-a?page=5"),
+    card("103", "source-a?page=6"),
+    card("201", "source-b?page=2"),
+  ]);
+
+  assert.deepEqual(queue.pending({
+    limit: 4,
+    perSourceLimit: 2,
+    sourceKey: (row) => String(row.source_url).split("?")[0],
+  }).map((row) => row.sku), ["101", "201", "102"]);
+});

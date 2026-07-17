@@ -103,6 +103,7 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
       attempted = new Set(),
       limit = Number.POSITIVE_INFINITY,
       perSourceLimit = Number.POSITIVE_INFINITY,
+      sourceKey = (row) => row?.source_url,
       nowMs = Date.now(),
     } = {}) {
       const maximum = Number.isFinite(Number(limit)) ? Math.max(0, Math.floor(Number(limit))) : Number.POSITIVE_INFINITY;
@@ -121,7 +122,9 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
       if (!Number.isFinite(sourceMaximum)) return eligible.slice(0, maximum);
       const groups = new Map();
       for (const row of eligible) {
-        const source = String(row?.source_url || "").trim() || `sku:${row.sku}`;
+        let source = "";
+        try { source = String(sourceKey(row) || "").trim(); } catch {}
+        source ||= `sku:${row.sku}`;
         const values = groups.get(source) || [];
         if (values.length < sourceMaximum) values.push(row);
         groups.set(source, values);
