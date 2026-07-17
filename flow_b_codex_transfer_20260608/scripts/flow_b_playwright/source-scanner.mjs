@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureMaoziLogin, ensureMaoziPluginLogin, openMaoziPage } from "./browser-context.mjs";
+import { createCandidateQueue } from "./candidate-queue.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError } from "./continuous-runtime.mjs";
 import { isPureFbs, prohibitedCategorySkipReason } from "./publish-policy.mjs";
 
@@ -10,6 +11,28 @@ const collectionRuntimeStates = new Map();
 const collectionRuntimeWriteChains = new Map();
 const jsonLinesFileCache = new Map();
 const jsonArrayFileCache = new Map();
+
+export function candidateQueueTransitionForCollectionResult(result, {
+  nowMs = Date.now(),
+  deferMs = 10 * 60_000,
+} = {}) {
+  const status = String(result?.status || "");
+  if (status === "favorited") return { status: "favorited", data: { reason: null } };
+  if (status === "rejected") {
+    return { status: "rejected", data: { reason: String(result?.reason || "rejected") } };
+  }
+  if (["failed", "deferred", "capacity_reached"].includes(status)) {
+    const reason = String(result?.reason || result?.error?.message || result?.error || status);
+    return {
+      status: "deferred",
+      data: {
+        reason,
+        retry_at: new Date(Number(nowMs) + Math.max(1_000, Number(deferMs) || 0)).toISOString(),
+      },
+    };
+  }
+  return null;
+}
 
 function parseJsonLinesChunk(text) {
   const source = String(text || "");
@@ -1426,6 +1449,29 @@ export function fullFunnelSourceScores(rows) {
   }));
 }
 
+export function interleaveStrictSuccessExploration(urls, yieldRows, exploitBurst = 6) {
+  const ordered = [...new Set((urls || []).filter(Boolean))];
+  const burst = Math.floor(Number(exploitBurst) || 0);
+  if (burst <= 0 || ordered.length < 2) return ordered;
+  const strictKeys = new Set((yieldRows || [])
+    .filter((row) => String(row?.status || "") === "published" && String(row?.sku || "").trim())
+    .map((row) => sourceYieldKey(row?.source_url))
+    .filter(Boolean));
+  const exploit = ordered.filter((url) => strictKeys.has(sourceYieldKey(url)));
+  const explore = ordered.filter((url) => !strictKeys.has(sourceYieldKey(url)));
+  if (!exploit.length || !explore.length) return ordered;
+  const result = [];
+  let exploitIndex = 0;
+  let exploreIndex = 0;
+  while (exploitIndex < exploit.length || exploreIndex < explore.length) {
+    for (let offset = 0; offset < burst && exploitIndex < exploit.length; offset += 1) {
+      result.push(exploit[exploitIndex++]);
+    }
+    if (exploreIndex < explore.length) result.push(explore[exploreIndex++]);
+  }
+  return result;
+}
+
 function exhaustedSourceFamilyPenalties(rows) {
   const families = new Map();
   (rows || []).forEach((row, order) => {
@@ -1677,6 +1723,17 @@ export function shouldYieldForSourceFeedback({ completedBatches, maximumBatches,
   return maximum > 0
     && Number(completedBatches) >= maximum
     && Number(pendingSources) > 0;
+}
+
+export function sourceBatchPrefetchAllowed({
+  sourceBlocked,
+  deadlineReached,
+  completedBatches,
+  maximumBatches,
+  remainingSources,
+}) {
+  if (sourceBlocked || deadlineReached || !(Number(remainingSources) > 0)) return false;
+  return !(Number(maximumBatches) > 0 && Number(completedBatches) >= Number(maximumBatches));
 }
 
 export function nextLowYieldBatchStreak({ current = 0, favorited = 0, threshold = 1 }) {
@@ -2097,7 +2154,12 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   for (const link of prioritizeFavoriteLinks(links, familyScores)) {
     const href = typeof link === "string" ? link : link?.href;
     const sku = skuFromProductUrl(href);
-    if (!sku || existing.has(sku) || attempted.has(sku)) continue;
+    if (!sku) continue;
+    if (attempted.has(sku)) continue;
+    if (existing.has(sku)) {
+      onResult({ status: "favorited", sku, existing: true });
+      continue;
+    }
     attempted.add(sku);
     queue.push({
       sku,
@@ -2291,6 +2353,13 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         if ((sourceBlockKey && softBlockedSources.has(sourceBlockKey))
           || (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey))) {
           attempted.delete(item.sku);
+          onResult({
+            status: "deferred",
+            sku: item.sku,
+            reason: sourceBlockKey && softBlockedSources.has(sourceBlockKey)
+              ? `source deferred after Ozon detail soft block: ${sourceBlockKey}`
+              : `source deferred after low pure-FBS yield: ${nonFbsSampleKey}`,
+          });
           continue;
         }
         collection.attempted += 1;
@@ -2338,6 +2407,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           } else if (["FLOW_B_SOURCE_SOFT_BLOCKED", "FLOW_B_SOURCE_LOW_FBS_YIELD"].includes(error?.code)) {
             attempted.delete(item.sku);
             collection.attempted -= 1;
+            onResult({ status: "deferred", sku: item.sku, reason: String(error?.message || error), error });
             continue;
           } else if (isFavoriteCapacityReached(error)) {
             total = target;
@@ -2666,7 +2736,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
   });
   const highYieldSources = yieldRows.filter((row) => row?.status === "published").map((row) => row.source_url);
-  const pending = prioritizeSourceUrls(urls.filter((url) => !done.has(url)), {
+  const prioritizedPending = prioritizeSourceUrls(urls.filter((url) => !done.has(url)), {
     highYieldSources,
     yieldRows,
     scanRows: records,
@@ -2695,7 +2765,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       derivedPriorityLimit,
     }),
   });
-  if (!pending.length) return { outFile: outputPath, records: records.length, pending: 0 };
+  const pending = interleaveStrictSuccessExploration(
+    prioritizedPending,
+    yieldRows,
+    envNumber(env, "FLOW_B_STRICT_EXPLOIT_BURST", 6),
+  );
   const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const workers = Math.max(1, envNumber(env, "FLOW_B_TAB_WORKERS", 4));
   const adaptiveWorkers = sourceAdaptiveConcurrency(favoriteLog, {
@@ -2720,6 +2794,15 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const targetFavorites = envNumber(env, "FLOW_B_TARGET_FAVORITES", 1000);
   const attempted = await loadExcludedSkus(outputPath, env);
   records = pruneAttemptedSourceLinks(records, attempted);
+  const candidateQueue = createCandidateQueue(path.join(path.dirname(outputPath), "candidate_queue.jsonl"));
+  await candidateQueue.load();
+  const recoveredCandidates = candidateQueue.pending({
+    attempted,
+    limit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48),
+  });
+  if (!pending.length && !recoveredCandidates.length) {
+    return { outFile: outputPath, records: records.length, pending: 0 };
+  }
   const runtime = collectionRuntimeState(favoriteLog);
   const collectionPacingFile = path.join(path.dirname(outputPath), "collection_pacing.json");
   if (runtime.collectionPacingFile !== collectionPacingFile) {
@@ -2739,6 +2822,35 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   );
   const sourcePagePool = reusablePools.sourcePages;
   const favoriteWorkerPagePool = reusablePools.favoritePages;
+  const collectWithCandidateQueue = async ({ links, onResult = () => {}, ...args }) => {
+    const discoveries = (links || []).filter((link) => {
+      const href = typeof link === "string" ? link : link?.href;
+      const sku = skuFromProductUrl(href);
+      return sku && !attempted.has(sku);
+    });
+    await candidateQueue.discover(discoveries);
+    const transitions = [];
+    let total;
+    try {
+      total = await collectFavorites({
+        ...args,
+        links,
+        attempted,
+        onResult: (result) => {
+          onResult(result);
+          const transition = candidateQueueTransitionForCollectionResult(result, {
+            deferMs: envNumber(env, "FLOW_B_CANDIDATE_DEFER_MS", 10 * 60_000),
+          });
+          if (result?.sku && transition) {
+            transitions.push(candidateQueue.transition(result.sku, transition.status, transition.data));
+          }
+        },
+      });
+    } finally {
+      await Promise.allSettled(transitions);
+    }
+    return total;
+  };
   let keepReusablePages = true;
   let sourceCheckpointDirty = false;
   const sourceCheckpointBatchInterval = envNumber(env, "FLOW_B_SOURCE_CHECKPOINT_BATCH_INTERVAL", 4);
@@ -2772,7 +2884,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       });
       if (cooldownFallbackLinks.length > 0) {
         emit(`collecting ${cooldownFallbackLinks.length} exact-FBS cached links during Ozon cooldown`);
-        favoriteBefore = await collectFavorites({
+        favoriteBefore = await collectWithCandidateQueue({
           context,
           maozi,
           links: cooldownFallbackLinks,
@@ -2803,6 +2915,23 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         pending: pending.length,
         cooldown_remaining_ms: remainingCollectionCooldown(runtime),
       };
+    }
+
+    if (favoriteBefore !== null && favoriteBefore < targetFavorites && recoveredCandidates.length) {
+      emit(`resuming ${recoveredCandidates.length} persisted product candidates`);
+      favoriteBefore = await collectWithCandidateQueue({
+        context,
+        maozi,
+        links: recoveredCandidates,
+        target: targetFavorites,
+        currentTotal: favoriteBefore,
+        env,
+        logFile: favoriteLog,
+        log: emit,
+        familyScores: titleFamilyScores,
+        productiveSourceSampleKeys,
+        workerPagePool: favoriteWorkerPagePool,
+      });
     }
 
     if (favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
@@ -2842,7 +2971,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       }
       emit(`collecting favorites from ${retainedLinks.length} retained product links`);
       let retainedAttempted = 0;
-      favoriteBefore = await collectFavorites({
+      favoriteBefore = await collectWithCandidateQueue({
         context,
         maozi,
         links: retainedLinks,
@@ -2873,16 +3002,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       }
     }
 
-    for (let start = 0; start < pending.length;) {
-      if (isCollectionDeadlineReached(env)) break;
-      if (favoriteBefore !== null && favoriteBefore >= targetFavorites) break;
-      const batch = pending.slice(start, start + adaptiveWorkers.current);
-      start += batch.length;
-      const batchFavoriteBefore = favoriteBefore;
-      emit(`batch ${start - batch.length + 1}-${start} / ${pending.length} concurrency=${adaptiveWorkers.current}`);
-      const sourceScanTimeout = envNumber(env, "FLOW_B_SOURCE_SCAN_TIMEOUT_MS", 90_000);
-      const pageCloseTimeout = envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000);
-      const batchRows = await Promise.all(batch.map((url, index) => scanSourceWithPage({
+    const sourceScanTimeout = envNumber(env, "FLOW_B_SOURCE_SCAN_TIMEOUT_MS", 90_000);
+    const pageCloseTimeout = envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000);
+    const startSourceBatch = (start, concurrency = adaptiveWorkers.current) => {
+      const batch = pending.slice(start, start + Math.max(1, Number(concurrency) || 1));
+      const nextStart = start + batch.length;
+      emit(`batch ${start + 1}-${nextStart} / ${pending.length} concurrency=${batch.length}`);
+      const rowsPromise = Promise.all(batch.map((url, index) => scanSourceWithPage({
         context,
         url,
         options: {
@@ -2898,8 +3024,25 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         closeTimeoutMs: pageCloseTimeout,
         pagePool: sourcePagePool,
         pageIndex: index,
-      })
-        .catch((error) => ({ source_url: url, blocked: false, stop_reason: `error: ${error.message}`, links: [], cumulative_product_link_count: 0 }))));
+      }).catch((error) => ({
+        source_url: url,
+        blocked: false,
+        stop_reason: `error: ${error.message}`,
+        links: [],
+        cumulative_product_link_count: 0,
+      }))));
+      return { batch, nextStart, rowsPromise };
+    };
+    let prefetchedBatch = null;
+    for (let start = 0; prefetchedBatch || start < pending.length;) {
+      if (isCollectionDeadlineReached(env)) break;
+      if (favoriteBefore !== null && favoriteBefore >= targetFavorites) break;
+      const batchWork = prefetchedBatch || startSourceBatch(start);
+      prefetchedBatch = null;
+      const batch = batchWork.batch;
+      start = batchWork.nextStart;
+      const batchFavoriteBefore = favoriteBefore;
+      const batchRows = await batchWork.rowsPromise;
       const fatalBatchError = fatalSourceBatchError(batchRows);
       if (fatalBatchError) throw fatalBatchError;
       completedSourceBatches += 1;
@@ -2927,6 +3070,16 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           adaptiveWorkers.recordSuccess();
         }
       }
+      if (sourceBatchPrefetchAllowed({
+        sourceBlocked: sourceCooldown.blocked,
+        deadlineReached: isCollectionDeadlineReached(env),
+        completedBatches: completedSourceBatches,
+        maximumBatches: maximumSourceBatches,
+        remainingSources: pending.length - start,
+      })) {
+        prefetchedBatch = startSourceBatch(start);
+        start = prefetchedBatch.nextStart;
+      }
       let eligibleCounts = null;
       if (favoriteBefore !== null && !sourceCooldown.blocked) {
         let collectionSoftBlocked = false;
@@ -2937,7 +3090,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           titleFamilyScores,
         );
         eligibleCounts = eligibleLinkCountsBySource(collectionLinks, attempted);
-        favoriteBefore = await collectFavorites({
+        favoriteBefore = await collectWithCandidateQueue({
           context,
           maozi,
           links: collectionLinks,
@@ -3018,6 +3171,37 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         emit(`yielding source tranche after ${completedSourceBatches} batches for fresh publish feedback`);
         break;
       }
+    }
+    if (prefetchedBatch) {
+      const prefetchedRows = await prefetchedBatch.rowsPromise;
+      const fatalPrefetchError = fatalSourceBatchError(prefetchedRows);
+      if (fatalPrefetchError) throw fatalPrefetchError;
+      const prefetchedLinks = limitLinksPerSource(
+        prefetchedRows.map((row, index) => ({ ...row, source_url: prefetchedBatch.batch[index] })),
+        perSourceLinkLimit,
+        titleFamilyScores,
+      );
+      const queued = await candidateQueue.discover(prefetchedLinks.filter((link) => {
+        const sku = skuFromProductUrl(link?.href);
+        return sku && !attempted.has(sku);
+      }));
+      const eligibleCounts = eligibleLinkCountsBySource(prefetchedLinks, attempted);
+      const scannedAt = new Date().toISOString();
+      records.push(...prefetchedRows.map((row, index) => ({
+        source_url: prefetchedBatch.batch[index],
+        ...row,
+        scanned_at: scannedAt,
+        eligible_link_count_before_collection: eligibleCounts.get(
+          sourceNonFbsSampleKey(prefetchedBatch.batch[index]),
+        ) || 0,
+        favorite_count_before: favoriteBefore,
+        favorite_count_after: favoriteBefore,
+        favorite_count_delta: 0,
+        collection_deferred_to_candidate_queue: true,
+      })));
+      completedSourceBatches += 1;
+      sourceCheckpointDirty = true;
+      emit(`persisted lookahead batch candidates=${queued} for the next consumer tranche`);
     }
     return { outFile: outputPath, records: records.length, pending: pending.length };
   } catch (error) {

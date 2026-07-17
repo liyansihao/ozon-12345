@@ -23,6 +23,7 @@ import {
   ozonDetailFailurePolicy,
   prioritizeFavoriteLinks,
   prioritizeSourceUrls,
+  interleaveStrictSuccessExploration,
   parseFavoriteProductSnapshot,
   parseListingFavoriteSnapshot,
   reusableListingFavoriteSnapshot,
@@ -64,6 +65,7 @@ import {
   softBlockCooldownState,
   collectionDetailCooldownState,
   sourceBatchCooldownState,
+  candidateQueueTransitionForCollectionResult,
   sourceCollectionBlockKey,
   collectionRuntimeState,
   persistCollectionRuntimeState,
@@ -108,6 +110,7 @@ import {
   readJsonArrayCached,
   writeJsonArrayCached,
   shouldWriteSourceCheckpoint,
+  sourceBatchPrefetchAllowed,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("verified seller promotion requires at least two strict publications", () => {
@@ -257,6 +260,25 @@ test("collection deadline stops an in-flight producer tranche", () => {
   assert.equal(isCollectionDeadlineReached(env, Date.parse("2026-07-14T22:00:29.808Z")), false);
   assert.equal(isCollectionDeadlineReached(env, Date.parse("2026-07-14T22:00:29.809Z")), true);
   assert.equal(collectionDeadlineMs({}), Number.POSITIVE_INFINITY);
+});
+
+test("candidate queue keeps transient collection work retryable and terminal outcomes final", () => {
+  assert.deepEqual(candidateQueueTransitionForCollectionResult({ status: "favorited", sku: "1" }), {
+    status: "favorited",
+    data: { reason: null },
+  });
+  assert.deepEqual(candidateQueueTransitionForCollectionResult({ status: "rejected", sku: "2", reason: "non-pure-fbs" }), {
+    status: "rejected",
+    data: { reason: "non-pure-fbs" },
+  });
+  assert.deepEqual(candidateQueueTransitionForCollectionResult({ status: "failed", sku: "3", error: new Error("soft blocked") }, {
+    nowMs: Date.parse("2026-07-17T12:00:00.000Z"),
+    deferMs: 60_000,
+  }), {
+    status: "deferred",
+    data: { reason: "soft blocked", retry_at: "2026-07-17T12:01:00.000Z" },
+  });
+  assert.equal(candidateQueueTransitionForCollectionResult({ status: "ignored", sku: "4" }), null);
 });
 
 test("listing enrichment wait exits early once enough product cards are ready", async () => {
@@ -896,6 +918,25 @@ test("repeated publication yield outranks a merely proven seller", () => {
   assert.deepEqual(prioritizeSourceUrls([proven, productive], {
     highYieldSources: [proven, productive, productive, productive],
   }), [productive, proven]);
+});
+
+test("strict-success scheduling reserves one bounded exploration slot per six exploit sources", () => {
+  const exploits = Array.from({ length: 8 }, (_, index) => `https://www.ozon.ru/search/?text=winner-${index}&is_global=true`);
+  const exploration = [
+    "https://www.ozon.ru/search/?text=new-one&is_global=true",
+    "https://www.ozon.ru/search/?text=new-two&is_global=true",
+  ];
+  const yieldRows = exploits.map((source_url, index) => ({
+    status: "published",
+    sku: `strict-${index}`,
+    source_url,
+  }));
+  assert.deepEqual(interleaveStrictSuccessExploration([...exploits, ...exploration], yieldRows, 6), [
+    ...exploits.slice(0, 6),
+    exploration[0],
+    ...exploits.slice(6),
+    exploration[1],
+  ]);
 });
 
 test("full-funnel source yield penalizes exhausted high-volume sources", () => {
@@ -2342,6 +2383,44 @@ test("source scanning yields after a bounded tranche so new publish feedback can
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 8, maximumBatches: 8, pendingSources: 100 }), true);
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 8, maximumBatches: 8, pendingSources: 0 }), false);
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 80, maximumBatches: 0, pendingSources: 100 }), false);
+});
+
+test("source lookahead stays one batch ahead only while the tranche can continue", () => {
+  assert.equal(sourceBatchPrefetchAllowed({
+    sourceBlocked: false,
+    deadlineReached: false,
+    completedBatches: 1,
+    maximumBatches: 8,
+    remainingSources: 12,
+  }), true);
+  assert.equal(sourceBatchPrefetchAllowed({
+    sourceBlocked: true,
+    deadlineReached: false,
+    completedBatches: 1,
+    maximumBatches: 8,
+    remainingSources: 12,
+  }), false);
+  assert.equal(sourceBatchPrefetchAllowed({
+    sourceBlocked: false,
+    deadlineReached: false,
+    completedBatches: 8,
+    maximumBatches: 8,
+    remainingSources: 12,
+  }), false);
+  assert.equal(sourceBatchPrefetchAllowed({
+    sourceBlocked: false,
+    deadlineReached: true,
+    completedBatches: 1,
+    maximumBatches: 8,
+    remainingSources: 12,
+  }), false);
+  assert.equal(sourceBatchPrefetchAllowed({
+    sourceBlocked: false,
+    deadlineReached: false,
+    completedBatches: 1,
+    maximumBatches: 0,
+    remainingSources: 0,
+  }), false);
 });
 
 test("source scrolling keeps bounded dedup headroom above the per-source consumer limit", () => {
