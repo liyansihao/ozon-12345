@@ -305,6 +305,24 @@ export function nextDetailPacingState({
   return { intervalMs: Math.max(minimum, current - step), stableSuccesses: 0 };
 }
 
+export function favoriteDetailPacingOptions(env = {}) {
+  const baseIntervalMs = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS", 1500));
+  return {
+    baseIntervalMs,
+    minIntervalMs: Math.min(
+      baseIntervalMs,
+      Math.max(0, envNumber(env, "FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS", baseIntervalMs)),
+    ),
+    maxIntervalMs: Math.max(
+      baseIntervalMs,
+      envNumber(env, "FLOW_B_MAX_FAVORITE_DETAIL_INTERVAL_MS", baseIntervalMs * 2),
+    ),
+    stepMs: Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_STEP_MS", 500)),
+    softBlockStepMs: Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_SOFT_BLOCK_STEP_MS", 1000)),
+    stableWindow: Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_STABLE_WINDOW", 12)),
+  };
+}
+
 export function collectionDeadlineMs(env = process.env) {
   const value = Date.parse(String(env.FLOW_B_DEADLINE_AT || ""));
   return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY;
@@ -1976,18 +1994,13 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   };
   const apiInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_INTERVAL_MS", 750));
   const maxRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_RETRIES", 5));
-  const detailBaseInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS", 1500));
-  const detailMinInterval = Math.min(
-    detailBaseInterval,
-    Math.max(0, envNumber(env, "FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS", 2000)),
-  );
-  const detailIntervalStep = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_STEP_MS", 500));
-  const detailSoftBlockIntervalStep = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_SOFT_BLOCK_STEP_MS", 1000));
-  const detailMaxInterval = Math.max(
-    detailBaseInterval,
-    envNumber(env, "FLOW_B_MAX_FAVORITE_DETAIL_INTERVAL_MS", detailBaseInterval * 2),
-  );
-  const detailStableWindow = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_STABLE_WINDOW", 12));
+  const detailPacing = favoriteDetailPacingOptions(env);
+  const detailBaseInterval = detailPacing.baseIntervalMs;
+  const detailMinInterval = detailPacing.minIntervalMs;
+  const detailIntervalStep = detailPacing.stepMs;
+  const detailSoftBlockIntervalStep = detailPacing.softBlockStepMs;
+  const detailMaxInterval = detailPacing.maxIntervalMs;
+  const detailStableWindow = detailPacing.stableWindow;
   if (!Number.isFinite(Number(runtime.detailIntervalMs))) runtime.detailIntervalMs = detailBaseInterval;
   if (!Number.isFinite(Number(runtime.detailStableSuccesses))) runtime.detailStableSuccesses = 0;
   const updateDetailPacing = (event) => {
@@ -2549,16 +2562,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const runtime = collectionRuntimeState(favoriteLog);
   const collectionPacingFile = path.join(path.dirname(outputPath), "collection_pacing.json");
   if (runtime.collectionPacingFile !== collectionPacingFile) {
-    const detailBaseInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS", 1500));
+    const detailPacing = favoriteDetailPacingOptions(env);
     await restoreCollectionRuntimeState(favoriteLog, collectionPacingFile, {
-      minIntervalMs: Math.min(
-        detailBaseInterval,
-        Math.max(0, envNumber(env, "FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS", 2000)),
-      ),
-      maxIntervalMs: Math.max(
-        detailBaseInterval,
-        envNumber(env, "FLOW_B_MAX_FAVORITE_DETAIL_INTERVAL_MS", detailBaseInterval * 2),
-      ),
+      minIntervalMs: detailPacing.minIntervalMs,
+      maxIntervalMs: detailPacing.maxIntervalMs,
     });
     runtime.collectionPacingFile = collectionPacingFile;
   }

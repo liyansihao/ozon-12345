@@ -74,6 +74,7 @@ import {
   eligibleLinkCountsBySource,
   exhaustedScanFamilyKeys,
   nextDetailPacingState,
+  favoriteDetailPacingOptions,
   collectionDeadlineMs,
   isCollectionDeadlineReached,
   withTimeout,
@@ -1993,6 +1994,24 @@ test("detail pacing ramps down after stability and above baseline after repeated
     state = nextDetailPacingState({ ...state, ...options, event: "success" });
   }
   assert.deepEqual(state, { intervalMs: 4500, stableSuccesses: 0 });
+});
+
+test("production detail pacing does not ramp below its baseline unless explicitly configured", () => {
+  assert.deepEqual(favoriteDetailPacingOptions({
+    FLOW_B_FAVORITE_DETAIL_INTERVAL_MS: "3000",
+    FLOW_B_MAX_FAVORITE_DETAIL_INTERVAL_MS: "6000",
+  }), {
+    baseIntervalMs: 3000,
+    minIntervalMs: 3000,
+    maxIntervalMs: 6000,
+    stepMs: 500,
+    softBlockStepMs: 1000,
+    stableWindow: 12,
+  });
+  assert.equal(favoriteDetailPacingOptions({
+    FLOW_B_FAVORITE_DETAIL_INTERVAL_MS: "3000",
+    FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS: "2500",
+  }).minIntervalMs, 2500);
 });
 
 test("favorite collection prioritizes observed profitable title families stably", () => {
