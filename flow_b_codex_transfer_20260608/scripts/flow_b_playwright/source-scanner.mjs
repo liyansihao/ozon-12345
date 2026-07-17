@@ -1626,14 +1626,46 @@ function skuFromProductUrl(value) {
   return String(value || "").match(/\/product\/(?:[^/?#]*-)?(\d+)(?:[/?#]|$)/)?.[1] || "";
 }
 
+export function compactListingCardText(value) {
+  const evidence = [];
+  let hasMode = false;
+  let hasPrice = false;
+  let hasGlobal = false;
+  for (const rawLine of String(value || "").split(/\r?\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    let useful = false;
+    if (!hasMode && /发货模式\s*[：:]/i.test(line)) {
+      hasMode = true;
+      useful = true;
+    }
+    if (!hasPrice && /[¥₽₸]/.test(line)) {
+      hasPrice = true;
+      useful = true;
+    }
+    if (!hasGlobal && /доставка\s+из\s+(?:китая|за\s+рубежа)|cross.?border|ozon\s+global/i.test(line)) {
+      hasGlobal = true;
+      useful = true;
+    }
+    if (useful) evidence.push(line.slice(0, 120));
+    if (hasMode && hasPrice && hasGlobal) break;
+  }
+  return evidence.join("\n").slice(0, 300);
+}
+
 export function pruneAttemptedSourceLinks(records, attempted = new Set()) {
-  if (!(attempted instanceof Set) || attempted.size === 0) return records || [];
+  const excluded = attempted instanceof Set ? attempted : new Set();
   return (records || []).map((row) => ({
     ...row,
-    links: (row?.links || []).filter((link) => {
-      const sku = skuFromProductUrl(link?.href);
-      return !sku || !attempted.has(sku);
-    }),
+    links: (row?.links || [])
+      .filter((link) => {
+        const sku = skuFromProductUrl(link?.href);
+        return !sku || !excluded.has(sku);
+      })
+      .map((link) => ({
+        ...link,
+        card_text: compactListingCardText(link?.card_text),
+      })),
   }));
 }
 
@@ -2128,7 +2160,7 @@ async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSt
       const prior = links.get(link.href) || {};
       links.set(link.href, {
         text: link.text || prior.text || "",
-        card_text: link.card_text || prior.card_text || "",
+        card_text: compactListingCardText(link.card_text || prior.card_text || ""),
         image_url: link.image_url || prior.image_url || "",
       });
     }

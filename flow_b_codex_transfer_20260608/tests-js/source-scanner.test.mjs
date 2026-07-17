@@ -27,6 +27,7 @@ import {
   parseListingFavoriteSnapshot,
   reusableListingFavoriteSnapshot,
   pruneAttemptedSourceLinks,
+  compactListingCardText,
   requiresFavoriteSession,
   retainedReplayLimit,
   scanSourceWithPage,
@@ -1607,8 +1608,28 @@ test("source scan checkpoints discard attempted links while retaining scan compl
   }];
   assert.deepEqual(pruneAttemptedSourceLinks(rows, new Set(["101"])), [{
     ...rows[0],
-    links: [rows[0].links[1]],
+    links: [{ ...rows[0].links[1], card_text: "" }],
   }]);
+});
+
+test("source checkpoints retain only shipping, price, and Global card evidence", () => {
+  const verbose = [
+    "月销量：8",
+    "Доставка из Китая",
+    "999 ₽",
+    "发货模式：FBS",
+    "库存：1000",
+    "退货取消率：1.2%",
+  ].join("\n");
+  assert.equal(compactListingCardText(verbose), "Доставка из Китая\n999 ₽\n发货模式：FBS");
+  const compacted = compactListingCardText(verbose);
+  assert.equal(listingModeSkipReason(compacted), null);
+  assert.equal(parseListingFavoriteSnapshot({
+    href: "https://www.ozon.ru/product/sample-3423207591/",
+    text: "Детский набор аксессуаров",
+    image_url: "https://ir.ozone.ru/s3/image.jpg",
+    card_text: compacted,
+  })?.price_info?.sell_price, 999);
 });
 
 test("missing shipping mode is a deterministic rejection, not an infinite retry", () => {
