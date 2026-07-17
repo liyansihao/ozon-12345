@@ -970,18 +970,24 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
   const publishedGroups = [];
   const submittedGroups = [];
   const sourceScores = fullFunnelSourceScores(yieldRows);
-  const recencyOrderedRows = [...(yieldRows || [])]
+  const scoredRows = [...(yieldRows || [])]
     .map((row, order) => ({
       row,
       order,
       time: Date.parse(row?.at || row?.timestamp || "") || 0,
       sourceScore: Number(sourceScores.get(sourceYieldKey(row?.source_url)) || 0),
-    }))
+    }));
+  const recencyOrderedRows = [...scoredRows]
     .sort((left, right) => right.sourceScore - left.sourceScore
       || right.time - left.time
       || right.order - left.order)
     .map(({ row }) => row);
+  const newestOrderedRows = [...scoredRows]
+    .sort((left, right) => right.time - left.time || right.order - left.order)
+    .map(({ row }) => row);
   const seenEvidence = new Set();
+  const seenPublishedGroups = new Set();
+  const seenSubmittedGroups = new Set();
   for (const row of recencyOrderedRows) {
     const group = queryGroupForRow(row);
     if (!group) continue;
@@ -992,11 +998,30 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     if (!evidenceId || seenEvidence.has(evidenceKey)) continue;
     if (status === "published") {
       seenEvidence.add(evidenceKey);
-      publishedGroups.push(group);
+      const groupKey = group.join("\0");
+      if (!seenPublishedGroups.has(groupKey)) {
+        seenPublishedGroups.add(groupKey);
+        publishedGroups.push(group);
+      }
     } else if (status === "submitted" && repeatedSubmittedSources.has(sourceYieldKey(row?.source_url))) {
       seenEvidence.add(evidenceKey);
-      submittedGroups.push(group);
+      const groupKey = group.join("\0");
+      if (!seenSubmittedGroups.has(groupKey)) {
+        seenSubmittedGroups.add(groupKey);
+        submittedGroups.push(group);
+      }
     }
+  }
+  const newestPublishedGroups = [];
+  const newestGroupKeys = new Set();
+  for (const row of newestOrderedRows) {
+    if (String(row?.status || "") !== "published") continue;
+    const group = queryGroupForRow(row);
+    if (!group) continue;
+    const groupKey = group.join("\0");
+    if (newestGroupKeys.has(groupKey)) continue;
+    newestGroupKeys.add(groupKey);
+    newestPublishedGroups.push(group);
   }
   const recentGroupLimit = Math.max(2, Math.ceil(maximum / (bands.length * pages.length * 2)));
   const leadingSubmittedLimit = Math.max(1, Math.floor(recentGroupLimit / 4));
@@ -1007,10 +1032,26 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
   publishedSlots += extraPublished;
   remainingSlots -= extraPublished;
   submittedSlots += Math.min(remainingSlots, submittedGroups.length - submittedSlots);
-  queryGroups.push(
-    ...publishedGroups.slice(0, publishedSlots),
-    ...submittedGroups.slice(0, submittedSlots),
-  );
+  const selectedPublishedGroups = [];
+  const selectedPublishedKeys = new Set();
+  const addPublishedGroups = (groups, count) => {
+    let added = 0;
+    for (const group of groups) {
+      if (added >= count || selectedPublishedGroups.length >= publishedSlots) break;
+      const key = group.join("\0");
+      if (selectedPublishedKeys.has(key)) continue;
+      selectedPublishedKeys.add(key);
+      selectedPublishedGroups.push(group);
+      added += 1;
+    }
+  };
+  const newestReserve = publishedSlots >= 2 ? Math.max(1, Math.floor(publishedSlots / 4)) : 0;
+  if (newestReserve > 0) {
+    addPublishedGroups(publishedGroups, 1);
+    addPublishedGroups(newestPublishedGroups, newestReserve);
+  }
+  addPublishedGroups(publishedGroups, publishedSlots);
+  queryGroups.push(...selectedPublishedGroups, ...submittedGroups.slice(0, submittedSlots));
   const rounds = Math.max(0, ...queryGroups.map((group) => group.length));
   for (let round = 0; round < rounds; round += 1) {
     for (const group of queryGroups) {

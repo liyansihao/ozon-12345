@@ -613,6 +613,59 @@ test("derived searches prefer a repeatable full-funnel source over a newer one-o
   assert.equal(new URL(urls[0]).searchParams.get("text"), "комплект трусов бикини");
 });
 
+test("derived searches reserve a bounded slot for the newest strict evidence", () => {
+  const durable = "https://www.ozon.ru/search/?text=durable&is_global=true&currency_price=500.000%3B";
+  const older = "https://www.ozon.ru/search/?text=older&is_global=true&currency_price=500.000%3B";
+  const recent = "https://www.ozon.ru/seller/recent-current-run/";
+  const urls = deriveSearchSourceUrls([
+    ...Array.from({ length: 4 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-15T10:00:00.000Z") + index * 1000).toISOString(),
+      status: "published",
+      sku: `durable-${index}`,
+      source_url: durable,
+      title: `Комплект трусов бикини ${index + 1}`,
+    })),
+    ...Array.from({ length: 3 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-15T11:00:00.000Z") + index * 1000).toISOString(),
+      status: "published",
+      sku: `older-${index}`,
+      source_url: older,
+      title: `Заколка для волос жемчужная ${index + 1}`,
+    })),
+    {
+      at: "2026-07-17T05:20:00.000Z",
+      status: "published",
+      sku: "recent-current",
+      source_url: recent,
+      title: "Чехол для дивана эластичный",
+    },
+  ], 2, ["500.000;"], [1]);
+  assert.deepEqual(urls.map((url) => new URL(url).searchParams.get("text")), [
+    "комплект трусов бикини",
+    "чехол дивана эластичный",
+  ]);
+});
+
+test("newest reserved evidence runs immediately after the top full-funnel group", () => {
+  const rows = Array.from({ length: 8 }, (_, index) => ({
+    at: new Date(Date.parse("2026-07-15T10:00:00.000Z") + index * 1000).toISOString(),
+    status: "published",
+    sku: `history-${index}`,
+    source_url: "https://www.ozon.ru/seller/durable-history/",
+    title: `Исторический товар победитель${"а".repeat(index + 4)}`,
+  }));
+  rows.push({
+    at: "2026-07-17T05:20:00.000Z",
+    status: "published",
+    sku: "recent-sofa-cover",
+    source_url: "https://www.ozon.ru/seller/recent-sofa-cover/",
+    title: "Чехол для мебели дивана",
+  });
+  const urls = deriveSearchSourceUrls(rows, 48, ["150.000;", "500.000;"], [1, 2]);
+  assert.equal(new URL(urls[0]).searchParams.get("text"), `исторический товар победитель${"а".repeat(11)}`);
+  assert.equal(new URL(urls[4]).searchParams.get("text"), "чехол мебели дивана");
+});
+
 test("derived searches replay the exact productive search phrase before title siblings", () => {
   const source = "https://www.ozon.ru/search/?text=%D1%82%D1%80%D1%83%D1%81%D0%BE%D0%B2+%D0%B1%D1%80%D0%B8%D1%84%D1%8B&is_global=true&currency_price=150.000%3B";
   const urls = deriveSearchSourceUrls([
