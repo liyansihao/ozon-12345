@@ -148,7 +148,7 @@ test("runner skips an exact long-title duplicate before Ozon detail and 1688", a
   const state = fakeState({
     existing: {
       status: "published",
-      data: { sku: "existing", title, store_id: 7, published_at: "2026-07-17T00:00:00Z" },
+      data: { sku: "existing", title, store_id: 8, published_at: "2026-07-17T00:00:00Z" },
     },
   });
   let detailCalls = 0;
@@ -173,7 +173,7 @@ test("runner skips an exact long-title duplicate before Ozon detail and 1688", a
     && event.data.duplicate_of_sku === "existing"));
 });
 
-test("concurrent exact-title candidates reserve only one store submission", async () => {
+test("same-store exact-title variants remain eligible", async () => {
   const title = "Плюшевый коврик-пазл из десяти частей для малышей";
   const state = fakeState();
   let publishCalls = 0;
@@ -193,10 +193,10 @@ test("concurrent exact-title candidates reserve only one store submission", asyn
     runDir: "/tmp/run",
   }).run();
 
-  assert.equal(result.published, 1);
-  assert.equal(publishCalls, 1);
-  assert.equal(state.selections.length, 1);
-  assert.ok(state.transitions.some((event) => event.status === "skipped"
+  assert.equal(result.published, 2);
+  assert.equal(publishCalls, 2);
+  assert.equal(state.selections.length, 2);
+  assert.ok(!state.transitions.some((event) => event.status === "skipped"
     && event.data.reason === "duplicate-title"));
 });
 
