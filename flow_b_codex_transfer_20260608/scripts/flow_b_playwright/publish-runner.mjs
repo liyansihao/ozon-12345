@@ -299,6 +299,7 @@ export function createPublishRunner({
   pendingStoreStallMs = 300_000,
   pendingStoreStallCount = 3,
   pendingStoreRetryMs = 300_000,
+  probeInactiveStores = false,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -1009,6 +1010,22 @@ export function createPublishRunner({
       return null;
     }
 
+    async function probeInactiveTargetConfigs() {
+      if (!probeInactiveStores
+        || targetPlan.length < 2
+        || (deadlineAt && now().getTime() >= Date.parse(deadlineAt))) return;
+      const currentIndex = activeTargetIndex;
+      for (let offset = 1; offset < targetPlan.length; offset += 1) {
+        const candidateIndex = (currentIndex + offset) % targetPlan.length;
+        try {
+          await resolveTargetConfig(candidateIndex);
+        } catch {
+          // A missing warehouse or exhausted quota must not interrupt the
+          // active store. The normal retry cooldown remains authoritative.
+        }
+      }
+    }
+
     const stalledStoresThisRun = new Set();
     let freshSubmissionsPaused = false;
     let initialPauseReason = null;
@@ -1405,6 +1422,7 @@ export function createPublishRunner({
       }
     }
 
+    await probeInactiveTargetConfigs();
     await metricsChain;
 
     if (!haltReason && freshSubmissionsPaused && initialPauseReason) haltReason = initialPauseReason;

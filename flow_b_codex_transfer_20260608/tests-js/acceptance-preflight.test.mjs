@@ -23,6 +23,7 @@ function validEnv() {
     FLOW_B_1688_PERSISTENT_POOL: "1",
     FLOW_B_1688_WORKERS: "4",
     FLOW_B_VERIFY_LISTING_FBS_DETAIL: "1",
+    FLOW_B_PROBE_INACTIVE_STORES: "1",
     FLOW_B_UNAVAILABLE_STORE_RETRY_MS: "300000",
     FLOW_B_STORE_TARGETS: JSON.stringify([
       { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
@@ -84,6 +85,10 @@ test("24-hour acceptance preflight rejects disabled quality and reuse controls",
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_UNAVAILABLE_STORE_RETRY_MS: "1800000" }),
     /unavailable store retry must be at most 300000ms/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_PROBE_INACTIVE_STORES: "0" }),
+    /FLOW_B_PROBE_INACTIVE_STORES must equal 1/,
   );
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_DAILY_STORE_TIMEZONE: "Asia\/Shanghai" }),

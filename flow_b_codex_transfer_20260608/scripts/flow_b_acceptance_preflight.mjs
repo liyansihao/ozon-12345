@@ -71,6 +71,7 @@ export function validate24hAcceptanceEnv(env = process.env) {
   if (!excluded.has("2815247918")) throw new Error("FLOW_B_EXCLUDED_SKUS must include 2815247918");
   requireFlag(env, "FLOW_B_VERIFY_LISTING_FBS_DETAIL");
   requireFlag(env, "FLOW_B_1688_PERSISTENT_POOL");
+  requireFlag(env, "FLOW_B_PROBE_INACTIVE_STORES");
   const initialPublishWorkers = Number(env.FLOW_B_PUBLISH_WORKERS);
   const maxPublishWorkers = Number(env.FLOW_B_MAX_PUBLISH_WORKERS);
   if (initialPublishWorkers !== 8 || maxPublishWorkers !== 12) {

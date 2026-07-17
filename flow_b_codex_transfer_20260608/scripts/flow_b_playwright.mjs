@@ -216,6 +216,7 @@ async function createPublishingSession(context, options, env, shared) {
       pendingStoreStallMs: Math.max(0, Number(env.FLOW_B_PENDING_STORE_STALL_MS) || 300_000),
       pendingStoreStallCount: Math.max(1, Number(env.FLOW_B_PENDING_STORE_STALL_COUNT) || 3),
       pendingStoreRetryMs: Math.max(0, Number(env.FLOW_B_PENDING_STORE_RETRY_MS) || 300_000),
+      probeInactiveStores: env.FLOW_B_PROBE_INACTIVE_STORES !== "0",
     });
     return { maoziPage, costBridge, detailProvider, runner };
   } catch (error) {

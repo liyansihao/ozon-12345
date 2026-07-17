@@ -922,6 +922,56 @@ test("warehouse discovery accepts one explicit ERP warehouse from supported shop
   }), [{ warehouse_id: 7001, name: "FBS 五店仓" }]);
 });
 
+test("runner proactively verifies an inactive store warehouse without publishing to it", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-probe-inactive-store-"));
+  const state = fakeState();
+  const syncCalls = [];
+  const targetReads = new Map();
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => {
+      const id = Number(storeId);
+      targetReads.set(id, Number(targetReads.get(id) || 0) + 1);
+      return {
+        store: {
+          id,
+          name: id === 106637 ? "丽丽二号" : "丽丽五号",
+          product_limit: { daily_create: { limit: 100, usage: 0 } },
+          warehouse: id === 106646 && Number(targetReads.get(id)) >= 2
+            ? [{ warehouse_id: 5020005022957960, name: "丽丽五号 FBS 仓" }]
+            : [],
+        },
+        watermark: { id: 60822, name: "lysh" },
+      };
+    },
+    syncWarehouses: async (ids) => { syncCalls.push(ids); return { queued: true }; },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    target: 0,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510 },
+      { id: 106646, needle: "丽丽五号" },
+    ],
+    probeInactiveStores: true,
+    warehouseSyncAttempts: 1,
+    warehouseSyncIntervalMs: 0,
+    sleep: async () => {},
+  }).run();
+
+  assert.equal(result.published, 0);
+  assert.deepEqual(syncCalls, [[106646]]);
+  const targetEvents = (await fs.readFile(path.join(runDir, "store_targets.jsonl"), "utf8"))
+    .trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  assert.ok(targetEvents.some((event) => event.store_id === 106646
+    && event.warehouse_id === 5020005022957960
+    && event.warehouse_source === "erp-discovered"));
+  await fs.rm(runDir, { recursive: true, force: true });
+});
+
 test("runner caches an unavailable store between consumer rounds instead of repeating warehouse sync", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-unavailable-store-"));
   const state = fakeState();
