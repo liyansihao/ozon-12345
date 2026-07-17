@@ -8,6 +8,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_SOURCE_YIELD_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/source_yield_history.jsonl");
 const collectionRuntimeStates = new Map();
 const jsonLinesFileCache = new Map();
+const jsonArrayFileCache = new Map();
 
 function parseJsonLinesChunk(text) {
   const source = String(text || "");
@@ -108,6 +109,77 @@ export async function readJsonLinesIncremental(filename) {
   };
   jsonLinesFileCache.set(absolute, value);
   return value.rows;
+}
+
+export function clearJsonArrayFileCache() {
+  jsonArrayFileCache.clear();
+}
+
+export function jsonArrayFileCacheStats(filename) {
+  const cached = jsonArrayFileCache.get(path.resolve(filename));
+  return {
+    full_reads: Number(cached?.fullReads || 0),
+    writes: Number(cached?.writes || 0),
+    bytes_read: Number(cached?.bytesRead || 0),
+  };
+}
+
+export async function readJsonArrayCached(filename) {
+  const absolute = path.resolve(filename);
+  let stat;
+  try {
+    stat = await fs.stat(absolute);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  const cached = jsonArrayFileCache.get(absolute);
+  if (cached
+    && Number(cached.ino) === Number(stat.ino)
+    && Number(cached.size) === Number(stat.size)
+    && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached.rows;
+  const text = await fs.readFile(absolute, "utf8");
+  let rows = [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) rows = parsed;
+  } catch {}
+  jsonArrayFileCache.set(absolute, {
+    ino: stat.ino,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    rows,
+    fullReads: Number(cached?.fullReads || 0) + 1,
+    writes: Number(cached?.writes || 0),
+    bytesRead: Number(cached?.bytesRead || 0) + Buffer.byteLength(text),
+  });
+  return rows;
+}
+
+export async function writeJsonArrayCached(filename, rows) {
+  const absolute = path.resolve(filename);
+  const temporary = `${absolute}.tmp`;
+  const cached = jsonArrayFileCache.get(absolute);
+  const text = JSON.stringify(Array.isArray(rows) ? rows : []);
+  await fs.mkdir(path.dirname(absolute), { recursive: true });
+  try {
+    await fs.writeFile(temporary, text, "utf8");
+    await fs.rename(temporary, absolute);
+  } finally {
+    await fs.unlink(temporary).catch((error) => {
+      if (error?.code !== "ENOENT") throw error;
+    });
+  }
+  const stat = await fs.stat(absolute);
+  jsonArrayFileCache.set(absolute, {
+    ino: stat.ino,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    rows,
+    fullReads: Number(cached?.fullReads || 0),
+    writes: Number(cached?.writes || 0) + 1,
+    bytesRead: Number(cached?.bytesRead || 0),
+  });
 }
 
 export function collectionRuntimeState(key) {
@@ -2243,11 +2315,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     ])],
     yieldRows,
   );
-  let records = [];
-  try {
-    const parsed = JSON.parse(await fs.readFile(outputPath, "utf8"));
-    if (Array.isArray(parsed)) records = parsed;
-  } catch {}
+  let records = await readJsonArrayCached(outputPath);
   const done = completedSourceUrls(records, {
     transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
   });
@@ -2557,7 +2625,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         favorite_count_delta: delta,
       })));
       await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      await fs.writeFile(outputPath, JSON.stringify(records));
+      await writeJsonArrayCached(outputPath, records);
       emit(`favorite ${batchFavoriteBefore} -> ${favoriteAfter} delta=${delta}`);
       favoriteBefore = favoriteAfter;
       if (sourceCooldown.blocked) break;

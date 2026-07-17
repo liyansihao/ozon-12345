@@ -92,6 +92,10 @@ import {
   clearJsonLinesFileCache,
   jsonLinesFileCacheStats,
   readJsonLinesIncremental,
+  clearJsonArrayFileCache,
+  jsonArrayFileCacheStats,
+  readJsonArrayCached,
+  writeJsonArrayCached,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
 
 test("JSONL seed reads reuse unchanged files and only parse appended bytes", async () => {
@@ -115,6 +119,26 @@ test("JSONL seed reads reuse unchanged files and only parse appended bytes", asy
   await fs.writeFile(filename, '{"sku":"4"}\n');
   assert.deepEqual((await readJsonLinesIncremental(filename)).map((row) => row.sku), ["4"]);
   assert.equal(jsonLinesFileCacheStats(filename).full_reads, 2);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("source scan array checkpoints reuse memory and replace files atomically", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-array-cache-"));
+  const filename = path.join(dir, "source_deep_scan.json");
+  clearJsonArrayFileCache();
+  await fs.writeFile(filename, JSON.stringify([{ source_url: "one" }]));
+
+  assert.deepEqual(await readJsonArrayCached(filename), [{ source_url: "one" }]);
+  assert.equal(jsonArrayFileCacheStats(filename).full_reads, 1);
+  assert.deepEqual(await readJsonArrayCached(filename), [{ source_url: "one" }]);
+  assert.equal(jsonArrayFileCacheStats(filename).full_reads, 1);
+
+  await writeJsonArrayCached(filename, [{ source_url: "one" }, { source_url: "two" }]);
+  assert.deepEqual(await readJsonArrayCached(filename), [{ source_url: "one" }, { source_url: "two" }]);
+  assert.equal(jsonArrayFileCacheStats(filename).full_reads, 1);
+  assert.equal(jsonArrayFileCacheStats(filename).writes, 1);
+  assert.deepEqual(JSON.parse(await fs.readFile(filename, "utf8")), [{ source_url: "one" }, { source_url: "two" }]);
+  await assert.rejects(fs.access(`${filename}.tmp`));
   await fs.rm(dir, { recursive: true, force: true });
 });
 
