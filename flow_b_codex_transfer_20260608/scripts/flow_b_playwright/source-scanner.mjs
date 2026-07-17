@@ -461,6 +461,44 @@ async function waitForContent(page, timeout = 20000) {
   return null;
 }
 
+export async function waitForListingEnrichment(page, {
+  maxWaitMs = 8000,
+  minWaitMs = 1500,
+  pollMs = 500,
+  minProducts = 12,
+  now = Date.now,
+  wait = sleep,
+} = {}) {
+  const maximum = Math.max(0, Number(maxWaitMs) || 0);
+  const minimum = Math.min(maximum, Math.max(0, Number(minWaitMs) || 0));
+  const interval = Math.max(1, Number(pollMs) || 1);
+  const productTarget = Math.max(1, Number(minProducts) || 1);
+  const startedAt = Number(now());
+  const deadline = startedAt + maximum;
+  let state = {};
+  while (true) {
+    state = await page.evaluate(() => {
+      const anchors = [...document.querySelectorAll('a[href*="/product/"]')];
+      const cards = [...new Set(anchors.map((anchor) => anchor.closest("div[data-index]")).filter(Boolean))];
+      return {
+        products: anchors.length,
+        richCards: cards.filter((card) => String(card.innerText || "").trim().length >= 30
+          && card.querySelector("img[src]")).length,
+        modeCards: cards.filter((card) => /发货模式\s*[：:]/i.test(String(card.innerText || ""))).length,
+      };
+    }).catch(() => ({}));
+    const currentTime = Number(now());
+    const elapsed = currentTime - startedAt;
+    const ready = elapsed >= minimum && (
+      Number(state.modeCards) > 0
+      || (Number(state.products) >= productTarget && Number(state.richCards) >= Math.min(4, productTarget))
+    );
+    if (ready) return { ...state, ready: true, elapsedMs: elapsed };
+    if (currentTime >= deadline) return { ...state, ready: false, elapsedMs: elapsed };
+    await wait(Math.min(interval, deadline - currentTime));
+  }
+}
+
 export function isFavoriteSessionAuthenticated({ hasToken, httpOk, code, pageText }) {
   return Boolean(hasToken)
     && Boolean(httpOk)
@@ -2264,7 +2302,10 @@ export function sourceScanLinkTargetForSource(url, {
 async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSteps, linkTarget }) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
   await waitForContent(page, 20000);
-  await sleep(initialWait);
+  await waitForListingEnrichment(page, {
+    maxWaitMs: initialWait,
+    minWaitMs: Math.min(1500, Math.max(0, Number(initialWait) || 0)),
+  });
   await page.evaluate(() => window.scrollTo(0, 0));
   const links = new Map();
   let stable = 0;

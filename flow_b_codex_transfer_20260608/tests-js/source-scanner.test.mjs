@@ -41,6 +41,7 @@ import {
   retainedRowsForCollection,
   orderRowsBySourceYield,
   waitForMovingDeadline,
+  waitForListingEnrichment,
   shouldYieldAfterRetained,
   shouldYieldForSourceFeedback,
   terminalSkusFromJsonl,
@@ -219,6 +220,39 @@ test("collection deadline stops an in-flight producer tranche", () => {
   assert.equal(isCollectionDeadlineReached(env, Date.parse("2026-07-14T22:00:29.808Z")), false);
   assert.equal(isCollectionDeadlineReached(env, Date.parse("2026-07-14T22:00:29.809Z")), true);
   assert.equal(collectionDeadlineMs({}), Number.POSITIVE_INFINITY);
+});
+
+test("listing enrichment wait exits early once enough product cards are ready", async () => {
+  let evaluations = 0;
+  const page = {
+    evaluate: async () => {
+      evaluations += 1;
+      return { products: 24, richCards: 18, modeCards: 0 };
+    },
+  };
+  const result = await waitForListingEnrichment(page, {
+    maxWaitMs: 8000,
+    minWaitMs: 0,
+    pollMs: 250,
+    minProducts: 12,
+  });
+  assert.equal(result.ready, true);
+  assert.equal(evaluations, 1);
+});
+
+test("listing enrichment wait remains bounded when cards are incomplete", async () => {
+  let clock = 0;
+  const page = { evaluate: async () => ({ products: 1, richCards: 0, modeCards: 0 }) };
+  const result = await waitForListingEnrichment(page, {
+    maxWaitMs: 1000,
+    minWaitMs: 0,
+    pollMs: 250,
+    minProducts: 12,
+    now: () => clock,
+    wait: async (ms) => { clock += ms; },
+  });
+  assert.equal(result.ready, false);
+  assert.equal(clock, 1000);
 });
 
 test("collection cooldown exposes only its remaining bounded wait", () => {
