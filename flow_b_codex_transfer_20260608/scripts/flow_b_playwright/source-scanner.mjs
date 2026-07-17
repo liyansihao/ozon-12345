@@ -1464,6 +1464,36 @@ function exhaustedSourceFamilyPenalties(rows) {
   }));
 }
 
+function recentSellerFamilyPenalties(rows) {
+  const sellers = new Map();
+  (rows || []).forEach((row, order) => {
+    const key = canonicalSellerUrl(row?.source_url) || canonicalSellerUrl(row?.seller_url);
+    const sku = String(row?.sku || "").trim();
+    const status = String(row?.status || "");
+    if (!key || !sku || !["favorited", "submitted", "published", "rejected", "skipped"].includes(status)) return;
+    const outcomes = sellers.get(key) || new Map();
+    const previous = outcomes.get(sku);
+    outcomes.set(sku, {
+      productive: Boolean(previous?.productive)
+        || status === "favorited"
+        || status === "submitted"
+        || status === "published",
+      time: Math.max(previous?.time || 0, Date.parse(row?.at || row?.timestamp || "") || 0),
+      order: Math.max(previous?.order ?? -1, order),
+    });
+    sellers.set(key, outcomes);
+  });
+  return new Map([...sellers].flatMap(([key, outcomes]) => {
+    const recent = [...outcomes.values()]
+      .sort((left, right) => right.time - left.time || right.order - left.order)
+      .slice(0, 12);
+    if (recent.length < 12) return [];
+    const productiveRate = recent.filter((outcome) => outcome.productive).length / recent.length;
+    if (productiveRate === 0) return [[key, -600_000]];
+    return productiveRate < 0.1 ? [[key, -300_000]] : [];
+  }));
+}
+
 export function prioritizeSourceUrls(urls, {
   highYieldSources = [],
   yieldRows = [],
@@ -1481,6 +1511,7 @@ export function prioritizeSourceUrls(urls, {
   const funnelScores = fullFunnelSourceScores(yieldRows);
   const familyScores = observedTitleFamilyScores(yieldRows);
   const familyPenalties = exhaustedSourceFamilyPenalties(yieldRows);
+  const sellerFamilyPenalties = recentSellerFamilyPenalties(yieldRows);
   const exhaustedScanFamilies = exhaustedScanFamilyKeys(scanRows);
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
   const qualifiedFreshKeys = new Set(qualifiedFreshSourceUrls.map(sourceUrlKey));
@@ -1499,6 +1530,8 @@ export function prioritizeSourceUrls(urls, {
       : boundedDeep ? `bounded-deep:${familyKey}` : familyKey;
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
     const familyPenalty = familyPenalties.get(isPriceBandedSource(url) ? yieldKey : familyKey) || 0;
+    const sellerFamilyPenalty = sellerFamilyPenalties.get(canonicalSellerUrl(url)) || 0;
+    const effectiveFamilyPenalty = Math.min(familyPenalty, sellerFamilyPenalty);
     const scanFamilyKey = isPriceBandedSource(url) ? yieldKey : familyKey;
     const scanPenalty = exhaustedScanFamilies.has(scanFamilyKey) ? -600_000 : 0;
     const baseTier = verifiedSellerKeys.has(familyKey)
@@ -1506,7 +1539,9 @@ export function prioritizeSourceUrls(urls, {
       : qualifiedFreshKeys.has(familyKey)
         ? 3
         : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
-    let tier = familyPenalty < 0
+    let tier = sellerFamilyPenalty < 0
+      ? 0
+      : familyPenalty < 0
       ? boundedDeep ? 3 : (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
     if (scanPenalty < 0 && !boundedDeep) tier = 0;
@@ -1514,7 +1549,7 @@ export function prioritizeSourceUrls(urls, {
       + (freshKeys.has(familyKey) ? 200_000 : 0)
       + (qualifiedFreshKeys.has(familyKey) ? 300_000 : 0)
       + (verifiedFreshKeys.has(familyKey) ? 400_000 : 0)
-      + familyPenalty
+      + effectiveFamilyPenalty
       + scanPenalty;
     const group = groups.get(key) || { index, priority, tier, urls: [] };
     group.priority = Math.max(group.priority, priority);

@@ -1051,7 +1051,7 @@ test("a dry verified seller yields its fixed tier to productive Global discovery
   }), [toySearch, staleSeller]);
 });
 
-test("an unseen bounded deep seller page outranks search without reviving its exhausted old pages", () => {
+test("a dry seller family cannot revive itself through an unseen bounded deep variant", () => {
   const seller = "https://www.ozon.ru/seller/deep-winner/";
   const pageTwo = `${seller}?page=2`;
   const pageFour = `${seller}?page=4`;
@@ -1072,7 +1072,36 @@ test("an unseen bounded deep seller page outranks search without reviving its ex
     freshSourceUrls: [search],
     verifiedFreshSourceUrls: [seller, search],
     boundedDeepFreshSourceUrls: [pageFour],
-  }), [pageFour, search, pageTwo]);
+  }), [search, pageTwo, pageFour]);
+});
+
+test("seller-family dry tails span price sorting and page variants", () => {
+  const seller = "https://www.ozon.ru/seller/variant-dry/";
+  const dryDeepVariant = `${seller}?sorting=rating&currency_price=500.000%3B&page=9`;
+  const productiveSearch = "https://www.ozon.ru/search/?text=kids+accessories&is_global=true";
+  const variants = [
+    seller,
+    `${seller}?sorting=price&page=2`,
+    `${seller}?currency_price=50.000%3B&page=4`,
+    `${seller}?sorting=rating&currency_price=500.000%3B&page=8`,
+  ];
+  const rows = [
+    { source_url: seller, sku: "old-win", status: "published", at: "2026-07-15T00:00:00Z" },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      source_url: variants[index % variants.length],
+      sku: `variant-dry-${index}`,
+      status: "rejected",
+      reason: "non-pure-fbs",
+      at: `2026-07-16T00:${String(index).padStart(2, "0")}:00Z`,
+    })),
+    { source_url: productiveSearch, sku: "search-win", status: "published", at: "2026-07-16T01:00:00Z" },
+  ];
+  assert.deepEqual(prioritizeSourceUrls([dryDeepVariant, productiveSearch], {
+    yieldRows: rows,
+    freshSourceUrls: [productiveSearch],
+    verifiedFreshSourceUrls: [seller, productiveSearch],
+    boundedDeepFreshSourceUrls: [dryDeepVariant],
+  }), [productiveSearch, dryDeepVariant]);
 });
 
 test("deeper pages inherit source yield within the same price band", () => {
