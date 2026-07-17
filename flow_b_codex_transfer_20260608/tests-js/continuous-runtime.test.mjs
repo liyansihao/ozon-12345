@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   AdaptiveConcurrency,
@@ -11,7 +14,37 @@ import {
   rankSourcesByYield,
   runProducerLoop,
   summarizeConsumerRound,
+  clearCandidateFactsCache,
+  candidateFactsCacheStats,
+  loadCandidateFacts,
 } from "../scripts/flow_b_playwright/continuous-runtime.mjs";
+
+test("candidate facts reuse an unchanged favorite history and refresh after append", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-facts-"));
+  const filename = path.join(runDir, "favorite_collection.jsonl");
+  clearCandidateFactsCache();
+  await fs.writeFile(filename, `${JSON.stringify({
+    sku: "one",
+    status: "favorited",
+    title: "first",
+    sell_price: 88,
+  })}\n`);
+
+  assert.equal((await loadCandidateFacts(runDir)).get("one")?.title, "first");
+  assert.equal((await loadCandidateFacts(runDir)).get("one")?.title, "first");
+  assert.equal(candidateFactsCacheStats(runDir).full_reads, 1);
+
+  await fs.appendFile(filename, `${JSON.stringify({
+    sku: "two",
+    status: "favorited",
+    title: "second",
+    sell_price: 99,
+  })}\n`);
+  const refreshed = await loadCandidateFacts(runDir);
+  assert.equal(refreshed.get("two")?.title, "second");
+  assert.equal(candidateFactsCacheStats(runDir).full_reads, 2);
+  await fs.rm(runDir, { recursive: true, force: true });
+});
 
 test("collection error rate reports failed preflight requests separately", () => {
   assert.deepEqual(collectionErrorSummary([

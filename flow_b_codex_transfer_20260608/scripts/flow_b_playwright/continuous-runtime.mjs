@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const BAD_SKUS = new Set(["2815247918"]);
+const candidateFactsCache = new Map();
 
 function positive(value) {
   const number = Number(value);
@@ -35,14 +36,32 @@ export function mergeCandidateFacts(favorite = {}, fact = {}) {
   };
 }
 
+export function clearCandidateFactsCache() {
+  candidateFactsCache.clear();
+}
+
+export function candidateFactsCacheStats(runDir) {
+  const filename = path.resolve(runDir, "favorite_collection.jsonl");
+  return { full_reads: Number(candidateFactsCache.get(filename)?.fullReads || 0) };
+}
+
 export async function loadCandidateFacts(runDir) {
-  const facts = new Map();
-  let text = "";
+  const filename = path.resolve(runDir, "favorite_collection.jsonl");
+  let stat;
   try {
-    text = await fs.readFile(path.join(runDir, "favorite_collection.jsonl"), "utf8");
+    stat = await fs.stat(filename);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
+    candidateFactsCache.delete(filename);
+    return new Map();
   }
+  const cached = candidateFactsCache.get(filename);
+  if (cached
+    && Number(cached.ino) === Number(stat.ino)
+    && Number(cached.size) === Number(stat.size)
+    && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached.facts;
+  const facts = new Map();
+  const text = await fs.readFile(filename, "utf8");
   for (const line of text.split(/\r?\n/)) {
     try {
       const row = JSON.parse(line);
@@ -50,6 +69,13 @@ export async function loadCandidateFacts(runDir) {
       facts.set(String(row.sku), mergeCandidateFacts({}, row));
     } catch {}
   }
+  candidateFactsCache.set(filename, {
+    ino: stat.ino,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    facts,
+    fullReads: Number(cached?.fullReads || 0) + 1,
+  });
   return facts;
 }
 
