@@ -15,6 +15,14 @@ function lineValue(text, label) {
   return match?.[1]?.trim() || "";
 }
 
+export function compactCostOutput(text) {
+  return ["COST_SOURCE", "REASON", "FILTERED_FIRST_PAGE_PRICES", "P70_COST"]
+    .map((label) => [label, lineValue(text, label)])
+    .filter(([, value]) => value !== "")
+    .map(([label, value]) => `${label} ${value}`)
+    .join("\n");
+}
+
 function parsePrices(value) {
   try {
     const parsed = JSON.parse(value);
@@ -177,7 +185,11 @@ export function createCostBridge({
     async function readEntries(filename) {
       try {
         const parsed = JSON.parse(await fs.readFile(path.resolve(filename), "utf8"));
-        return parsed?.entries && typeof parsed.entries === "object" ? parsed.entries : {};
+        if (!parsed?.entries || typeof parsed.entries !== "object") return {};
+        return Object.fromEntries(Object.entries(parsed.entries).map(([key, entry]) => [key, {
+          ...entry,
+          output: compactCostOutput(entry?.output),
+        }]));
       } catch (error) {
         if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
         return {};
@@ -311,7 +323,7 @@ export function createCostBridge({
       if (result?.outputPath && (result?.ok || result?.reason)) {
         const output = await fs.readFile(result.outputPath, "utf8");
         cache.entries[key] = {
-          output,
+          output: compactCostOutput(output),
           terminal: true,
           process_code: result.process_code,
           source_image: String(item.cover_image),

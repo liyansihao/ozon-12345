@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createCostBridge, parseCostOutput } from "../scripts/flow_b_playwright/cost-bridge.mjs";
+import { compactCostOutput, createCostBridge, parseCostOutput } from "../scripts/flow_b_playwright/cost-bridge.mjs";
 
 async function withTempDir(callback) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-cost-bridge-"));
@@ -75,6 +75,21 @@ test("malformed bare price tokens invalidate the evidence", () => {
   ].join("\n"), 100);
   assert.equal(result.ok, false);
   assert.match(result.reason, /insufficient|invalid/i);
+});
+
+test("compact cost evidence preserves reliability parsing without verbose diagnostics", () => {
+  const verbose = [
+    "VALID_COUNT 50",
+    "COST_SOURCE search_first_page_cluster_p70_similarity_filtered",
+    "REASON filtered first-page similarity clustered cost",
+    "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+    `TOP_ROWS ${"verbose ".repeat(200)}`,
+    "P70_COST 11",
+  ].join("\n");
+  const compact = compactCostOutput(verbose);
+  assert.equal(compact.includes("TOP_ROWS"), false);
+  assert.equal(compact.length < verbose.length / 2, true);
+  assert.deepEqual(parseCostOutput(compact, 100), parseCostOutput(verbose, 100));
 });
 
 test("nonzero review decisions preserve the 1688 reliability reason", async () => {
