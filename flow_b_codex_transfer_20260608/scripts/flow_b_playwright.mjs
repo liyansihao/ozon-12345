@@ -196,6 +196,7 @@ async function createPublishingSession(context, options, env, shared) {
       targetRefreshIntervalMs: Math.max(0, Number(env.FLOW_B_TARGET_REFRESH_INTERVAL_MS) || 60_000),
       targetMetricHeartbeatMs: Math.max(0, Number(env.FLOW_B_TARGET_METRIC_HEARTBEAT_MS) || 1_800_000),
       sourceYieldHistoryPath: env.FLOW_B_SOURCE_YIELD_HISTORY || path.join(ROOT, "data/flow_b/source_yield_history.jsonl"),
+      candidateFactSeedFiles: String(env.FLOW_B_CANDIDATE_FACT_SEED_FILES || "").split(path.delimiter).filter(Boolean),
       confirmationAttempts: Math.max(1, Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) || 6),
       confirmationIntervalMs: Math.max(0, Number(env.FLOW_B_CONFIRMATION_INTERVAL_MS) || 2000),
       onlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_ONLINE_SYNC_INTERVAL_MS) || 1_800_000),

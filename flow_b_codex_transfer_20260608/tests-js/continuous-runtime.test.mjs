@@ -22,8 +22,15 @@ import {
 
 test("candidate facts reuse an unchanged favorite history and refresh after append", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-facts-"));
+  const seedDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-seed-"));
   const filename = path.join(runDir, "favorite_collection.jsonl");
+  const seedFilename = path.join(seedDir, "favorite_collection.jsonl");
   clearCandidateFactsCache();
+  await fs.writeFile(seedFilename, [
+    JSON.stringify({ sku: "seed", status: "favorited", title: "seeded", sell_price: 77, preflight_mode: "FBS" }),
+    JSON.stringify({ sku: "one", status: "favorited", title: "stale title", sell_price: 66 }),
+    "",
+  ].join("\n"));
   await fs.writeFile(filename, `${JSON.stringify({
     sku: "one",
     status: "favorited",
@@ -32,9 +39,11 @@ test("candidate facts reuse an unchanged favorite history and refresh after appe
     preflight_mode: "FBS",
   })}\n`);
 
-  assert.equal((await loadCandidateFacts(runDir)).get("one")?.title, "first");
-  assert.equal((await loadCandidateFacts(runDir)).get("one")?.title, "first");
-  assert.deepEqual([...(await loadPreflightPureSkus(runDir))], ["one"]);
+  const seededFacts = await loadCandidateFacts(runDir, [seedFilename]);
+  assert.equal(seededFacts.get("one")?.title, "first");
+  assert.equal(seededFacts.get("seed")?.title, "seeded");
+  assert.equal((await loadCandidateFacts(runDir, [seedFilename])).get("one")?.title, "first");
+  assert.deepEqual([...(await loadPreflightPureSkus(runDir, [seedFilename]))].sort(), ["one", "seed"]);
   assert.equal(candidateFactsCacheStats(runDir).full_reads, 1);
 
   await fs.appendFile(filename, `${JSON.stringify({
@@ -43,10 +52,11 @@ test("candidate facts reuse an unchanged favorite history and refresh after appe
     title: "second",
     sell_price: 99,
   })}\n`);
-  const refreshed = await loadCandidateFacts(runDir);
+  const refreshed = await loadCandidateFacts(runDir, [seedFilename]);
   assert.equal(refreshed.get("two")?.title, "second");
   assert.equal(candidateFactsCacheStats(runDir).full_reads, 2);
   await fs.rm(runDir, { recursive: true, force: true });
+  await fs.rm(seedDir, { recursive: true, force: true });
 });
 
 test("collection error rate reports failed preflight requests separately", () => {
@@ -88,6 +98,21 @@ test("collection facts retain publish-critical fields and override incomplete fa
     link: "https://www.ozon.ru/product/42/",
     seller_url: "https://www.ozon.ru/seller/proven/",
   });
+});
+
+test("Maozi favorite price remains CNY when collection evidence came from an Ozon RUB page", () => {
+  const merged = mergeCandidateFacts({ sku: "42", sell_price: 22.64 }, {
+    sku: "42",
+    title: "儿童配饰",
+    sale_price: 259,
+    source_currency: "RUB",
+    shipping_mode: "FBS",
+    cover_image: "https://img.example/42.jpg",
+    source_url: "https://www.ozon.ru/seller/proven/",
+  });
+  assert.equal(merged.sell_price, 22.64);
+  assert.equal(merged.source_currency, "CNY");
+  assert.equal(merged.shipping_mode, "FBS");
 });
 
 test("operational error rate includes runtime crashes without hiding SKU failures", () => {

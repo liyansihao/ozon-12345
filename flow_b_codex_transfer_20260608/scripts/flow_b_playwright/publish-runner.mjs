@@ -287,6 +287,7 @@ export function createPublishRunner({
   targetRefreshIntervalMs = 60_000,
   targetMetricHeartbeatMs = 1_800_000,
   sourceYieldHistoryPath = null,
+  candidateFactSeedFiles = [],
   confirmationAttempts = 6,
   confirmationIntervalMs = 2000,
   onlineSyncIntervalMs = 1_800_000,
@@ -1047,7 +1048,7 @@ export function createPublishRunner({
         }
       }
     }
-    const facts = await loadCandidateFacts(runDir);
+    const facts = await loadCandidateFacts(runDir, candidateFactSeedFiles);
     const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
     const favorites = (await client.listFavorites()).map((item) => {
       const sku = String(item?.sku ?? item?.id ?? "");
@@ -1083,7 +1084,7 @@ export function createPublishRunner({
         return restored?.data?.submitted === true || restored?.data?.submission_pending === true;
       })
       : favorites;
-    const preflightPureSkus = await loadPreflightPureSkus(runDir);
+    const preflightPureSkus = await loadPreflightPureSkus(runDir, candidateFactSeedFiles);
     const { familyScores, sourceScores } = await loadObservedPublishFeedback(runDir);
     const isReconciliationCandidate = (item) => item?.reconcile_only === true
       || item?.submitted === true

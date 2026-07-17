@@ -3,6 +3,7 @@ import path from "node:path";
 
 const BAD_SKUS = new Set(["2815247918"]);
 const candidateFactsCache = new Map();
+const candidateFactsCompositeCache = new Map();
 
 function positive(value) {
   const number = Number(value);
@@ -11,15 +12,18 @@ function positive(value) {
 
 export function mergeCandidateFacts(favorite = {}, fact = {}) {
   const sku = String(favorite?.sku ?? favorite?.id ?? fact?.sku ?? "").trim();
-  const salePrice = positive(favorite?.sell_price ?? favorite?.sale_price ?? favorite?.price)
-    ?? positive(fact?.sale_price ?? fact?.sell_price);
+  const favoriteSalePrice = positive(favorite?.sell_price ?? favorite?.sale_price ?? favorite?.price);
+  const salePrice = favoriteSalePrice ?? positive(fact?.sale_price ?? fact?.sell_price);
   const title = String(favorite?.title || fact?.title || "").trim();
   const coverImage = String(favorite?.cover_image || favorite?.coverImage || fact?.cover_image || "").trim() || null;
   const mode = String(favorite?.mode || favorite?.shipping_mode || fact?.shipping_mode || fact?.mode || "").trim() || null;
   const sourceUrl = String(favorite?.source_url || fact?.source_url || "").trim() || null;
   const sellerUrl = String(favorite?.seller_url || fact?.seller_url || "").trim() || null;
   const productUrl = String(favorite?.link || favorite?.detail_url || fact?.source_url_product || fact?.link || "").trim() || null;
-  const sourceCurrency = String(favorite?.source_currency || fact?.source_currency || "").trim().toUpperCase() || null;
+  const explicitFavoriteCurrency = String(favorite?.source_currency || "").trim().toUpperCase();
+  const sourceCurrency = explicitFavoriteCurrency
+    || (favoriteSalePrice ? "CNY" : String(fact?.source_currency || "").trim().toUpperCase())
+    || null;
   return {
     ...favorite,
     sku,
@@ -38,6 +42,7 @@ export function mergeCandidateFacts(favorite = {}, fact = {}) {
 
 export function clearCandidateFactsCache() {
   candidateFactsCache.clear();
+  candidateFactsCompositeCache.clear();
 }
 
 export function candidateFactsCacheStats(runDir) {
@@ -45,24 +50,27 @@ export function candidateFactsCacheStats(runDir) {
   return { full_reads: Number(candidateFactsCache.get(filename)?.fullReads || 0) };
 }
 
-async function loadCandidateHistory(runDir) {
-  const filename = path.resolve(runDir, "favorite_collection.jsonl");
+async function loadCandidateHistoryFile(filename) {
+  const absolute = path.resolve(filename);
   let stat;
   try {
-    stat = await fs.stat(filename);
+    stat = await fs.stat(absolute);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    candidateFactsCache.delete(filename);
-    return { facts: new Map(), preflightPureSkus: new Set() };
+    const missing = candidateFactsCache.get(absolute);
+    if (missing?.missing) return missing;
+    const value = { missing: true, facts: new Map(), preflightPureSkus: new Set(), fullReads: 0 };
+    candidateFactsCache.set(absolute, value);
+    return value;
   }
-  const cached = candidateFactsCache.get(filename);
+  const cached = candidateFactsCache.get(absolute);
   if (cached
     && Number(cached.ino) === Number(stat.ino)
     && Number(cached.size) === Number(stat.size)
     && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached;
   const facts = new Map();
   const preflightPureSkus = new Set();
-  const text = await fs.readFile(filename, "utf8");
+  const text = await fs.readFile(absolute, "utf8");
   for (const line of text.split(/\r?\n/)) {
     try {
       const row = JSON.parse(line);
@@ -72,7 +80,7 @@ async function loadCandidateHistory(runDir) {
       if (row?.preflight_mode === "FBS") preflightPureSkus.add(sku);
     } catch {}
   }
-  candidateFactsCache.set(filename, {
+  candidateFactsCache.set(absolute, {
     ino: stat.ino,
     size: stat.size,
     mtimeMs: stat.mtimeMs,
@@ -80,15 +88,37 @@ async function loadCandidateHistory(runDir) {
     preflightPureSkus,
     fullReads: Number(cached?.fullReads || 0) + 1,
   });
-  return candidateFactsCache.get(filename);
+  return candidateFactsCache.get(absolute);
 }
 
-export async function loadCandidateFacts(runDir) {
-  return (await loadCandidateHistory(runDir)).facts;
+async function loadCandidateHistory(runDir, seedFiles = []) {
+  const filenames = [...new Set([
+    ...(Array.isArray(seedFiles) ? seedFiles : []),
+    path.resolve(runDir, "favorite_collection.jsonl"),
+  ].map((filename) => path.resolve(filename)))];
+  const histories = await Promise.all(filenames.map(loadCandidateHistoryFile));
+  const key = filenames.join("\0");
+  const cached = candidateFactsCompositeCache.get(key);
+  if (cached
+    && cached.histories.length === histories.length
+    && cached.histories.every((history, index) => history === histories[index])) return cached.value;
+  const facts = new Map();
+  const preflightPureSkus = new Set();
+  for (const history of histories) {
+    for (const [sku, fact] of history.facts) facts.set(sku, fact);
+    for (const sku of history.preflightPureSkus) preflightPureSkus.add(sku);
+  }
+  const value = { facts, preflightPureSkus };
+  candidateFactsCompositeCache.set(key, { histories, value });
+  return value;
 }
 
-export async function loadPreflightPureSkus(runDir) {
-  return (await loadCandidateHistory(runDir)).preflightPureSkus;
+export async function loadCandidateFacts(runDir, seedFiles = []) {
+  return (await loadCandidateHistory(runDir, seedFiles)).facts;
+}
+
+export async function loadPreflightPureSkus(runDir, seedFiles = []) {
+  return (await loadCandidateHistory(runDir, seedFiles)).preflightPureSkus;
 }
 
 export function hasReusableCandidateFacts(item) {
