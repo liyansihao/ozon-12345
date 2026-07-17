@@ -40,6 +40,7 @@ export function buildStatusSnapshot({
   config = {},
   published = [],
   selected = [],
+  storeTargetEvents = [],
   runtimeErrors = [],
   observedAt = new Date().toISOString(),
 } = {}) {
@@ -75,6 +76,24 @@ export function buildStatusSnapshot({
       selectedUnique.set(`${storeId}:${sku}`, row);
     }
   }
+  const latestStoreTargets = new Map();
+  for (const event of storeTargetEvents || []) {
+    const storeId = Number(event?.store_id || 0);
+    if (storeId > 0) latestStoreTargets.set(String(storeId), event);
+  }
+  const quotaByStore = Object.fromEntries(storeIds.map((id) => {
+    const event = latestStoreTargets.get(String(id));
+    const dailyUsage = Number(event?.daily_usage);
+    const dailyLimit = Number(event?.daily_limit);
+    return [String(id), {
+      daily_usage: Number.isFinite(dailyUsage) ? dailyUsage : null,
+      daily_limit: dailyLimit > 0 ? dailyLimit : null,
+      daily_remaining: dailyLimit > 0 && Number.isFinite(dailyUsage) ? Math.max(0, dailyLimit - dailyUsage) : null,
+      available: event ? event.available !== false : null,
+      warehouse_id: Number(event?.warehouse_id) > 0 ? Number(event.warehouse_id) : null,
+      reason: event?.reason ? String(event.reason) : null,
+    }];
+  }));
   const rolling = {};
   for (const minutes of [15, 30, 60, 120]) {
     const windowMs = minutes * 60_000;
@@ -132,6 +151,7 @@ export function buildStatusSnapshot({
       passed: targetReachedMs !== null && Number(activePerHour) >= 35,
     },
     selected: { total: selectedUnique.size, by_store: countByStore([...selectedUnique.values()], storeIds) },
+    quota: { by_store: quotaByStore },
     rolling,
     runtime_errors: {
       total: runtimeErrors.length,
@@ -171,6 +191,7 @@ export async function snapshotRun(runDir, observedAt = new Date().toISOString())
     },
     published: await readJsonLines(path.join(root, "published.jsonl")),
     selected: await readJsonLines(path.join(root, "selected.jsonl")),
+    storeTargetEvents: await readJsonLines(path.join(root, "store_targets.jsonl")),
     runtimeErrors: await readJsonLines(path.join(root, "runtime_errors.jsonl")),
     observedAt,
   });
