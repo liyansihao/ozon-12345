@@ -17,8 +17,16 @@ import {
 
 test("publish feedback reuses an unchanged source-yield history and refreshes after append", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-publish-feedback-"));
+  const seedDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-publish-feedback-seed-"));
   const filename = path.join(runDir, "source_yield.jsonl");
+  const seedFilename = path.join(seedDir, "source_yield.jsonl");
   clearObservedPublishFeedbackCache();
+  await fs.writeFile(seedFilename, `${JSON.stringify({
+    sku: "seeded",
+    source_url: "https://www.ozon.ru/seller/seeded/",
+    title: "Детские аксессуары",
+    status: "published",
+  })}\n`);
   await fs.writeFile(filename, `${JSON.stringify({
     sku: "one",
     source_url: "https://www.ozon.ru/seller/one/",
@@ -26,8 +34,9 @@ test("publish feedback reuses an unchanged source-yield history and refreshes af
     status: "published",
   })}\n`);
 
-  const first = await loadObservedPublishFeedback(runDir);
-  assert.strictEqual(await loadObservedPublishFeedback(runDir), first);
+  const first = await loadObservedPublishFeedback(runDir, [seedFilename]);
+  assert.ok(Number(first.sourceScores.get("https://www.ozon.ru/seller/seeded/") || 0) > 0);
+  assert.strictEqual(await loadObservedPublishFeedback(runDir, [seedFilename]), first);
   assert.equal(observedPublishFeedbackCacheStats(runDir).full_reads, 1);
 
   await fs.appendFile(filename, `${JSON.stringify({
@@ -36,9 +45,10 @@ test("publish feedback reuses an unchanged source-yield history and refreshes af
     title: "Детская одежда",
     status: "published",
   })}\n`);
-  assert.notStrictEqual(await loadObservedPublishFeedback(runDir), first);
+  assert.notStrictEqual(await loadObservedPublishFeedback(runDir, [seedFilename]), first);
   assert.equal(observedPublishFeedbackCacheStats(runDir).full_reads, 2);
   await fs.rm(runDir, { recursive: true, force: true });
+  await fs.rm(seedDir, { recursive: true, force: true });
 });
 
 function fakeState(initial = {}, initialRunPublished = 0) {

@@ -18,6 +18,7 @@ const ECONOMY_SENTINEL = Object.freeze({
   price_list: { logistics_name: "CEL", logistics_speed: "economy" },
 });
 const observedPublishFeedbackCache = new Map();
+const observedPublishFeedbackCompositeCache = new Map();
 
 function asSku(item) {
   const sku = String(item?.sku ?? item?.id ?? "").trim();
@@ -197,6 +198,7 @@ function interleaveCandidateBatches(primary, secondary, batchSize) {
 
 export function clearObservedPublishFeedbackCache() {
   observedPublishFeedbackCache.clear();
+  observedPublishFeedbackCompositeCache.clear();
 }
 
 export function observedPublishFeedbackCacheStats(runDir) {
@@ -204,36 +206,55 @@ export function observedPublishFeedbackCacheStats(runDir) {
   return { full_reads: Number(observedPublishFeedbackCache.get(filename)?.fullReads || 0) };
 }
 
-export async function loadObservedPublishFeedback(runDir) {
-  const filename = path.resolve(runDir, "source_yield.jsonl");
+async function loadObservedPublishFeedbackFile(filename) {
+  const absolute = path.resolve(filename);
   try {
-    const stat = await fs.stat(filename);
-    const cached = observedPublishFeedbackCache.get(filename);
+    const stat = await fs.stat(absolute);
+    const cached = observedPublishFeedbackCache.get(absolute);
     if (cached
       && Number(cached.ino) === Number(stat.ino)
       && Number(cached.size) === Number(stat.size)
-      && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached.value;
-    const text = await fs.readFile(filename, "utf8");
+      && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached;
+    const text = await fs.readFile(absolute, "utf8");
     const rows = text.split(/\n/).filter(Boolean).flatMap((line) => {
       try { return [JSON.parse(line)]; } catch { return []; }
     });
-    const value = {
-      familyScores: observedTitleFamilyScores(rows),
-      sourceScores: fullFunnelSourceScores(rows),
-    };
-    observedPublishFeedbackCache.set(filename, {
+    observedPublishFeedbackCache.set(absolute, {
       ino: stat.ino,
       size: stat.size,
       mtimeMs: stat.mtimeMs,
-      value,
+      rows,
       fullReads: Number(cached?.fullReads || 0) + 1,
     });
-    return value;
+    return observedPublishFeedbackCache.get(absolute);
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    observedPublishFeedbackCache.delete(filename);
-    return { familyScores: {}, sourceScores: new Map() };
+    const missing = observedPublishFeedbackCache.get(absolute);
+    if (missing?.missing) return missing;
+    const value = { missing: true, rows: [], fullReads: 0 };
+    observedPublishFeedbackCache.set(absolute, value);
+    return value;
   }
+}
+
+export async function loadObservedPublishFeedback(runDir, seedFiles = []) {
+  const filenames = [...new Set([
+    ...(Array.isArray(seedFiles) ? seedFiles : []),
+    path.resolve(runDir, "source_yield.jsonl"),
+  ].map((filename) => path.resolve(filename)))];
+  const histories = await Promise.all(filenames.map(loadObservedPublishFeedbackFile));
+  const key = filenames.join("\0");
+  const cached = observedPublishFeedbackCompositeCache.get(key);
+  if (cached
+    && cached.histories.length === histories.length
+    && cached.histories.every((history, index) => history === histories[index])) return cached.value;
+  const rows = histories.flatMap((history) => history.rows);
+  const value = {
+    familyScores: observedTitleFamilyScores(rows),
+    sourceScores: fullFunnelSourceScores(rows),
+  };
+  observedPublishFeedbackCompositeCache.set(key, { histories, value });
+  return value;
 }
 
 function buildPayload(item, detail, economy, targetConfig, now) {
@@ -287,6 +308,7 @@ export function createPublishRunner({
   targetRefreshIntervalMs = 60_000,
   targetMetricHeartbeatMs = 1_800_000,
   sourceYieldHistoryPath = null,
+  publishFeedbackSeedFiles = [],
   candidateFactSeedFiles = [],
   confirmationAttempts = 6,
   confirmationIntervalMs = 2000,
@@ -1085,7 +1107,7 @@ export function createPublishRunner({
       })
       : favorites;
     const preflightPureSkus = await loadPreflightPureSkus(runDir, candidateFactSeedFiles);
-    const { familyScores, sourceScores } = await loadObservedPublishFeedback(runDir);
+    const { familyScores, sourceScores } = await loadObservedPublishFeedback(runDir, publishFeedbackSeedFiles);
     const isReconciliationCandidate = (item) => item?.reconcile_only === true
       || item?.submitted === true
       || item?.submission_pending === true;
