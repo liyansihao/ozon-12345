@@ -63,6 +63,8 @@ import {
   sourceBatchCooldownState,
   sourceCollectionBlockKey,
   collectionRuntimeState,
+  persistCollectionRuntimeState,
+  restoreCollectionRuntimeState,
   remainingCollectionCooldown,
   sourceAdaptiveConcurrency,
   sourceAdaptiveStableWindow,
@@ -1870,6 +1872,40 @@ test("collection pacing and cooldown state persists across producer tranches", (
   assert.equal(resumed.detailSoftBlockStreak, 3);
   assert.equal(resumed.detailBlockedUntil, 12345);
   assert.notEqual(collectionRuntimeState(`${key}-other`), first);
+});
+
+test("collection pacing and cooldown state survives a supervised process restart", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-pacing-"));
+  const filename = path.join(directory, "collection_pacing.json");
+  const now = Date.parse("2026-07-17T05:30:00.000Z");
+  await persistCollectionRuntimeState(filename, {
+    detailIntervalMs: 5000,
+    detailStableSuccesses: 2,
+    detailSoftBlockStreak: 3,
+    lastDetailSoftBlockAt: now - 1000,
+    detailBlockedUntil: now + 60_000,
+    nextApiAt: now + 99_000,
+  });
+  const restored = await restoreCollectionRuntimeState(`restart-${Math.random()}`, filename, {
+    now,
+    minIntervalMs: 2000,
+    maxIntervalMs: 6000,
+  });
+  assert.deepEqual({
+    detailIntervalMs: restored.detailIntervalMs,
+    detailStableSuccesses: restored.detailStableSuccesses,
+    detailSoftBlockStreak: restored.detailSoftBlockStreak,
+    lastDetailSoftBlockAt: restored.lastDetailSoftBlockAt,
+    detailBlockedUntil: restored.detailBlockedUntil,
+    nextApiAt: restored.nextApiAt,
+  }, {
+    detailIntervalMs: 5000,
+    detailStableSuccesses: 2,
+    detailSoftBlockStreak: 3,
+    lastDetailSoftBlockAt: now - 1000,
+    detailBlockedUntil: now + 60_000,
+    nextApiAt: 0,
+  });
 });
 
 test("source adaptive concurrency keeps stable progress across producer tranches", () => {
