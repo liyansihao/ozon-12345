@@ -351,6 +351,7 @@ export function createPublishRunner({
   const storeTotalReservations = new Set();
   let storeUsageDay = null;
   const lastOnlineSyncAt = new Map();
+  const lastOnlineSyncPendingCount = new Map();
   const unavailableStoreUntil = new Map();
   const lastStoreSwitchDiagnosticAt = new Map();
   const lastStoreTargetMetrics = new Map();
@@ -473,22 +474,26 @@ export function createPublishRunner({
     const activeStoreId = Number(targetConfig.store.id);
     const currentTime = now().getTime();
     const lastSync = Number(lastOnlineSyncAt.get(activeStoreId) || 0);
-    const urgent = Number(pendingCount) >= Math.max(1, Number(urgentOnlineSyncPendingCount) || 1);
+    const normalizedPendingCount = Math.max(0, Number(pendingCount) || 0);
+    const urgent = normalizedPendingCount >= Math.max(1, Number(urgentOnlineSyncPendingCount) || 1);
     const cooldownMs = urgent
       ? Math.min(
         Math.max(0, Number(onlineSyncIntervalMs) || 0),
         Math.max(0, Number(urgentOnlineSyncIntervalMs) || 0),
       )
       : Math.max(0, Number(onlineSyncIntervalMs) || 0);
-    if (currentTime - lastSync < cooldownMs) return;
+    const firstNonEmptyAfterEmpty = normalizedPendingCount > 0
+      && Number(lastOnlineSyncPendingCount.get(activeStoreId)) === 0;
+    if (!firstNonEmptyAfterEmpty && currentTime - lastSync < cooldownMs) return;
     lastOnlineSyncAt.set(activeStoreId, currentTime);
+    lastOnlineSyncPendingCount.set(activeStoreId, normalizedPendingCount);
     try {
       const syncResult = await client.syncOnlineShops([activeStoreId], "all");
       recordMetric("store_syncs.jsonl", {
         store_id: activeStoreId,
         kind: "online-products",
         ok: true,
-        pending_count: Math.max(0, Number(pendingCount) || 0),
+        pending_count: normalizedPendingCount,
         cooldown_ms: cooldownMs,
         urgent,
         result: syncResult ?? null,
@@ -498,7 +503,7 @@ export function createPublishRunner({
         store_id: activeStoreId,
         kind: "online-products",
         ok: false,
-        pending_count: Math.max(0, Number(pendingCount) || 0),
+        pending_count: normalizedPendingCount,
         cooldown_ms: cooldownMs,
         urgent,
         error: String(error?.message || error),
@@ -535,7 +540,7 @@ export function createPublishRunner({
       limit: configuredTotalStoreLimit,
       event: "submission-reserved",
     });
-    await maybeSyncOnlineShop(targetConfig);
+    await maybeSyncOnlineShop(targetConfig, { pendingCount: 1 });
     const confirmation = await confirmPublication(sku, payload, targetConfig);
     if (confirmation.reason === "daily-product-limit") haltReason = confirmation.reason;
     return { ...confirmation, publish_result: publishResult };
@@ -776,7 +781,14 @@ export function createPublishRunner({
           const storeKey = Number(event.store_id);
           const timestamp = Date.parse(event.at);
           if (storeKey > 0 && Number.isFinite(timestamp)) {
-            lastOnlineSyncAt.set(storeKey, Math.max(timestamp, Number(lastOnlineSyncAt.get(storeKey) || 0)));
+            const previous = Number(lastOnlineSyncAt.get(storeKey) || 0);
+            if (timestamp >= previous) {
+              lastOnlineSyncAt.set(storeKey, timestamp);
+              const pendingCount = Number(event.pending_count);
+              if (Number.isFinite(pendingCount) && pendingCount >= 0) {
+                lastOnlineSyncPendingCount.set(storeKey, pendingCount);
+              }
+            }
           }
         } catch {}
       }

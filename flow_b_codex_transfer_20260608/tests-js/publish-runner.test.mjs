@@ -1784,6 +1784,37 @@ test("runner restores the persisted online-sync cooldown after a supervisor rest
   assert.deepEqual(syncCalls, []);
 });
 
+test("an empty startup sync does not suppress the first post-submission sync", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-empty-sync-cooldown-"));
+  const now = () => new Date("2026-07-15T08:06:00.000Z");
+  await fs.writeFile(path.join(runDir, "store_syncs.jsonl"), `${JSON.stringify({
+    at: "2026-07-15T08:05:00.000Z",
+    store_id: 7,
+    kind: "online-products",
+    ok: true,
+    pending_count: 0,
+  })}\n`);
+  const syncCalls = [];
+  const client = clientFor([{ id: "fresh-after-empty-sync", sku: "fresh-after-empty-sync" }], {
+    syncOnlineShops: async (...args) => { syncCalls.push(args); return { msg: "queued" }; },
+  });
+
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state: fakeState(),
+    runDir,
+    now,
+    target: 1,
+    onlineSyncIntervalMs: 600_000,
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.deepEqual(syncCalls, [[[7], "all"]]);
+  await fs.rm(runDir, { recursive: true, force: true });
+});
+
 test("runner shortens the online-sync cooldown only for a large delayed backlog", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-urgent-sync-"));
   const now = () => new Date("2026-07-15T08:06:00.000Z");
