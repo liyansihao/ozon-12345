@@ -931,6 +931,19 @@ test("warehouse discovery accepts one explicit ERP warehouse from supported shop
   }), [{ warehouse_id: 7001, name: "FBS 五店仓" }]);
 });
 
+test("warehouse discovery accepts an explicit unique warehouse from nested ERP containers", () => {
+  assert.deepEqual(verifiedWarehouseCandidates({
+    settings: {
+      fulfillment: {
+        warehouse_list: {
+          data: [{ warehouse_id: 7002, name: "丽丽五号 FBS 仓" }],
+          audit: { rows: [{ id: 9999, name: "request log" }] },
+        },
+      },
+    },
+  }), [{ warehouse_id: 7002, name: "丽丽五号 FBS 仓" }]);
+});
+
 test("runner proactively verifies an inactive store warehouse without publishing to it", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-probe-inactive-store-"));
   const state = fakeState();

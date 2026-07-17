@@ -86,14 +86,46 @@ export function restoredDailyStoreUsage(entries, storeId, at = new Date(), timeZ
 
 export function verifiedWarehouseCandidates(store = {}) {
   const candidates = new Map();
-  for (const rows of [store?.warehouse, store?.warehouses, store?.warehouse_list, store?.warehouseList]) {
-    if (!Array.isArray(rows)) continue;
-    for (const row of rows) {
-      const warehouseId = Number(row?.warehouse_id || row?.id || 0);
-      if (!(warehouseId > 0) || candidates.has(warehouseId)) continue;
-      candidates.set(warehouseId, { ...row, warehouse_id: warehouseId });
+  const visited = new Set();
+  const warehouseField = /^(?:warehouse|warehouses|warehouse_list|warehouseList)$/;
+  const listWrapperField = /^(?:data|items|list|rows|records)$/i;
+  const recordCandidate = (row, allowGenericId = false) => {
+    if (!row || typeof row !== "object" || Array.isArray(row)) return;
+    const warehouseId = Number(row.warehouse_id || (allowGenericId ? row.id : 0));
+    if (!(warehouseId > 0) || candidates.has(warehouseId)) return;
+    candidates.set(warehouseId, { ...row, warehouse_id: warehouseId });
+  };
+  const visitWarehouseContainer = (value, arrayRow = false) => {
+    if (!value || typeof value !== "object" || visited.has(value)) return;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (const row of value) visitWarehouseContainer(row, true);
+      return;
+    }
+    recordCandidate(value, arrayRow);
+    for (const [key, child] of Object.entries(value)) {
+      if (!child || typeof child !== "object") continue;
+      if (warehouseField.test(key) || listWrapperField.test(key)) {
+        visitWarehouseContainer(child, Array.isArray(child));
+      } else {
+        findWarehouseFields(child);
+      }
+    }
+  };
+  function findWarehouseFields(value) {
+    if (!value || typeof value !== "object" || visited.has(value)) return;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      for (const child of value) findWarehouseFields(child);
+      return;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (!child || typeof child !== "object") continue;
+      if (warehouseField.test(key)) visitWarehouseContainer(child);
+      else findWarehouseFields(child);
     }
   }
+  findWarehouseFields(store);
   return [...candidates.values()];
 }
 
