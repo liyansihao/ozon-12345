@@ -53,6 +53,7 @@ import {
   observedTitleFamilyScores,
   createScannerLogger,
   favoriteFailureDisposition,
+  adaptiveNonFbsSampleLimit,
   shouldDeferSourceAfterNonFbsSample,
   nextSourceSampleStats,
   sourceNonFbsSampleKey,
@@ -198,6 +199,13 @@ test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 12, nonPureFbs: 11, favorited: 1 }, 6), true);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 12, nonPureFbs: 10, favorited: 2 }, 6), false);
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 20, nonPureFbs: 20, favorited: 0 }, 0), false);
+});
+
+test("unproven sources use one fewer FBS sample while productive sources retain the configured evidence", () => {
+  assert.equal(adaptiveNonFbsSampleLimit(4, false), 3);
+  assert.equal(adaptiveNonFbsSampleLimit(4, true), 4);
+  assert.equal(adaptiveNonFbsSampleLimit(3, false), 3);
+  assert.equal(adaptiveNonFbsSampleLimit(0, false), 0);
 });
 
 test("source samples count completed outcomes but not deferred queued work", () => {

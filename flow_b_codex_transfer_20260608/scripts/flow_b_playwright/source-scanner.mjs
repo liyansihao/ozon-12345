@@ -579,6 +579,12 @@ export function shouldDeferSourceAfterNonFbsSample(stats = {}, limit = 6) {
   );
 }
 
+export function adaptiveNonFbsSampleLimit(limit, productive = false) {
+  const configured = Math.max(0, Math.floor(Number(limit) || 0));
+  if (productive || configured <= 3) return configured;
+  return configured - 1;
+}
+
 export function nextSourceSampleStats(stats = {}, outcome = {}) {
   const next = {
     attempted: Math.max(0, Number(stats?.attempted) || 0),
@@ -1992,7 +1998,7 @@ async function extractFavoriteProduct(page, url, timeout) {
   return parseFavoriteProductSnapshot(snapshot || { url });
 }
 
-async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, onResult = () => {}, workerPagePool = null }) {
+async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, productiveSourceSampleKeys = new Set(), onResult = () => {}, workerPagePool = null }) {
   if (currentTotal >= target || !links.length || isCollectionDeadlineReached(env)) return currentTotal;
   let existing = new Set();
   try {
@@ -2250,8 +2256,12 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             const { reason } = favoriteFailureDisposition(error);
             const sourceStats = recordSourceOutcome(nonFbsSampleKey, { status: "rejected", reason });
             if (sourceStats && reason === "non-pure-fbs") {
+              const sourceSampleLimit = adaptiveNonFbsSampleLimit(
+                nonFbsSampleLimit,
+                productiveSourceSampleKeys.has(nonFbsSampleKey),
+              );
               if (!nonFbsDeferredSources.has(nonFbsSampleKey)
-                && shouldDeferSourceAfterNonFbsSample(sourceStats, nonFbsSampleLimit)) {
+                && shouldDeferSourceAfterNonFbsSample(sourceStats, sourceSampleLimit)) {
                 nonFbsDeferredSources.add(nonFbsSampleKey);
                 log(`source non-pure-FBS sample deferred after ${sourceStats.attempted} checks: ${nonFbsSampleKey}`);
               }
@@ -2484,6 +2494,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   for (const yieldFile of yieldFiles) {
     yieldRows.push(...await readJsonLinesIncremental(yieldFile));
   }
+  const productiveSourceSampleKeys = new Set(yieldRows
+    .filter((row) => ["favorited", "submitted", "published"].includes(String(row?.status || "")))
+    .map((row) => sourceNonFbsSampleKey(row?.source_url))
+    .filter(Boolean));
   const titleFamilyScores = observedTitleFamilyScores(yieldRows);
   const derivedPriceBands = String(env.FLOW_B_DERIVED_SEARCH_PRICE_BANDS || "150.000;")
     .split(",").map((value) => value.trim()).filter(Boolean);
@@ -2674,6 +2688,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           logFile: favoriteLog,
           log: emit,
           familyScores: titleFamilyScores,
+          productiveSourceSampleKeys,
           workerPagePool: favoriteWorkerPagePool,
         });
         return {
@@ -2743,6 +2758,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         logFile: favoriteLog,
         log: emit,
         familyScores: titleFamilyScores,
+        productiveSourceSampleKeys,
         workerPagePool: favoriteWorkerPagePool,
         onResult: (result) => {
           if (result.sku) retainedAttempted += 1;
@@ -2837,6 +2853,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           logFile: favoriteLog,
           log: emit,
           familyScores: titleFamilyScores,
+          productiveSourceSampleKeys,
           workerPagePool: favoriteWorkerPagePool,
           onResult: (result) => {
             if (result.status === "favorited") batchFavorited += 1;
