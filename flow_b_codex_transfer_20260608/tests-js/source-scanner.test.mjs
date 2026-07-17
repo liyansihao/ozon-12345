@@ -668,6 +668,47 @@ test("newest reserved evidence runs immediately after the top full-funnel group"
   assert.equal(new URL(urls[4]).searchParams.get("text"), "чехол мебели дивана");
 });
 
+test("newest reserved evidence skips a source after its full-funnel yield turns negative", () => {
+  const durable = "https://www.ozon.ru/seller/durable-profit/";
+  const healthy = "https://www.ozon.ru/seller/healthy-recent/";
+  const exhausted = "https://www.ozon.ru/search/?text=exhausted&is_global=true";
+  const urls = deriveSearchSourceUrls([
+    ...Array.from({ length: 4 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-15T10:00:00.000Z") + index * 1000).toISOString(),
+      status: "published",
+      sku: `durable-${index}`,
+      source_url: durable,
+      title: `Комплект трусов бикини ${index + 1}`,
+    })),
+    {
+      at: "2026-07-17T05:20:00.000Z",
+      status: "published",
+      sku: "healthy",
+      source_url: healthy,
+      title: "Чехол мебели дивана",
+    },
+    {
+      at: "2026-07-17T05:30:00.000Z",
+      status: "published",
+      sku: "exhausted-win",
+      source_url: exhausted,
+      title: "Куклы милые плюшевые",
+    },
+    ...Array.from({ length: 20 }, (_, index) => ({
+      at: new Date(Date.parse("2026-07-17T05:31:00.000Z") + index * 1000).toISOString(),
+      status: "skipped",
+      sku: `exhausted-loss-${index}`,
+      source_url: exhausted,
+      title: `Брелок кукла ${index + 1}`,
+      reason: "profit_rate<=30",
+    })),
+  ], 2, ["500.000;"], [1]);
+  assert.deepEqual(urls.map((url) => new URL(url).searchParams.get("text")), [
+    "комплект трусов бикини",
+    "чехол мебели дивана",
+  ]);
+});
+
 test("derived searches replay the exact productive search phrase before title siblings", () => {
   const source = "https://www.ozon.ru/search/?text=%D1%82%D1%80%D1%83%D1%81%D0%BE%D0%B2+%D0%B1%D1%80%D0%B8%D1%84%D1%8B&is_global=true&currency_price=150.000%3B";
   const urls = deriveSearchSourceUrls([

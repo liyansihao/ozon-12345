@@ -1071,6 +1071,8 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
   const newestGroupKeys = new Set();
   for (const row of newestOrderedRows) {
     if (String(row?.status || "") !== "published") continue;
+    const sourceScore = Number(sourceScores.get(sourceYieldKey(row?.source_url)) || 0);
+    if (sourceScore < 0) continue;
     const group = queryGroupForRow(row);
     if (!group) continue;
     const groupKey = group.join("\0");
