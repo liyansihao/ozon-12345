@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   canClaimFavorite,
@@ -82,7 +85,34 @@ import {
   fullFunnelSourceScores,
   fatalSourceBatchError,
   completedSourceUrls,
+  clearJsonLinesFileCache,
+  jsonLinesFileCacheStats,
+  readJsonLinesIncremental,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+
+test("JSONL seed reads reuse unchanged files and only parse appended bytes", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-jsonl-cache-"));
+  const filename = path.join(dir, "seed.jsonl");
+  clearJsonLinesFileCache();
+  await fs.writeFile(filename, '{"sku":"1"}\n{"sku":"2"}\n');
+
+  assert.deepEqual((await readJsonLinesIncremental(filename)).map((row) => row.sku), ["1", "2"]);
+  assert.equal(jsonLinesFileCacheStats(filename).full_reads, 1);
+  assert.equal(jsonLinesFileCacheStats(filename).append_reads, 0);
+
+  assert.deepEqual((await readJsonLinesIncremental(filename)).map((row) => row.sku), ["1", "2"]);
+  assert.equal(jsonLinesFileCacheStats(filename).full_reads, 1);
+
+  await fs.appendFile(filename, '{"sku":"3"}\n');
+  assert.deepEqual((await readJsonLinesIncremental(filename)).map((row) => row.sku), ["1", "2", "3"]);
+  assert.equal(jsonLinesFileCacheStats(filename).full_reads, 1);
+  assert.equal(jsonLinesFileCacheStats(filename).append_reads, 1);
+
+  await fs.writeFile(filename, '{"sku":"4"}\n');
+  assert.deepEqual((await readJsonLinesIncremental(filename)).map((row) => row.sku), ["4"]);
+  assert.equal(jsonLinesFileCacheStats(filename).full_reads, 2);
+  await fs.rm(dir, { recursive: true, force: true });
+});
 
 test("a source is deferred only after a zero-yield non-pure-FBS sample", () => {
   assert.equal(shouldDeferSourceAfterNonFbsSample({ attempted: 5, nonPureFbs: 5, favorited: 0 }, 6), false);

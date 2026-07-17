@@ -7,6 +7,108 @@ import { isPureFbs } from "./publish-policy.mjs";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_SOURCE_YIELD_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/source_yield_history.jsonl");
 const collectionRuntimeStates = new Map();
+const jsonLinesFileCache = new Map();
+
+function parseJsonLinesChunk(text) {
+  const source = String(text || "");
+  const complete = /\r?\n$/.test(source);
+  const parts = source.split(/\r?\n/);
+  if (complete) parts.pop();
+  const tail = complete ? "" : (parts.pop() || "");
+  const rows = [];
+  for (const line of parts) {
+    try { rows.push(JSON.parse(line)); } catch {}
+  }
+  let tailParsed = false;
+  if (tail) {
+    try {
+      rows.push(JSON.parse(tail));
+      tailParsed = true;
+    } catch {}
+  }
+  return { rows, tail, tailParsed };
+}
+
+export function clearJsonLinesFileCache() {
+  jsonLinesFileCache.clear();
+}
+
+export function jsonLinesFileCacheStats(filename) {
+  const cached = jsonLinesFileCache.get(path.resolve(filename));
+  return {
+    full_reads: Number(cached?.fullReads || 0),
+    append_reads: Number(cached?.appendReads || 0),
+    bytes_read: Number(cached?.bytesRead || 0),
+  };
+}
+
+export async function readJsonLinesIncremental(filename) {
+  const absolute = path.resolve(filename);
+  let stat;
+  try {
+    stat = await fs.stat(absolute);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  const cached = jsonLinesFileCache.get(absolute);
+  const sameFile = cached && Number(cached.ino) === Number(stat.ino);
+  if (sameFile
+    && Number(cached.size) === Number(stat.size)
+    && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached.rows;
+
+  if (sameFile && Number(stat.size) > Number(cached.size)) {
+    const length = Number(stat.size) - Number(cached.size);
+    const buffer = Buffer.allocUnsafe(length);
+    const handle = await fs.open(absolute, "r");
+    let bytesRead = 0;
+    try {
+      while (bytesRead < length) {
+        const result = await handle.read(
+          buffer,
+          bytesRead,
+          length - bytesRead,
+          Number(cached.size) + bytesRead,
+        );
+        if (!(result.bytesRead > 0)) break;
+        bytesRead += result.bytesRead;
+      }
+    } finally {
+      await handle.close();
+    }
+    const parsed = parseJsonLinesChunk(`${cached.tail || ""}${buffer.subarray(0, bytesRead).toString("utf8")}`);
+    const baseRows = cached.tailParsed ? cached.rows.slice(0, -1) : cached.rows;
+    const value = {
+      ino: stat.ino,
+      size: Number(cached.size) + bytesRead,
+      mtimeMs: bytesRead === length ? stat.mtimeMs : Number.NaN,
+      rows: [...baseRows, ...parsed.rows],
+      tail: parsed.tail,
+      tailParsed: parsed.tailParsed,
+      fullReads: Number(cached.fullReads || 0),
+      appendReads: Number(cached.appendReads || 0) + 1,
+      bytesRead: Number(cached.bytesRead || 0) + bytesRead,
+    };
+    jsonLinesFileCache.set(absolute, value);
+    return value.rows;
+  }
+
+  const text = await fs.readFile(absolute, "utf8");
+  const parsed = parseJsonLinesChunk(text);
+  const value = {
+    ino: stat.ino,
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    rows: parsed.rows,
+    tail: parsed.tail,
+    tailParsed: parsed.tailParsed,
+    fullReads: Number(cached?.fullReads || 0) + 1,
+    appendReads: Number(cached?.appendReads || 0),
+    bytesRead: Number(cached?.bytesRead || 0) + Buffer.byteLength(text),
+  };
+  jsonLinesFileCache.set(absolute, value);
+  return value.rows;
+}
 
 export function collectionRuntimeState(key) {
   const normalized = String(key || "default");
@@ -2005,14 +2107,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   ].map((value) => path.resolve(value)))];
   const yieldRows = [];
   for (const yieldFile of yieldFiles) {
-    try {
-      const text = await fs.readFile(yieldFile, "utf8");
-      yieldRows.push(...text.split(/\r?\n/).flatMap((line) => {
-        try { return [JSON.parse(line)]; } catch { return []; }
-      }));
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
+    yieldRows.push(...await readJsonLinesIncremental(yieldFile));
   }
   const titleFamilyScores = observedTitleFamilyScores(yieldRows);
   const derivedPriceBands = String(env.FLOW_B_DERIVED_SEARCH_PRICE_BANDS || "150.000;")
