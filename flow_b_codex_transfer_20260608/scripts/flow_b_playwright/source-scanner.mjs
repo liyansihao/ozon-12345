@@ -225,16 +225,25 @@ export function nextDetailPacingState({
   stableSuccesses = 0,
   baseIntervalMs = 3000,
   minIntervalMs = 2000,
+  maxIntervalMs = 6000,
   stepMs = 500,
+  softBlockStepMs = 1000,
   stableWindow = 12,
   event = "success",
 } = {}) {
   const base = Math.max(0, Number(baseIntervalMs) || 0);
   const minimum = Math.min(base, Math.max(0, Number(minIntervalMs) || 0));
+  const maximum = Math.max(base, Number(maxIntervalMs) || base * 2);
   const step = Math.max(1, Number(stepMs) || 1);
+  const softBlockStep = Math.max(step, Number(softBlockStepMs) || 1000);
   const window = Math.max(1, Number(stableWindow) || 1);
-  const current = Math.max(minimum, Math.min(base, Number(intervalMs) || base));
-  if (event === "soft-block") return { intervalMs: base, stableSuccesses: 0 };
+  const current = Math.max(minimum, Math.min(maximum, Number(intervalMs) || base));
+  if (event === "soft-block") {
+    return {
+      intervalMs: Math.min(maximum, Math.max(base, current) + softBlockStep),
+      stableSuccesses: 0,
+    };
+  }
   if (event !== "success") return { intervalMs: current, stableSuccesses: 0 };
   const stable = Math.max(0, Number(stableSuccesses) || 0) + 1;
   if (stable < window || current <= minimum) return { intervalMs: current, stableSuccesses: stable };
@@ -1873,6 +1882,11 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     Math.max(0, envNumber(env, "FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS", 2000)),
   );
   const detailIntervalStep = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_INTERVAL_STEP_MS", 500));
+  const detailSoftBlockIntervalStep = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_SOFT_BLOCK_STEP_MS", 1000));
+  const detailMaxInterval = Math.max(
+    detailBaseInterval,
+    envNumber(env, "FLOW_B_MAX_FAVORITE_DETAIL_INTERVAL_MS", detailBaseInterval * 2),
+  );
   const detailStableWindow = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_DETAIL_STABLE_WINDOW", 12));
   if (!Number.isFinite(Number(runtime.detailIntervalMs))) runtime.detailIntervalMs = detailBaseInterval;
   if (!Number.isFinite(Number(runtime.detailStableSuccesses))) runtime.detailStableSuccesses = 0;
@@ -1883,7 +1897,9 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
       stableSuccesses: runtime.detailStableSuccesses,
       baseIntervalMs: detailBaseInterval,
       minIntervalMs: detailMinInterval,
+      maxIntervalMs: detailMaxInterval,
       stepMs: detailIntervalStep,
+      softBlockStepMs: detailSoftBlockIntervalStep,
       stableWindow: detailStableWindow,
       event,
     });

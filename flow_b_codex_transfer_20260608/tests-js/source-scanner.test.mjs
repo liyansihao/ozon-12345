@@ -1836,11 +1836,13 @@ test("source adaptive ramp window is configurable but never below one", () => {
   assert.equal(sourceAdaptiveStableWindow({ FLOW_B_SOURCE_STABLE_WINDOW: "0" }), 1);
 });
 
-test("detail pacing ramps down only after stable loads and resets on soft block", () => {
+test("detail pacing ramps down after stability and above baseline after repeated soft blocks", () => {
   const options = {
     baseIntervalMs: 3000,
     minIntervalMs: 2000,
+    maxIntervalMs: 6000,
     stepMs: 500,
+    softBlockStepMs: 1000,
     stableWindow: 3,
   };
   let state = { intervalMs: 3000, stableSuccesses: 0 };
@@ -1854,7 +1856,13 @@ test("detail pacing ramps down only after stable loads and resets on soft block"
   }
   assert.deepEqual(state, { intervalMs: 2000, stableSuccesses: 0 });
   state = nextDetailPacingState({ ...state, ...options, event: "soft-block" });
-  assert.deepEqual(state, { intervalMs: 3000, stableSuccesses: 0 });
+  assert.deepEqual(state, { intervalMs: 4000, stableSuccesses: 0 });
+  state = nextDetailPacingState({ ...state, ...options, event: "soft-block" });
+  assert.deepEqual(state, { intervalMs: 5000, stableSuccesses: 0 });
+  for (let index = 0; index < 3; index += 1) {
+    state = nextDetailPacingState({ ...state, ...options, event: "success" });
+  }
+  assert.deepEqual(state, { intervalMs: 4500, stableSuccesses: 0 });
 });
 
 test("favorite collection prioritizes observed profitable title families stably", () => {
