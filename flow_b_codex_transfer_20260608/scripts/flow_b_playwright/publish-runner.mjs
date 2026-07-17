@@ -11,7 +11,7 @@ import {
   productTitlePriority,
   sourceYieldKey,
 } from "./source-scanner.mjs";
-import { AdaptiveConcurrency, hasReusableCandidateFacts, isFatalBrowserError, loadCandidateFacts, mergeCandidateFacts } from "./continuous-runtime.mjs";
+import { AdaptiveConcurrency, hasReusableCandidateFacts, isFatalBrowserError, loadCandidateFacts, loadPreflightPureSkus, mergeCandidateFacts } from "./continuous-runtime.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -190,24 +190,6 @@ function interleaveCandidateBatches(primary, secondary, batchSize) {
     primaryIndex += width;
     result.push(...secondary.slice(secondaryIndex, secondaryIndex + width));
     secondaryIndex += width;
-  }
-  return result;
-}
-
-async function loadPreflightPureSkus(runDir) {
-  const result = new Set();
-  try {
-    const text = await fs.readFile(path.join(runDir, "favorite_collection.jsonl"), "utf8");
-    for (const line of text.split(/\r?\n/)) {
-      try {
-        const event = JSON.parse(line);
-        if (event?.status === "favorited" && event?.preflight_mode === "FBS" && event?.sku) {
-          result.add(String(event.sku));
-        }
-      } catch {}
-    }
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
   }
   return result;
 }

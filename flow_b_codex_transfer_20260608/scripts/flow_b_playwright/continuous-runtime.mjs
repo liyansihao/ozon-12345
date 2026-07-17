@@ -45,7 +45,7 @@ export function candidateFactsCacheStats(runDir) {
   return { full_reads: Number(candidateFactsCache.get(filename)?.fullReads || 0) };
 }
 
-export async function loadCandidateFacts(runDir) {
+async function loadCandidateHistory(runDir) {
   const filename = path.resolve(runDir, "favorite_collection.jsonl");
   let stat;
   try {
@@ -53,20 +53,23 @@ export async function loadCandidateFacts(runDir) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     candidateFactsCache.delete(filename);
-    return new Map();
+    return { facts: new Map(), preflightPureSkus: new Set() };
   }
   const cached = candidateFactsCache.get(filename);
   if (cached
     && Number(cached.ino) === Number(stat.ino)
     && Number(cached.size) === Number(stat.size)
-    && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached.facts;
+    && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached;
   const facts = new Map();
+  const preflightPureSkus = new Set();
   const text = await fs.readFile(filename, "utf8");
   for (const line of text.split(/\r?\n/)) {
     try {
       const row = JSON.parse(line);
       if (row?.status !== "favorited" || !row?.sku) continue;
-      facts.set(String(row.sku), mergeCandidateFacts({}, row));
+      const sku = String(row.sku);
+      facts.set(sku, mergeCandidateFacts({}, row));
+      if (row?.preflight_mode === "FBS") preflightPureSkus.add(sku);
     } catch {}
   }
   candidateFactsCache.set(filename, {
@@ -74,9 +77,18 @@ export async function loadCandidateFacts(runDir) {
     size: stat.size,
     mtimeMs: stat.mtimeMs,
     facts,
+    preflightPureSkus,
     fullReads: Number(cached?.fullReads || 0) + 1,
   });
-  return facts;
+  return candidateFactsCache.get(filename);
+}
+
+export async function loadCandidateFacts(runDir) {
+  return (await loadCandidateHistory(runDir)).facts;
+}
+
+export async function loadPreflightPureSkus(runDir) {
+  return (await loadCandidateHistory(runDir)).preflightPureSkus;
 }
 
 export function hasReusableCandidateFacts(item) {

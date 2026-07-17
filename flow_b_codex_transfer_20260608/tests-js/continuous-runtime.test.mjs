@@ -17,6 +17,7 @@ import {
   clearCandidateFactsCache,
   candidateFactsCacheStats,
   loadCandidateFacts,
+  loadPreflightPureSkus,
 } from "../scripts/flow_b_playwright/continuous-runtime.mjs";
 
 test("candidate facts reuse an unchanged favorite history and refresh after append", async () => {
@@ -28,10 +29,12 @@ test("candidate facts reuse an unchanged favorite history and refresh after appe
     status: "favorited",
     title: "first",
     sell_price: 88,
+    preflight_mode: "FBS",
   })}\n`);
 
   assert.equal((await loadCandidateFacts(runDir)).get("one")?.title, "first");
   assert.equal((await loadCandidateFacts(runDir)).get("one")?.title, "first");
+  assert.deepEqual([...(await loadPreflightPureSkus(runDir))], ["one"]);
   assert.equal(candidateFactsCacheStats(runDir).full_reads, 1);
 
   await fs.appendFile(filename, `${JSON.stringify({
