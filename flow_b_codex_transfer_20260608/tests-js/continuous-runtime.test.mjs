@@ -112,6 +112,25 @@ test("acceptance only counts unique in-window profit>30 selling publications wit
   assert.deepEqual(summary.skus, ["ok-1"]);
 });
 
+test("five-store acceptance requires 100 strict publications in every configured store", () => {
+  const startedAt = "2026-07-14T00:00:00.000Z";
+  const endedAt = "2026-07-15T00:00:00.000Z";
+  const storeIds = [1, 2, 3, 4, 5];
+  const rows = storeIds.flatMap((storeId) => Array.from({ length: storeId === 5 ? 99 : 100 }, (_, index) => ({
+    sku: `${storeId}-${index}`,
+    store_id: storeId,
+    profit_rate: 30.01,
+    online_status: "selling",
+    stock: 1,
+    published_at: "2026-07-14T12:00:00.000Z",
+  })));
+  const summary = acceptanceSummary({ rows, startedAt, endedAt, target: 500, storeIds, perStoreTarget: 100 });
+  assert.equal(summary.success_count, 499);
+  assert.deepEqual(summary.success_by_store, { "1": 100, "2": 100, "3": 100, "4": 100, "5": 99 });
+  assert.deepEqual(summary.remaining_by_store, { "1": 0, "2": 0, "3": 0, "4": 0, "5": 1 });
+  assert.equal(summary.passed, false);
+});
+
 test("producer loop keeps rescanning after success and survives one failed scan", async () => {
   let now = 0;
   let calls = 0;

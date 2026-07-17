@@ -334,6 +334,53 @@ test("verified lifetime store target rotates independently of the daily quota", 
   assert.deepEqual(result.store_switches, [{ from_store_id: 106637, to_store_id: 106640, reason: "store-total-limit" }]);
 });
 
+test("runner reconciles reserved submissions when every store total target is temporarily full", async () => {
+  const state = fakeState({
+    pending: {
+      status: "processing",
+      data: {
+        sku: "pending",
+        store_id: 106637,
+        submitted: true,
+        submission_pending: true,
+        offer_id: "mz-pending",
+        prepared_at: "2026-07-15T09:00:00.000Z",
+      },
+    },
+  });
+  let publishCalls = 0;
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async () => { publishCalls += 1; return { ok: true }; },
+    findImportLog: async ({ sku, offerId }) => ({
+      sku,
+      offer_id: offerId,
+      import_status: "all_failed",
+      skus: [{ error_msg: "invalid category" }],
+    }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    totalStoreLimit: 1,
+    storeTargets: [{ id: 106637, needle: "丽丽二号", requireWarehouse: false }],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(publishCalls, 0);
+  assert.equal(result.failed, 1);
+  assert.equal(result.fresh_submissions_paused, true);
+  assert.deepEqual(result.store_total_usage, { "106637": 0 });
+  assert.ok(state.transitions.some((entry) => entry.sku === "pending" && entry.status === "failed"));
+});
+
 test("a stalled pending-import backlog keeps reconciliation but routes fresh work to the next store", async () => {
   const state = fakeState({
     "old-1": { status: "processing", data: { store_id: 106637, submitted: true, prepared_at: "2026-07-15T09:00:00.000Z" } },
@@ -771,6 +818,7 @@ test("runner syncs and verifies a missing warehouse before rotating into a store
 });
 
 test("runner caches an unavailable store between consumer rounds instead of repeating warehouse sync", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-unavailable-store-"));
   const state = fakeState();
   let syncCalls = 0;
   const client = clientFor([{ id: 206, sku: 206 }], {
@@ -780,7 +828,10 @@ test("runner caches an unavailable store between consumer rounds instead of repe
         name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽1号",
         warehouse: Number(storeId) === 104965
           ? [{ warehouse_id: 1020005022957960, name: "丽丽1号仓库" }]
-          : [],
+          : [
+            { warehouse_id: 7001, name: "候选仓一" },
+            { warehouse_id: 7002, name: "候选仓二" },
+          ],
       },
       watermark: { id: 60822, name: "lysh" },
     }),
@@ -790,6 +841,7 @@ test("runner caches an unavailable store between consumer rounds instead of repe
     client,
     costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
     state,
+    runDir,
     target: 1,
     storeTargets: [
       { id: 106637, needle: "丽丽二号" },
@@ -806,6 +858,14 @@ test("runner caches an unavailable store between consumer rounds instead of repe
   await runner.run();
   await runner.run();
   assert.equal(syncCalls, 1);
+  const targetEvents = (await fs.readFile(path.join(runDir, "store_targets.jsonl"), "utf8"))
+    .trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  assert.ok(targetEvents.some((event) => event.store_id === 106637
+    && event.available === false
+    && event.reason === "warehouse-not-uniquely-verified"
+    && event.warehouse_count === 2
+    && event.warehouse_candidates.map((row) => row.warehouse_id).join(",") === "7001,7002"));
+  await fs.rm(runDir, { recursive: true, force: true });
 });
 
 test("runner restarts the store rotation from 丽丽二号 after the local day changes", async () => {

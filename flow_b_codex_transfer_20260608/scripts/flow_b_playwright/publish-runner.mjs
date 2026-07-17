@@ -822,6 +822,23 @@ export function createPublishRunner({
       }
       const targetWarehouseId = Number(spec.warehouseId || discoveredWarehouseId || 0);
       if (spec.requireWarehouse && !(targetWarehouseId > 0)) {
+        recordMetric("store_targets.jsonl", {
+          store_id: Number(resolved.store?.id || spec.id),
+          store_name: resolved.store?.name ?? resolved.store?.title ?? spec.needle,
+          available: false,
+          reason: discoveredWarehouses.length > 1
+            ? "warehouse-not-uniquely-verified"
+            : "warehouse-unavailable-after-sync",
+          warehouse_count: discoveredWarehouses.length,
+          warehouse_candidates: discoveredWarehouses.map((warehouse) => ({
+            warehouse_id: Number(warehouse?.warehouse_id || warehouse?.id || 0) || null,
+            name: String(warehouse?.name || warehouse?.title || "").trim() || null,
+            type: String(warehouse?.type || warehouse?.warehouse_type || "").trim() || null,
+            status: String(warehouse?.status || "").trim() || null,
+          })),
+          watermark_id: Number(resolved.watermark?.id || watermarkId),
+        });
+        await metricsChain;
         unavailableStoreUntil.set(spec.id, now().getTime() + Math.max(0, Number(unavailableStoreRetryMs) || 0));
         const error = new Error(`verified FBS warehouse unavailable for store ${spec.id}`);
         error.code = "STORE_WAREHOUSE_UNAVAILABLE";
@@ -948,6 +965,8 @@ export function createPublishRunner({
     }
 
     const stalledStoresThisRun = new Set();
+    let freshSubmissionsPaused = false;
+    let initialPauseReason = null;
     let targetConfig;
     try {
       targetConfig = await resolveTargetConfig(activeTargetIndex);
@@ -956,9 +975,17 @@ export function createPublishRunner({
         ? "daily-product-limit"
         : error?.code === "STORE_TOTAL_LIMIT" ? "store-total-limit" : "store-target-unavailable";
       targetConfig = await advanceStore(haltReason, { store: { id: targetPlan[activeTargetIndex].id } });
-      if (!targetConfig) throw error;
+      if (!targetConfig) {
+        try {
+          targetConfig = await resolveTargetConfig(activeTargetIndex, { allowExhausted: true });
+          freshSubmissionsPaused = true;
+          initialPauseReason = haltReason;
+          haltReason = null;
+        } catch {
+          throw error;
+        }
+      }
     }
-    let freshSubmissionsPaused = false;
     while (!freshSubmissionsPaused) {
       const stalledPending = stalledPendingForStore(targetConfig.store.id);
       if (stalledPending.length < Math.max(1, Number(pendingStoreStallCount) || 1)) break;
@@ -1277,7 +1304,7 @@ export function createPublishRunner({
         - Number(storeDailyUsage.get(activeStoreId) || 0);
       const remainingTotalStoreQuota = configuredTotalStoreLimit - Number(storeTotalUsage.get(activeStoreId) || 0);
       const remainingStoreQuota = Math.min(remainingDailyStoreQuota, remainingTotalStoreQuota);
-      if (remainingStoreQuota <= 0) {
+      if (!nextIsReconciliation && remainingStoreQuota <= 0) {
         haltReason = remainingTotalStoreQuota <= 0 ? "store-total-limit" : "daily-product-limit";
         const nextConfig = await advanceStore(haltReason, targetConfig);
         if (nextConfig) {
@@ -1287,7 +1314,9 @@ export function createPublishRunner({
         break;
       }
       const nearTarget = published >= targetCount - (adaptive.current - 1);
-      const width = Math.min(remainingStoreQuota, nearTarget ? 1 : adaptive.current);
+      const width = nextIsReconciliation
+        ? (nearTarget ? 1 : adaptive.current)
+        : Math.min(remainingStoreQuota, nearTarget ? 1 : adaptive.current);
       const batch = candidates.slice(cursor, cursor + width);
       cursor += batch.length;
       const results = await Promise.all(batch.map(handleCandidate));
@@ -1330,6 +1359,8 @@ export function createPublishRunner({
     }
 
     await metricsChain;
+
+    if (!haltReason && freshSubmissionsPaused && initialPauseReason) haltReason = initialPauseReason;
 
     return {
       published,

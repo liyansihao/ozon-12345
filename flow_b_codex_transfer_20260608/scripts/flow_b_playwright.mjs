@@ -316,7 +316,16 @@ export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) 
   const timings = await readJsonLines(path.join(runDir, "stage_timings.jsonl"));
   const yieldEvents = await readJsonLines(path.join(runDir, "source_yield.jsonl"));
   const published = publishedEvents.map((row) => ({ ...row, ...(row.data || {}) }));
-  const acceptance = acceptanceSummary({ rows: published, startedAt, endedAt, target });
+  let sourceConfig = {};
+  try { sourceConfig = JSON.parse(await fs.readFile(path.join(runDir, "source_config.json"), "utf8")); } catch {}
+  const acceptance = acceptanceSummary({
+    rows: published,
+    startedAt,
+    endedAt,
+    target,
+    storeIds: (sourceConfig.store_targets || []).map((entry) => entry?.id),
+    perStoreTarget: sourceConfig.per_store_target ?? null,
+  });
   const windowStart = Date.parse(startedAt);
   const windowEnd = Date.parse(endedAt);
   const favoriteCollectionInWindow = favoriteCollection.filter((row) => {
@@ -410,6 +419,7 @@ async function runAcceptance(context, options, env) {
     window_ended_at: endedAt.toISOString(),
     publish_target: options.target,
     acceptance_target: acceptanceTarget,
+    per_store_target: Math.max(1, Number(env.FLOW_B_STORE_ACCEPTANCE_TARGET) || Number(env.FLOW_B_STORE_TOTAL_LIMIT) || 100),
     store_id: Number(env.FLOW_B_STORE_ID || 104965),
     store_targets: storeTargets,
     watermark_id: Number(env.FLOW_B_WATERMARK_ID || 60822),

@@ -101,7 +101,7 @@ export function rankSourcesByYield(rows) {
   }).sort((left, right) => right.yield_score - left.yield_score || Number(right.published || 0) - Number(left.published || 0));
 }
 
-export function acceptanceSummary({ rows, startedAt, endedAt, target = 50 }) {
+export function acceptanceSummary({ rows, startedAt, endedAt, target = 50, storeIds = [], perStoreTarget = null }) {
   const start = Date.parse(startedAt);
   const end = Date.parse(endedAt);
   const durationHours = Math.max(0, end - start) / 3_600_000;
@@ -118,6 +118,25 @@ export function acceptanceSummary({ rows, startedAt, endedAt, target = 50 }) {
     unique.set(sku, row);
   }
   const successCount = unique.size;
+  const normalizedStoreIds = [...new Set((storeIds || []).map(Number).filter((id) => id > 0))];
+  const successByStore = Object.fromEntries(normalizedStoreIds.map((id) => [String(id), 0]));
+  for (const row of unique.values()) {
+    const storeId = Number(row?.store_id);
+    if (!(storeId > 0)) continue;
+    const key = String(storeId);
+    successByStore[key] = Number(successByStore[key] || 0) + 1;
+  }
+  const normalizedPerStoreTarget = Number(perStoreTarget);
+  const requirePerStore = normalizedStoreIds.length > 0
+    && Number.isInteger(normalizedPerStoreTarget)
+    && normalizedPerStoreTarget > 0;
+  const remainingByStore = requirePerStore
+    ? Object.fromEntries(normalizedStoreIds.map((id) => [
+      String(id),
+      Math.max(0, normalizedPerStoreTarget - Number(successByStore[String(id)] || 0)),
+    ]))
+    : {};
+  const storesPassed = !requirePerStore || Object.values(remainingByStore).every((remaining) => remaining === 0);
   return {
     window_started_at: new Date(start).toISOString(),
     window_ended_at: new Date(end).toISOString(),
@@ -125,7 +144,10 @@ export function acceptanceSummary({ rows, startedAt, endedAt, target = 50 }) {
     success_count: successCount,
     effective_per_hour: durationHours ? Math.round((successCount / durationHours) * 100) / 100 : 0,
     target: Number(target),
-    passed: successCount >= Number(target),
+    per_store_target: requirePerStore ? normalizedPerStoreTarget : null,
+    success_by_store: successByStore,
+    remaining_by_store: remainingByStore,
+    passed: successCount >= Number(target) && storesPassed,
     excluded_skus: [...BAD_SKUS],
     skus: [...unique.keys()],
   };
