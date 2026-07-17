@@ -534,7 +534,10 @@ export function createPublishRunner({
     const currentTime = now().getTime();
     const lastSync = Number(lastOnlineSyncAt.get(activeStoreId) || 0);
     const normalizedPendingCount = Math.max(0, Number(pendingCount) || 0);
-    const urgent = normalizedPendingCount >= Math.max(1, Number(urgentOnlineSyncPendingCount) || 1);
+    const hasPreviousPendingCount = lastOnlineSyncPendingCount.has(activeStoreId);
+    const previousPendingCount = Math.max(0, Number(lastOnlineSyncPendingCount.get(activeStoreId)) || 0);
+    const urgent = normalizedPendingCount >= Math.max(1, Number(urgentOnlineSyncPendingCount) || 1)
+      || (normalizedPendingCount > 0 && previousPendingCount > 0);
     const cooldownMs = urgent
       ? Math.min(
         Math.max(0, Number(onlineSyncIntervalMs) || 0),
@@ -542,7 +545,8 @@ export function createPublishRunner({
       )
       : Math.max(0, Number(onlineSyncIntervalMs) || 0);
     const firstNonEmptyAfterEmpty = normalizedPendingCount > 0
-      && Number(lastOnlineSyncPendingCount.get(activeStoreId)) === 0;
+      && hasPreviousPendingCount
+      && previousPendingCount === 0;
     if (!firstNonEmptyAfterEmpty && currentTime - lastSync < cooldownMs) return;
     lastOnlineSyncAt.set(activeStoreId, currentTime);
     lastOnlineSyncPendingCount.set(activeStoreId, normalizedPendingCount);
