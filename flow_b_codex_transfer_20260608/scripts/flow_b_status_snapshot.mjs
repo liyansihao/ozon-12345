@@ -58,6 +58,9 @@ export function buildStatusSnapshot({
   const storeNames = Object.fromEntries(storeTargets.map((row) => [String(Number(row.id)), String(row.needle || row.name || "")]));
   const perStoreTarget = Math.max(1, Number(config.per_store_target || config.store_acceptance_target || 100));
   const strict = strictRows(published, startedMs, anchorMs);
+  const strictChronological = [...strict].sort((left, right) => (
+    Date.parse(left.published_at || left.timestamp || "") - Date.parse(right.published_at || right.timestamp || "")
+  ));
   const strictByStore = countByStore(strict, storeIds);
   const remainingByStore = Object.fromEntries(storeIds.map((id) => [
     String(id),
@@ -81,6 +84,25 @@ export function buildStatusSnapshot({
   }
   const complete = observedMs >= endedMs;
   const storesPassed = Object.values(remainingByStore).every((remaining) => remaining === 0);
+  const totalTarget = perStoreTarget * storeIds.length;
+  const paceDeadlineMs = startedMs + (totalTarget / 35) * 3_600_000;
+  const paceCounts = Object.fromEntries(storeIds.map((id) => [String(id), 0]));
+  let targetReachedMs = null;
+  for (const row of strictChronological) {
+    const key = String(Number(row.store_id || 0));
+    if (!(key in paceCounts)) continue;
+    paceCounts[key] += 1;
+    if (Object.values(paceCounts).every((count) => count >= perStoreTarget)) {
+      targetReachedMs = Date.parse(row.published_at || row.timestamp || "");
+      break;
+    }
+  }
+  const hoursToTarget = targetReachedMs === null ? null : Math.max(0, targetReachedMs - startedMs) / 3_600_000;
+  const remainingForPace = Object.values(remainingByStore).reduce((sum, value) => sum + Number(value || 0), 0);
+  const remainingPaceHours = Math.max(0, paceDeadlineMs - anchorMs) / 3_600_000;
+  const activePerHour = hoursToTarget && hoursToTarget > 0
+    ? rounded(totalTarget / hoursToTarget)
+    : targetReachedMs === startedMs ? null : rounded(strict.length / Math.max(elapsedHours, Number.EPSILON));
   return {
     observed_at: new Date(observedMs).toISOString(),
     window: {
@@ -93,11 +115,21 @@ export function buildStatusSnapshot({
     stores: storeNames,
     strict: {
       total: strict.length,
-      target: perStoreTarget * storeIds.length,
+      target: totalTarget,
       per_hour: elapsedHours > 0 ? rounded(strict.length / elapsedHours) : 0,
       by_store: strictByStore,
       remaining_by_store: remainingByStore,
       passed: complete && storesPassed,
+    },
+    pace_35: {
+      deadline_at: new Date(paceDeadlineMs).toISOString(),
+      target_reached_at: targetReachedMs === null ? null : new Date(targetReachedMs).toISOString(),
+      hours_to_target: hoursToTarget === null ? null : rounded(hoursToTarget),
+      active_per_hour: activePerHour,
+      required_remaining_per_hour: targetReachedMs !== null || !(remainingPaceHours > 0)
+        ? null
+        : rounded(remainingForPace / remainingPaceHours),
+      passed: targetReachedMs !== null && Number(activePerHour) >= 35,
     },
     selected: { total: selectedUnique.size, by_store: countByStore([...selectedUnique.values()], storeIds) },
     rolling,
