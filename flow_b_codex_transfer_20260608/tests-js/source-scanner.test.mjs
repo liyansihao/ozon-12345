@@ -29,7 +29,9 @@ import {
   retainedReplayLimit,
   scanSourceWithPage,
   closeReusablePages,
+  closeRuntimeReusablePagePools,
   ensureReusablePageSlots,
+  runtimeReusablePagePools,
   classifyFreshSourceUrls,
   expandFreshSellerSourceUrls,
   retryMaoziPageFetch,
@@ -249,6 +251,33 @@ test("source page slots are reused across tranche batches and invalidated after 
   await closeReusablePages(pagePool, 5);
   assert.equal(closed, 2);
   assert.equal(pagePool.length, 0);
+});
+
+test("runtime page pools survive producer tranches but close when the browser context changes", async () => {
+  let closed = 0;
+  const firstContext = {};
+  const secondContext = {};
+  const runtime = {};
+  const first = await runtimeReusablePagePools(runtime, firstContext, 10);
+  first.sourcePages.push({ isClosed: () => false, close: async () => { closed += 1; } });
+  first.favoritePages.push({ isClosed: () => false, close: async () => { closed += 1; } });
+
+  const same = await runtimeReusablePagePools(runtime, firstContext, 10);
+  assert.equal(same.sourcePages, first.sourcePages);
+  assert.equal(same.favoritePages, first.favoritePages);
+  assert.equal(closed, 0);
+
+  const replacement = await runtimeReusablePagePools(runtime, secondContext, 10);
+  assert.equal(closed, 2);
+  assert.notEqual(replacement.sourcePages, first.sourcePages);
+  assert.notEqual(replacement.favoritePages, first.favoritePages);
+  assert.equal(replacement.sourcePages.length, 0);
+  assert.equal(replacement.favoritePages.length, 0);
+
+  replacement.sourcePages.push({ isClosed: () => false, close: async () => { closed += 1; } });
+  await closeRuntimeReusablePagePools(runtime, 10);
+  assert.equal(closed, 3);
+  assert.equal(runtime.pagePoolContext, null);
 });
 
 test("favorite worker page creation has a bounded lifecycle", async () => {

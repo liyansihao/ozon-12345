@@ -228,6 +228,29 @@ export async function closeReusablePages(pages, timeoutMs = 5_000) {
     : Promise.resolve()));
 }
 
+export async function closeRuntimeReusablePagePools(runtime, timeoutMs = 5_000) {
+  await Promise.all([
+    closeReusablePages(runtime.sourcePagePool || [], timeoutMs),
+    closeReusablePages(runtime.favoriteWorkerPagePool || [], timeoutMs),
+  ]);
+  runtime.sourcePagePool = [];
+  runtime.favoriteWorkerPagePool = [];
+  runtime.pagePoolContext = null;
+}
+
+export async function runtimeReusablePagePools(runtime, context, timeoutMs = 5_000) {
+  if (runtime.pagePoolContext && runtime.pagePoolContext !== context) {
+    await closeRuntimeReusablePagePools(runtime, timeoutMs);
+  }
+  runtime.pagePoolContext = context;
+  runtime.sourcePagePool ||= [];
+  runtime.favoriteWorkerPagePool ||= [];
+  return {
+    sourcePages: runtime.sourcePagePool,
+    favoritePages: runtime.favoriteWorkerPagePool,
+  };
+}
+
 export function readFavoriteSkusWithTimeout(operation, timeoutMs = 10_000) {
   return withTimeout(
     Promise.resolve().then(operation),
@@ -2284,8 +2307,14 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const runtime = collectionRuntimeState(favoriteLog);
   emit(`favorite exclusions loaded: ${attempted.size}`);
   const maozi = await openMaoziPage(context, { forceNew: true });
-  const sourcePagePool = [];
-  const favoriteWorkerPagePool = [];
+  const reusablePools = await runtimeReusablePagePools(
+    runtime,
+    context,
+    envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000),
+  );
+  const sourcePagePool = reusablePools.sourcePages;
+  const favoriteWorkerPagePool = reusablePools.favoritePages;
+  let keepReusablePages = true;
   try {
     await waitForContent(maozi, 15000);
     if (requiresFavoriteSession(env)) {
@@ -2544,9 +2573,16 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       }
     }
     return { outFile: outputPath, records: records.length, pending: pending.length };
+  } catch (error) {
+    keepReusablePages = false;
+    throw error;
   } finally {
-    await closeReusablePages(sourcePagePool, envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000));
-    await closeReusablePages(favoriteWorkerPagePool, envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000));
+    if (!keepReusablePages || isCollectionDeadlineReached(env)) {
+      await closeRuntimeReusablePagePools(
+        runtime,
+        envNumber(env, "FLOW_B_PAGE_CLOSE_TIMEOUT_MS", 5_000),
+      );
+    }
     await maozi.close().catch(() => {});
   }
 }
