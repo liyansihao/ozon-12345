@@ -197,6 +197,8 @@ export function collectionRuntimeState(key) {
       detailBlockedUntil: 0,
       detailSoftBlockStreak: 0,
       lastDetailSoftBlockAt: 0,
+      sourceSoftBlockStreak: 0,
+      lastSourceSoftBlockAt: 0,
     });
   }
   return collectionRuntimeStates.get(normalized);
@@ -211,6 +213,8 @@ export async function persistCollectionRuntimeState(filename, state = {}) {
     detail_stable_successes: Math.max(0, Math.floor(Number(state.detailStableSuccesses) || 0)),
     detail_soft_block_streak: Math.max(0, Math.floor(Number(state.detailSoftBlockStreak) || 0)),
     last_detail_soft_block_at: Math.max(0, Number(state.lastDetailSoftBlockAt) || 0),
+    source_soft_block_streak: Math.max(0, Math.floor(Number(state.sourceSoftBlockStreak) || 0)),
+    last_source_soft_block_at: Math.max(0, Number(state.lastSourceSoftBlockAt) || 0),
     detail_blocked_until: Math.max(0, Number(state.detailBlockedUntil) || 0),
   };
   await fs.mkdir(path.dirname(absolute), { recursive: true });
@@ -251,6 +255,8 @@ export async function restoreCollectionRuntimeState(key, filename, {
   runtime.detailStableSuccesses = Math.max(0, Math.floor(Number(saved.detail_stable_successes) || 0));
   runtime.detailSoftBlockStreak = Math.max(0, Math.floor(Number(saved.detail_soft_block_streak) || 0));
   runtime.lastDetailSoftBlockAt = Math.max(0, Number(saved.last_detail_soft_block_at) || 0);
+  runtime.sourceSoftBlockStreak = Math.max(0, Math.floor(Number(saved.source_soft_block_streak) || 0));
+  runtime.lastSourceSoftBlockAt = Math.max(0, Number(saved.last_source_soft_block_at) || 0);
   const blockedUntil = Math.max(0, Number(saved.detail_blocked_until) || 0);
   runtime.detailBlockedUntil = blockedUntil > Number(now) ? blockedUntil : 0;
   return runtime;
@@ -683,18 +689,18 @@ export function sourceBatchCooldownState(rows, state, now = Date.now()) {
   const blockedCount = batch.filter((row) => row?.blocked || isOzonSoftBlock(`${row?.title || ""} ${row?.stop_reason || ""}`)).length;
   const blocked = blockedCount >= Math.floor(batch.length / 2) + 1;
   if (!blocked) {
-    state.detailSoftBlockStreak = 0;
-    state.lastDetailSoftBlockAt = 0;
+    state.sourceSoftBlockStreak = 0;
+    state.lastSourceSoftBlockAt = 0;
     return { blocked: false, delay: 0 };
   }
   const cooldown = softBlockCooldownState({
-    streak: state.detailSoftBlockStreak,
-    lastBlockedAt: state.lastDetailSoftBlockAt,
+    streak: state.sourceSoftBlockStreak,
+    lastBlockedAt: state.lastSourceSoftBlockAt,
     now,
   });
   cooldown.delay = [60_000, 180_000, 600_000][Math.min(2, Math.max(0, cooldown.streak - 1))];
-  state.detailSoftBlockStreak = cooldown.streak;
-  state.lastDetailSoftBlockAt = cooldown.lastBlockedAt;
+  state.sourceSoftBlockStreak = cooldown.streak;
+  state.lastSourceSoftBlockAt = cooldown.lastBlockedAt;
   state.detailBlockedUntil = Math.max(Number(state.detailBlockedUntil) || 0, Number(now) + cooldown.delay);
   return { blocked: true, delay: cooldown.delay };
 }
@@ -2882,14 +2888,14 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       if (fatalBatchError) throw fatalBatchError;
       completedSourceBatches += 1;
       const previousSourceCooldownState = [
-        runtime.detailSoftBlockStreak,
-        runtime.lastDetailSoftBlockAt,
+        runtime.sourceSoftBlockStreak,
+        runtime.lastSourceSoftBlockAt,
         runtime.detailBlockedUntil,
       ];
       const sourceCooldown = sourceBatchCooldownState(batchRows, runtime);
       const currentSourceCooldownState = [
-        runtime.detailSoftBlockStreak,
-        runtime.lastDetailSoftBlockAt,
+        runtime.sourceSoftBlockStreak,
+        runtime.lastSourceSoftBlockAt,
         runtime.detailBlockedUntil,
       ];
       if (previousSourceCooldownState.some((value, index) => value !== currentSourceCooldownState[index])) {

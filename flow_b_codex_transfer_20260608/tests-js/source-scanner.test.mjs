@@ -2017,7 +2017,7 @@ test("collection soft blocks quarantine only the affected source price band", ()
 });
 
 test("blocked source batches probe with short backoff before escalating", () => {
-  const state = { detailSoftBlockStreak: 0, lastDetailSoftBlockAt: 0, detailBlockedUntil: 0 };
+  const state = { sourceSoftBlockStreak: 0, lastSourceSoftBlockAt: 0, detailBlockedUntil: 0 };
   const rows = [
     { blocked: true, stop_reason: "blocked_or_empty" },
     { blocked: true, stop_reason: "blocked_or_empty" },
@@ -2026,18 +2026,37 @@ test("blocked source batches probe with short backoff before escalating", () => 
   const result = sourceBatchCooldownState(rows, state, 10_000);
   assert.equal(result.blocked, true);
   assert.equal(result.delay, 60_000);
-  assert.equal(state.detailSoftBlockStreak, 1);
+  assert.equal(state.sourceSoftBlockStreak, 1);
   assert.equal(state.detailBlockedUntil, 70_000);
   const repeated = sourceBatchCooldownState(rows, state, 80_000);
   assert.equal(repeated.delay, 180_000);
-  assert.equal(state.detailSoftBlockStreak, 2);
+  assert.equal(state.sourceSoftBlockStreak, 2);
   assert.equal(state.detailBlockedUntil, 260_000);
   sourceBatchCooldownState([{ blocked: false, stop_reason: "max_steps" }], state, 270_000);
-  assert.equal(state.detailSoftBlockStreak, 0);
+  assert.equal(state.sourceSoftBlockStreak, 0);
+});
+
+test("a first source-page block cannot escalate an existing detail streak to ten minutes", () => {
+  const state = {
+    detailSoftBlockStreak: 2,
+    lastDetailSoftBlockAt: 79_000,
+    sourceSoftBlockStreak: 0,
+    lastSourceSoftBlockAt: 0,
+    detailBlockedUntil: 260_000,
+  };
+  const result = sourceBatchCooldownState([
+    { blocked: true, stop_reason: "blocked_or_empty" },
+    { blocked: true, stop_reason: "blocked_or_empty" },
+    { blocked: true, stop_reason: "blocked_or_empty" },
+  ], state, 80_000);
+  assert.equal(result.delay, 60_000);
+  assert.equal(state.detailSoftBlockStreak, 2);
+  assert.equal(state.sourceSoftBlockStreak, 1);
+  assert.equal(state.detailBlockedUntil, 260_000);
 });
 
 test("one isolated blocked source only lowers concurrency without pausing the producer", () => {
-  const state = { detailSoftBlockStreak: 0, lastDetailSoftBlockAt: 0, detailBlockedUntil: 0 };
+  const state = { sourceSoftBlockStreak: 0, lastSourceSoftBlockAt: 0, detailBlockedUntil: 0 };
   const result = sourceBatchCooldownState([
     { blocked: true, stop_reason: "blocked_or_empty" },
     { blocked: false, stop_reason: "max_steps" },
@@ -2046,7 +2065,7 @@ test("one isolated blocked source only lowers concurrency without pausing the pr
     { blocked: false, stop_reason: "stable_bottom" },
   ], state, 10_000);
   assert.deepEqual(result, { blocked: false, delay: 0 });
-  assert.equal(state.detailSoftBlockStreak, 0);
+  assert.equal(state.sourceSoftBlockStreak, 0);
   assert.equal(state.detailBlockedUntil, 0);
 });
 
@@ -2071,6 +2090,8 @@ test("collection pacing and cooldown state survives a supervised process restart
     detailStableSuccesses: 2,
     detailSoftBlockStreak: 3,
     lastDetailSoftBlockAt: now - 1000,
+    sourceSoftBlockStreak: 2,
+    lastSourceSoftBlockAt: now - 2000,
     detailBlockedUntil: now + 60_000,
     nextApiAt: now + 99_000,
   });
@@ -2084,6 +2105,8 @@ test("collection pacing and cooldown state survives a supervised process restart
     detailStableSuccesses: restored.detailStableSuccesses,
     detailSoftBlockStreak: restored.detailSoftBlockStreak,
     lastDetailSoftBlockAt: restored.lastDetailSoftBlockAt,
+    sourceSoftBlockStreak: restored.sourceSoftBlockStreak,
+    lastSourceSoftBlockAt: restored.lastSourceSoftBlockAt,
     detailBlockedUntil: restored.detailBlockedUntil,
     nextApiAt: restored.nextApiAt,
   }, {
@@ -2091,6 +2114,8 @@ test("collection pacing and cooldown state survives a supervised process restart
     detailStableSuccesses: 2,
     detailSoftBlockStreak: 3,
     lastDetailSoftBlockAt: now - 1000,
+    sourceSoftBlockStreak: 2,
+    lastSourceSoftBlockAt: now - 2000,
     detailBlockedUntil: now + 60_000,
     nextApiAt: 0,
   });
