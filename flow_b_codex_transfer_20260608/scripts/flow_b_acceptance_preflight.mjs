@@ -83,6 +83,10 @@ export function validate24hAcceptanceEnv(env = process.env) {
   const initialTabs = Number(env.FLOW_B_TAB_WORKERS);
   const maxTabs = Number(env.FLOW_B_MAX_TAB_WORKERS);
   if (initialTabs !== 3 || maxTabs !== 4) throw new Error("producer concurrency must be 3..4");
+  const favoriteDetailIntervalMs = Number(env.FLOW_B_FAVORITE_DETAIL_INTERVAL_MS);
+  if (!(favoriteDetailIntervalMs >= 4_000)) {
+    throw new Error("favorite detail interval must be at least 4000ms");
+  }
   if (Number(env.FLOW_B_1688_WORKERS) !== 4) throw new Error("FLOW_B_1688_WORKERS must equal 4");
   const unavailableRetryMs = Number(env.FLOW_B_UNAVAILABLE_STORE_RETRY_MS);
   if (!(unavailableRetryMs > 0) || unavailableRetryMs > 300_000) {
@@ -98,7 +102,12 @@ export function validate24hAcceptanceEnv(env = process.env) {
     strict_profit_rule: "profit_rate > 30",
     watermark_id: 60822,
     excluded_skus: [...excluded],
-    concurrency: { publish: [8, 12], producer: [3, 4], sourcing_1688: 4 },
+    concurrency: {
+      publish: [8, 12],
+      producer: [3, 4],
+      sourcing_1688: 4,
+      favorite_detail_interval_ms: favoriteDetailIntervalMs,
+    },
   };
 }
 
