@@ -6,9 +6,12 @@ import { canonicalProductUrl } from "./publish-state.mjs";
 import { mapOzonCategory } from "./category-commission.mjs";
 import {
   fullFunnelSourceScores,
+  clearJsonLinesFileCache,
+  jsonLinesFileCacheStats,
   observedTitleFamilyScores,
   productTitleFamily,
   productTitlePriority,
+  readJsonLinesIncremental,
   sourceYieldKey,
 } from "./source-scanner.mjs";
 import { AdaptiveConcurrency, hasReusableCandidateFacts, isFatalBrowserError, loadCandidateFacts, loadPreflightPureSkus, mergeCandidateFacts } from "./continuous-runtime.mjs";
@@ -17,7 +20,6 @@ const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
   price_list: { logistics_name: "CEL", logistics_speed: "economy" },
 });
-const observedPublishFeedbackCache = new Map();
 const observedPublishFeedbackCompositeCache = new Map();
 
 function asSku(item) {
@@ -197,44 +199,13 @@ function interleaveCandidateBatches(primary, secondary, batchSize) {
 }
 
 export function clearObservedPublishFeedbackCache() {
-  observedPublishFeedbackCache.clear();
   observedPublishFeedbackCompositeCache.clear();
+  clearJsonLinesFileCache();
 }
 
 export function observedPublishFeedbackCacheStats(runDir) {
   const filename = path.resolve(runDir, "source_yield.jsonl");
-  return { full_reads: Number(observedPublishFeedbackCache.get(filename)?.fullReads || 0) };
-}
-
-async function loadObservedPublishFeedbackFile(filename) {
-  const absolute = path.resolve(filename);
-  try {
-    const stat = await fs.stat(absolute);
-    const cached = observedPublishFeedbackCache.get(absolute);
-    if (cached
-      && Number(cached.ino) === Number(stat.ino)
-      && Number(cached.size) === Number(stat.size)
-      && Number(cached.mtimeMs) === Number(stat.mtimeMs)) return cached;
-    const text = await fs.readFile(absolute, "utf8");
-    const rows = text.split(/\n/).filter(Boolean).flatMap((line) => {
-      try { return [JSON.parse(line)]; } catch { return []; }
-    });
-    observedPublishFeedbackCache.set(absolute, {
-      ino: stat.ino,
-      size: stat.size,
-      mtimeMs: stat.mtimeMs,
-      rows,
-      fullReads: Number(cached?.fullReads || 0) + 1,
-    });
-    return observedPublishFeedbackCache.get(absolute);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    const missing = observedPublishFeedbackCache.get(absolute);
-    if (missing?.missing) return missing;
-    const value = { missing: true, rows: [], fullReads: 0 };
-    observedPublishFeedbackCache.set(absolute, value);
-    return value;
-  }
+  return jsonLinesFileCacheStats(filename);
 }
 
 export async function loadObservedPublishFeedback(runDir, seedFiles = []) {
@@ -242,13 +213,13 @@ export async function loadObservedPublishFeedback(runDir, seedFiles = []) {
     ...(Array.isArray(seedFiles) ? seedFiles : []),
     path.resolve(runDir, "source_yield.jsonl"),
   ].map((filename) => path.resolve(filename)))];
-  const histories = await Promise.all(filenames.map(loadObservedPublishFeedbackFile));
+  const histories = await Promise.all(filenames.map(readJsonLinesIncremental));
   const key = filenames.join("\0");
   const cached = observedPublishFeedbackCompositeCache.get(key);
   if (cached
     && cached.histories.length === histories.length
     && cached.histories.every((history, index) => history === histories[index])) return cached.value;
-  const rows = histories.flatMap((history) => history.rows);
+  const rows = histories.flat();
   const value = {
     familyScores: observedTitleFamilyScores(rows),
     sourceScores: fullFunnelSourceScores(rows),

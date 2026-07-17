@@ -46,7 +46,8 @@ test("publish feedback reuses an unchanged source-yield history and refreshes af
     status: "published",
   })}\n`);
   assert.notStrictEqual(await loadObservedPublishFeedback(runDir, [seedFilename]), first);
-  assert.equal(observedPublishFeedbackCacheStats(runDir).full_reads, 2);
+  assert.equal(observedPublishFeedbackCacheStats(runDir).full_reads, 1);
+  assert.equal(observedPublishFeedbackCacheStats(runDir).append_reads, 1);
   await fs.rm(runDir, { recursive: true, force: true });
   await fs.rm(seedDir, { recursive: true, force: true });
 });
