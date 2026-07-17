@@ -615,6 +615,17 @@ test("derived searches replay the exact productive search phrase before title si
   assert.equal(new URL(urls[0]).searchParams.get("text"), "трусов брифы");
 });
 
+test("derived searches prefer concrete product terms over demographic-only phrases", () => {
+  const source = "https://www.ozon.ru/search/?text=%D0%BD%D0%B0%D0%B1%D0%BE%D1%80+%D0%B4%D0%B5%D0%B2%D0%BE%D1%87%D0%B5%D0%BA+%D0%B4%D0%B5%D1%82%D1%81%D0%BA%D0%BE%D0%B9&is_global=true";
+  const urls = deriveSearchSourceUrls([{
+    status: "published",
+    sku: "cosmetics-winner",
+    source_url: source,
+    title: "Набор для девочек детской декоративной косметики чемоданчик",
+  }], 1);
+  assert.equal(new URL(urls[0]).searchParams.get("text"), "декоративной косметики чемоданчик");
+});
+
 test("duplicate strict evidence from run and history does not crowd out another winner", () => {
   const recent = { at: "2026-07-16T15:30:00.000Z", status: "published", sku: "recent", title: "Комплект трусов бикини" };
   const urls = deriveSearchSourceUrls([
