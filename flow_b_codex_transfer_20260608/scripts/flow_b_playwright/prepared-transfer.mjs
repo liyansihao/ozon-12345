@@ -3,7 +3,7 @@ function skuOf(item) {
 }
 
 function pureFbs(item) {
-  const mode = String(item?.shipping_mode ?? item?.mode ?? "").trim().toUpperCase();
+  const mode = String(item?.shipping_mode ?? item?.mode ?? item?.preflight_mode ?? "").trim().toUpperCase();
   return mode === "FBS";
 }
 

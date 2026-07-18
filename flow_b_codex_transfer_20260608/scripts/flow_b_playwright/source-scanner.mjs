@@ -7,6 +7,7 @@ import { isPureFbs, prohibitedCategorySkipReason } from "./publish-policy.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_SOURCE_YIELD_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/source_yield_history.jsonl");
+const DEFAULT_FBS_SOURCE_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/fbs_source_history.jsonl");
 const collectionRuntimeStates = new Map();
 const collectionRuntimeWriteChains = new Map();
 const jsonLinesFileCache = new Map();
@@ -610,6 +611,30 @@ export async function retryMaoziPageFetch(operation, {
 
 export function isFavoriteCapacityReached(error) {
   return /收藏数量已达上限|favorite.*(?:limit|capacity)/i.test(String(error?.message || error || ""));
+}
+
+export async function appendFavoriteEvidence({
+  logFile,
+  historyFile = null,
+  row,
+  now = () => new Date(),
+}) {
+  const runLog = path.resolve(logFile);
+  const durableLog = historyFile ? path.resolve(historyFile) : null;
+  const event = {
+    at: now().toISOString(),
+    run_id: path.basename(path.dirname(runLog)),
+    ...row,
+  };
+  const targets = [...new Set([
+    runLog,
+    event.source_url ? durableLog : null,
+  ].filter(Boolean))];
+  await Promise.all(targets.map(async (filename) => {
+    await fs.mkdir(path.dirname(filename), { recursive: true });
+    await fs.appendFile(filename, `${JSON.stringify(event)}\n`);
+  }));
+  return event;
 }
 
 export function favoriteFailureDisposition(error) {
@@ -1312,6 +1337,44 @@ export function verifiedSellerSourceUrls(yieldRows, minimumPublishedSkus = 2) {
   return [...sellers].filter(([, skus]) => skus.size >= minimum).map(([url]) => url);
 }
 
+export function pureFbsSellerSourceUrls(yieldRows, minimumFavoritedSkus = 2, limit = 50) {
+  const minimum = Math.max(2, Number(minimumFavoritedSkus) || 2);
+  const maximum = Math.max(0, Number(limit) || 0);
+  if (maximum === 0) return [];
+  const sellers = new Map();
+  (yieldRows || []).forEach((row, order) => {
+    if (String(row?.status || "") !== "favorited") return;
+    const seller = canonicalSellerUrl(row?.seller_url) || canonicalSellerUrl(row?.source_url);
+    const sku = String(row?.sku || "").trim();
+    if (!seller || !sku) return;
+    const value = sellers.get(seller) || { skus: new Set(), time: 0, order: -1 };
+    value.skus.add(sku);
+    value.time = Math.max(value.time, Date.parse(row?.at || row?.timestamp || "") || 0);
+    value.order = Math.max(value.order, order);
+    sellers.set(seller, value);
+  });
+  return [...sellers]
+    .filter(([, value]) => value.skus.size >= minimum)
+    .sort(([, left], [, right]) => right.time - left.time || right.order - left.order)
+    .slice(0, maximum)
+    .map(([seller]) => seller);
+}
+
+export function pureFbsSellerSourceVariants(yieldRows, minimumFavoritedSkus = 2, limit = 50) {
+  const firstPages = expandFreshSellerSourceUrls(
+    pureFbsSellerSourceUrls(yieldRows, minimumFavoritedSkus, limit),
+  );
+  const expanded = [...firstPages];
+  for (const source of firstPages) {
+    for (const page of [2, 3]) {
+      const url = new URL(source);
+      url.searchParams.set("page", String(page));
+      expanded.push(url.toString());
+    }
+  }
+  return [...new Set(expanded)];
+}
+
 export function repeatedSubmittedSellerSourceUrls(yieldRows, minimumSubmittedSkus = 2, limit = 50) {
   const minimum = Math.max(2, Number(minimumSubmittedSkus) || 2);
   const maximum = Math.max(0, Number(limit) || 0);
@@ -1494,6 +1557,94 @@ export function interleaveStrictSuccessExploration(urls, yieldRows, exploitBurst
       result.push(exploit[exploitIndex++]);
     }
     if (exploreIndex < explore.length) result.push(explore[exploreIndex++]);
+  }
+  return result;
+}
+
+function sourcePortfolioKeys(row) {
+  return [...new Set([
+    sourceYieldKey(row?.source_url),
+    canonicalSellerUrl(row?.source_url),
+    canonicalSellerUrl(row?.seller_url),
+  ].filter(Boolean))];
+}
+
+function sourcePortfolioIndex(rows = []) {
+  const collectionByKey = new Map();
+  const strictSkusByKey = new Map();
+  (rows || []).forEach((row, order) => {
+    const sku = String(row?.sku || "").trim();
+    const status = String(row?.status || "");
+    if (!sku) return;
+    for (const key of sourcePortfolioKeys(row)) {
+      if (status === "published") {
+        const strictSkus = strictSkusByKey.get(key) || new Set();
+        strictSkus.add(sku);
+        strictSkusByKey.set(key, strictSkus);
+      }
+      if (!["favorited", "rejected", "failed"].includes(status)) continue;
+      const collection = collectionByKey.get(key) || new Map();
+      const time = Date.parse(row?.at || row?.timestamp || "") || 0;
+      const previous = collection.get(sku);
+      if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
+        collection.set(sku, { status, time, order });
+      }
+      collectionByKey.set(key, collection);
+    }
+  });
+  return { collectionByKey, strictSkusByKey };
+}
+
+function sourcePortfolioTierFromIndex(url, index) {
+  const key = canonicalSellerUrl(url) || sourceYieldKey(url);
+  if ((index.strictSkusByKey.get(key)?.size || 0) > 0) return "strict";
+  const collection = index.collectionByKey.get(key) || new Map();
+  const attempted = collection.size;
+  const pureFbs = [...collection.values()].filter((event) => event.status === "favorited").length;
+  if (canonicalSellerUrl(url) && pureFbs >= 2) return "fbs";
+  if (attempted >= 4 && pureFbs >= 2 && pureFbs / attempted >= 0.3) return "fbs";
+  return "explore";
+}
+
+export function sourcePortfolioTier(url, rows = []) {
+  return sourcePortfolioTierFromIndex(url, sourcePortfolioIndex(rows));
+}
+
+export function sourcePortfolioTiers(urls, rows = []) {
+  const index = sourcePortfolioIndex(rows);
+  return new Map([...new Set((urls || []).filter(Boolean))]
+    .map((url) => [url, sourcePortfolioTierFromIndex(url, index)]));
+}
+
+export function interleaveSourcePortfolio(urls, yieldRows = [], {
+  strictWeight = 7,
+  fbsWeight = 2,
+  exploreWeight = 1,
+} = {}) {
+  const queues = { strict: [], fbs: [], explore: [] };
+  for (const [url, tier] of sourcePortfolioTiers(urls, yieldRows)) {
+    queues[tier].push(url);
+  }
+  const weights = {
+    strict: Math.max(0, Math.floor(Number(strictWeight) || 0)),
+    fbs: Math.max(0, Math.floor(Number(fbsWeight) || 0)),
+    explore: Math.max(0, Math.floor(Number(exploreWeight) || 0)),
+  };
+  if (Object.values(weights).every((value) => value === 0)) return [...queues.strict, ...queues.fbs, ...queues.explore];
+  const cursors = { strict: 0, fbs: 0, explore: 0 };
+  const result = [];
+  while (Object.keys(queues).some((tier) => cursors[tier] < queues[tier].length)) {
+    let progressed = false;
+    for (const tier of ["strict", "fbs", "explore"]) {
+      for (let offset = 0; offset < weights[tier] && cursors[tier] < queues[tier].length; offset += 1) {
+        result.push(queues[tier][cursors[tier]++]);
+        progressed = true;
+      }
+    }
+    if (!progressed) break;
+  }
+  for (const tier of ["strict", "fbs", "explore"]) {
+    result.push(...queues[tier].slice(cursors[tier]));
   }
   return result;
 }
@@ -2351,9 +2502,10 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     apiChain = operation.catch(() => {});
     return operation;
   };
+  const historyFile = path.resolve(env.FLOW_B_FBS_SOURCE_HISTORY || DEFAULT_FBS_SOURCE_HISTORY);
   let writeChain = Promise.resolve();
   const record = (row) => {
-    writeChain = writeChain.then(() => fs.appendFile(logFile, `${JSON.stringify({ at: new Date().toISOString(), ...row })}\n`));
+    writeChain = writeChain.then(() => appendFavoriteEvidence({ logFile, historyFile, row }));
     return writeChain;
   };
   const desiredWorkers = Math.min(workerCount, queue.length);
@@ -2675,6 +2827,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     path.join(path.dirname(outputPath), "source_yield.jsonl"),
     path.join(path.dirname(outputPath), "favorite_collection.jsonl"),
     env.FLOW_B_SOURCE_YIELD_HISTORY || DEFAULT_SOURCE_YIELD_HISTORY,
+    env.FLOW_B_FBS_SOURCE_HISTORY || DEFAULT_FBS_SOURCE_HISTORY,
     ...String(env.FLOW_B_SOURCE_YIELD_SEED_FILES || "").split(path.delimiter).filter(Boolean),
     ...String(env.FLOW_B_FAVORITE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
   ].map((value) => path.resolve(value)))];
@@ -2702,6 +2855,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const verifiedSellerUrls = verifiedSellerSourceUrls(
     yieldRows,
     verifiedSellerMinimumPublished(env),
+  );
+  const pureFbsSellerVariants = pureFbsSellerSourceVariants(
+    yieldRows,
+    envNumber(env, "FLOW_B_PURE_FBS_SELLER_MIN_FAVORITES", 2),
+    envNumber(env, "FLOW_B_PURE_FBS_SELLERS", 50),
   );
   const verifiedSellerSet = new Set(verifiedSellerUrls);
   const deepVerifiedSellerVariants = deepVerifiedSellerSourceVariants(
@@ -2753,6 +2911,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         ...verifiedSellerUrls,
         ...deepVerifiedSellerVariants,
         ...submittedSellerSourceVariants,
+        ...pureFbsSellerVariants,
         ...derivedSearchUrls,
       ], yieldRows),
     ])],
@@ -2772,7 +2931,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...derivedSearchUrls,
     ],
     qualifiedFreshSourceUrls: qualifiedPrioritySourceUrls({
-      submittedSellerUrls: submittedSellerSourceVariants,
+      submittedSellerUrls: [...submittedSellerSourceVariants, ...pureFbsSellerVariants],
       derivedSearchUrls,
       prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
       derivedPriorityLimit,
@@ -2792,11 +2951,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       derivedPriorityLimit,
     }),
   });
-  const pending = interleaveStrictSuccessExploration(
-    prioritizedPending,
-    yieldRows,
-    envNumber(env, "FLOW_B_STRICT_EXPLOIT_BURST", 6),
-  );
+  const pending = interleaveSourcePortfolio(prioritizedPending, yieldRows, {
+    strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
+    fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
+    exploreWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORE_WEIGHT", 1),
+  });
   const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const workers = Math.max(1, envNumber(env, "FLOW_B_TAB_WORKERS", 4));
   const adaptiveWorkers = sourceAdaptiveConcurrency(favoriteLog, {

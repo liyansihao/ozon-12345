@@ -27,6 +27,25 @@ test("prepared transfer selects only the requested strict-profit safe SKUs", () 
   ]);
 });
 
+test("prepared transfer accepts durable preflight FBS evidence when the transient mode is missing", () => {
+  const candidates = selectPreparedTransferCandidates([{
+    sku: "1",
+    profit_rate: 60,
+    preflight_mode: "FBS",
+    title: "one",
+    cover_image: "1.jpg",
+    link: "https://www.ozon.ru/product/one-1/",
+    sell_price: 10,
+    purchase_price: 1,
+    cate_rate: 10,
+    cate_fee: 1,
+    id: 11,
+  }]);
+
+  assert.deepEqual(candidates.accepted.map((row) => row.sku), ["1"]);
+  assert.deepEqual(candidates.rejected, []);
+});
+
 test("prepared transfer payload targets the verified second store and keeps the full SKU", () => {
   const payload = buildPreparedTransferPayload({
     id: 18464424,

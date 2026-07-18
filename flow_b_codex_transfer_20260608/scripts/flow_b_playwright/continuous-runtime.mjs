@@ -16,7 +16,8 @@ export function mergeCandidateFacts(favorite = {}, fact = {}) {
   const salePrice = favoriteSalePrice ?? positive(fact?.sale_price ?? fact?.sell_price);
   const title = String(favorite?.title || fact?.title || "").trim();
   const coverImage = String(favorite?.cover_image || favorite?.coverImage || fact?.cover_image || "").trim() || null;
-  const mode = String(favorite?.mode || favorite?.shipping_mode || fact?.shipping_mode || fact?.mode || "").trim() || null;
+  const preflightMode = String(favorite?.preflight_mode || fact?.preflight_mode || "").trim().toUpperCase() || null;
+  const mode = String(favorite?.mode || favorite?.shipping_mode || fact?.shipping_mode || fact?.mode || (preflightMode === "FBS" ? "FBS" : "")).trim() || null;
   const sourceUrl = String(favorite?.source_url || fact?.source_url || "").trim() || null;
   const sellerUrl = String(favorite?.seller_url || fact?.seller_url || "").trim() || null;
   const productUrl = String(favorite?.link || favorite?.detail_url || fact?.source_url_product || fact?.link || "").trim() || null;
@@ -26,6 +27,7 @@ export function mergeCandidateFacts(favorite = {}, fact = {}) {
     || null;
   return {
     ...favorite,
+    ...(preflightMode ? { preflight_mode: preflightMode } : {}),
     sku,
     title,
     sell_price: salePrice,

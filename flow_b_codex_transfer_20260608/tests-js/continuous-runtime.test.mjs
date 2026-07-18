@@ -129,6 +129,18 @@ test("Maozi favorite price remains CNY when collection evidence came from an Ozo
   assert.equal(merged.shipping_mode, "FBS");
 });
 
+test("preflight FBS evidence restores a missing downstream shipping mode", () => {
+  const merged = mergeCandidateFacts({ sku: "42", sell_price: 22.64 }, {
+    sku: "42",
+    preflight_mode: "FBS",
+    title: "儿童配饰",
+    sale_price: 259,
+    source_currency: "RUB",
+  });
+  assert.equal(merged.mode, "FBS");
+  assert.equal(merged.shipping_mode, "FBS");
+});
+
 test("operational error rate includes runtime crashes without hiding SKU failures", () => {
   assert.deepEqual(operationalErrorSummary({
     successCount: 9,

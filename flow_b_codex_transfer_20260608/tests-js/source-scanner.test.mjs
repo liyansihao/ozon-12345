@@ -24,6 +24,8 @@ import {
   prioritizeFavoriteLinks,
   prioritizeSourceUrls,
   interleaveStrictSuccessExploration,
+  interleaveSourcePortfolio,
+  appendFavoriteEvidence,
   parseFavoriteProductSnapshot,
   parseListingFavoriteSnapshot,
   reusableListingFavoriteSnapshot,
@@ -92,6 +94,8 @@ import {
   repeatedSubmittedSellerSourceUrls,
   deepVerifiedSellerSourceVariants,
   verifiedSellerSourceUrls,
+  pureFbsSellerSourceUrls,
+  pureFbsSellerSourceVariants,
   verifiedSellerMinimumPublished,
   verifiedPrioritySourceUrls,
   qualifiedPrioritySourceUrls,
@@ -119,6 +123,21 @@ test("verified seller promotion requires at least two strict publications", () =
   assert.equal(verifiedSellerMinimumPublished({}), 2);
   assert.equal(verifiedSellerMinimumPublished({ FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED: "1" }), 2);
   assert.equal(verifiedSellerMinimumPublished({ FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED: "4" }), 4);
+});
+
+test("two pure-FBS favorites promote their seller into bounded source variants before publication", () => {
+  const seller = "https://www.ozon.ru/seller/pure-fbs-seed/";
+  const rows = [
+    { at: "2026-07-18T10:00:00.000Z", status: "favorited", sku: "1", seller_url: seller },
+    { at: "2026-07-18T10:01:00.000Z", status: "favorited", sku: "2", seller_url: seller },
+    { at: "2026-07-18T10:02:00.000Z", status: "favorited", sku: "2", seller_url: seller },
+  ];
+  assert.deepEqual(pureFbsSellerSourceUrls(rows), [seller]);
+  const variants = pureFbsSellerSourceVariants(rows);
+  assert.ok(variants.includes(seller));
+  assert.ok(variants.some((url) => url.startsWith(`${seller}?`) && url.includes("currency_price=500.000%3B")));
+  assert.ok(variants.some((url) => url.includes("page=2")));
+  assert.ok(variants.some((url) => url.includes("page=3")));
 });
 
 test("JSONL seed reads reuse unchanged files and only parse appended bytes", async () => {
@@ -222,6 +241,54 @@ test("source samples count completed outcomes but not deferred queued work", () 
   stats = nextSourceSampleStats(stats, { status: "favorited" });
   assert.deepEqual(stats, { attempted: 3, nonPureFbs: 1, favorited: 1 });
   assert.deepEqual(nextSourceSampleStats(stats, { status: "deferred" }), stats);
+});
+
+test("favorite evidence is mirrored to durable cross-run history with one timestamp", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-fbs-history-"));
+  const runLog = path.join(dir, "run", "favorite_collection.jsonl");
+  const historyLog = path.join(dir, "data", "fbs_source_history.jsonl");
+  const event = await appendFavoriteEvidence({
+    logFile: runLog,
+    historyFile: historyLog,
+    row: {
+      status: "favorited",
+      sku: "42",
+      source_url: "https://www.ozon.ru/seller/proven/",
+      preflight_mode: "FBS",
+    },
+    now: () => new Date("2026-07-18T12:00:00.000Z"),
+  });
+
+  assert.equal(event.at, "2026-07-18T12:00:00.000Z");
+  assert.equal(event.run_id, "run");
+  assert.deepEqual(
+    JSON.parse((await fs.readFile(runLog, "utf8")).trim()),
+    JSON.parse((await fs.readFile(historyLog, "utf8")).trim()),
+  );
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("source portfolio schedules strict, pure-FBS, and exploration sources at 70/20/10", () => {
+  const strict = Array.from({ length: 9 }, (_, index) => `https://www.ozon.ru/seller/strict-${index}/`);
+  const pureFbs = Array.from({ length: 4 }, (_, index) => `https://www.ozon.ru/seller/fbs-${index}/`);
+  const explore = Array.from({ length: 3 }, (_, index) => `https://www.ozon.ru/search/?text=explore-${index}`);
+  const rows = [
+    ...strict.map((source_url, index) => ({ source_url, sku: `strict-${index}`, status: "published" })),
+    ...pureFbs.flatMap((source_url, sourceIndex) => Array.from({ length: 4 }, (_, index) => ({
+      source_url,
+      sku: `fbs-${sourceIndex}-${index}`,
+      status: index < 2 ? "favorited" : "rejected",
+      reason: index < 2 ? null : "non-pure-fbs",
+    }))),
+  ];
+
+  const ordered = interleaveSourcePortfolio([...strict, ...pureFbs, ...explore], rows);
+  assert.deepEqual(ordered.slice(0, 10), [
+    ...strict.slice(0, 7),
+    ...pureFbs.slice(0, 2),
+    explore[0],
+  ]);
+  assert.deepEqual(new Set(ordered), new Set([...strict, ...pureFbs, ...explore]));
 });
 
 test("source sample history restores only the dry tail after the latest favorite", () => {
