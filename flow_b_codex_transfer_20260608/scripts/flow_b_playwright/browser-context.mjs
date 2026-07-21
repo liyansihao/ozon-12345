@@ -28,6 +28,11 @@ function readManifest(extensionDir) {
   }
 }
 
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback;
+}
+
 export function resolveBrowserOptions(env = process.env, defaultExecutable = chromium.executablePath()) {
   const profileDir = requiredPath(env.FLOW_B_PW_PROFILE, "FLOW_B_PW_PROFILE");
   const extensionDir = requiredPath(env.FLOW_B_EXTENSION_DIR, "FLOW_B_EXTENSION_DIR");
@@ -35,6 +40,8 @@ export function resolveBrowserOptions(env = process.env, defaultExecutable = chr
 
   const executablePath = String(env.FLOW_B_CHROMIUM_EXECUTABLE || defaultExecutable || "").trim();
   if (!executablePath) throw new Error("Chrome for Testing executable path is required");
+  const diskCacheSize = positiveInteger(env.FLOW_B_DISK_CACHE_SIZE_BYTES, 100 * 1024 * 1024);
+  const mediaCacheSize = positiveInteger(env.FLOW_B_MEDIA_CACHE_SIZE_BYTES, 50 * 1024 * 1024);
 
   return {
     profileDir,
@@ -52,6 +59,8 @@ export function resolveBrowserOptions(env = process.env, defaultExecutable = chr
       "--disable-blink-features=AutomationControlled",
       "--no-first-run",
       "--no-default-browser-check",
+      `--disk-cache-size=${diskCacheSize}`,
+      `--media-cache-size=${mediaCacheSize}`,
       `--disable-extensions-except=${extensionDir}`,
       `--load-extension=${extensionDir}`,
     ],

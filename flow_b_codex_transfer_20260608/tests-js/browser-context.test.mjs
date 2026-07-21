@@ -38,6 +38,21 @@ test("browser options require an unpacked extension and use Chrome for Testing",
   assert.equal(options.handleSIGINT, false);
   assert.equal(options.handleSIGTERM, false);
   assert.equal(options.handleSIGHUP, false);
+  assert.ok(options.args.includes("--disk-cache-size=104857600"));
+  assert.ok(options.args.includes("--media-cache-size=52428800"));
+});
+
+test("browser cache limits accept explicit positive byte overrides", async () => {
+  const extensionDir = await extensionFixture();
+  const options = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: "/tmp/profile",
+    FLOW_B_EXTENSION_DIR: extensionDir,
+    FLOW_B_DISK_CACHE_SIZE_BYTES: "67108864",
+    FLOW_B_MEDIA_CACHE_SIZE_BYTES: "33554432",
+  }, "/tmp/cft");
+
+  assert.ok(options.args.includes("--disk-cache-size=67108864"));
+  assert.ok(options.args.includes("--media-cache-size=33554432"));
 });
 
 test("empty extension token is repaired through the plugin's own login button", async () => {
