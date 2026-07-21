@@ -88,12 +88,19 @@ function strictPublished(rows, startedMs, endedMs) {
   return [...seen.values()];
 }
 
+export function matchesRunCommand(line, runDir) {
+  const absolute = path.resolve(runDir);
+  const relative = path.relative(process.cwd(), absolute);
+  const basename = path.basename(absolute);
+  return [absolute, relative, basename].filter(Boolean).some((value) => String(line || "").includes(value));
+}
+
 async function processHealth(runDir, profileDir) {
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,command="]);
     const lines = stdout.split(/\r?\n/u).filter(Boolean);
-    const supervised = lines.filter((line) => line.includes("run_acceptance_supervised.sh") && line.includes(runDir));
-    const workers = lines.filter((line) => line.includes("flow_b_playwright.mjs accept") && line.includes(runDir));
+    const supervised = lines.filter((line) => line.includes("run_acceptance_supervised.sh") && matchesRunCommand(line, runDir));
+    const workers = lines.filter((line) => line.includes("flow_b_playwright.mjs accept") && matchesRunCommand(line, runDir));
     const browsers = lines.filter((line) => profileDir && line.includes(`--user-data-dir=${profileDir}`));
     return {
       supervisor_alive: supervised.length === 1,

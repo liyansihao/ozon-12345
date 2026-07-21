@@ -1,0 +1,10 @@
+{
+  "result": "INTERRUPTED",
+  "window_started_at": "2026-07-21T08:34:25.885Z",
+  "interrupted_at": "2026-07-21T08:37:29.000Z",
+  "reason": "baseline checkpoint liveness matcher compared the absolute run directory with relative supervisor command lines and falsely reported supervisor_alive=false",
+  "publication_logic_changed": false,
+  "profit_rule_changed": false,
+  "duplicate_risk_detected": false,
+  "action": "preserved evidence, stopped process group, fixed checkpoint-only liveness evidence, regression test required, then start a fresh full 24-hour window"
+}

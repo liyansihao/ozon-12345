@@ -1,0 +1,26 @@
+{
+  "frozen_commit": "776b91bf156e0697694a2f28649535454779ae54",
+  "source_acceptance_run": "runs/flow_b/20260721_122550_ozon30m_accept_v61",
+  "source_acceptance_result": "PASS",
+  "source_acceptance_strict_successes": 17,
+  "source_acceptance_minimum_profit_rate": 31.68,
+  "source_acceptance_duplicate_skus": 0,
+  "profit_rule": "profit_rate > 30",
+  "confirmation_rule": "ERP/Ozon final online_status=selling and stock>0",
+  "watermark": { "id": 60822, "needle": "lysh" },
+  "store_targets": [
+    { "id": 106637, "needle": "丽丽二号", "warehouseId": 1020005023256510, "requireWarehouse": true },
+    { "id": 106640, "needle": "丽丽三号", "warehouseId": 1020005023295220, "requireWarehouse": true },
+    { "id": 106644, "needle": "丽丽四号", "warehouseId": 1020005023295540, "requireWarehouse": true },
+    { "id": 106646, "needle": "丽丽五号", "warehouseId": null, "requireWarehouse": true },
+    { "id": 104965, "needle": "丽丽1号", "warehouseId": 1020005022957960, "requireWarehouse": true }
+  ],
+  "acceptance": {
+    "duration_seconds": 86400,
+    "strict_unique_target": 500,
+    "per_store_target": 100,
+    "excluded_skus": ["2815247918"],
+    "fresh_run_quota_counters": true,
+    "historical_dedup_source": "data/flow_b/published_links.csv"
+  }
+}
