@@ -431,6 +431,30 @@ test("browser transport retries on the replacement Maozi page after SSO closes",
   assert.deepEqual(await transport("/api.shop/lists"), { status: 200, json: { code: 1 } });
 });
 
+test("browser transport refreshes one expired Maozi API session before returning 403", async () => {
+  let authenticated = false;
+  let recoveryCalls = 0;
+  const page = {
+    evaluate: async () => authenticated
+      ? ({ status: 200, json: { code: 1, data: [{ id: 106637 }] } })
+      : ({ status: 403, json: { message: "Unauthenticated" } }),
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    recoverUnauthorized: async (activePage) => {
+      recoveryCalls += 1;
+      assert.equal(activePage, page);
+      authenticated = true;
+    },
+  });
+
+  assert.deepEqual(await transport("/api.shop/lists"), {
+    status: 200,
+    json: { code: 1, data: [{ id: 106637 }] },
+  });
+  assert.equal(recoveryCalls, 1);
+});
+
 test("browser transport retries GET requests through a short HTTP 0 outage", async () => {
   let calls = 0;
   const delays = [];

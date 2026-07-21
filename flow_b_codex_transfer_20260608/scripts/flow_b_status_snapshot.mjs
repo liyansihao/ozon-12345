@@ -98,20 +98,27 @@ export function buildStatusSnapshot({
     if (sku) latestSkuStates.set(sku, event);
   }
   const pendingConfirmationByStore = Object.fromEntries(storeIds.map((id) => [String(id), 0]));
+  const selectedTerminalByStore = Object.fromEntries(storeIds.map((id) => [String(id), 0]));
   for (const row of selectedUnique.values()) {
     const sku = String(row?.sku || "").trim();
     const storeId = Number(row?.store_id || 0);
     const key = String(storeId);
     const state = latestSkuStates.get(sku);
-    if (!(key in pendingConfirmationByStore)
-      || strictKeys.has(`${storeId}:${sku}`)
-      || state?.status !== "processing") continue;
-    pendingConfirmationByStore[key] += 1;
+    if (!(key in pendingConfirmationByStore) || strictKeys.has(`${storeId}:${sku}`)) continue;
+    if (state?.status === "processing") pendingConfirmationByStore[key] += 1;
+    else if (["failed", "skipped"].includes(String(state?.status || ""))) selectedTerminalByStore[key] += 1;
   }
   const latestStoreTargets = new Map();
   for (const event of storeTargetEvents || []) {
     const storeId = Number(event?.store_id || 0);
-    if (storeId > 0) latestStoreTargets.set(String(storeId), event);
+    const at = Date.parse(event?.at || event?.timestamp || "");
+    if (!(storeId > 0) || (Number.isFinite(at) && at > anchorMs)) continue;
+    const key = String(storeId);
+    const previous = latestStoreTargets.get(key);
+    const previousAt = Date.parse(previous?.at || previous?.timestamp || "");
+    if (!previous || !Number.isFinite(at) || !Number.isFinite(previousAt) || at >= previousAt) {
+      latestStoreTargets.set(key, event);
+    }
   }
   const dailyTimeZone = String(config.daily_store_timezone || "UTC");
   const observedDay = dayKey(anchorMs, dailyTimeZone);
@@ -130,7 +137,9 @@ export function buildStatusSnapshot({
   const quotaByStore = Object.fromEntries(storeIds.map((id) => {
     const event = latestStoreTargets.get(String(id));
     const usageEvent = latestDailyUsage.get(String(id));
-    const verifiedUsage = Number(event?.daily_usage);
+    const eventAt = Date.parse(event?.at || event?.timestamp || "");
+    const eventMatchesObservedDay = !Number.isFinite(eventAt) || dayKey(eventAt, dailyTimeZone) === observedDay;
+    const verifiedUsage = eventMatchesObservedDay ? Number(event?.daily_usage) : Number.NaN;
     const submittedUsage = Number(usageEvent?.usage);
     const dailyUsage = Math.max(
       Number.isFinite(verifiedUsage) ? verifiedUsage : 0,
@@ -143,6 +152,10 @@ export function buildStatusSnapshot({
       daily_usage: Number.isFinite(verifiedUsage) || Number.isFinite(submittedUsage) ? dailyUsage : null,
       daily_limit: dailyLimit > 0 ? dailyLimit : null,
       daily_remaining: dailyLimit > 0 && Number.isFinite(dailyUsage) ? Math.max(0, dailyLimit - dailyUsage) : null,
+      erp_daily_usage: Number.isFinite(verifiedUsage) ? verifiedUsage : null,
+      run_submitted_today: Number.isFinite(submittedUsage) ? submittedUsage : 0,
+      strict_gap: Number(remainingByStore[String(id)] || 0),
+      selected_terminal: Number(selectedTerminalByStore[String(id)] || 0),
       available: event ? event.available !== false : null,
       warehouse_id: Number(event?.warehouse_id) > 0 ? Number(event.warehouse_id) : null,
       reason: event?.reason ? String(event.reason) : null,
@@ -160,6 +173,9 @@ export function buildStatusSnapshot({
           - dailyRemaining,
       )];
   }));
+  for (const id of storeIds) {
+    quotaByStore[String(id)].capacity_shortfall_until_reset = Number(quotaShortfallByStore[String(id)] || 0);
+  }
   const nextQuotaResetAt = config.daily_store_timezone === "UTC"
     ? new Date(Date.UTC(
       new Date(anchorMs).getUTCFullYear(),
@@ -227,6 +243,8 @@ export function buildStatusSnapshot({
     quota: {
       by_store: quotaByStore,
       pending_confirmation_by_store: pendingConfirmationByStore,
+      selected_terminal_by_store: selectedTerminalByStore,
+      capacity_shortfall_until_reset_by_store: quotaShortfallByStore,
       shortfall_by_store: quotaShortfallByStore,
       constrained_stores: storeIds.map(String).filter((storeId) => (
         Number(quotaShortfallByStore[storeId] || 0) > 0
@@ -260,6 +278,9 @@ export function compactStatusSnapshot(snapshot = {}) {
     rolling_h: Object.fromEntries(Object.entries(snapshot?.rolling || {})
       .map(([minutes, value]) => [minutes, Number(value?.per_hour || 0)])),
     constrained: snapshot?.quota?.constrained_stores || [],
+    capacity_shortfall_until_reset: snapshot?.quota?.capacity_shortfall_until_reset_by_store
+      || snapshot?.quota?.shortfall_by_store
+      || {},
     shortfall: snapshot?.quota?.shortfall_by_store || {},
     unavailable,
     next_reset_at: snapshot?.quota?.next_reset_at || null,

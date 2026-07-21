@@ -127,10 +127,75 @@ test("1688 failures use bounded summary reasons while retaining raw cost evidenc
   assert.equal(normalizeCostFailureReason({ error: { code: "IMAGE_DOWNLOAD_FAILED" } }), "1688-image-fetch-failed");
 });
 
+test("1688 health collapse defers the favorite without consuming it and retries after recovery", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-health-defer-"));
+  try {
+    let current = new Date("2026-07-18T03:00:00.000Z");
+    let costCalls = 0;
+    let favoriteDeletes = 0;
+    let importChecks = 0;
+    const state = fakeState();
+    const item = { id: 1688001, sku: "1688001" };
+    const client = clientFor([item], {
+      deleteFavorite: async () => { favoriteDeletes += 1; return true; },
+      findImportLog: async (input) => {
+        importChecks += 1;
+        return { sku: input.sku, offer_id: input.offerId, import_status: "all_imported" };
+      },
+    });
+    const runner = createPublishRunner({
+      client,
+      costBridge: {
+        estimate: async () => {
+          costCalls += 1;
+          if (costCalls === 1) {
+            return {
+              ok: false,
+              reason: "filtered first-page 1688 candidates fewer than 3",
+              deferred: true,
+              terminal: false,
+              retry_at: "2026-07-18T03:05:00.000Z",
+              health: { circuit: "open" },
+            };
+          }
+          return { ok: true, cost: 20, health: { recovered: true } };
+        },
+      },
+      state,
+      target: 1,
+      runDir,
+      now: () => current,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    });
+
+    const deferred = await runner.run();
+    assert.equal(deferred.published, 0);
+    assert.equal(favoriteDeletes, 0);
+    assert.equal(state.entries()[0].status, "failed");
+    assert.equal(state.entries()[0].data.reason, "1688-health-deferred");
+    assert.equal(state.entries()[0].data.retry_at, "2026-07-18T03:05:00.000Z");
+
+    current = new Date("2026-07-18T03:04:00.000Z");
+    await runner.run();
+    assert.equal(costCalls, 1);
+    assert.equal(importChecks, 0);
+
+    current = new Date("2026-07-18T03:06:00.000Z");
+    const recovered = await runner.run();
+    assert.equal(costCalls, 2);
+    assert.equal(recovered.published, 1);
+    assert.equal(favoriteDeletes, 0);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 function clientFor(items, overrides = {}) {
   return {
     resolvePublishTarget: async () => ({ store: { id: 7, name: "丽丽1号" }, watermark: { id: 8, name: "lysh" } }),
     listFavorites: async () => items,
+    listAllFavorites: async () => [],
     getProductDetail: async (sku) => ({ sku, mode: "FBS", title: "safe item", current_price: 100, follow_min: 90 }),
     getCategoryBySku: async () => ({ cate: [11, 22, "1,12.00"], product_info: { weight: 100, depth: 20, width: 10, height: 5 } }),
     calculateProfit: async () => economy(),
@@ -302,19 +367,34 @@ test("cross-window candidate facts bypass duplicate Ozon detail while retaining 
   let categoryCalls = 0;
   let costCalls = 0;
   let estimatedSalePrice = null;
+  let estimatedMatchEvidence = null;
   const state = fakeState();
   const client = clientFor([{ sku: "seeded-900", sell_price: 22.64 }], {
     getProductDetail: async () => { detailCalls += 1; throw new Error("detail should be reused"); },
     getCategoryBySku: async () => {
       categoryCalls += 1;
-      return { cate: [11, 22, "1,12.00"], product_info: { weight: 100, depth: 20, width: 10, height: 5 } };
+      return { cate: [11, 22, "1,12.00"], product_info: { weight: 100, depth: 20, width: 10, height: 5, model: "KIDS-900" } };
     },
+    listCategoryCommissions: async () => [{
+      cate_id: 11,
+      label: "Аксессуары",
+      children: [{
+        cate_id: 22,
+        label: "Детские аксессуары",
+        children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }],
+      }],
+    }],
   });
   const result = await createPublishRunner({
     client,
     costBridge: { estimate: async (item) => {
       costCalls += 1;
       estimatedSalePrice = item.sell_price;
+      estimatedMatchEvidence = {
+        title: item.expect_title,
+        model: item.expect_model,
+        category: item.expect_category,
+      };
       return { ok: true, cost: 5 };
     } },
     state,
@@ -330,6 +410,11 @@ test("cross-window candidate facts bypass duplicate Ozon detail while retaining 
   assert.equal(categoryCalls, 1);
   assert.equal(costCalls, 1);
   assert.equal(estimatedSalePrice, 22.64);
+  assert.deepEqual(estimatedMatchEvidence, {
+    title: "Детский аксессуар",
+    model: "KIDS-900",
+    category: "Аксессуары Детские аксессуары",
+  });
   await fs.rm(runDir, { recursive: true, force: true });
 });
 
@@ -508,6 +593,139 @@ test("verified lifetime store target rotates independently of the daily quota", 
   assert.deepEqual(result.store_switches, [{ from_store_id: 106637, to_store_id: 106640, reason: "store-total-limit" }]);
 });
 
+test("next quota day backfills a store with 94 strict and 6 terminal accepted submissions", async () => {
+  const initial = {};
+  for (let index = 0; index < 94; index += 1) {
+    initial[`strict-${index}`] = {
+      status: "published",
+      data: { store_id: 106637, published_at: "2026-07-17T03:00:00.000Z" },
+    };
+  }
+  for (let index = 0; index < 6; index += 1) {
+    initial[`terminal-${index}`] = {
+      status: "failed",
+      data: {
+        store_id: 106637,
+        submitted: true,
+        reason: "import-failed",
+        submitted_at: "2026-07-17T04:00:00.000Z",
+      },
+    };
+  }
+  const state = fakeState(initial);
+  const shopIds = [];
+  const items = Array.from({ length: 7 }, (_, index) => ({ id: 700 + index, sku: String(700 + index) }));
+  const client = clientFor(items, {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: `store-${storeId}`, product_limit: { daily_create: { usage: 0, limit: 100 } } },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 101,
+    now: () => new Date("2026-07-18T03:00:00.000Z"),
+    totalStoreUsageSeed: { 106637: 100 },
+    totalStoreUsageSeedIncludesRestored: true,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.deepEqual(shopIds, [106637, 106637, 106637, 106637, 106637, 106637, 106640]);
+  assert.deepEqual(result.store_total_usage, { "106637": 100, "106640": 1 });
+});
+
+test("100 accepted submissions remain a hard same-day cap even when 6 are terminal", async () => {
+  const initial = {};
+  for (let index = 0; index < 94; index += 1) {
+    initial[`strict-${index}`] = {
+      status: "published",
+      data: { store_id: 106637, published_at: "2026-07-17T03:00:00.000Z" },
+    };
+  }
+  for (let index = 0; index < 6; index += 1) {
+    initial[`terminal-${index}`] = {
+      status: "failed",
+      data: { store_id: 106637, submitted: true, reason: "import-failed", submitted_at: "2026-07-17T04:00:00.000Z" },
+    };
+  }
+  const state = fakeState(initial);
+  const shopIds = [];
+  const client = clientFor([{ id: 800, sku: 800 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: `store-${storeId}`, product_limit: { daily_create: { usage: 0, limit: 100 } } },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+  });
+
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 95,
+    now: () => new Date("2026-07-17T05:00:00.000Z"),
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.deepEqual(shopIds, [106640]);
+});
+
+test("one long-lived runner resets daily quota and returns to an earlier strict gap", async () => {
+  let current = new Date("2026-07-17T05:00:00.000Z");
+  let favorites = [];
+  const initial = {};
+  for (let index = 0; index < 94; index += 1) {
+    initial[`strict-${index}`] = { status: "published", data: { store_id: 106637, published_at: "2026-07-17T03:00:00.000Z" } };
+  }
+  for (let index = 0; index < 6; index += 1) {
+    initial[`terminal-${index}`] = { status: "failed", data: { store_id: 106637, submitted: true, reason: "import-failed", submitted_at: "2026-07-17T04:00:00.000Z" } };
+  }
+  const state = fakeState(initial);
+  const shopIds = [];
+  const client = clientFor([], {
+    listFavorites: async () => favorites,
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: `store-${storeId}`, product_limit: { daily_create: { usage: 0, limit: 100 } } },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 95,
+    now: () => current,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  });
+
+  const first = await runner.run();
+  assert.equal(first.active_store_id, 106640);
+  current = new Date("2026-07-18T05:00:00.000Z");
+  favorites = [{ id: 900, sku: 900 }];
+  await runner.run();
+  assert.deepEqual(shopIds, [106637]);
+});
+
 test("runner reconciles reserved submissions when every store total target is temporarily full", async () => {
   const state = fakeState({
     pending: {
@@ -646,6 +864,60 @@ test("an imported Ozon moderation backlog does not falsely stall fresh store sub
 
   assert.deepEqual(shopIds, [106637]);
   assert.equal(result.store_switches.some((event) => event.reason === "submission-stall"), false);
+});
+
+test("an imported warehouse-status rejection backlog rotates fresh work to the next store", async () => {
+  const rejected = (preparedAt) => ({
+    status: "processing",
+    data: {
+      store_id: 106637,
+      submitted: true,
+      prepared_at: preparedAt,
+      reason: "stock-activation-rejected",
+      import_log: { import_status: "all_imported" },
+      final_result: {
+        stock_update: {
+          result: [{
+            errors: [{ code: "WAREHOUSE_WRONG_STATUS", message: "warehouse is archived" }],
+          }],
+        },
+      },
+    },
+  });
+  const state = fakeState({
+    "warehouse-rejected-1": rejected("2026-07-15T09:00:00.000Z"),
+    "warehouse-rejected-2": rejected("2026-07-15T09:01:00.000Z"),
+  });
+  const shopIds = [];
+  const client = clientFor([{ id: 212, sku: 212 }], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: Number(storeId) === 106637 ? "丽丽二号" : "丽丽三号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+    publish: async (payload) => { shopIds.push(payload.shop_ids[0]); return { ok: true }; },
+    findImportLog: async ({ sku, offerId }) => ({ sku, offer_id: offerId, import_status: "all_imported" }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-15T10:00:00.000Z"),
+    pendingStoreStallMs: 60_000,
+    pendingStoreStallCount: 2,
+    storeTargets: [
+      { id: 106637, needle: "丽丽二号", requireWarehouse: false },
+      { id: 106640, needle: "丽丽三号", requireWarehouse: false },
+    ],
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.deepEqual(shopIds, [106640]);
+  assert.ok(result.store_switches.some((event) => event.from_store_id === 106637
+    && event.to_store_id === 106640
+    && event.reason === "submission-stall"));
 });
 
 test("runner rechecks a newly stalled import backlog between fresh publish batches", async () => {
@@ -2557,7 +2829,10 @@ test("runner builds the exact one-row payload and stops at target", async () => 
 
 test("historical duplicates do not consume target but resumed run successes do", async () => {
   const historicalState = fakeState({ 1: "published" }, 0);
-  const client = clientFor([{ id: 1, sku: 1 }, { id: 2, sku: 2 }]);
+  const deleted = [];
+  const client = clientFor([{ id: 1, sku: 1 }, { id: 2, sku: 2 }], {
+    deleteFavorite: async (item) => { deleted.push(String(item.sku)); return true; },
+  });
   const first = await createPublishRunner({
     client,
     costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
@@ -2566,6 +2841,7 @@ test("historical duplicates do not consume target but resumed run successes do",
   }).run();
   assert.equal(first.published, 1);
   assert.equal(historicalState.records[0].sku, "2");
+  assert.deepEqual(deleted, ["1"]);
 
   const resumedState = fakeState({ 9: "published" }, 1);
   let publishCalls = 0;
@@ -2577,6 +2853,30 @@ test("historical duplicates do not consume target but resumed run successes do",
   }).run();
   assert.equal(resumed.published, 1);
   assert.equal(publishCalls, 0);
+});
+
+test("each publish round frees a bounded batch of already imported favorites", async () => {
+  const deleted = [];
+  const client = clientFor([{ id: 2, sku: 2 }], {
+    listAllFavorites: async () => [
+      { id: 101, sku: 101, is_imported: 1 },
+      { id: 102, sku: 102, is_imported: true },
+      { id: 103, sku: 103, is_imported: 1 },
+      { id: 104, sku: 104, is_imported: 0 },
+    ],
+    deleteFavorite: async (item) => { deleted.push(String(item.sku)); return true; },
+  });
+  const state = fakeState();
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    importedFavoriteCleanupLimit: 2,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.deepEqual(deleted, ["101", "102"]);
 });
 
 test("resumed skipped candidates are terminal and are not recalculated", async () => {

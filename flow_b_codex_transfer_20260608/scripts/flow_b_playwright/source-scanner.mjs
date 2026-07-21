@@ -1498,28 +1498,32 @@ export function qualifiedPrioritySourceUrls({
   ])];
 }
 
-export function fullFunnelSourceScores(rows) {
+function latestSourceSkuOutcomes(rows, acceptedStatuses) {
   const sources = new Map();
-  const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
   (rows || []).forEach((row, order) => {
     const key = sourceYieldKey(row?.source_url);
-    const sku = String(row?.sku || "").trim();
-    const rank = outcomeRank[row?.status] || 0;
-    if (!key || !sku || !rank) return;
+    const status = String(row?.status || "");
+    if (!key || !acceptedStatuses.has(status)) return;
+    const sku = String(row?.sku || "").trim() || `__event:${order}`;
     const outcomes = sources.get(key) || new Map();
     const previous = outcomes.get(sku);
-    outcomes.set(sku, {
-      rank: Math.max(previous?.rank || 0, rank),
-      time: Math.max(previous?.time || 0, Date.parse(row?.at || row?.timestamp || "") || 0),
-      order: Math.max(previous?.order ?? -1, order),
-    });
+    const time = Date.parse(row?.at || row?.timestamp || "") || 0;
+    if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
+      outcomes.set(sku, { row, status, time, order });
+    }
     sources.set(key, outcomes);
   });
+  return sources;
+}
+
+export function fullFunnelSourceScores(rows) {
+  const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
+  const sources = latestSourceSkuOutcomes(rows, new Set(Object.keys(outcomeRank)));
   const scoreOutcomes = (key, values) => {
     const attempted = values.length;
-    const published = values.filter(({ rank }) => rank === outcomeRank.published).length;
-    const submitted = values.filter(({ rank }) => rank === outcomeRank.submitted).length;
-    const pureFbs = values.filter(({ rank }) => rank === outcomeRank.favorited).length;
+    const published = values.filter(({ status }) => status === "published").length;
+    const submitted = values.filter(({ status }) => status === "submitted").length;
+    const pureFbs = values.filter(({ status }) => status === "favorited").length;
     const qualifiedYield = published + submitted * 0.65 + pureFbs * 0.35;
     const targetYield = isPriceBandedSource(key) ? 0.2 : 0.1;
     return ((qualifiedYield - attempted * targetYield) / (attempted + 5)) * 100_000
@@ -1660,33 +1664,38 @@ function exhaustedSourceFamilyPenalties(rows) {
     if ((!canonicalSellerUrl(familyKey) && !priceBanded)
       || !sku
       || !["favorited", "submitted", "published", "rejected", "skipped"].includes(status)) return;
-    const family = families.get(key) || { outcomes: new Map(), events: [], priceBanded: false };
+    const family = families.get(key) || { outcomes: new Map(), priceBanded: false };
     family.priceBanded ||= priceBanded;
     const productive = status === "favorited" || status === "submitted" || status === "published";
-    family.outcomes.set(sku, Boolean(family.outcomes.get(sku)) || productive);
-    family.events.push({
+    const event = {
       sku,
+      status,
       productive,
       explicitNonPureFbs: /non-pure-fbs/i.test(String(row?.reason || "")),
+      explicit1688NoMatch: /1688-no-reliable-match/i.test(String(row?.reason || "")),
       time: Date.parse(row?.at || row?.timestamp || "") || 0,
       order,
-    });
+    };
+    const previous = family.outcomes.get(sku);
+    if (!previous || event.time > previous.time || (event.time === previous.time && order > previous.order)) {
+      family.outcomes.set(sku, event);
+    }
     families.set(key, family);
   });
   return new Map([...families].flatMap(([key, family]) => {
     const dryThreshold = family.priceBanded ? 8 : 12;
     const minimumYield = family.priceBanded ? 0.2 : 0.1;
     const attempted = family.outcomes.size;
-    const productive = [...family.outcomes.values()].filter(Boolean).length;
-    const recent = [];
-    const seen = new Set();
-    for (const event of [...family.events].sort((left, right) => right.time - left.time || right.order - left.order)) {
-      if (seen.has(event.sku)) continue;
-      seen.add(event.sku);
-      recent.push(event);
-      if (recent.length >= dryThreshold) break;
-    }
+    const productive = [...family.outcomes.values()].filter((event) => event.productive).length;
+    const recent = [...family.outcomes.values()]
+      .sort((left, right) => right.time - left.time || right.order - left.order)
+      .slice(0, dryThreshold);
     const recentProductive = recent.filter((event) => event.productive).length;
+    if (recent.length >= 4
+      && recent.slice(0, 4).every((event) => event.explicit1688NoMatch)
+      && recent.slice(0, 4).every((event) => !["submitted", "published"].includes(event.status))) {
+      return [[key, -500_000]];
+    }
     if (family.priceBanded
       && recent.length >= 4
       && recent.slice(0, 4).every((event) => event.explicitNonPureFbs)) return [[key, -500_000]];
@@ -1705,14 +1714,14 @@ function recentSellerFamilyPenalties(rows) {
     if (!key || !sku || !["favorited", "submitted", "published", "rejected", "skipped"].includes(status)) return;
     const outcomes = sellers.get(key) || new Map();
     const previous = outcomes.get(sku);
-    outcomes.set(sku, {
-      productive: Boolean(previous?.productive)
-        || status === "favorited"
-        || status === "submitted"
-        || status === "published",
-      time: Math.max(previous?.time || 0, Date.parse(row?.at || row?.timestamp || "") || 0),
-      order: Math.max(previous?.order ?? -1, order),
-    });
+    const time = Date.parse(row?.at || row?.timestamp || "") || 0;
+    if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
+      outcomes.set(sku, {
+        productive: status === "favorited" || status === "submitted" || status === "published",
+        time,
+        order,
+      });
+    }
     sellers.set(key, outcomes);
   });
   return new Map([...sellers].flatMap(([key, outcomes]) => {
@@ -1854,19 +1863,20 @@ export function retainedRowsForCollection(records, {
 
 export function orderRowsBySourceYield(rows, yieldRows = []) {
   const stats = new Map();
-  for (const row of yieldRows) {
-    const key = sourceYieldKey(row?.source_url);
-    if (!key || row?.status === "ignored") continue;
+  const outcomes = latestSourceSkuOutcomes(yieldRows, new Set(["favorited", "submitted", "published", "rejected", "skipped"]));
+  for (const [key, skuOutcomes] of outcomes) {
     const value = stats.get(key) || { attempted: 0, published: 0, submitted: 0, outcomeWeight: 0 };
-    value.attempted += 1;
-    if (row?.status === "published") {
-      value.published += 1;
-      value.outcomeWeight += 3;
-    } else if (row?.status === "submitted") {
-      value.submitted += 1;
-      value.outcomeWeight += 1.5;
-    } else if (row?.status === "favorited") {
-      value.outcomeWeight += 0.5;
+    for (const { status } of skuOutcomes.values()) {
+      value.attempted += 1;
+      if (status === "published") {
+        value.published += 1;
+        value.outcomeWeight += 3;
+      } else if (status === "submitted") {
+        value.submitted += 1;
+        value.outcomeWeight += 1.5;
+      } else if (status === "favorited") {
+        value.outcomeWeight += 0.5;
+      }
     }
     stats.set(key, value);
   }
@@ -2994,6 +3004,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     sourceKey: (row) => sourceCollectionBlockKey(row?.source_url) || row?.source_url,
     priority: (row) => favoriteLinkPriority(row, titleFamilyScores)
       + Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
+    priorityTier: (row) => Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
   };
   const recoveredCandidates = candidateQueue.pending({
     ...pendingCandidateOptions,

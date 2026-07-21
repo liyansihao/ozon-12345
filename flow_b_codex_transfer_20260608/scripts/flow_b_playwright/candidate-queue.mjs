@@ -11,7 +11,7 @@ function compactDiscovery(link, at) {
   const href = String(typeof link === "string" ? link : link?.href || "").trim();
   const sku = String(typeof link === "object" ? link?.sku || "" : "").trim() || candidateSku(href);
   if (!sku || !href) return null;
-  return {
+  const row = {
     at,
     status: "discovered",
     sku,
@@ -21,6 +21,22 @@ function compactDiscovery(link, at) {
     card_text: String(typeof link === "object" ? link?.card_text || "" : ""),
     image_url: String(typeof link === "object" ? link?.image_url || "" : "").trim(),
   };
+  if (typeof link === "object") {
+    for (const key of ["sale_price", "title", "cover_image", "shipping_mode"]) {
+      const value = link?.[key];
+      if (value !== undefined && value !== null && value !== "") row[key] = value;
+    }
+  }
+  return row;
+}
+
+function mergePendingDiscovery(previous, discovery) {
+  const merged = { ...previous };
+  for (const [key, value] of Object.entries(discovery)) {
+    if (["at", "status", "sku"].includes(key)) continue;
+    if (value !== undefined && value !== null && value !== "") merged[key] = value;
+  }
+  return { ...merged, at: discovery.at, status: previous.status, sku: previous.sku };
 }
 
 function isoNow(now) {
@@ -73,10 +89,15 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
       const at = isoNow(now);
       for (const link of links || []) {
         const row = compactDiscovery(link, at);
-        if (!row || seen.has(row.sku) || latest.has(row.sku)) continue;
+        if (!row || seen.has(row.sku)) continue;
         seen.add(row.sku);
-        latest.set(row.sku, row);
-        rows.push(row);
+        const previous = latest.get(row.sku);
+        if (previous && !PENDING_STATUSES.has(String(previous.status || ""))) continue;
+        const next = previous ? mergePendingDiscovery(previous, row) : row;
+        const changed = !previous || Object.keys(next).some((key) => key !== "at" && next[key] !== previous[key]);
+        if (!changed) continue;
+        latest.set(row.sku, next);
+        rows.push(next);
       }
       await appendRows(rows);
       return rows.length;
@@ -105,6 +126,7 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
       perSourceLimit = Number.POSITIVE_INFINITY,
       sourceKey = (row) => row?.source_url,
       priority = () => 0,
+      priorityTier = priority,
       nowMs = Date.now(),
     } = {}) {
       const maximum = Number.isFinite(Number(limit)) ? Math.max(0, Math.floor(Number(limit))) : Number.POSITIVE_INFINITY;
@@ -122,31 +144,41 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
       }
       const ranked = eligible.map((row, index) => {
         let score = 0;
+        let tier = 0;
         try { score = Number(priority(row)) || 0; } catch {}
-        return { row, index, score };
-      }).sort((left, right) => right.score - left.score || left.index - right.index)
-        .map(({ row }) => row);
-      if (!Number.isFinite(sourceMaximum)) return ranked.slice(0, maximum);
-      const groups = new Map();
-      for (const row of ranked) {
+        try { tier = Number(priorityTier(row)) || 0; } catch {}
+        return { row, index, score, tier };
+      }).sort((left, right) => right.tier - left.tier || right.score - left.score || left.index - right.index);
+      if (!Number.isFinite(sourceMaximum)) return ranked.slice(0, maximum).map(({ row }) => row);
+      const tiers = new Map();
+      for (const entry of ranked) {
+        const { row, tier: tierScore } = entry;
         let source = "";
         try { source = String(sourceKey(row) || "").trim(); } catch {}
         source ||= `sku:${row.sku}`;
-        const values = groups.get(source) || [];
-        if (values.length < sourceMaximum) values.push(row);
-        groups.set(source, values);
+        const tier = tiers.get(tierScore) || new Map();
+        const values = tier.get(source) || [];
+        values.push(row);
+        tier.set(source, values);
+        tiers.set(tierScore, tier);
       }
       const rows = [];
-      for (let round = 0; rows.length < maximum; round += 1) {
-        let added = false;
-        for (const values of groups.values()) {
-          if (values[round]) {
-            rows.push(values[round]);
-            added = true;
-            if (rows.length >= maximum) break;
+      const sourceCounts = new Map();
+      for (const groups of tiers.values()) {
+        for (let round = 0; rows.length < maximum; round += 1) {
+          let added = false;
+          for (const [source, values] of groups) {
+            if (Number(sourceCounts.get(source) || 0) >= sourceMaximum) continue;
+            if (values[round]) {
+              rows.push(values[round]);
+              sourceCounts.set(source, Number(sourceCounts.get(source) || 0) + 1);
+              added = true;
+              if (rows.length >= maximum) break;
+            }
           }
+          if (!added) break;
         }
-        if (!added) break;
+        if (rows.length >= maximum) break;
       }
       return rows;
     },

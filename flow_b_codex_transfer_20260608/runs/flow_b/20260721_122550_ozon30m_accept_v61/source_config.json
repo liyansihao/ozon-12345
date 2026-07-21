@@ -1,0 +1,49 @@
+{
+  "mode": "continuous-acceptance",
+  "urls_file": "/Users/mac/.codex/worktrees/3b6c/ozon/flow_b_codex_transfer_20260608/runs/flow_b/20260714_source_urls_union.txt",
+  "scan_output": "/Users/mac/.codex/worktrees/3b6c/ozon/flow_b_codex_transfer_20260608/runs/flow_b/20260721_122550_ozon30m_accept_v61/source_deep_scan.json",
+  "window_started_at": "2026-07-21T04:27:27.515Z",
+  "window_ended_at": "2026-07-21T04:57:27.515Z",
+  "publish_target": 500,
+  "acceptance_target": 15,
+  "per_store_target": 100,
+  "store_id": 104965,
+  "store_targets": [
+    {
+      "id": 106637,
+      "needle": "丽丽二号",
+      "warehouseId": 1020005023256510,
+      "requireWarehouse": true
+    },
+    {
+      "id": 106640,
+      "needle": "丽丽三号",
+      "warehouseId": 1020005023295220,
+      "requireWarehouse": true
+    },
+    {
+      "id": 106644,
+      "needle": "丽丽四号",
+      "warehouseId": 1020005023295540,
+      "requireWarehouse": true
+    },
+    {
+      "id": 106646,
+      "needle": "丽丽五号",
+      "warehouseId": null,
+      "requireWarehouse": true
+    },
+    {
+      "id": 104965,
+      "needle": "丽丽1号",
+      "warehouseId": 1020005022957960,
+      "requireWarehouse": true
+    }
+  ],
+  "watermark_id": 60822,
+  "warehouse_id": null,
+  "initial_stock": 1,
+  "daily_store_timezone": "UTC",
+  "initial_concurrency": 8,
+  "max_concurrency": 12
+}

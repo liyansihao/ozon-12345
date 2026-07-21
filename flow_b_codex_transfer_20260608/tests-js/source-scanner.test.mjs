@@ -1524,7 +1524,36 @@ test("four consecutive explicit non-pure FBS cards demote only that search price
       status: "rejected",
       reason: "1688-no-reliable-match",
     })),
-  }), [genericDrySearch, untriedSeller]);
+  }), [untriedSeller, genericDrySearch]);
+});
+
+test("four recent 1688 no-match outcomes override earlier favorites and fast-demote the source", () => {
+  const drySearch = "https://www.ozon.ru/search/?text=no-match&is_global=true&currency_price=500.000%3B";
+  const untriedSeller = "https://www.ozon.ru/seller/untried-after-no-match/";
+  const rows = Array.from({ length: 4 }, (_, index) => [
+    {
+      at: new Date(Date.parse("2026-07-18T01:00:00.000Z") + index * 2000).toISOString(),
+      source_url: drySearch,
+      sku: `no-match-${index}`,
+      status: "favorited",
+    },
+    {
+      at: new Date(Date.parse("2026-07-18T01:00:01.000Z") + index * 2000).toISOString(),
+      source_url: drySearch,
+      sku: `no-match-${index}`,
+      status: "skipped",
+      reason: "1688-no-reliable-match",
+    },
+  ]).flat();
+
+  assert.deepEqual(prioritizeSourceUrls([drySearch, untriedSeller], {
+    freshSourceUrls: [drySearch],
+    yieldRows: rows,
+  }), [untriedSeller, drySearch]);
+  assert.deepEqual(orderRowsBySourceYield([
+    { source_url: drySearch },
+    { source_url: untriedSeller },
+  ], rows).map((row) => row.source_url), [untriedSeller, drySearch]);
 });
 
 test("a dry search price band cannot demote a productive sibling price band", () => {

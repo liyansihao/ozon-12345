@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -429,6 +430,47 @@ test("uncached 1688 estimates use and close an injected long-lived worker pool",
   });
 });
 
+test("semantic match evidence reaches the worker and isolates shared image cache entries", async () => {
+  await withTempDir(async (runDir) => {
+    const requests = [];
+    const bridge = createCostBridge({
+      workerPool: {
+        run: async (request) => {
+          requests.push(request);
+          return {
+            code: 0,
+            stdout: [
+              "COST_SOURCE search_first_page_p70_similarity_filtered",
+              "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+              "P70_COST 11",
+            ].join("\n"),
+            stderr: "",
+          };
+        },
+        close: async () => {},
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+    });
+    const shared = {
+      cover_image: "https://img.example/semantic.jpg",
+      sell_price: 100,
+      expect_model: "S5",
+      expect_category: "Автомобильные аксессуары",
+    };
+
+    assert.equal((await bridge.estimate({ ...shared, sku: "semantic-1", expect_title: "OMODA S5 уплотнитель" }, runDir)).ok, true);
+    assert.equal((await bridge.estimate({ ...shared, sku: "semantic-2", expect_title: "OMODA S5 уплотнитель" }, runDir)).ok, true);
+    assert.equal((await bridge.estimate({ ...shared, sku: "semantic-3", expect_title: "OMODA S5 накладка" }, runDir)).ok, true);
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].expect_title, "OMODA S5 уплотнитель");
+    assert.equal(requests[0].expect_model, "S5");
+    assert.equal(requests[0].expect_category, "Автомобильные аксессуары");
+    assert.notEqual(requests[0].image, undefined);
+    await bridge.close();
+  });
+});
+
 test("persistent worker infrastructure failure falls back to the one-shot process", async () => {
   await withTempDir(async (runDir) => {
     let fallbackRuns = 0;
@@ -438,8 +480,13 @@ test("persistent worker infrastructure failure falls back to the one-shot proces
         close: async () => {},
       },
       download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
-      runProcess: async () => {
+      runProcess: async ({ args }) => {
         fallbackRuns += 1;
+        assert.deepEqual(args.slice(2), [
+          "--expect-title", "OMODA S5 уплотнитель",
+          "--expect-model", "S5",
+          "--expect-category", "Автомобильные аксессуары",
+        ]);
         return {
           code: 0,
           stdout: [
@@ -455,6 +502,9 @@ test("persistent worker infrastructure failure falls back to the one-shot proces
       sku: "fallback-1",
       cover_image: "https://img.example/fallback.jpg",
       sell_price: 100,
+      expect_title: "OMODA S5 уплотнитель",
+      expect_model: "S5",
+      expect_category: "Автомобильные аксессуары",
     }, runDir);
     assert.equal(result.ok, true);
     assert.equal(fallbackRuns, 1);
@@ -495,5 +545,243 @@ test("shared cache reuses a reliable 1688 result across independent run director
     assert.equal(reused.shared_cache, true);
     assert.equal(reused.cross_run_cache, true);
     assert.equal(runs, 1);
+  });
+});
+
+test("repeated fewer-than-three first-page results trip health circuit and remain retryable", async () => {
+  await withTempDir(async (runDir) => {
+    let now = Date.parse("2026-07-18T00:00:00.000Z");
+    let runs = 0;
+    const bridge = createCostBridge({
+      healthFailureThreshold: 3,
+      healthDeferredTtlMs: 1_000,
+      now: () => now,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        return {
+          code: 2,
+          stdout: "REASON filtered first-page 1688 candidates fewer than 3\nP70_COST None",
+          stderr: "",
+        };
+      },
+    });
+
+    const rows = [];
+    for (let index = 1; index <= 3; index += 1) {
+      rows.push(await bridge.estimate({
+        sku: `health-${index}`,
+        cover_image: `https://img.example/health-${index}.jpg`,
+        sell_price: 100,
+      }, runDir));
+    }
+
+    assert.equal(rows[0].deferred, true);
+    assert.equal(rows[0].terminal, false);
+    assert.equal(rows[2].health?.circuit, "open");
+    assert.equal(rows[2].health?.consecutive_failures, 3);
+    assert.equal(rows[2].health?.reason, "1688-first-page-candidate-collapse");
+
+    const cached = await bridge.estimate({
+      sku: "health-cached",
+      cover_image: "https://img.example/health-1.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(cached.deferred, true);
+    assert.equal(cached.shared_cache, true);
+    assert.equal(runs, 3);
+
+    now += 1_001;
+    const stillBackedOff = await bridge.estimate({
+      sku: "health-retry",
+      cover_image: "https://img.example/health-1.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(stillBackedOff.deferred, true);
+    assert.equal(stillBackedOff.health?.probe_blocked, true);
+    assert.equal(runs, 3);
+  });
+});
+
+test("legacy terminal candidate-collapse cache is retried instead of poisoning a new run", async () => {
+  await withTempDir(async (root) => {
+    const runDir = path.join(root, "run");
+    const sharedCachePath = path.join(root, "shared", "1688_cache.json");
+    const image = "https://img.example/legacy-collapse.jpg";
+    const key = crypto.createHash("sha256").update(image).digest("hex");
+    await fs.mkdir(path.dirname(sharedCachePath), { recursive: true });
+    await fs.writeFile(sharedCachePath, JSON.stringify({ entries: {
+      [key]: {
+        output: "REASON filtered first-page 1688 candidates fewer than 3\nP70_COST None",
+        terminal: true,
+        updated_at: "2026-07-18T00:00:00.000Z",
+      },
+    } }));
+    let runs = 0;
+    const result = await createCostBridge({
+      sharedCachePath,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        return {
+          code: 0,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+            "P70_COST 11",
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    }).estimate({ sku: "legacy", cover_image: image, sell_price: 100 }, runDir);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.shared_cache, false);
+    assert.equal(runs, 1);
+  });
+});
+
+test("health circuit rebuilds an owned worker pool and marks a successful recovery probe", async () => {
+  await withTempDir(async (runDir) => {
+    let poolsCreated = 0;
+    let poolsClosed = 0;
+    const createWorkerPool = () => {
+      poolsCreated += 1;
+      const generation = poolsCreated;
+      return {
+        run: async () => generation === 1
+          ? {
+              code: 2,
+              stdout: "REASON filtered first-page 1688 candidates fewer than 3\nP70_COST None",
+              stderr: "",
+            }
+          : {
+              code: 0,
+              stdout: [
+                "COST_SOURCE search_first_page_p70_similarity_filtered",
+                "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+                "P70_COST 11",
+              ].join("\n"),
+              stderr: "",
+            },
+        close: async () => { poolsClosed += 1; },
+      };
+    };
+    const bridge = createCostBridge({
+      createWorkerPool,
+      healthFailureThreshold: 2,
+      healthDeferredTtlMs: 1,
+      healthProbeBackoffMs: 0,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => { throw new Error("owned pool must handle the probe"); },
+    });
+
+    for (let index = 1; index <= 2; index += 1) {
+      const result = await bridge.estimate({
+        sku: `trip-${index}`,
+        cover_image: `https://img.example/trip-${index}.jpg`,
+        sell_price: 100,
+      }, runDir);
+      assert.equal(result.deferred, true);
+    }
+    assert.equal(poolsCreated, 1);
+    assert.equal(poolsClosed, 1);
+
+    const recovered = await bridge.estimate({
+      sku: "recovery-probe",
+      cover_image: "https://img.example/recovery-probe.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(recovered.ok, true);
+    assert.equal(recovered.health_probe, true);
+    assert.equal(recovered.health?.circuit, "closed");
+    assert.equal(recovered.health?.recovered, true);
+    assert.equal(poolsCreated, 2);
+    await bridge.close();
+  });
+});
+
+test("open health circuit globally backs off and permits only one concurrent probe", async () => {
+  await withTempDir(async (runDir) => {
+    let clock = Date.parse("2026-07-18T00:00:00.000Z");
+    let runs = 0;
+    let releaseProbe;
+    let markProbeStarted;
+    const probeGate = new Promise((resolve) => { releaseProbe = resolve; });
+    const probeStarted = new Promise((resolve) => { markProbeStarted = resolve; });
+    const bridge = createCostBridge({
+      healthFailureThreshold: 1,
+      healthDeferredTtlMs: 1_000,
+      healthProbeBackoffMs: 10_000,
+      now: () => clock,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        if (runs === 1) return {
+          code: 2,
+          stdout: "REASON filtered first-page 1688 candidates fewer than 3\nP70_COST None",
+          stderr: "",
+        };
+        markProbeStarted();
+        await probeGate;
+        return {
+          code: 0,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+            "P70_COST 11",
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    });
+
+    await bridge.estimate({ sku: "trip", cover_image: "https://img.example/trip.jpg", sell_price: 100 }, runDir);
+    const backedOff = await bridge.estimate({ sku: "blocked", cover_image: "https://img.example/blocked.jpg", sell_price: 100 }, runDir);
+    assert.equal(backedOff.deferred, true);
+    assert.equal(backedOff.health?.probe_blocked, true);
+    assert.equal(runs, 1);
+
+    clock += 10_001;
+    const probe = bridge.estimate({ sku: "probe", cover_image: "https://img.example/probe.jpg", sell_price: 100 }, runDir);
+    await probeStarted;
+    const concurrent = await bridge.estimate({ sku: "concurrent", cover_image: "https://img.example/concurrent.jpg", sell_price: 100 }, runDir);
+    assert.equal(concurrent.deferred, true);
+    assert.equal(concurrent.health?.probe_in_flight, true);
+    assert.equal(runs, 2);
+    releaseProbe();
+    assert.equal((await probe).ok, true);
+    assert.equal(runs, 2);
+  });
+});
+
+test("an isolated fewer-than-three result becomes terminal after one health retry", async () => {
+  await withTempDir(async (runDir) => {
+    let clock = Date.parse("2026-07-18T00:00:00.000Z");
+    let runs = 0;
+    const bridge = createCostBridge({
+      healthFailureThreshold: 5,
+      healthDeferredTtlMs: 1_000,
+      healthSkuRetryLimit: 1,
+      now: () => clock,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        return {
+          code: 2,
+          stdout: "REASON filtered first-page 1688 candidates fewer than 3\nP70_COST None",
+          stderr: "",
+        };
+      },
+    });
+    const item = { sku: "isolated", cover_image: "https://img.example/isolated.jpg", sell_price: 100 };
+    const first = await bridge.estimate(item, runDir);
+    assert.equal(first.deferred, true);
+    clock += 1_001;
+    const second = await bridge.estimate(item, runDir);
+    assert.equal(second.deferred, undefined);
+    assert.equal(second.terminal, true);
+    assert.equal(second.reason, "filtered first-page 1688 candidates fewer than 3");
+    assert.equal(runs, 2);
   });
 });

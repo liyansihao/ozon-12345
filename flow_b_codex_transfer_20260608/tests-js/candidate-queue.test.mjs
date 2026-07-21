@@ -135,3 +135,55 @@ test("pending priority is applied before the global limit without bypassing sour
     priority: (row) => ({ "101": 1, "102": 100, "201": 50, "301": 75 }[row.sku]),
   }).map((row) => row.sku), ["102", "301", "201"]);
 });
+
+test("pending drains every higher-priority source tranche before a lower-priority tier", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-priority-tier-"));
+  const queue = createCandidateQueue(path.join(dir, "candidate_queue.jsonl"));
+  await queue.load();
+  await queue.discover([
+    ...Array.from({ length: 6 }, (_, index) => card(`10${index + 1}`, "source-high")),
+    card("201", "source-low"),
+  ]);
+
+  assert.deepEqual(queue.pending({
+    limit: 7,
+    perSourceLimit: 6,
+    priority: (row) => row.source_url === "source-high" ? 500_000 : 0,
+  }).map((row) => row.sku), ["101", "102", "103", "104", "105", "106", "201"]);
+});
+
+test("discover enriches an existing pending SKU without clearing its retry window", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-upsert-"));
+  const filename = path.join(dir, "candidate_queue.jsonl");
+  const queue = createCandidateQueue(filename, { now: () => new Date("2026-07-18T01:00:00.000Z") });
+  await queue.load();
+  await queue.discover([{ href: "https://www.ozon.ru/product/item-100/", source_url: "source-a" }]);
+  await queue.transition("100", "deferred", {
+    retry_at: "2026-07-18T01:10:00.000Z",
+    reason: "ozon-soft-block",
+  });
+
+  assert.equal(await queue.discover([{
+    ...card("100", "source-b"),
+    sale_price: 799,
+    title: "Rich title",
+    cover_image: "https://ir.ozone.ru/rich.jpg",
+    shipping_mode: "FBS",
+  }]), 1);
+  assert.deepEqual(queue.pending({ nowMs: Date.parse("2026-07-18T01:10:00.000Z") })[0], {
+    at: "2026-07-18T01:00:00.000Z",
+    status: "deferred",
+    sku: "100",
+    href: "https://www.ozon.ru/product/sample-100/",
+    source_url: "source-b",
+    text: "candidate 100",
+    card_text: "199 ₽\n发货模式：FBS",
+    image_url: "https://ir.ozone.ru/100.jpg",
+    sale_price: 799,
+    title: "Rich title",
+    cover_image: "https://ir.ozone.ru/rich.jpg",
+    shipping_mode: "FBS",
+    retry_at: "2026-07-18T01:10:00.000Z",
+    reason: "ozon-soft-block",
+  });
+});

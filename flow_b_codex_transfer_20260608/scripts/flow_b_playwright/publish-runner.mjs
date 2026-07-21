@@ -188,6 +188,12 @@ function hasTerminalStockActivationRejection(stockUpdate) {
   )));
 }
 
+function hasWarehouseStatusRejection(stockUpdate) {
+  return (stockUpdate?.result || []).some((row) => (row?.errors || []).some((error) => (
+    String(error?.code || "").toUpperCase() === "WAREHOUSE_WRONG_STATUS"
+  )));
+}
+
 function isTerminalSubmittedFailure(entry) {
   const data = entry?.data || entry || {};
   const reason = String(data.reason || "");
@@ -344,6 +350,7 @@ export function createPublishRunner({
   sourceYieldHistoryPath = null,
   publishFeedbackSeedFiles = [],
   candidateFactSeedFiles = [],
+  importedFavoriteCleanupLimit = 0,
   confirmationAttempts = 6,
   confirmationIntervalMs = 2000,
   onlineSyncIntervalMs = 1_800_000,
@@ -356,6 +363,7 @@ export function createPublishRunner({
   dailyStoreUsageSeed = null,
   totalStoreLimit = 100,
   totalStoreUsageSeed = {},
+  totalStoreUsageSeedIncludesRestored = false,
   warehouseSyncAttempts = 2,
   warehouseSyncIntervalMs = 5000,
   unavailableStoreRetryMs = 1_800_000,
@@ -709,7 +717,39 @@ export function createPublishRunner({
         });
       }
 
-      const cost = await timed(sku, "1688_cost", () => costBridge.estimate({ ...detail, sell_price: salePrice }, runDir));
+      const costModel = [
+        productInfo?.model,
+        productInfo?.model_name,
+        productInfo?.article,
+        detail?.model,
+        detail?.model_name,
+        detail?.article,
+      ].find((value) => typeof value === "string" || typeof value === "number");
+      const cost = await timed(sku, "1688_cost", () => costBridge.estimate({
+        ...detail,
+        sell_price: salePrice,
+        expect_title: detail?.title ?? item?.title ?? "",
+        expect_model: costModel ?? "",
+        expect_category: (category?.labels || []).slice(0, 2).join(" "),
+      }, runDir));
+      if (!cost?.ok && cost?.deferred === true && cost?.terminal === false) {
+        const retryAt = String(cost.retry_at || new Date(now().getTime() + 300_000).toISOString());
+        await state.transition(sku, "failed", {
+          ...item,
+          reason: "1688-health-deferred",
+          retry_at: retryAt,
+          submitted: false,
+          submission_pending: false,
+          cost,
+        });
+        return {
+          status: "deferred",
+          sku,
+          source_url: item.source_url ?? null,
+          reason: "1688-health-deferred",
+          retry_at: retryAt,
+        };
+      }
       if (!cost?.ok) return skip(item, normalizeCostFailureReason(cost), { cost });
 
       const calc = await timed(sku, "profit_calculation", () => client.calculateProfit(profitCalculationInput({
@@ -826,6 +866,55 @@ export function createPublishRunner({
   async function run() {
     await state.load?.();
     const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
+    const cleanupLimit = Math.max(0, Math.floor(Number(importedFavoriteCleanupLimit) || 0));
+    if (cleanupLimit > 0 && typeof client.listAllFavorites === "function") {
+      let allFavorites = [];
+      let cleanupFailed = 0;
+      try {
+        allFavorites = await client.listAllFavorites();
+      } catch (error) {
+        if (isFatalBrowserError(error)) throw error;
+        cleanupFailed += 1;
+        recordMetric("failed.jsonl", {
+          reason: "imported-favorite-list-failed",
+          error: String(error?.message || error),
+        });
+      }
+      const restoredForCleanup = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
+      const cleanupCandidates = allFavorites.filter((item) => {
+        const imported = [true, 1, "1", "true"].includes(item?.is_imported);
+        const entry = restoredForCleanup.get(asSku(item));
+        return imported
+          || entry?.status === "published"
+          || entry?.status === "skipped"
+          || (entry?.status === "failed" && isTerminalSubmittedFailure(entry));
+      });
+      const cleanupBatch = cleanupCandidates.slice(0, cleanupLimit);
+      let cleanupDeleted = 0;
+      for (const item of cleanupBatch) {
+        try {
+          await client.deleteFavorite(item);
+          cleanupDeleted += 1;
+        } catch (error) {
+          if (isFatalBrowserError(error)) throw error;
+          cleanupFailed += 1;
+          recordMetric("failed.jsonl", {
+            sku: asSku(item),
+            reason: "imported-favorite-delete-failed",
+            error: String(error?.message || error),
+          });
+        }
+      }
+      if (allFavorites.length > 0 || cleanupFailed > 0) {
+        recordMetric("favorite_cleanup.jsonl", {
+          available: allFavorites.length,
+          eligible: cleanupCandidates.length,
+          attempted: cleanupBatch.length,
+          deleted: cleanupDeleted,
+          failed: cleanupFailed,
+        });
+      }
+    }
     selectedTitleOwners.clear();
     for (const entry of restoredEntries) {
       const data = entry?.data || {};
@@ -836,10 +925,26 @@ export function createPublishRunner({
     }
     storeTotalUsage.clear();
     storeTotalReservations.clear();
+    const restoredAcceptedByStore = new Map();
+    for (const entry of restoredEntries) {
+      const data = entry?.data || {};
+      const entryStoreId = Number(data.store_id || 0);
+      const sku = String(entry?.sku ?? data.sku ?? "").trim();
+      if (!(entryStoreId > 0) || !sku) continue;
+      const accepted = entry.status === "published"
+        || data.submitted === true
+        || data.submission_pending === true;
+      if (accepted) restoredAcceptedByStore.set(entryStoreId, Number(restoredAcceptedByStore.get(entryStoreId) || 0) + 1);
+    }
     for (const [storeId, usage] of Object.entries(totalStoreUsageSeed || {})) {
       const id = Number(storeId);
       const count = Number(usage);
-      if (id > 0 && Number.isInteger(count) && count >= 0) storeTotalUsage.set(id, count);
+      if (!(id > 0) || !Number.isInteger(count) || count < 0) continue;
+      const restoredAccepted = Number(restoredAcceptedByStore.get(id) || 0);
+      const priorOnlyCount = totalStoreUsageSeedIncludesRestored
+        ? Math.max(0, count - restoredAccepted)
+        : count;
+      storeTotalUsage.set(id, priorOnlyCount);
     }
     for (const entry of restoredEntries) {
       const data = entry?.data || {};
@@ -1092,7 +1197,9 @@ export function createPublishRunner({
         if (Number(entry.data?.store_id) !== Number(storeId)) return false;
         if (entry.data?.submitted !== true && entry.data?.submission_pending !== true) return false;
         const importStatus = normalizedImportStatus(entry.data?.import_log || entry.data?.final_result?.import_log);
-        if (["all_imported", "imported", "nested_imported"].includes(importStatus)) return false;
+        const warehouseStatusRejected = entry.data?.reason === "stock-activation-rejected"
+          && hasWarehouseStatusRejection(entry.data?.final_result?.stock_update || entry.data?.stock_update);
+        if (["all_imported", "imported", "nested_imported"].includes(importStatus) && !warehouseStatusRejected) return false;
         const submittedAt = Date.parse(entry.data?.prepared_at || entry.data?.selected_at || entry.data?.submitted_at || "");
         return Number.isFinite(submittedAt) && now().getTime() - submittedAt >= Math.max(0, Number(pendingStoreStallMs) || 0);
       });
@@ -1263,7 +1370,20 @@ export function createPublishRunner({
 
     async function handleCandidate(inputItem) {
       const sku = asSku(inputItem);
-      if (state.hasPublished(sku)) return { status: "ignored", sku };
+      if (state.hasPublished(sku)) {
+        try {
+          await client.deleteFavorite(inputItem);
+        } catch (error) {
+          if (isFatalBrowserError(error)) throw error;
+          recordMetric("failed.jsonl", {
+            sku,
+            reason: "historical-favorite-delete-failed",
+            error: String(error?.message || error),
+          });
+          return { status: "ignored", sku, reason: "historical-favorite-delete-failed" };
+        }
+        return { status: "ignored", sku, reason: "historical-favorite-deleted" };
+      }
 
       const latestEntry = typeof state.entryOf === "function"
         ? state.entryOf(sku)
@@ -1275,6 +1395,13 @@ export function createPublishRunner({
       const item = latestEntry
         ? mergeCandidateFacts({ ...inputItem, ...(latestEntry.data || {}), sku }, facts.get(String(sku)) || {})
         : inputItem;
+      const costHealthDeferred = item?.reason === "1688-health-deferred";
+      const costHealthRetryAt = Date.parse(item?.retry_at || "");
+      if (costHealthDeferred
+        && Number.isFinite(costHealthRetryAt)
+        && costHealthRetryAt > now().getTime()) {
+        return { status: "ignored", sku, reason: "1688-health-backoff" };
+      }
       if (restoredStatus === "failed" && isTerminalSubmittedFailure(restoredEntry)) {
         return { status: "ignored", sku, reason: "terminal-submission-failure" };
       }
@@ -1300,7 +1427,7 @@ export function createPublishRunner({
           };
         }
       }
-      if (restoredStatus === "processing" || restoredStatus === "failed") {
+      if ((restoredStatus === "processing" || restoredStatus === "failed") && !costHealthDeferred) {
         let reconciliationTarget = targetConfig;
         const restoredStoreId = Number(item.store_id || 0);
         if (restoredStoreId > 0 && restoredStoreId !== Number(targetConfig.store.id)) {

@@ -83,8 +83,9 @@ def normalize_text(value: object) -> str:
 def split_tokens(value: str) -> list[str]:
     text = normalize_text(value)
     ascii_tokens = re.findall(r"[a-z0-9][a-z0-9-]{1,}", text)
+    cyrillic_tokens = re.findall(r"[а-яё][а-яё0-9-]{1,}", text, flags=re.IGNORECASE)
     cn_tokens = re.findall(r"[\u4e00-\u9fff]{2,}", text)
-    return [token for token in ascii_tokens + cn_tokens if token not in GENERIC_TOKENS]
+    return [token for token in ascii_tokens + cyrillic_tokens + cn_tokens if token not in GENERIC_TOKENS]
 
 
 def model_tokens(value: str) -> list[str]:
@@ -196,6 +197,72 @@ def p70_index(count: int) -> int:
     return max(0, min(count - 1, int(count * 0.7 + 0.999) - 1))
 
 
+def p80_index(count: int) -> int:
+    return max(0, min(count - 1, int(count * 0.8 + 0.999) - 1))
+
+
+def median_number(values: list[float]) -> float | None:
+    return statistics.median(values) if values else None
+
+
+def price_cluster_summary(cluster_rows: list[dict]) -> dict:
+    prices = sorted(float(row["price"]) for row in cluster_rows if row.get("price") is not None)
+    count = len(cluster_rows)
+    strong_count = sum(1 for row in cluster_rows if row.get("level") == "strong")
+    score_sum = sum(float(row.get("score") or 0) for row in cluster_rows)
+    return {
+        "count": count,
+        "prices": prices,
+        "min_price": prices[0] if prices else None,
+        "max_price": prices[-1] if prices else None,
+        "median_price": median_number(prices),
+        "strong_count": strong_count,
+        "strong_ratio": strong_count / count if count else 0,
+        "score_sum": score_sum,
+        "avg_score": score_sum / count if count else 0,
+        "rows": cluster_rows,
+    }
+
+
+def build_price_clusters(filtered_rows: list[dict], adjacent_ratio: float = 1.8) -> list[dict]:
+    priced_rows = sorted(
+        [row for row in filtered_rows if row.get("price") is not None and float(row["price"]) > 0],
+        key=lambda row: float(row["price"]),
+    )
+    if not priced_rows:
+        return []
+
+    clusters: list[list[dict]] = []
+    for start in range(len(priced_rows)):
+        cluster = [priced_rows[start]]
+        cluster_min_price = float(priced_rows[start]["price"])
+        previous_price = cluster_min_price
+        for row in priced_rows[start + 1:]:
+            current_price = float(row["price"])
+            if current_price / previous_price <= adjacent_ratio and current_price / cluster_min_price <= adjacent_ratio:
+                cluster.append(row)
+                previous_price = current_price
+            else:
+                break
+        clusters.append(cluster)
+    return [price_cluster_summary(cluster) for cluster in clusters]
+
+
+def choose_price_cluster(price_clusters: list[dict], all_median: float | None = None) -> dict | None:
+    if not price_clusters:
+        return None
+    return sorted(
+        price_clusters,
+        key=lambda cluster: (
+            cluster["count"],
+            cluster["strong_count"],
+            cluster["avg_score"],
+            -abs((cluster["median_price"] or 0) - all_median) if all_median else 0,
+        ),
+        reverse=True,
+    )[0]
+
+
 def scored_similarity_rows(rows: list[dict], expect_title: str, expect_model: str, expect_category: str, match_top: int) -> list[dict]:
     model_needles = model_tokens(expect_model)
     title_needles = title_tokens(expect_title)
@@ -238,7 +305,12 @@ def first_page_p70_cost(
     allowed_levels = {"strong", "weak"} if strong_exists else ({"weak"} if weak_exists else set())
 
     raw_prices = sorted(float(row["price"]) for row in first_page if row.get("price") is not None and float(row["price"]) > 0)
-    raw_median = raw_prices[len(raw_prices) // 2] if raw_prices else None
+    anchor_rows = [
+        row for row in first_page
+        if not row.get("bad_hits") and (not allowed_levels or row.get("level") in allowed_levels)
+    ]
+    anchor_prices = sorted(float(row["price"]) for row in anchor_rows if row.get("price") is not None and float(row["price"]) > 0)
+    anchor_median = anchor_prices[len(anchor_prices) // 2] if anchor_prices else None
     filtered_rows = []
     excluded_rows = []
     for row in first_page:
@@ -250,9 +322,9 @@ def first_page_p70_cost(
             reason = "accessory or packaging title"
         elif allowed_levels and row.get("level") not in allowed_levels:
             reason = "not a same-product candidate"
-        elif raw_median and len(raw_prices) >= 3 and float(price) < raw_median * 0.25:
+        elif anchor_median and len(anchor_prices) >= 3 and float(price) < anchor_median * 0.25:
             reason = "extreme low price"
-        elif raw_median and len(raw_prices) >= 5 and float(price) > raw_median * 8:
+        elif anchor_median and len(anchor_prices) >= 5 and float(price) > anchor_median * 8:
             reason = "extreme high price"
 
         if reason:
@@ -269,30 +341,107 @@ def first_page_p70_cost(
             "selected_offer_id": None,
             "first_page_prices": first_page_prices,
             "filtered_first_page_prices": filtered_prices,
+            "price_clusters": [],
+            "selected_price_cluster": None,
+            "cluster_p70_cost": None,
+            "cluster_p80_cost": None,
             "filtered_rows": filtered_rows,
             "excluded_rows": excluded_rows,
         }
-    if filtered_prices[0] <= 0 or filtered_prices[-1] / filtered_prices[0] > 5:
+    all_median = median_number(filtered_prices)
+    price_clusters = build_price_clusters(filtered_rows)
+    selected_cluster = choose_price_cluster(price_clusters, all_median)
+    if not selected_cluster or selected_cluster["count"] < 3:
         return {
             "decision": "REVIEW",
-            "reason": f"filtered first-page price spread abnormal {filtered_prices}",
+            "reason": f"main price cluster fewer than 3 {filtered_prices}",
             "p70_cost": None,
             "selected_offer_id": None,
             "first_page_prices": first_page_prices,
             "filtered_first_page_prices": filtered_prices,
+            "price_clusters": price_clusters,
+            "selected_price_cluster": selected_cluster,
+            "cluster_p70_cost": None,
+            "cluster_p80_cost": None,
             "filtered_rows": filtered_rows,
             "excluded_rows": excluded_rows,
         }
 
-    p70_cost = filtered_prices[p70_index(len(filtered_prices))]
-    selected = sorted(filtered_rows, key=lambda row: (abs(float(row["price"]) - p70_cost), -row.get("score", 0), row.get("title", "")))[0]
+    main_prices = selected_cluster["prices"]
+    spread_prices = filtered_prices if allowed_levels else raw_prices
+    full_spread_ratio = spread_prices[-1] / spread_prices[0] if spread_prices and spread_prices[0] > 0 else 0
+    main_share = selected_cluster["count"] / len(filtered_prices) if filtered_prices else 0
+    main_median = selected_cluster["median_price"]
+    median_ratio = max(main_median, all_median) / min(main_median, all_median) if main_median and all_median else 1
+    min_main_share = 0.4 if selected_cluster["count"] >= 3 and selected_cluster["strong_ratio"] >= 0.6 else 0.5
+    if main_share < min_main_share:
+        return {
+            "decision": "REVIEW",
+            "reason": f"main price cluster share below {min_main_share:.0%} {main_prices} of {filtered_prices}",
+            "p70_cost": None,
+            "selected_offer_id": None,
+            "first_page_prices": first_page_prices,
+            "filtered_first_page_prices": filtered_prices,
+            "price_clusters": price_clusters,
+            "selected_price_cluster": selected_cluster,
+            "cluster_p70_cost": None,
+            "cluster_p80_cost": None,
+            "filtered_rows": filtered_rows,
+            "excluded_rows": excluded_rows,
+        }
+    if median_ratio > 2.5:
+        return {
+            "decision": "REVIEW",
+            "reason": f"main price cluster median too far from all prices {main_prices} of {filtered_prices}",
+            "p70_cost": None,
+            "selected_offer_id": None,
+            "first_page_prices": first_page_prices,
+            "filtered_first_page_prices": filtered_prices,
+            "price_clusters": price_clusters,
+            "selected_price_cluster": selected_cluster,
+            "cluster_p70_cost": None,
+            "cluster_p80_cost": None,
+            "filtered_rows": filtered_rows,
+            "excluded_rows": excluded_rows,
+        }
+    if full_spread_ratio > 15 and not (selected_cluster["count"] >= 5 and selected_cluster["strong_ratio"] >= 0.6):
+        return {
+            "decision": "REVIEW",
+            "reason": f"extreme price spread without strong main cluster {filtered_prices}",
+            "p70_cost": None,
+            "selected_offer_id": None,
+            "first_page_prices": first_page_prices,
+            "filtered_first_page_prices": filtered_prices,
+            "price_clusters": price_clusters,
+            "selected_price_cluster": selected_cluster,
+            "cluster_p70_cost": None,
+            "cluster_p80_cost": None,
+            "filtered_rows": filtered_rows,
+            "excluded_rows": excluded_rows,
+        }
+
+    cluster_p70_cost = main_prices[p70_index(len(main_prices))]
+    cluster_p80_cost = main_prices[p80_index(len(main_prices))]
+    use_p80 = full_spread_ratio > 8
+    selected_cost = cluster_p80_cost if use_p80 else cluster_p70_cost
+    selected = sorted(
+        selected_cluster["rows"],
+        key=lambda row: (abs(float(row["price"]) - selected_cost), -row.get("score", 0), row.get("title", "")),
+    )[0]
     return {
         "decision": "LIGHT_ACCEPT",
-        "reason": "filtered first-page similarity p70 cost",
-        "p70_cost": p70_cost,
+        "reason": "filtered first-page similarity clustered cost",
+        "p70_cost": selected_cost,
         "selected_offer_id": selected.get("offerId"),
         "first_page_prices": first_page_prices,
         "filtered_first_page_prices": filtered_prices,
+        "price_clusters": price_clusters,
+        "selected_price_cluster": selected_cluster,
+        "cluster_p70_cost": cluster_p70_cost,
+        "cluster_p80_cost": cluster_p80_cost,
+        "cost_source": "search_first_page_cluster_p80_similarity_filtered"
+        if use_p80
+        else "search_first_page_cluster_p70_similarity_filtered",
         "filtered_rows": filtered_rows,
         "excluded_rows": excluded_rows,
     }
@@ -400,9 +549,13 @@ def main() -> int:
         "reason": p70["reason"],
         "selected_cost": p70["p70_cost"],
         "selected_offer_id": p70["selected_offer_id"],
-        "cost_source": "search_first_page_p70_similarity_filtered",
+        "cost_source": p70.get("cost_source") or "search_first_page_p70_similarity_filtered",
         "first_page_prices": p70["first_page_prices"],
         "filtered_first_page_prices": p70["filtered_first_page_prices"],
+        "price_clusters": p70["price_clusters"],
+        "selected_price_cluster": p70["selected_price_cluster"],
+        "cluster_p70_cost": p70["cluster_p70_cost"],
+        "cluster_p80_cost": p70["cluster_p80_cost"],
         "p70_cost": p70["p70_cost"],
         "filtered_rows": p70["filtered_rows"],
         "excluded_rows": p70["excluded_rows"],
@@ -433,6 +586,10 @@ def main() -> int:
         )
     print("FIRST_PAGE_PRICES", payload["first_page_prices"])
     print("FILTERED_FIRST_PAGE_PRICES", payload["filtered_first_page_prices"])
+    print("PRICE_CLUSTERS", json.dumps(payload["price_clusters"], ensure_ascii=False))
+    print("SELECTED_PRICE_CLUSTER", json.dumps(payload["selected_price_cluster"], ensure_ascii=False))
+    print("CLUSTER_P70_COST", payload["cluster_p70_cost"])
+    print("CLUSTER_P80_COST", payload["cluster_p80_cost"])
     print("P70_COST", payload["p70_cost"])
     print("TOP3_PRICES", payload["top3_prices"])
     print("MEDIAN_COST", payload["median_cost"])

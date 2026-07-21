@@ -9,6 +9,7 @@ import { ensureMaoziLogin, ensureMaoziPluginLogin, launchFlowContext, openMaoziP
 import { createCostBridge } from "./flow_b_playwright/cost-bridge.mjs";
 import { createMaoziClient, createMaoziPageTransport } from "./flow_b_playwright/maozi-client.mjs";
 import { createOzonDetailProvider } from "./flow_b_playwright/ozon-detail.mjs";
+import { createLowTokenInterventionController } from "./flow_b_playwright/low-token-intervention.mjs";
 import { createPublishRunner } from "./flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "./flow_b_playwright/publish-state.mjs";
 import { scanSources } from "./flow_b_playwright/source-scanner.mjs";
@@ -138,6 +139,22 @@ function browserOptions(env) {
   });
 }
 
+function createRuntimeMaoziTransport(page, context, env) {
+  return createMaoziPageTransport({
+    page,
+    context,
+    recoverUnauthorized: async (activePage) => {
+      await activePage.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+      const recoveredPage = await openMaoziPage(context, { settleMs: 1_000 });
+      await ensureMaoziLogin(recoveredPage, {
+        continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1",
+        timeout: 60_000,
+      });
+      return recoveredPage;
+    },
+  });
+}
+
 async function createRunDir(runDir, sourceConfig) {
   await fs.mkdir(runDir, { recursive: true });
   const startFile = path.join(runDir, "start_time.txt");
@@ -156,7 +173,7 @@ async function createPublishingSession(context, options, env, shared) {
   const maoziPage = await openMaoziPage(context, { forceNew: true });
   try {
     await ensureMaoziLogin(maoziPage, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
-    const client = createMaoziClient({ transport: createMaoziPageTransport({ page: maoziPage, context }) });
+    const client = createMaoziClient({ transport: createRuntimeMaoziTransport(maoziPage, context, env) });
     const state = createPublishState({
       runDir: options.runDir,
       publishedCsv: path.join(ROOT, "data/flow_b/published_links.csv"),
@@ -198,6 +215,7 @@ async function createPublishingSession(context, options, env, shared) {
       sourceYieldHistoryPath: env.FLOW_B_SOURCE_YIELD_HISTORY || path.join(ROOT, "data/flow_b/source_yield_history.jsonl"),
       publishFeedbackSeedFiles: String(env.FLOW_B_PUBLISH_FEEDBACK_SEED_FILES || "").split(path.delimiter).filter(Boolean),
       candidateFactSeedFiles: String(env.FLOW_B_CANDIDATE_FACT_SEED_FILES || "").split(path.delimiter).filter(Boolean),
+      importedFavoriteCleanupLimit: Math.max(0, Number(env.FLOW_B_IMPORTED_FAVORITE_CLEANUP_LIMIT) || 0),
       confirmationAttempts: Math.max(1, Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) || 6),
       confirmationIntervalMs: Math.max(0, Number(env.FLOW_B_CONFIRMATION_INTERVAL_MS) || 2000),
       onlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_ONLINE_SYNC_INTERVAL_MS) || 1_800_000),
@@ -210,6 +228,7 @@ async function createPublishingSession(context, options, env, shared) {
       dailyStoreUsageSeed: parseDailyStoreUsageSeed(env),
       totalStoreLimit: Math.max(1, Number(env.FLOW_B_STORE_TOTAL_LIMIT) || 100),
       totalStoreUsageSeed: parseStoreTotalUsageSeed(env),
+      totalStoreUsageSeedIncludesRestored: env.FLOW_B_STORE_TOTAL_USAGE_SEED_INCLUDES_RESTORED === "1",
       warehouseSyncAttempts: Math.max(1, Number(env.FLOW_B_WAREHOUSE_SYNC_ATTEMPTS) || 2),
       warehouseSyncIntervalMs: Math.max(0, Number(env.FLOW_B_WAREHOUSE_SYNC_INTERVAL_MS) || 5000),
       unavailableStoreRetryMs: Math.max(0, Number(env.FLOW_B_UNAVAILABLE_STORE_RETRY_MS) || 1_800_000),
@@ -255,7 +274,7 @@ async function verifyWithContext(context, options, env) {
   try {
     await ensureMaoziLogin(page, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
     await ensureMaoziPluginLogin(context, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
-    const client = createMaoziClient({ transport: createMaoziPageTransport({ page, context }) });
+    const client = createMaoziClient({ transport: createRuntimeMaoziTransport(page, context, env) });
     const manifest = JSON.parse(await fs.readFile(path.join(browserOptions(env).extensionDir, "manifest.json"), "utf8"));
     return runReadOnlyVerification({
       client,
@@ -391,6 +410,11 @@ async function runAcceptance(context, options, env) {
   try {
     await ensureMaoziLogin(authPage, { continueDeviceLogin: true, timeout: 60000 });
     await ensureMaoziPluginLogin(context, { continueDeviceLogin: true, timeout: 60000 });
+    const authClient = createMaoziClient({ transport: createRuntimeMaoziTransport(authPage, context, {
+      ...env,
+      FLOW_B_MAOZI_CONTINUE_LOGIN: "1",
+    }) });
+    await Promise.all([authClient.listShops(), authClient.listWatermarks()]);
   } finally {
     await authPage.close().catch(() => {});
   }
@@ -435,12 +459,27 @@ async function runAcceptance(context, options, env) {
   });
   await fs.writeFile(windowPath, `${JSON.stringify({ started_at: startedAt.toISOString(), ended_at: endedAt.toISOString() }, null, 2)}\n`);
   const shared = { targetConfigCache: {}, persistent: true, session: null };
+  const lowTokenController = createLowTokenInterventionController({
+    runDir: options.runDir,
+    env: runtimeEnv,
+  });
   let producerFatalError = null;
   const scanTask = runProducerLoop({
     deadlineMs: endedAt.getTime(),
     intervalMs: Math.max(1_000, Number(env.FLOW_B_PRODUCER_INTERVAL_MS || 20_000)),
     shouldStop: () => Boolean(producerFatalError),
-    scan: () => scanSources({ context, urlsFile: options.urlsFile, outFile: options.outFile, env: runtimeEnv }),
+    scan: async () => {
+      try {
+        await lowTokenController.refresh();
+      } catch (error) {
+        await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({
+          at: new Date().toISOString(),
+          stage: "low-token-intervention",
+          error: String(error?.message || error),
+        })}\n`);
+      }
+      return scanSources({ context, urlsFile: options.urlsFile, outFile: options.outFile, env: runtimeEnv });
+    },
     onError: async (error) => {
       await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), stage: "producer", error: String(error?.message || error) })}\n`);
       if (isFatalBrowserError(error)) {

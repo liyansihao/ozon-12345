@@ -1,0 +1,88 @@
+{
+  "result": "PASS",
+  "criteria": {
+    "continuous_window_seconds": 1800,
+    "minimum_strict_successes": 15,
+    "profit_rate": "> 30",
+    "confirmation_basis": "ERP/Ozon final selling status with stock > 0",
+    "unique_skus_only": true
+  },
+  "window": {
+    "started_at": "2026-07-21T04:27:27.515Z",
+    "ended_at": "2026-07-21T04:57:27.515Z",
+    "duration_seconds": 1800,
+    "process_exit_code": 0,
+    "crashed": false
+  },
+  "outcome": {
+    "strict_success_count": 17,
+    "effective_per_hour": 34,
+    "unique_sku_count": 17,
+    "duplicate_count": 0,
+    "excluded_sku_count": 0,
+    "minimum_profit_rate": 31.68,
+    "not_selling_count": 0,
+    "nonpositive_stock_count": 0,
+    "success_by_store": {
+      "106646": 17
+    }
+  },
+  "successful_skus": [
+    "1347038704",
+    "5095686446",
+    "4133838475",
+    "4966271212",
+    "2925503974",
+    "3887099123",
+    "4948628521",
+    "4840316257",
+    "3633979418",
+    "2162760852",
+    "3662760402",
+    "3188219771",
+    "2162760882",
+    "1698315071",
+    "2962947500",
+    "4652660220",
+    "4934835993"
+  ],
+  "stage_timings_ms": {
+    "ozon_detail_and_category": { "count": 93, "p50": 172, "p95": 359 },
+    "profit_upper_bound": { "count": 90, "p50": 181, "p95": 247 },
+    "1688_cost": { "count": 78, "p50": 2764, "p95": 4844 },
+    "profit_calculation": { "count": 42, "p50": 190, "p95": 247 },
+    "maozi_publish_and_confirm": { "count": 25, "p50": 410, "p95": 702 }
+  },
+  "failure_classification": {
+    "collection": {
+      "non-pure-fbs": 171,
+      "prohibited-category": 12,
+      "oversized-low-yield-title": 4,
+      "missing-shipping-mode": 10
+    },
+    "elimination": {
+      "1688-no-reliable-match": 29,
+      "non-pure-fbs": 3,
+      "profit-upper-bound<=30": 12,
+      "profit_rate<=30": 17
+    },
+    "failed": {
+      "online-product-rejected": 4,
+      "1688-health-deferred": 7,
+      "imported-favorite-list-failed": 1
+    },
+    "runtime": {
+      "consumer-page-reload-err-aborted": 1
+    }
+  },
+  "artifacts": {
+    "confirmed_csv": "../../../../exports/confirmed_store_skus_20260721_v61/confirmed_all_stores.csv",
+    "acceptance_summary": "acceptance_summary.json",
+    "published_truth": "published.jsonl",
+    "runtime_errors": "runtime_errors.jsonl",
+    "failed": "failed.jsonl",
+    "skipped": "skipped.jsonl",
+    "stage_timings": "stage_timings.jsonl"
+  },
+  "legacy_note": "acceptance_summary.passed also enforces the repository's older 100-per-store contract; this report applies the user's current 30-minute total >=15 criterion without changing strict SKU counting."
+}

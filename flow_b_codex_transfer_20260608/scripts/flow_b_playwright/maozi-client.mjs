@@ -95,6 +95,33 @@ export function createMaoziClient({ transport }) {
     throw new Error("Maozi favorites pagination exceeded 1000 pages");
   }
 
+  async function listImportedFavorites({ pageSize = 50, query = {} } = {}) {
+    return listFavorites({ pageSize, query: { ...query, is_imported: 1 } });
+  }
+
+  async function listAllFavorites({ pageSize = 50, query = {} } = {}) {
+    const rows = [];
+    const seenPages = new Set();
+    for (let page = 1; page <= 1000; page += 1) {
+      if (seenPages.has(page)) throw new Error("Maozi favorites pagination repeated a page");
+      seenPages.add(page);
+      const response = await transport(ENDPOINTS.favorites, {
+        method: "GET",
+        query: { ...query, page, page_size: pageSize },
+      });
+      const data = requireSuccess(response, "favorites");
+      const batch = listRows(data, "favorites");
+      rows.push(...batch);
+      const lastPage = Number(data?.last_page ?? data?.last ?? data?.pages);
+      if (Number.isFinite(lastPage) && lastPage > 0) {
+        if (page >= lastPage) return rows;
+      } else if (batch.length < pageSize) {
+        return rows;
+      }
+    }
+    throw new Error("Maozi favorites pagination exceeded 1000 pages");
+  }
+
   async function listShops() {
     const data = requireSuccess(await transport(ENDPOINTS.shops, { method: "GET" }), "shops");
     return listRows(data, "shops");
@@ -114,6 +141,8 @@ export function createMaoziClient({ transport }) {
   return {
     getFavoritePage,
     listFavorites,
+    listImportedFavorites,
+    listAllFavorites,
     listShops,
     listWatermarks,
 
@@ -265,6 +294,7 @@ export function createMaoziPageTransport({
   baseUrl = "https://api.maozierp.com",
   maxGetAttempts = 6,
   retrySleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  recoverUnauthorized = null,
 }) {
   if (!page || typeof page.evaluate !== "function") throw new TypeError("A Playwright Maozi page is required");
   const evaluate = (activePage, request) => activePage.evaluate(async (input) => {
@@ -371,10 +401,23 @@ export function createMaoziPageTransport({
       headers: {},
     };
     let lastError;
+    let unauthorizedRetried = false;
     const attempts = request.method === "GET" ? Math.max(1, Number(maxGetAttempts) || 1) : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const result = await evaluate(page, { ...request, headers: {} });
+        let result = await evaluate(page, { ...request, headers: {} });
+        if (!unauthorizedRetried
+          && (Number(result?.status) === 401 || Number(result?.status) === 403)
+          && typeof recoverUnauthorized === "function") {
+          unauthorizedRetried = true;
+          const recoveredPage = await recoverUnauthorized(page, {
+            endpoint: request.endpoint,
+            method: request.method,
+            status: Number(result.status),
+          });
+          if (recoveredPage) page = recoveredPage;
+          result = await evaluate(page, { ...request, headers: {} });
+        }
         const transientGet = request.method === "GET" && (
           Number(result?.status) === 0
           || /请求过于频繁|too many requests|rate.?limit|failed to fetch/i.test(String(result?.json?.msg || result?.json?.message || result?.json?.error || ""))
