@@ -4,9 +4,9 @@ set -u
 cd /Users/mac/.codex/worktrees/3b6c/ozon/flow_b_codex_transfer_20260608
 export PATH=/Users/mac/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
-RUN_DIR=runs/flow_b/20260721_161549_ozon24h_stability_v62
-EXPORT_DIR=../exports/confirmed_store_skus_20260721_v62
-export FLOW_B_FROZEN_COMMIT=776b91bf156e0697694a2f28649535454779ae54
+RUN_DIR="${FLOW_B_RUN_DIR_OVERRIDE:-runs/flow_b/20260721_161549_ozon24h_stability_v62}"
+EXPORT_DIR="${FLOW_B_EXPORT_DIR_OVERRIDE:-../exports/confirmed_store_skus_20260721_v62}"
+export FLOW_B_FROZEN_COMMIT="${FLOW_B_FROZEN_COMMIT_OVERRIDE:-776b91bf156e0697694a2f28649535454779ae54}"
 export FLOW_B_EXTENSION_DIR=/Users/mac/Downloads/maozi-plugin-3.0.9/maozi-plugin-3.0.9
 export FLOW_B_MAOZI_CONTINUE_LOGIN=1
 export FLOW_B_WATERMARK_ID=60822 FLOW_B_WATERMARK_NEEDLE=lysh
