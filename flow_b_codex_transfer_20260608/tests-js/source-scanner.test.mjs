@@ -2569,14 +2569,6 @@ test("source scanning yields after a bounded tranche so new publish feedback can
 
 test("source lookahead stays one batch ahead only while the tranche can continue", () => {
   assert.equal(sourceBatchPrefetchAllowed({
-    enabled: false,
-    sourceBlocked: false,
-    deadlineReached: false,
-    completedBatches: 1,
-    maximumBatches: 8,
-    remainingSources: 12,
-  }), false);
-  assert.equal(sourceBatchPrefetchAllowed({
     sourceBlocked: false,
     deadlineReached: false,
     completedBatches: 1,

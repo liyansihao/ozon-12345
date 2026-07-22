@@ -1915,14 +1915,13 @@ export function shouldYieldForSourceFeedback({ completedBatches, maximumBatches,
 }
 
 export function sourceBatchPrefetchAllowed({
-  enabled = true,
   sourceBlocked,
   deadlineReached,
   completedBatches,
   maximumBatches,
   remainingSources,
 }) {
-  if (!enabled || sourceBlocked || deadlineReached || !(Number(remainingSources) > 0)) return false;
+  if (sourceBlocked || deadlineReached || !(Number(remainingSources) > 0)) return false;
   return !(Number(maximumBatches) > 0 && Number(completedBatches) >= Number(maximumBatches));
 }
 
@@ -3292,7 +3291,6 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         }
       }
       if (sourceBatchPrefetchAllowed({
-        enabled: env.FLOW_B_SOURCE_PREFETCH !== "0",
         sourceBlocked: sourceCooldown.blocked,
         deadlineReached: isCollectionDeadlineReached(env),
         completedBatches: completedSourceBatches,
