@@ -25,6 +25,7 @@ import {
   prioritizeSourceUrls,
   interleaveStrictSuccessExploration,
   interleaveSourcePortfolio,
+  sourcePortfolioTier,
   appendFavoriteEvidence,
   parseFavoriteProductSnapshot,
   parseListingFavoriteSnapshot,
@@ -289,6 +290,27 @@ test("source portfolio schedules strict, pure-FBS, and exploration sources at 70
     explore[0],
   ]);
   assert.deepEqual(new Set(ordered), new Set([...strict, ...pureFbs, ...explore]));
+});
+
+test("downstream 1688 failures replace earlier favorite evidence in source portfolio tiers", () => {
+  const source = "https://www.ozon.ru/seller/downstream-dry/";
+  const rows = Array.from({ length: 4 }, (_, index) => [
+    {
+      at: `2026-07-22T10:00:0${index}.000Z`,
+      source_url: source,
+      sku: `dry-${index}`,
+      status: "favorited",
+    },
+    {
+      at: `2026-07-22T10:01:0${index}.000Z`,
+      source_url: source,
+      sku: `dry-${index}`,
+      status: "skipped",
+      reason: "1688-no-reliable-match",
+    },
+  ]).flat();
+
+  assert.equal(sourcePortfolioTier(source, rows), "explore");
 });
 
 test("source sample history restores only the dry tail after the latest favorite", () => {

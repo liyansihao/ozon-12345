@@ -1586,7 +1586,7 @@ function sourcePortfolioIndex(rows = []) {
         strictSkus.add(sku);
         strictSkusByKey.set(key, strictSkus);
       }
-      if (!["favorited", "rejected", "failed"].includes(status)) continue;
+      if (!["favorited", "submitted", "published", "rejected", "skipped", "failed"].includes(status)) continue;
       const collection = collectionByKey.get(key) || new Map();
       const time = Date.parse(row?.at || row?.timestamp || "") || 0;
       const previous = collection.get(sku);
@@ -1604,7 +1604,8 @@ function sourcePortfolioTierFromIndex(url, index) {
   if ((index.strictSkusByKey.get(key)?.size || 0) > 0) return "strict";
   const collection = index.collectionByKey.get(key) || new Map();
   const attempted = collection.size;
-  const pureFbs = [...collection.values()].filter((event) => event.status === "favorited").length;
+  const pureFbs = [...collection.values()]
+    .filter((event) => ["favorited", "submitted", "published"].includes(event.status)).length;
   if (canonicalSellerUrl(url) && pureFbs >= 2) return "fbs";
   if (attempted >= 4 && pureFbs >= 2 && pureFbs / attempted >= 0.3) return "fbs";
   return "explore";

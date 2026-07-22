@@ -132,3 +132,26 @@ Round-3 variable: the Ozon candidate-detail request safety floor only. The prefl
 - Rollback: revert the round-3 commit and restore the launcher interval to 4,000 ms.
 
 The next real sample must begin only after the current profile's captcha is cleared again. It must preserve `FLOW_B_VERIFY_LISTING_FBS_DETAIL=1`, seed the three v78 pending submissions, and compare captcha/soft-block incidence, candidate supply, submissions, and strict confirmations against v78.
+
+## v79 round-3 real sample and optimization round 4
+
+Observed run: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_191245_ozon10m_sample_v79`, with the exact measurement window `2026-07-22T11:19:45.447Z` through `2026-07-22T11:29:45.447Z`. One additional submission during graceful shutdown after the exact window is preserved in durable state but excluded from all v79 sample rates.
+
+- Round 3 removed the Ozon access constraint in this window: 41 candidate-detail outcomes covered 41 unique SKUs, 19 were favorited, 22 were rejected, and captcha/soft-block events were 0. Candidate supply was 114 favorites/hour versus v78's 24/hour.
+- Exactly 17 unique favorited candidates reached downstream processing. Ozon detail/category P50/P95 was 173/198 ms; profit upper-bound 187/228 ms; 1688 1,531/6,808 ms with zero timed-stage failures; exact profit 189/217 ms; ERP submit 419/587 ms with zero submit failures.
+- Four unique SKUs were accepted inside the exact window at profit rates 37.24%, 134.38%, 32.55%, and 30.45%. Strict final count at the window end was 0 because all four were still pending; duplicate count and runtime-error count were both 0.
+- Downstream attrition was 10 `1688-no-reliable-match` skips and 3 profit-rate `<=30` skips. Even assuming instant perfect final confirmation, four submissions per ten minutes is only 24/hour and therefore cannot reach the target.
+- The previous three pending v78 submissions were reconciled without duplicate submission and triggered the verified store-stall rotation from store 106637 to 106640. This confirms preserved pending state and automatic rotation behavior; it does not count as v79 strict success.
+
+The unique hard-cap bottleneck after v79 is now **1688/source-quality conversion**, not Ozon detail capacity: 10 of 17 processed candidates (58.8%) had no reliable 1688 match. The reliability rule itself remains unchanged. Source-level replay revealed a ranking-state bug: sources with later downstream failures remained in the two-share `fbs` portfolio because `sourcePortfolioIndex` ignored `skipped` outcomes and retained the earlier favorite event for the same SKU. In v79, `chestnost-2336398` produced 3/3 1688 no-match outcomes and `han007` produced no submissions from two attempts, yet both still received the `fbs` tier.
+
+Round-4 variable: source portfolio tier state merging only.
+
+- Baseline/target: v79 selected 4/10 minutes (24/hour), with 10/17 removed by 1688 reliability. Make each SKU's later downstream result replace its earlier favorite when assigning portfolio shares so downstream-dry sources yield capacity to productive or unexplored supply. Target at least 5 selections in the next exact ten-minute sample without changing matching, profit, detail pacing, quotas, or final truth.
+- Regression-before-code: four SKUs each recorded as `favorited` and later `skipped: 1688-no-reliable-match` incorrectly returned the `fbs` tier instead of `explore`.
+- Minimal change: the existing portfolio index now considers downstream `submitted`, `published`, and `skipped` statuses in its latest-per-SKU merge; `favorited`, `submitted`, and `published` remain productive evidence. No stored schema changes are required.
+- Replay result: v79's downstream-dry seller families are reclassified from `fbs` to `explore`; strict publication remains the highest tier and submitted evidence remains productive.
+- Tests: focused regression passed, complete source-scanner suite 174/174, full Node tests 425/425, Python tests 8/8.
+- Rollback: revert the round-4 commit. Historical source evidence, candidate state, successful-SKU state, and browser profile are untouched.
+
+Round 4 requires a fresh 5–10 minute real sample with the same 15,000 ms detail floor. Its primary comparison is selected/hour and 1688 no-match conversion; pending final confirmations must still be reconciled and reported but cannot substitute for new in-window throughput.
