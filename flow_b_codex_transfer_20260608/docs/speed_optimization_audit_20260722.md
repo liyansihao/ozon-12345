@@ -175,3 +175,13 @@ Round 4 did not improve the primary metric (24 selected/hour in v79 versus 6/hou
 - Regression-before-code: a seller with older publications and a latest 3/12 productive tail still ranked ahead of untried verified supply. The first threshold-only implementation also failed the existing repeated-submission regression, so the rule was narrowed to exempt at least two recent strict outcomes.
 - Result in tests: the new 3/12 regression, the existing repeated-submission regression, and the complete 174-test source-scanner suite pass. The v79+v80 evidence replay now ranks untried supply ahead of `fluff-joy`.
 - This changes no FBS verification, 1688 reliability, profit threshold, submission/final truth, quota, dedupe, or persisted-state format.
+
+## v81/v82 platform-cooldown diagnostics
+
+Round 5 could not yet be measured under healthy Ozon access. Both exact ten-minute windows used the same committed code and 15,000 ms detail floor.
+
+- v81: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_200100_ozon10m_sample_v81`, `2026-07-22T12:03:03.223Z`–`12:13:03.223Z`. The first candidate was favorited and selected at 52.28% profit; the next three permitted probes at the initial, 60-second, and 3-minute recovery points were all Ozon soft blocks. One inherited pending SKU became strict; duplicate and runtime-error counts were 0.
+- A post-window read-only diagnostic of the last blocked SKU returned HTTP 200, its normal product title, and a product image rather than `Antibot Captcha`. No human verification was required.
+- v82: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_201600_ozon10m_sample_v82`, `2026-07-22T12:17:49.339Z`–`12:27:49.339Z`. The first detail was an explicit non-pure-FBS rejection; the next three recovery probes were again soft blocked. No new selection occurred; the v81 pending SKU became strict at 52.28% profit; duplicate and runtime-error counts were 0.
+
+These runs validate bounded cooldown and state recovery but not round-5 source performance. Starting another supervisor immediately would extend the observed platform cooldown, so the next measurement must begin only after a quiet interval and a normal read-only detail check. No code or business threshold is changed in response to this external access state.
