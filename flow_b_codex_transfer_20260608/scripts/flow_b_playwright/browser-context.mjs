@@ -40,13 +40,25 @@ export function resolveBrowserOptions(env = process.env, defaultExecutable = chr
 
   const executablePath = String(env.FLOW_B_CHROMIUM_EXECUTABLE || defaultExecutable || "").trim();
   if (!executablePath) throw new Error("Chrome for Testing executable path is required");
+  const cdpEndpoint = String(env.FLOW_B_CDP_ENDPOINT || "").trim();
   const diskCacheSize = positiveInteger(env.FLOW_B_DISK_CACHE_SIZE_BYTES, 100 * 1024 * 1024);
   const mediaCacheSize = positiveInteger(env.FLOW_B_MEDIA_CACHE_SIZE_BYTES, 50 * 1024 * 1024);
+  const args = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    `--disk-cache-size=${diskCacheSize}`,
+    `--media-cache-size=${mediaCacheSize}`,
+    `--disable-extensions-except=${extensionDir}`,
+    `--load-extension=${extensionDir}`,
+  ];
+  if (String(env.FLOW_B_NO_PROXY_SERVER || "").trim() === "1") args.push("--no-proxy-server");
 
   return {
     profileDir,
     extensionDir,
     executablePath,
+    cdpEndpoint: cdpEndpoint || null,
     headless: false,
     viewport: null,
     // Playwright otherwise consumes process signals, closes Chromium, and
@@ -55,15 +67,7 @@ export function resolveBrowserOptions(env = process.env, defaultExecutable = chr
     handleSIGINT: false,
     handleSIGTERM: false,
     handleSIGHUP: false,
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--no-first-run",
-      "--no-default-browser-check",
-      `--disk-cache-size=${diskCacheSize}`,
-      `--media-cache-size=${mediaCacheSize}`,
-      `--disable-extensions-except=${extensionDir}`,
-      `--load-extension=${extensionDir}`,
-    ],
+    args,
     ignoreDefaultArgs: ["--disable-extensions"],
     pluginTimeout: Number(env.FLOW_B_PLUGIN_TIMEOUT_MS) || 15000,
   };
@@ -94,21 +98,34 @@ export async function assertPluginLoaded(context, { timeout = 15000, interval = 
   throw new Error("Maozi extension did not load in Chrome for Testing");
 }
 
-export async function launchFlowContext(options) {
+export async function launchFlowContext(options, browserType = chromium) {
   const {
     profileDir,
     extensionDir: _extensionDir,
     pluginTimeout = 15000,
+    cdpEndpoint,
     ...launchOptions
   } = options;
   await fsp.mkdir(profileDir, { recursive: true });
   let context;
+  let browser;
   try {
-    context = await chromium.launchPersistentContext(profileDir, launchOptions);
+    if (cdpEndpoint) {
+      browser = await browserType.connectOverCDP(cdpEndpoint);
+      context = browser.contexts()[0];
+      if (!context) throw new Error(`CDP browser has no default context: ${cdpEndpoint}`);
+      Object.defineProperty(context, "close", {
+        configurable: true,
+        value: browser.close.bind(browser),
+      });
+    } else {
+      context = await browserType.launchPersistentContext(profileDir, launchOptions);
+    }
     await assertPluginLoaded(context, { timeout: pluginTimeout });
     return context;
   } catch (error) {
-    await context?.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
+    else await context?.close().catch(() => {});
     throw error;
   }
 }

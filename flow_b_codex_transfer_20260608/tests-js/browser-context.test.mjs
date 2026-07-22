@@ -10,6 +10,7 @@ import {
   assertPluginLoaded,
   ensureMaoziLogin,
   ensureMaoziPluginLogin,
+  launchFlowContext,
   openMaoziPage,
   resolveBrowserOptions,
 } from "../scripts/flow_b_playwright/browser-context.mjs";
@@ -53,6 +54,59 @@ test("browser cache limits accept explicit positive byte overrides", async () =>
 
   assert.ok(options.args.includes("--disk-cache-size=67108864"));
   assert.ok(options.args.includes("--media-cache-size=33554432"));
+});
+
+test("browser options can bypass a broken macOS system proxy explicitly", async () => {
+  const extensionDir = await extensionFixture();
+  const directOptions = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: "/tmp/profile",
+    FLOW_B_EXTENSION_DIR: extensionDir,
+    FLOW_B_NO_PROXY_SERVER: "1",
+  }, "/tmp/cft");
+  const defaultOptions = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: "/tmp/profile",
+    FLOW_B_EXTENSION_DIR: extensionDir,
+  }, "/tmp/cft");
+
+  assert.ok(directOptions.args.includes("--no-proxy-server"));
+  assert.equal(defaultOptions.args.includes("--no-proxy-server"), false);
+});
+
+test("browser context can attach to a normally launched CDP browser and owns its shutdown", async () => {
+  const extensionDir = await extensionFixture();
+  let endpoint = null;
+  let persistentLaunches = 0;
+  let browserCloses = 0;
+  let contextCloses = 0;
+  const context = {
+    serviceWorkers: () => [{ url: () => "chrome-extension://fixture/background.js" }],
+    backgroundPages: () => [],
+    pages: () => [],
+    close: async () => { contextCloses += 1; },
+  };
+  const browserType = {
+    connectOverCDP: async (value) => {
+      endpoint = value;
+      return {
+        contexts: () => [context],
+        close: async () => { browserCloses += 1; },
+      };
+    },
+    launchPersistentContext: async () => { persistentLaunches += 1; },
+  };
+  const options = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: "/tmp/profile",
+    FLOW_B_EXTENSION_DIR: extensionDir,
+    FLOW_B_CDP_ENDPOINT: "http://127.0.0.1:9223",
+  }, "/tmp/cft");
+
+  const attached = await launchFlowContext(options, browserType);
+  assert.equal(attached, context);
+  assert.equal(endpoint, "http://127.0.0.1:9223");
+  assert.equal(persistentLaunches, 0);
+  await attached.close();
+  assert.equal(browserCloses, 1);
+  assert.equal(contextCloses, 0);
 });
 
 test("empty extension token is repaired through the plugin's own login button", async () => {
