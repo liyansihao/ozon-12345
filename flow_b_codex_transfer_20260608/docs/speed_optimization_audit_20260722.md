@@ -112,3 +112,23 @@ Observed run: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_2026060
 - A separate read-only CDP diagnostic against the same profile and a failed SKU returned HTTP 403, title `Antibot Captcha`, and the visible instruction `请拖动滑块，将拼图移入轮廓中。请确认您不是机器人。` Evidence is stored as `ozon_block_diagnostic.json` and `ozon_block_diagnostic.png` inside the v77 run.
 
 This is an explicit human-verification pause under the execution rules, not a reason to weaken the cooldown or bypass platform controls. After the slider is completed in the automation profile, first verify a normal Ozon detail response, then start a new 5–10 minute sample with the same committed code and preserved v75/v76 pending state.
+
+## v78 post-verification sample and optimization round 3
+
+After the user completed the slider, two independent product details returned HTTP 200 with product metadata and no captcha. Observed run: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_185324_ozon10m_sample_v78`, continuously from `2026-07-22T10:54:12.114Z` through the planned ten-minute stop.
+
+- The restored profile produced 4 favorited candidates from 8 candidate-detail attempts. One candidate was correctly rejected downstream at 3.8% profit; three were accepted by ERP at profit rates 70.06%, 124.53%, and 36.44%.
+- At the stop, all three submissions remained strict-unconfirmed `import_pending`; final strict count was 0, selected count 3, duplicate count 0, and runtime-error count 0. Successful online-sync requests occurred at 18:55, 18:58, 19:01, and 19:04 local time, but pending state did not become `selling` within the sample.
+- Candidate-detail calls were initially spaced at the configured four-second floor. The first soft block arrived after eight attempts in about 28 seconds; the next two probes escalated through the persisted 60-second, 180-second, and ten-minute cooldowns. A post-run read-only diagnostic of the last failed SKU returned HTTP 403 `Antibot Captcha`, proving that the slider challenge recurred under the current request rate.
+- Candidate supply was 4 favorited candidates per ten minutes, or 24/hour, still below the required 30/hour even before downstream loss. Repeated manual captcha solving cannot form a stable acceptance window.
+
+Round-3 variable: the Ozon candidate-detail request safety floor only. The preflight already permits intervals above 4,000 ms, but the low-token controller previously overwrote every operator-configured slower baseline with exactly 4,000 ms whenever it entered cooldown, balanced, exploit, or source-bias mode.
+
+- Baseline: about eight detail attempts in 28 seconds caused a recurring 403 captcha and capped supply at 24 favorited/hour.
+- Hypothesis/target: use a 15,000 ms operator baseline for the next sample and ensure adaptive profiles never lower it. This still permits up to 120 detail attempts per 30 minutes; v78's 50% favorite yield and 75% favorite-to-submit yield leave sufficient theoretical capacity without relaxing FBS detail verification.
+- Regression-before-code: the new focused test requested a 15,000 ms safety floor and failed because both intervention overrides returned 4,000 ms.
+- Minimal change: derive the controller's safe detail interval from its captured operator baseline, bounded below by the existing 4,000 ms rule. No FBS verification, retry, cooldown duration, profit, dedupe, store, submission, or final-confirmation rule changes.
+- Result: focused regression passed, low-token tests 11/11, full Node tests 424/424, Python tests 8/8, and `git diff --check` passed.
+- Rollback: revert the round-3 commit and restore the launcher interval to 4,000 ms.
+
+The next real sample must begin only after the current profile's captcha is cleared again. It must preserve `FLOW_B_VERIFY_LISTING_FBS_DETAIL=1`, seed the three v78 pending submissions, and compare captcha/soft-block incidence, candidate supply, submissions, and strict confirmations against v78.

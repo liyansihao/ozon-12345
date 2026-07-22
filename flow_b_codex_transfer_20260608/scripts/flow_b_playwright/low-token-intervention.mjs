@@ -16,11 +16,18 @@ const CONTROLLED_KEYS = [
   "FLOW_B_SOURCE_EXPLORE_WEIGHT",
 ];
 
-const SAFE_BASE = {
-  FLOW_B_FAVORITE_DETAIL_INTERVAL_MS: "4000",
-  FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS: "4000",
-  FLOW_B_STRICT_EXPLOIT_BURST: "12",
-};
+function safeBaseOverrides({ favoriteDetailIntervalMs = 4_000, favoriteDetailMinIntervalMs = 4_000 } = {}) {
+  const detailIntervalFloor = Math.max(
+    4_000,
+    Number(favoriteDetailIntervalMs) || 0,
+    Number(favoriteDetailMinIntervalMs) || 0,
+  );
+  return {
+    FLOW_B_FAVORITE_DETAIL_INTERVAL_MS: String(detailIntervalFloor),
+    FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS: String(detailIntervalFloor),
+    FLOW_B_STRICT_EXPLOIT_BURST: "12",
+  };
+}
 
 const SOURCE_PORTFOLIO_WINDOW_MS = 30 * 60_000;
 const SOURCE_BIAS_MIN_DWELL_MS = 20 * 60_000;
@@ -32,7 +39,8 @@ export function chooseLowTokenIntervention({
   softBlocks = 0,
   strictPerHour = 0,
   sourceTypes = {},
-} = {}) {
+} = {}, safety = {}) {
+  const safeBase = safeBaseOverrides(safety);
   const attempts = Math.max(0, Number(collectionAttempts) || 0);
   const pureFbsYield = attempts > 0 ? Math.max(0, Number(favorites) || 0) / attempts : 0;
   if (Number(softBlocks) > 0) {
@@ -43,7 +51,7 @@ export function chooseLowTokenIntervention({
         FLOW_B_TAB_WORKERS: "3",
         FLOW_B_MAX_TAB_WORKERS: "4",
         FLOW_B_FAVORITE_WORKERS: "3",
-        ...SAFE_BASE,
+        ...safeBase,
       },
     };
   }
@@ -81,7 +89,7 @@ export function chooseLowTokenIntervention({
         FLOW_B_TAB_WORKERS: "4",
         FLOW_B_MAX_TAB_WORKERS: "4",
         FLOW_B_FAVORITE_WORKERS: "4",
-        ...SAFE_BASE,
+        ...safeBase,
         FLOW_B_DERIVED_SEARCH_SOURCES: "100",
         FLOW_B_DERIVED_PRIORITY_SOURCES: "24",
         FLOW_B_PRIORITIZE_DERIVED_SEARCH: "1",
@@ -100,7 +108,7 @@ export function chooseLowTokenIntervention({
         FLOW_B_TAB_WORKERS: "4",
         FLOW_B_MAX_TAB_WORKERS: "4",
         FLOW_B_FAVORITE_WORKERS: "4",
-        ...SAFE_BASE,
+        ...safeBase,
         FLOW_B_DERIVED_SEARCH_SOURCES: "0",
         FLOW_B_DERIVED_PRIORITY_SOURCES: "0",
         FLOW_B_PRIORITIZE_DERIVED_SEARCH: "0",
@@ -118,7 +126,7 @@ export function chooseLowTokenIntervention({
         FLOW_B_TAB_WORKERS: "3",
         FLOW_B_MAX_TAB_WORKERS: "4",
         FLOW_B_FAVORITE_WORKERS: "3",
-        ...SAFE_BASE,
+        ...safeBase,
         FLOW_B_DERIVED_SEARCH_SOURCES: "100",
       },
     };
@@ -130,7 +138,7 @@ export function chooseLowTokenIntervention({
       FLOW_B_TAB_WORKERS: "4",
       FLOW_B_MAX_TAB_WORKERS: "4",
       FLOW_B_FAVORITE_WORKERS: "4",
-      ...SAFE_BASE,
+        ...safeBase,
     },
   };
 }
@@ -227,7 +235,10 @@ export function createLowTokenInterventionController({
       if (env.FLOW_B_LOW_TOKEN_INTERVENTION !== "1") return { profile: "disabled", reason: "not-enabled", overrides: {} };
       const currentTime = now();
       const metrics = await recentMetrics(root, currentTime);
-      const measuredDecision = chooseLowTokenIntervention(metrics);
+      const measuredDecision = chooseLowTokenIntervention(metrics, {
+        favoriteDetailIntervalMs: baseline.FLOW_B_FAVORITE_DETAIL_INTERVAL_MS,
+        favoriteDetailMinIntervalMs: baseline.FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS,
+      });
       const sourceBiasDwellRemaining = lastDecision
         && SOURCE_BIAS_PROFILES.has(lastDecision.profile)
         && measuredDecision.profile !== lastDecision.profile

@@ -26,6 +26,19 @@ test("low token intervention protects an Ozon soft-block recovery window", () =>
   });
 });
 
+test("low token intervention never lowers an operator-configured detail safety floor", () => {
+  const decision = chooseLowTokenIntervention({
+    collectionAttempts: 80,
+    favorites: 12,
+    softBlocks: 2,
+    strictPerHour: 8,
+  }, { favoriteDetailIntervalMs: 15_000 });
+
+  assert.equal(decision.profile, "cooldown");
+  assert.equal(decision.overrides.FLOW_B_FAVORITE_DETAIL_INTERVAL_MS, "15000");
+  assert.equal(decision.overrides.FLOW_B_MIN_FAVORITE_DETAIL_INTERVAL_MS, "15000");
+});
+
 test("low token intervention exploits strict sources when pure-FBS yield is poor", () => {
   const result = chooseLowTokenIntervention({
     collectionAttempts: 60,
