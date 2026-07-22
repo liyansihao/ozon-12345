@@ -155,3 +155,14 @@ Round-4 variable: source portfolio tier state merging only.
 - Rollback: revert the round-4 commit. Historical source evidence, candidate state, successful-SKU state, and browser profile are untouched.
 
 Round 4 requires a fresh 5–10 minute real sample with the same 15,000 ms detail floor. Its primary comparison is selected/hour and 1688 no-match conversion; pending final confirmations must still be reconciled and reported but cannot substitute for new in-window throughput.
+
+## v80 round-4 real sample and rollback
+
+Observed run: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_194000_ozon10m_sample_v80`, exact window `2026-07-22T11:42:32.217Z` through `2026-07-22T11:52:32.217Z`.
+
+- New in-window result: 1 selected SKU, 6/hour, profit rate 58.51%, duplicate 0. Three inherited pending SKUs reached strict `selling` with stock `>0` at startup; they prove recovery but are not counted as new-supply improvement.
+- Collection: 15 unique outcomes, 8 favorited and 7 explicit non-pure-FBS rejects, with no captcha/soft block and no runtime error. Downstream: 4 1688 no-match skips, 2 profit `<=30` skips, 1 health deferral, and 1 ERP/Ozon terminal rejection.
+- Timings remained healthy: Ozon detail/category P50/P95 158/2,761 ms, 1688 787/2,748 ms, exact profit 201/245 ms, and submit 721/721 ms; no timed-stage failures were recorded.
+- Candidate production stopped adding outcomes after minute 4.4. Fifteen latest seller-family outcomes for `fluff-joy` contained only 3 productive results (2 unprocessed favorites plus 1 submission), a 20% rate, but the source still retained high priority and consumed the early source batches.
+
+Round 4 did not improve the primary metric (24 selected/hour in v79 versus 6/hour in v80). Its source-portfolio state merge is therefore removed before any further optimization; the audit evidence remains. Rollback restores the exact round-3 code behavior without modifying runtime histories or pending state.
