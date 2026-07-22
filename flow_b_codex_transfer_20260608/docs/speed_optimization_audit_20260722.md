@@ -100,3 +100,15 @@ The source scanner emits two distinct access-block errors: `Ozon detail soft blo
 - Rollback: revert the round-2 commit; no persisted-state format changes and no historical runtime evidence is modified.
 
 Round 2 still requires a fresh 5–10 minute real sample. Its success criterion is a material reduction in repeated blocked-detail failures and recovery of favorited-candidate supply; strict final speed will be reported but cannot be substituted by a short-window projection.
+
+## v77 round-2 real sample
+
+Observed run: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_165649_ozon10m_sample_v77`, continuously from `2026-07-22T08:58:59.621Z` until the planned sample stop at `2026-07-22T09:09:27Z`.
+
+- Strict final result: 0 confirmed, 0 selected, duplicate 0, runtime errors 0. This diagnostic sample does not qualify as a formal 30-minute acceptance window.
+- The exact block classifier and persisted cooldown worked: only three detail-block events occurred across the sample. The first two raised the detail interval from 4,000 to 6,000 ms and set a three-minute gate; the next probe remained blocked and raised the gate to the ten-minute safety ceiling.
+- By comparison, v76 recorded 66 failed candidate-detail events in its first ten minutes (11 in minutes 0–5 and 55 in minutes 5–10). Round 2 therefore reduced repeated blocked-detail calls from 66 to 3 without a browser disconnect, supervisor restart, or loss of the durable candidate queue.
+- Candidate listing discovery continued, but the current browser profile produced no favorited candidates because every permitted Ozon detail probe remained blocked. The unique active bottleneck remains Ozon detail access, now correctly bounded rather than hammered.
+- A separate read-only CDP diagnostic against the same profile and a failed SKU returned HTTP 403, title `Antibot Captcha`, and the visible instruction `请拖动滑块，将拼图移入轮廓中。请确认您不是机器人。` Evidence is stored as `ozon_block_diagnostic.json` and `ozon_block_diagnostic.png` inside the v77 run.
+
+This is an explicit human-verification pause under the execution rules, not a reason to weaken the cooldown or bypass platform controls. After the slider is completed in the automation profile, first verify a normal Ozon detail response, then start a new 5–10 minute sample with the same committed code and preserved v75/v76 pending state.
