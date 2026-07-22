@@ -2202,6 +2202,11 @@ test("Ozon no-connection incident pages are retried with a longer cooldown", () 
     retry: false,
     delay: 600_000,
   });
+  assert.deepEqual(ozonDetailFailurePolicy(new Error("Ozon detail is blocked: https://www.ozon.ru/product/42"), 0, 0), {
+    softBlocked: true,
+    retry: false,
+    delay: 600_000,
+  });
 });
 
 test("concurrent pages coalesce one Ozon incident instead of escalating to 180 seconds", () => {

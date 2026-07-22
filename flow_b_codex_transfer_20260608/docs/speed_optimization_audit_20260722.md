@@ -79,3 +79,24 @@ The first safe code cleanup is the unused constant. The first correctness/perfor
 - Static post-change size is 31 production files / 11,442 lines and 27 test files / 9,924 lines. The actual cleanup is one deleted production line; the net increase comes from the narrowly scoped deterministic-error classifier and its regression test, not a new compatibility layer.
 
 The real effect on final-confirmation speed is not inferred from unit tests. It must be measured in a fresh 5–10 minute sample against v75, while also checking whether the now-recovered browser restores candidate-detail conversion.
+
+## v76 real sample and optimization round 2
+
+Observed run: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_155830_ozon10m_sample_v76`. The intended ten-minute sample remained continuous for 2,811 seconds before it was safely stopped; it is diagnostic evidence only and is not counted as the formal 30-minute acceptance window.
+
+- Final strict result: 4 unique `selling` SKUs with stock `>0`, 5.12/hour, duplicate 0, minimum profit rate 34.84%; 5 unique SKUs were selected.
+- Candidate discovery: 395 unique SKUs. Candidate-detail collection attempted 352 unique SKUs in 621 events but favorited only 27.
+- Candidate-detail failures: 537 events whose actual exception text was `Ozon detail is blocked: <URL>`. Favorite production collapsed from 25 in minutes 0–5 to zero in most later five-minute buckets.
+- Post-collection stage timing was not the supply constraint: Ozon detail/category P50/P95 176/2,113 ms, 1688 P50/P95 1,372/6,472 ms, and ERP submit P50/P95 395/490 ms.
+- The round-1 deterministic logistics repair behaved as intended: the affected SKU failed once and became a terminal `missing-shipping-mode` skip rather than being retried hundreds of times.
+- Runtime incidents remained zero for 401, 403, page crash, browser disconnect, worker timeout, and runtime-error records. Final-sync throttling remained visible (29 failures in 44 attempts due to the platform's three-minute interval), but only five SKUs reached submission because candidate supply collapsed first.
+
+The source scanner emits two distinct access-block errors: `Ozon detail soft blocked` for incident pages and `Ozon detail is blocked` for access-denied/captcha pages. Before round 2, `ozonDetailFailurePolicy` recognized only the former. Consequently the 537 exact access-block failures did not activate the persisted global detail cooldown and the producer continued hammering blocked detail pages.
+
+- Optimization variable: classify the already-emitted exact `Ozon detail is blocked` error as the same soft-block incident in `ozonDetailFailurePolicy`; no pacing duration, concurrency, retry count, business rule, or statistic is changed.
+- Baseline/target: reduce hundreds of repeated blocked-detail calls after the first incident to a bounded probe/cooldown sequence, preserve browser ownership, and restore usable candidate supply once access recovers.
+- Regression-before-code: the focused policy assertion failed because it returned `softBlocked: false` and zero delay for the exact production error.
+- Result after the one-line classifier change: the focused assertion and the complete source-scanner suite passed; full Node tests 423/423, Python tests 8/8, and `git diff --check` passed.
+- Rollback: revert the round-2 commit; no persisted-state format changes and no historical runtime evidence is modified.
+
+Round 2 still requires a fresh 5–10 minute real sample. Its success criterion is a material reduction in repeated blocked-detail failures and recovery of favorited-candidate supply; strict final speed will be reported but cannot be substituted by a short-window projection.

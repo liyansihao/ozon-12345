@@ -781,7 +781,7 @@ export function sourceBatchCooldownState(rows, state, now = Date.now()) {
 
 export function ozonDetailFailurePolicy(error, attempt, retries) {
   const message = String(error?.message || error || "");
-  const softBlocked = /Ozon detail soft blocked|net::ERR_(?:FAILED|CONNECTION_RESET|CONNECTION_CLOSED|TIMED_OUT).*ozon\.ru/i.test(message);
+  const softBlocked = /Ozon detail (?:soft blocked|is blocked)|net::ERR_(?:FAILED|CONNECTION_RESET|CONNECTION_CLOSED|TIMED_OUT).*ozon\.ru/i.test(message);
   return {
     softBlocked,
     retry: softBlocked && Number(attempt) < Number(retries),
