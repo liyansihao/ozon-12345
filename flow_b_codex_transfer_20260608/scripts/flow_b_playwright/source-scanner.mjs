@@ -1718,6 +1718,7 @@ function recentSellerFamilyPenalties(rows) {
     if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
       outcomes.set(sku, {
         productive: status === "favorited" || status === "submitted" || status === "published",
+        strict: status === "submitted" || status === "published",
         time,
         order,
       });
@@ -1729,9 +1730,10 @@ function recentSellerFamilyPenalties(rows) {
       .sort((left, right) => right.time - left.time || right.order - left.order)
       .slice(0, 12);
     if (recent.length < 12) return [];
+    if (recent.filter((outcome) => outcome.strict).length >= 2) return [];
     const productiveRate = recent.filter((outcome) => outcome.productive).length / recent.length;
     if (productiveRate === 0) return [[key, -600_000]];
-    return productiveRate < 0.1 ? [[key, -300_000]] : [];
+    return productiveRate < 0.3 ? [[key, -300_000]] : [];
   }));
 }
 

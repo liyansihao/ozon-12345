@@ -1195,6 +1195,31 @@ test("a recent twelve-SKU dry tail overrides older seller wins", () => {
   }), [untried, staleWinner]);
 });
 
+test("a seller below thirty percent recent full-funnel yield gives way to untried supply", () => {
+  const overcommitted = "https://www.ozon.ru/seller/overcommitted/";
+  const untried = "https://www.ozon.ru/seller/untried/";
+  const rows = [
+    ...Array.from({ length: 8 }, (_, index) => ({
+      at: `2026-07-15T00:0${index}:00Z`,
+      source_url: overcommitted,
+      sku: `old-published-${index}`,
+      status: "published",
+    })),
+    ...Array.from({ length: 12 }, (_, index) => ({
+      at: `2026-07-16T00:${String(index).padStart(2, "0")}:00Z`,
+      source_url: overcommitted,
+      sku: `recent-${index}`,
+      status: index < 2 ? "favorited" : index === 2 ? "submitted" : "rejected",
+      reason: index > 2 ? "non-pure-fbs" : null,
+    })),
+  ];
+
+  assert.deepEqual(prioritizeSourceUrls([overcommitted, untried], {
+    yieldRows: rows,
+    verifiedFreshSourceUrls: [overcommitted, untried],
+  }), [untried, overcommitted]);
+});
+
 test("a dry verified seller yields its fixed tier to productive Global discovery", () => {
   const staleSeller = "https://www.ozon.ru/seller/stale-verified/";
   const toySearch = "https://www.ozon.ru/search/?text=%D0%B4%D0%B5%D1%82%D1%81%D0%BA%D0%B0%D1%8F+%D0%B8%D0%B3%D1%80%D1%83%D1%88%D0%BA%D0%B0&is_global=true";

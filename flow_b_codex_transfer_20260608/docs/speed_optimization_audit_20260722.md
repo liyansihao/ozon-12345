@@ -166,3 +166,12 @@ Observed run: `/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_2026060
 - Candidate production stopped adding outcomes after minute 4.4. Fifteen latest seller-family outcomes for `fluff-joy` contained only 3 productive results (2 unprocessed favorites plus 1 submission), a 20% rate, but the source still retained high priority and consumed the early source batches.
 
 Round 4 did not improve the primary metric (24 selected/hour in v79 versus 6/hour in v80). Its source-portfolio state merge is therefore removed before any further optimization; the audit evidence remains. Rollback restores the exact round-3 code behavior without modifying runtime histories or pending state.
+
+## Optimization round 5
+
+- Unique latest bottleneck: seller-family overcommit. The v80 source family supplied 15 latest unique outcomes but only 3 productive results (20%), while candidate production stopped after minute 4.4. It remained ahead of untried supply because the existing seller-family dry-tail penalty activated only below 10%.
+- Variable: the existing 12-outcome seller-family minimum productive rate only, from 10% to 30%. Two or more recent strict submissions/publications explicitly exempt the seller, preserving the validated repeated-success signal; fewer than 12 outcomes remain untouched.
+- Baseline/target: v80 selected 1/10 minutes and produced only 8 favorites. Demote the measured 20% seller family before it consumes another tranche; restore at least v79's 19 favorites and reach at least 5 selections in the next exact ten-minute sample.
+- Regression-before-code: a seller with older publications and a latest 3/12 productive tail still ranked ahead of untried verified supply. The first threshold-only implementation also failed the existing repeated-submission regression, so the rule was narrowed to exempt at least two recent strict outcomes.
+- Result in tests: the new 3/12 regression, the existing repeated-submission regression, and the complete 174-test source-scanner suite pass. The v79+v80 evidence replay now ranks untried supply ahead of `fluff-joy`.
+- This changes no FBS verification, 1688 reliability, profit threshold, submission/final truth, quota, dedupe, or persisted-state format.
