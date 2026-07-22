@@ -2775,6 +2775,44 @@ test("runner falls back to the exact profit path when the optimistic precheck fa
   assert.equal(costCalls, 1);
 });
 
+test("runner terminally skips a deterministic missing-logistics profit error instead of retrying it every round", async () => {
+  const state = fakeState();
+  let profitCalls = 0;
+  let costCalls = 0;
+  let favoriteDeletes = 0;
+  const client = clientFor([{ id: 63, sku: 63 }], {
+    calculateProfit: async () => {
+      profitCalls += 1;
+      throw new Error("Maozi profit calculation request failed: 根据当前售价、重量和尺寸，暂时没有符合的物流方式");
+    },
+    deleteFavorite: async () => { favoriteDeletes += 1; return true; },
+    findImportLog: async () => null,
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: {
+      estimate: async () => {
+        costCalls += 1;
+        return { ok: true, cost: 20 };
+      },
+    },
+    state,
+    target: 1,
+    threshold: 30,
+    runDir: "/tmp/run",
+  });
+
+  await runner.run();
+  await runner.run();
+
+  assert.equal(profitCalls, 2);
+  assert.equal(costCalls, 1);
+  assert.equal(favoriteDeletes, 2);
+  assert.ok(state.transitions.some((event) => event.sku === "63"
+    && event.status === "skipped"
+    && event.data.reason === "missing-shipping-mode"));
+});
+
 test("runner builds the exact one-row payload and stops at target", async () => {
   const state = fakeState();
   const payloads = [];

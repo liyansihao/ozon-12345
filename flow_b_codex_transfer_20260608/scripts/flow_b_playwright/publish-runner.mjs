@@ -34,6 +34,14 @@ export function normalizeCostFailureReason(cost = {}) {
   return "1688-no-reliable-match";
 }
 
+function deterministicProfitFailureReason(error) {
+  const message = String(error?.message || error || "");
+  if (/没有符合的物流方式|no (?:available|matching|suitable) logistics/i.test(message)) {
+    return "missing-shipping-mode";
+  }
+  return null;
+}
+
 function asSku(item) {
   const sku = String(item?.sku ?? item?.id ?? "").trim();
   if (!sku) throw new Error("candidate SKU is required");
@@ -858,6 +866,10 @@ export function createPublishRunner({
       return { status: "published", sku, source_url: item.source_url ?? null, payload, finalResult };
     } catch (error) {
       if (isFatalBrowserError(error)) throw error;
+      const deterministicReason = deterministicProfitFailureReason(error);
+      if (deterministicReason) {
+        return skip(item, deterministicReason, { error: String(error?.message || error) });
+      }
       await state.transition(sku, "failed", { reason: "exception", error: String(error?.message || error) }).catch(() => {});
       return { status: "failed", sku, source_url: item.source_url ?? null, reason: "exception", error };
     }
