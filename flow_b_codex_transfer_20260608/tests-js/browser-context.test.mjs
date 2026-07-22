@@ -17,7 +17,12 @@ import {
 
 async function extensionFixture() {
   const extensionDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-extension-"));
-  await fsp.writeFile(path.join(extensionDir, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "fixture", version: "1.0.0" }));
+  await fsp.writeFile(path.join(extensionDir, "manifest.json"), JSON.stringify({
+    manifest_version: 3,
+    name: "fixture",
+    version: "1.0.0",
+    action: { default_popup: "popup.html" },
+  }));
   return extensionDir;
 }
 
@@ -30,6 +35,7 @@ test("browser options require an unpacked extension and use Chrome for Testing",
 
   assert.equal(options.executablePath, "/tmp/cft");
   assert.equal(options.profileDir, "/tmp/profile");
+  assert.equal(options.extensionPopup, "popup.html");
   assert.deepEqual(options.args.slice(-2), [
     `--disable-extensions-except=${extensionDir}`,
     `--load-extension=${extensionDir}`,
@@ -109,6 +115,83 @@ test("browser context can attach to a normally launched CDP browser and owns its
   assert.equal(contextCloses, 0);
 });
 
+test("CDP attachment wakes an idle registered extension through its popup", async () => {
+  const extensionDir = await extensionFixture();
+  const profileDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-profile-"));
+  await fsp.mkdir(path.join(profileDir, "Default"), { recursive: true });
+  await fsp.writeFile(path.join(profileDir, "Default", "Preferences"), JSON.stringify({
+    extensions: { settings: { abcdefghijklmnop: { path: extensionDir } } },
+  }));
+  let currentUrl = "about:blank";
+  const popup = {
+    url: () => currentUrl,
+    goto: async (url) => { currentUrl = url; },
+    close: async () => {},
+  };
+  const pages = [];
+  const context = {
+    serviceWorkers: () => [],
+    backgroundPages: () => [],
+    pages: () => pages,
+    newPage: async () => {
+      pages.push(popup);
+      return popup;
+    },
+  };
+  const browserType = {
+    connectOverCDP: async () => ({
+      contexts: () => [context],
+      close: async () => {},
+    }),
+  };
+  const options = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: profileDir,
+    FLOW_B_EXTENSION_DIR: extensionDir,
+    FLOW_B_CDP_ENDPOINT: "http://127.0.0.1:9223",
+    FLOW_B_PLUGIN_TIMEOUT_MS: "5",
+  }, "/tmp/cft");
+
+  assert.equal(await launchFlowContext(options, browserType), context);
+  assert.equal(currentUrl, "chrome-extension://abcdefghijklmnop/popup.html");
+});
+
+test("CDP attachment reads unpacked extension registration from Secure Preferences", async () => {
+  const extensionDir = await extensionFixture();
+  const profileDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-secure-profile-"));
+  await fsp.mkdir(path.join(profileDir, "Default"), { recursive: true });
+  await fsp.writeFile(path.join(profileDir, "Default", "Secure Preferences"), JSON.stringify({
+    extensions: { settings: { ponmlkjihgfedcba: { path: extensionDir } } },
+  }));
+  let currentUrl = "about:blank";
+  const popup = {
+    url: () => currentUrl,
+    goto: async (url) => { currentUrl = url; },
+    close: async () => {},
+  };
+  const pages = [];
+  const context = {
+    serviceWorkers: () => [],
+    backgroundPages: () => [],
+    pages: () => pages,
+    newPage: async () => {
+      pages.push(popup);
+      return popup;
+    },
+  };
+  const browserType = {
+    connectOverCDP: async () => ({ contexts: () => [context], close: async () => {} }),
+  };
+  const options = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: profileDir,
+    FLOW_B_EXTENSION_DIR: extensionDir,
+    FLOW_B_CDP_ENDPOINT: "http://127.0.0.1:9223",
+    FLOW_B_PLUGIN_TIMEOUT_MS: "5",
+  }, "/tmp/cft");
+
+  assert.equal(await launchFlowContext(options, browserType), context);
+  assert.equal(currentUrl, "chrome-extension://ponmlkjihgfedcba/popup.html");
+});
+
 test("empty extension token is repaired through the plugin's own login button", async () => {
   let authenticated = false;
   let clicked = false;
@@ -135,6 +218,32 @@ test("empty extension token is repaired through the plugin's own login button", 
   };
   assert.equal(await ensureMaoziPluginLogin(context, { timeout: 100 }), true);
   assert.equal(clicked, true);
+});
+
+test("extension token check tolerates worker API warm-up without reopening login", async () => {
+  let checks = 0;
+  let clicked = false;
+  const worker = {
+    url: () => "chrome-extension://abc/background.js",
+    evaluate: async () => {
+      checks += 1;
+      return checks >= 3;
+    },
+  };
+  const context = {
+    serviceWorkers: () => [worker],
+    pages: () => [{
+      url: () => "https://www.ozon.ru/",
+      getByRole: () => ({
+        count: async () => 1,
+        click: async () => { clicked = true; },
+      }),
+    }],
+  };
+
+  assert.equal(await ensureMaoziPluginLogin(context, { timeout: 500 }), true);
+  assert.equal(checks, 3);
+  assert.equal(clicked, false);
 });
 
 test("device-full continuation only clicks when explicitly enabled", async () => {

@@ -36,7 +36,7 @@ function positiveInteger(value, fallback) {
 export function resolveBrowserOptions(env = process.env, defaultExecutable = chromium.executablePath()) {
   const profileDir = requiredPath(env.FLOW_B_PW_PROFILE, "FLOW_B_PW_PROFILE");
   const extensionDir = requiredPath(env.FLOW_B_EXTENSION_DIR, "FLOW_B_EXTENSION_DIR");
-  readManifest(extensionDir);
+  const manifest = readManifest(extensionDir);
 
   const executablePath = String(env.FLOW_B_CHROMIUM_EXECUTABLE || defaultExecutable || "").trim();
   if (!executablePath) throw new Error("Chrome for Testing executable path is required");
@@ -57,6 +57,7 @@ export function resolveBrowserOptions(env = process.env, defaultExecutable = chr
   return {
     profileDir,
     extensionDir,
+    extensionPopup: String(manifest.action?.default_popup || "").trim() || null,
     executablePath,
     cdpEndpoint: cdpEndpoint || null,
     headless: false,
@@ -71,6 +72,44 @@ export function resolveBrowserOptions(env = process.env, defaultExecutable = chr
     ignoreDefaultArgs: ["--disable-extensions"],
     pluginTimeout: Number(env.FLOW_B_PLUGIN_TIMEOUT_MS) || 15000,
   };
+}
+
+function registeredExtensionId(profileDir, extensionDir) {
+  const preferenceNames = ["Preferences", "Secure Preferences"];
+  for (const preferenceName of preferenceNames) {
+    try {
+      const preferencesPath = path.join(profileDir, "Default", preferenceName);
+      const preferences = JSON.parse(fs.readFileSync(preferencesPath, "utf8"));
+      const settings = preferences?.extensions?.settings || {};
+      const extensionId = Object.entries(settings).find(([, value]) => {
+        const registeredPath = String(value?.path || "").trim();
+        return registeredPath && path.resolve(registeredPath) === path.resolve(extensionDir);
+      })?.[0];
+      if (extensionId) return extensionId;
+    } catch {
+      // Chrome may keep unpacked-extension registration in either file.
+    }
+  }
+  return null;
+}
+
+async function wakeRegisteredExtension(context, profileDir, extensionDir, extensionPopup) {
+  const extensionId = registeredExtensionId(profileDir, extensionDir);
+  if (!extensionId || !extensionPopup) return null;
+  const extensionPrefix = `chrome-extension://${extensionId}/`;
+  const existing = context.pages().find((candidate) => targetUrl(candidate).startsWith(extensionPrefix));
+  if (existing) return existing;
+  const page = await context.newPage();
+  try {
+    await page.goto(`${extensionPrefix}${extensionPopup.replace(/^\/+/, "")}`, {
+      waitUntil: "domcontentloaded",
+      timeout: 10000,
+    });
+    return page;
+  } catch (error) {
+    await page.close().catch(() => {});
+    throw error;
+  }
 }
 
 function targetUrl(target) {
@@ -101,7 +140,8 @@ export async function assertPluginLoaded(context, { timeout = 15000, interval = 
 export async function launchFlowContext(options, browserType = chromium) {
   const {
     profileDir,
-    extensionDir: _extensionDir,
+    extensionDir,
+    extensionPopup,
     pluginTimeout = 15000,
     cdpEndpoint,
     ...launchOptions
@@ -121,7 +161,12 @@ export async function launchFlowContext(options, browserType = chromium) {
     } else {
       context = await browserType.launchPersistentContext(profileDir, launchOptions);
     }
-    await assertPluginLoaded(context, { timeout: pluginTimeout });
+    try {
+      await assertPluginLoaded(context, { timeout: cdpEndpoint ? Math.min(pluginTimeout, 1000) : pluginTimeout });
+    } catch (error) {
+      if (!cdpEndpoint || !await wakeRegisteredExtension(context, profileDir, extensionDir, extensionPopup)) throw error;
+      await assertPluginLoaded(context, { timeout: pluginTimeout });
+    }
     return context;
   } catch (error) {
     if (browser) await browser.close().catch(() => {});
@@ -137,9 +182,10 @@ export async function openMaoziPage(context, {
   recoveryPollMs = 100,
 } = {}) {
   const available = () => context.pages().filter((page) => typeof page.isClosed !== "function" || !page.isClosed());
+  const navigable = () => available().filter((page) => !targetUrl(page).startsWith("chrome-extension://"));
   let page = forceNew ? null : available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
   if (!page) {
-    page = forceNew ? await context.newPage() : available()[0] || await context.newPage();
+    page = forceNew ? await context.newPage() : navigable()[0] || await context.newPage();
     await page.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded", timeout: 60000 });
   }
   if (settleMs > 0) await delay(settleMs);
@@ -191,15 +237,32 @@ export async function ensureMaoziLogin(page, { continueDeviceLogin = false, time
 }
 
 async function hasMaoziPluginToken(context) {
-  const worker = context.serviceWorkers().find((candidate) => targetUrl(candidate).startsWith("chrome-extension://"));
-  if (!worker) return false;
-  return Boolean(await worker.evaluate(() => new Promise((resolve) => {
-    chrome.storage.local.get("maozierp-token", (data) => resolve(Boolean(data?.["maozierp-token"])));
-  })));
+  const targets = [
+    ...(typeof context.serviceWorkers === "function" ? context.serviceWorkers() : []),
+    ...(typeof context.backgroundPages === "function" ? context.backgroundPages() : []),
+    ...(typeof context.pages === "function" ? context.pages() : []),
+  ];
+  const extensionTarget = targets.find((candidate) => targetUrl(candidate).startsWith("chrome-extension://"));
+  if (!extensionTarget) return false;
+  return Boolean(await extensionTarget.evaluate(async () => {
+    const storage = globalThis.browser?.storage?.local || globalThis.chrome?.storage?.local;
+    if (!storage) return false;
+    try {
+      const data = await storage.get("maozierp-token");
+      return Boolean(data?.["maozierp-token"]);
+    } catch {
+      return false;
+    }
+  }).catch(() => false));
 }
 
 export async function ensureMaoziPluginLogin(context, { timeout = 60000, continueDeviceLogin = true } = {}) {
-  if (await hasMaoziPluginToken(context)) return true;
+  const workerReadyDeadline = Date.now() + Math.min(Math.max(0, timeout), 5000);
+  do {
+    if (await hasMaoziPluginToken(context)) return true;
+    if (Date.now() >= workerReadyDeadline) break;
+    await delay(100);
+  } while (true);
   const existing = context.pages().find((candidate) => /^https:\/\/www\.ozon\.(?:ru|kz|by)\//i.test(targetUrl(candidate)));
   const page = existing || await context.newPage();
   if (!existing) await page.goto("https://www.ozon.ru/", { waitUntil: "domcontentloaded", timeout });
