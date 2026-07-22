@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { parseCli, parseDailyStoreUsageSeed, parseStoreTargets, parseStoreTotalUsageSeed } from "../scripts/flow_b_playwright.mjs";
+import { parseCli, parseDailyStoreUsageSeed, parseStoreTargets, parseStoreTotalUsageSeed, publishedCsvPath } from "../scripts/flow_b_playwright.mjs";
 
 test("publish CLI uses strict production defaults", () => {
   const parsed = parseCli(["publish", "/tmp/flow-run"], {});
@@ -47,6 +47,14 @@ test("environment overrides production defaults explicitly", () => {
   assert.equal(parsed.target, 12);
   assert.equal(parsed.storeNeedle, "店铺A");
   assert.equal(parsed.watermarkNeedle, "wm");
+});
+
+test("published state can use a durable CSV outside the recyclable worktree", () => {
+  assert.equal(
+    publishedCsvPath({ FLOW_B_PUBLISHED_CSV: "/tmp/ozon-durable/published_links.csv" }),
+    "/tmp/ozon-durable/published_links.csv",
+  );
+  assert.match(publishedCsvPath({}), /data\/flow_b\/published_links\.csv$/);
 });
 
 test("store target environment parses an ordered verified rotation plan", () => {

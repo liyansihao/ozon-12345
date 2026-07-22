@@ -139,6 +139,10 @@ function browserOptions(env) {
   });
 }
 
+export function publishedCsvPath(env = process.env) {
+  return path.resolve(env.FLOW_B_PUBLISHED_CSV || path.join(ROOT, "data/flow_b/published_links.csv"));
+}
+
 function createRuntimeMaoziTransport(page, context, env) {
   return createMaoziPageTransport({
     page,
@@ -176,7 +180,7 @@ async function createPublishingSession(context, options, env, shared) {
     const client = createMaoziClient({ transport: createRuntimeMaoziTransport(maoziPage, context, env) });
     const state = createPublishState({
       runDir: options.runDir,
-      publishedCsv: path.join(ROOT, "data/flow_b/published_links.csv"),
+      publishedCsv: publishedCsvPath(env),
       pendingStateFiles: String(env.FLOW_B_PENDING_STATE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
     });
     const costBridge = createCostBridge({
