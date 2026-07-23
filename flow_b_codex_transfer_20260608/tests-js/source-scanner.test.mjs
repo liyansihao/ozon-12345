@@ -105,6 +105,7 @@ import {
   expandRepeatedPublishedDiscoveryPageFour,
   fullFunnelSourceScores,
   filterSourceUrlsByAllowlist,
+  filterSourceRowsByAllowlist,
   fatalSourceBatchError,
   completedSourceUrls,
   clearJsonLinesFileCache,
@@ -148,6 +149,11 @@ test("source allowlist constrains derived seller variants to explicitly selected
     "https://www.ozon.ru/seller/fluff-joy/",
   ], { match: "exact" }), []);
   assert.deepEqual(filterSourceUrlsByAllowlist(urls, []), urls);
+  assert.deepEqual(filterSourceRowsByAllowlist(
+    urls.map((source_url, index) => ({ source_url, index })),
+    [urls[1], urls[3]],
+    { match: "exact" },
+  ).map((row) => row.index), [1, 3]);
 });
 
 test("verified seller promotion requires at least two strict publications", () => {

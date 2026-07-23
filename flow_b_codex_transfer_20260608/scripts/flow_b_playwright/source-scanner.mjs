@@ -929,6 +929,15 @@ export function filterSourceUrlsByAllowlist(urls = [], allowlistUrls = [], { mat
   return urls.filter((url) => allowedKeys.has(key(url)));
 }
 
+export function filterSourceRowsByAllowlist(rows = [], allowlistUrls = [], options = {}) {
+  if (!allowlistUrls.length) return [...rows];
+  return rows.filter((row) => filterSourceUrlsByAllowlist(
+    [row?.source_url],
+    allowlistUrls,
+    options,
+  ).length > 0);
+}
+
 function isSearchSource(value) {
   try {
     return /^\/search\/?$/i.test(new URL(String(value || "")).pathname);
@@ -2981,7 +2990,14 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   ), allowlistUrls, {
     match: String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "family").toLowerCase(),
   });
-  let records = await readJsonArrayCached(outputPath);
+  const allowlistOptions = {
+    match: String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "family").toLowerCase(),
+  };
+  let records = filterSourceRowsByAllowlist(
+    await readJsonArrayCached(outputPath),
+    allowlistUrls,
+    allowlistOptions,
+  );
   const done = completedSourceUrls(records, {
     transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
   });
