@@ -1511,29 +1511,180 @@ function latestSourceSkuOutcomes(rows, acceptedStatuses) {
   return sources;
 }
 
-export function fullFunnelSourceScores(rows) {
-  const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
-  const sources = latestSourceSkuOutcomes(rows, new Set(Object.keys(outcomeRank)));
-  const scoreOutcomes = (key, values) => {
-    const attempted = values.length;
-    const published = values.filter(({ status }) => status === "published").length;
-    const submitted = values.filter(({ status }) => status === "submitted").length;
-    const pureFbs = values.filter(({ status }) => status === "favorited").length;
-    const qualifiedYield = published + submitted * 0.65 + pureFbs * 0.35;
-    const targetYield = isPriceBandedSource(key) ? 0.2 : 0.1;
-    return ((qualifiedYield - attempted * targetYield) / (attempted + 5)) * 100_000
-      + Math.log1p(published) * 1000
-      + Math.log1p(submitted) * 500
-      + Math.log1p(pureFbs) * 100;
+const SOURCE_FUNNEL_PRIORS = Object.freeze({
+  pureFbsRate: 0.392,
+  reliable1688Rate: 0.483,
+  profitPassRate: 0.714,
+  finalConfirmationRate: 0.6,
+});
+
+function sourceFunnelEventFlags(row) {
+  const status = String(row?.status || "");
+  const reason = String(row?.reason || "");
+  const downstream = status === "submitted" || status === "published";
+  const entered1688 = downstream || /^(?:1688-|profit(?:_|-))/i.test(reason)
+    || /duplicate-title|publish-|target-|online-|stock-|import-|daily-/i.test(reason);
+  const reliable1688 = downstream || /profit(?:_|-)|duplicate-title|publish-|target-|online-|stock-|import-|daily-/i.test(reason);
+  const profitPass = downstream || /duplicate-title|publish-|target-|online-|stock-|import-|daily-/i.test(reason);
+  return {
+    pureFbs: status === "favorited" || downstream || entered1688,
+    entered1688,
+    reliable1688,
+    profitPass,
+    submitted: downstream,
+    published: status === "published",
   };
-  return new Map([...sources].map(([key, outcomes]) => {
-    const values = [...outcomes.values()];
-    const lifetimeScore = scoreOutcomes(key, values);
-    const recent = [...values]
-      .sort((left, right) => right.time - left.time || right.order - left.order)
-      .slice(0, 6);
-    const recentScore = recent.length >= 4 ? scoreOutcomes(key, recent) : Number.NEGATIVE_INFINITY;
-    return [key, Math.max(lifetimeScore, recentScore)];
+}
+
+export function sourceFunnelMetrics(rows, {
+  observedAt = null,
+  priors = SOURCE_FUNNEL_PRIORS,
+} = {}) {
+  const acceptedStatuses = new Set([
+    "favorited",
+    "submitted",
+    "published",
+    "rejected",
+    "skipped",
+    "failed",
+    "deferred",
+  ]);
+  const sources = new Map();
+  let latestObservedTime = Date.parse(observedAt || "") || 0;
+  (rows || []).forEach((row, order) => {
+    const sourceKey = sourceYieldKey(row?.source_url);
+    const status = String(row?.status || "");
+    const sku = String(row?.sku || "").trim();
+    if (!sourceKey || !sku || !acceptedStatuses.has(status)) return;
+    const time = Date.parse(row?.at || row?.timestamp || "") || 0;
+    latestObservedTime = Math.max(latestObservedTime, time);
+    const source = sources.get(sourceKey) || { skus: new Map(), latestTime: 0 };
+    const skuState = source.skus.get(sku) || {
+      pureFbs: false,
+      entered1688: false,
+      reliable1688: false,
+      profitPass: false,
+      submitted: false,
+      published: false,
+      latestStatus: "",
+      latestTime: 0,
+      latestOrder: -1,
+      publishedTime: 0,
+    };
+    const flags = sourceFunnelEventFlags(row);
+    for (const flag of ["pureFbs", "entered1688", "reliable1688", "profitPass", "submitted", "published"]) {
+      skuState[flag] ||= flags[flag];
+    }
+    if (flags.published) skuState.publishedTime = Math.max(skuState.publishedTime, time);
+    if (time > skuState.latestTime || (time === skuState.latestTime && order > skuState.latestOrder)) {
+      skuState.latestStatus = status;
+      skuState.latestTime = time;
+      skuState.latestOrder = order;
+    }
+    source.latestTime = Math.max(source.latestTime, time);
+    source.skus.set(sku, skuState);
+    sources.set(sourceKey, source);
+  });
+
+  const observedTime = latestObservedTime || Date.now();
+  return new Map([...sources].map(([sourceKey, source]) => {
+    const skus = [...source.skus.values()];
+    const sampleSize = skus.length;
+    const pureFbsCount = skus.filter((sku) => sku.pureFbs).length;
+    const entered1688Count = skus.filter((sku) => sku.entered1688).length;
+    const reliable1688Count = skus.filter((sku) => sku.reliable1688).length;
+    const profitPassCount = skus.filter((sku) => sku.profitPass).length;
+    const submittedCount = skus.filter((sku) => sku.submitted).length;
+    const finalPublishCount = skus.filter((sku) => sku.published).length;
+    const recencyOrdered = [...skus].sort((left, right) => (
+      right.latestTime - left.latestTime || right.latestOrder - left.latestOrder
+    ));
+    let recentFailureStreak = 0;
+    for (const sku of recencyOrdered) {
+      if (!["rejected", "skipped", "failed", "deferred"].includes(sku.latestStatus)) break;
+      recentFailureStreak += 1;
+    }
+    const lastSuccessTime = skus.reduce((latest, sku) => Math.max(latest, sku.publishedTime), 0);
+    const ageDays = source.latestTime > 0
+      ? Math.max(0, observedTime - source.latestTime) / 86_400_000
+      : 0;
+    const sampleConfidence = sampleSize / (sampleSize + 8);
+    const recencyConfidence = 1 / (1 + ageDays / 7);
+    const confidence = sampleConfidence * recencyConfidence;
+
+    const smoothedPureFbs = (pureFbsCount + priors.pureFbsRate * 8) / (sampleSize + 8);
+    const smoothedReliable1688 = (reliable1688Count + priors.reliable1688Rate * 6) / (entered1688Count + 6);
+    const smoothedProfitPass = (profitPassCount + priors.profitPassRate * 2) / (reliable1688Count + 2);
+    const pendingSubmitted = Math.max(0, submittedCount - finalPublishCount);
+    const smoothedFinalConfirmation = (
+      finalPublishCount + pendingSubmitted * 0.25 + priors.finalConfirmationRate * 2
+    ) / (submittedCount + 2);
+    const expectedFinalYield = smoothedPureFbs
+      * smoothedReliable1688
+      * smoothedProfitPass
+      * smoothedFinalConfirmation;
+    const baselineYield = priors.pureFbsRate
+      * priors.reliable1688Rate
+      * priors.profitPassRate
+      * priors.finalConfirmationRate;
+    const failurePenalty = 0.75 ** Math.min(recentFailureStreak, 6);
+    const sourceScore = Math.round(
+      (expectedFinalYield - baselineYield)
+      * (0.35 + 0.65 * sampleConfidence)
+      * recencyConfidence
+      * failurePenalty
+      * 1_000_000,
+    );
+
+    return [sourceKey, {
+      source_key: sourceKey,
+      sample_size: sampleSize,
+      pure_fbs_count: pureFbsCount,
+      entered_1688_count: entered1688Count,
+      reliable_1688_count: reliable1688Count,
+      profit_pass_count: profitPassCount,
+      submitted_count: submittedCount,
+      final_publish_count: finalPublishCount,
+      pure_fbs_rate: sampleSize ? pureFbsCount / sampleSize : 0,
+      reliable_1688_rate: entered1688Count ? reliable1688Count / entered1688Count : 0,
+      profit_pass_rate: reliable1688Count ? profitPassCount / reliable1688Count : 0,
+      final_publish_rate: sampleSize ? finalPublishCount / sampleSize : 0,
+      confidence,
+      recent_failure_streak: recentFailureStreak,
+      last_success_at: lastSuccessTime ? new Date(lastSuccessTime).toISOString() : null,
+      last_event_at: source.latestTime ? new Date(source.latestTime).toISOString() : null,
+      source_score: sourceScore,
+    }];
+  }));
+}
+
+export function fullFunnelSourceScores(rows) {
+  const lifetimeMetrics = sourceFunnelMetrics(rows);
+  const latestOutcomes = latestSourceSkuOutcomes(rows, new Set([
+    "favorited",
+    "submitted",
+    "published",
+    "rejected",
+    "skipped",
+    "failed",
+    "deferred",
+  ]));
+  const recentSkuKeys = new Map([...latestOutcomes].map(([sourceKey, outcomes]) => [
+    sourceKey,
+    new Set([...outcomes.entries()]
+      .sort((left, right) => right[1].time - left[1].time || right[1].order - left[1].order)
+      .slice(0, 6)
+      .map(([sku]) => sku)),
+  ]));
+  const recentRows = (rows || []).filter((row) => {
+    const skuKeys = recentSkuKeys.get(sourceYieldKey(row?.source_url));
+    return skuKeys?.has(String(row?.sku || "").trim());
+  });
+  const recentMetrics = sourceFunnelMetrics(recentRows);
+  return new Map([...lifetimeMetrics].map(([sourceKey, metrics]) => {
+    const recent = recentMetrics.get(sourceKey);
+    const recentScore = recent?.sample_size >= 4 ? recent.source_score : Number.NEGATIVE_INFINITY;
+    return [sourceKey, Math.max(metrics.source_score, recentScore)];
   }));
 }
 
@@ -2879,6 +3030,15 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     .map((row) => sourceNonFbsSampleKey(row?.source_url))
     .filter(Boolean));
   const titleFamilyScores = observedTitleFamilyScores(yieldRows);
+  const funnelMetrics = sourceFunnelMetrics(yieldRows);
+  await writeJsonArrayCached(
+    path.join(path.dirname(outputPath), "source_funnel_scores.json"),
+    [...funnelMetrics.values()].sort((left, right) => (
+      right.source_score - left.source_score
+      || right.final_publish_count - left.final_publish_count
+      || right.sample_size - left.sample_size
+    )),
+  );
   const candidateSourceScores = fullFunnelSourceScores(yieldRows);
   const derivedPriceBands = String(env.FLOW_B_DERIVED_SEARCH_PRICE_BANDS || "150.000;")
     .split(",").map((value) => value.trim()).filter(Boolean);
