@@ -6,9 +6,17 @@ import path from "node:path";
 
 import {
   createOzonAccessController,
+  isOzonCaptchaText,
   isOzonAccessStoppedError,
   resolveOzonAccessStateFile,
 } from "../scripts/flow_b_playwright/ozon-access-controller.mjs";
+
+test("Ozon CAPTCHA text is classified separately from network soft blocks", () => {
+  assert.equal(isOzonCaptchaText("CAPTCHA: confirm you are not a robot"), true);
+  assert.equal(isOzonCaptchaText("Подтвердите, что вы не робот"), true);
+  assert.equal(isOzonCaptchaText("请完成人机验证"), true);
+  assert.equal(isOzonCaptchaText("Похоже, нет соединения"), false);
+});
 
 test("global Ozon controller serializes callers and preserves a quiet interval after completion", async () => {
   let clock = 1_000;
@@ -65,6 +73,68 @@ test("one soft block persists a manual stop and prevents every queued Ozon opera
     nextRun.run({ kind: "source", url: "https://www.ozon.ru/search/new-run" }, async () => {}),
     isOzonAccessStoppedError,
   );
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("one CAPTCHA waits globally and reopens the same operation once", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-captcha-"));
+  const stateFile = path.join(dir, "ozon_access_state.json");
+  const logFile = path.join(dir, "ozon_access_timeline.jsonl");
+  let clock = 1_000;
+  let calls = 0;
+  const controller = createOzonAccessController({
+    stateFile,
+    logFile,
+    minIntervalMs: 250,
+    captchaReopenDelayMs: 600,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  });
+  const result = await controller.run(
+    { kind: "favorite-detail", url: "https://www.ozon.ru/product/captcha" },
+    async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("Ozon CAPTCHA required");
+      clock += 10;
+      return "reopened";
+    },
+  );
+  assert.equal(result, "reopened");
+  assert.equal(calls, 2);
+  assert.equal(clock, 1_610);
+  const saved = JSON.parse(await fs.readFile(stateFile, "utf8"));
+  assert.equal(saved.requires_manual_clear, false);
+  assert.equal(saved.captcha_retry_pending, false);
+  assert.equal(saved.captcha_retry_count, 1);
+  const timeline = (await fs.readFile(logFile, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(timeline.map((row) => row.event), ["started", "captcha_wait", "captcha_reopened", "succeeded"]);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("a CAPTCHA repeated after reopening becomes a persistent manual stop", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-captcha-repeat-"));
+  const stateFile = path.join(dir, "ozon_access_state.json");
+  let clock = 1_000;
+  let calls = 0;
+  const controller = createOzonAccessController({
+    stateFile,
+    minIntervalMs: 0,
+    captchaReopenDelayMs: 600,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  });
+  await assert.rejects(controller.run(
+    { kind: "source", url: "https://www.ozon.ru/search/captcha" },
+    async () => {
+      calls += 1;
+      throw new Error("Ozon CAPTCHA required");
+    },
+  ), isOzonAccessStoppedError);
+  assert.equal(calls, 2);
+  const saved = JSON.parse(await fs.readFile(stateFile, "utf8"));
+  assert.equal(saved.requires_manual_clear, true);
+  assert.equal(saved.captcha_retry_pending, false);
+  assert.match(saved.reason, /CAPTCHA/i);
   await fs.rm(dir, { recursive: true, force: true });
 });
 

@@ -4,7 +4,7 @@ import { ensureMaoziLogin, ensureMaoziPluginLogin, openMaoziPage } from "./brows
 import { createCandidateQueue } from "./candidate-queue.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError } from "./continuous-runtime.mjs";
 import { isPureFbs, prohibitedCategorySkipReason } from "./publish-policy.mjs";
-import { isOzonAccessStoppedError, ozonAccessControllerFor } from "./ozon-access-controller.mjs";
+import { isOzonAccessStoppedError, isOzonCaptchaText, ozonAccessControllerFor } from "./ozon-access-controller.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_SOURCE_YIELD_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/source_yield_history.jsonl");
@@ -2307,10 +2307,14 @@ async function extractFavoriteProduct(page, url, timeout) {
       mode: (document.body?.innerText || "").match(/发货模式：\s*([^\n]+)/)?.[1]?.trim() || "",
       pageText: (document.body?.innerText || "").slice(0, 1000),
     })).catch(() => null);
-    if (isOzonSoftBlock(`${snapshot?.title || ""} ${snapshot?.pageText || ""}`)) {
+    const diagnostic = `${snapshot?.title || ""} ${snapshot?.pageText || ""}`;
+    if (isOzonCaptchaText(diagnostic)) {
+      throw new Error(`Ozon CAPTCHA required: ${url}`);
+    }
+    if (isOzonSoftBlock(diagnostic)) {
       throw new Error(`Ozon detail soft blocked: ${url}`);
     }
-    if (/доступ ограничен|access denied|captcha/i.test(`${snapshot?.title || ""} ${snapshot?.pageText || ""}`)) {
+    if (/доступ ограничен|access denied/i.test(diagnostic)) {
       throw new Error(`Ozon detail is blocked: ${url}`);
     }
     if (snapshot?.ogImage && snapshot?.priceText && snapshot?.mode) break;
@@ -2691,6 +2695,7 @@ async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSt
   let title = "";
   let finalUrl = url;
   let blocked = false;
+  let blockKind = null;
   let stopReason = "max_steps";
   const started = Date.now();
 
@@ -2718,7 +2723,11 @@ async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSt
     });
     title = state.title;
     finalUrl = state.url;
-    blocked = /доступ ограничен|access denied|captcha|похоже, нет/i.test(`${title} ${state.text}`);
+    const diagnostic = `${title} ${state.text}`;
+    blockKind = isOzonCaptchaText(diagnostic)
+      ? "captcha"
+      : /доступ ограничен|access denied|похоже, нет/i.test(diagnostic) ? "soft-block" : null;
+    blocked = Boolean(blockKind);
     for (const link of state.links) {
       if (!link.href.includes("/product/")) continue;
       const prior = links.get(link.href) || {};
@@ -2748,6 +2757,7 @@ async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSt
     final_url: finalUrl,
     title,
     blocked,
+    block_kind: blockKind,
     stop_reason: stopReason,
     seconds: Math.round((Date.now() - started) / 100) / 10,
     cumulative_product_link_count: links.size,
@@ -2784,7 +2794,10 @@ export async function scanSourceWithPage({
   try {
     const execute = async (createdPage) => {
       const result = await scan(createdPage, url, options);
-      if (result?.blocked) throw new Error(`Ozon source soft blocked: ${url}`);
+      if (result?.blocked) {
+        if (result?.block_kind === "captcha") throw new Error(`Ozon CAPTCHA required: ${url}`);
+        throw new Error(`Ozon source soft blocked: ${url}`);
+      }
       return result;
     };
     const createdPage = await withTimeout(pagePromise, timeoutMs, label);

@@ -16,6 +16,15 @@ export function resolveOzonAccessStateFile(env = process.env) {
   return profile ? path.join(path.dirname(path.resolve(profile)), "ozon_access_state.json") : null;
 }
 
+export function isOzonCaptchaText(value) {
+  return /captcha|капч|(?:подтвердите|провер\w*)[^\n]{0,80}(?:человек|не робот)|验证码|人机验证/i
+    .test(String(value || ""));
+}
+
+export function isOzonCaptchaError(error) {
+  return isOzonCaptchaText(error?.message || error);
+}
+
 export function isOzonSoftBlockError(error) {
   return /soft block|soft-block|access denied|captcha|доступ ограничен|похоже, нет(?:\s|\u00a0)+соединения|no connection|incident:\s*[a-z0-9_]+/i
     .test(String(error?.message || error || ""));
@@ -59,12 +68,14 @@ export function createOzonAccessController({
   stateFile = null,
   logFile = null,
   minIntervalMs = 15_000,
+  captchaReopenDelayMs = 600_000,
   now = () => Date.now(),
   sleep = defaultSleep,
 } = {}) {
   const filename = stateFile ? path.resolve(stateFile) : null;
   const timelineFilename = logFile ? path.resolve(logFile) : null;
   const minimumInterval = interval(minIntervalMs);
+  const captchaReopenDelay = interval(captchaReopenDelayMs, 600_000);
   let state = null;
   let chain = Promise.resolve();
 
@@ -148,14 +159,55 @@ export function createOzonAccessController({
           await record("succeeded", metadata);
           return result;
         } catch (error) {
-          if (isOzonAccessStoppedError(error)) {
-            await record("rejected_stopped", metadata, { reason: String(error?.message || error) });
-            throw error;
+          let failure = error;
+          if (isOzonCaptchaError(failure)) {
+            const detectedAt = now();
+            const retryAt = detectedAt + captchaReopenDelay;
+            state = {
+              ...state,
+              version: 1,
+              updated_at: new Date(detectedAt).toISOString(),
+              requires_manual_clear: true,
+              captcha_retry_pending: true,
+              captcha_retry_at: new Date(retryAt).toISOString(),
+              captcha_retry_count: Math.max(0, Number(state?.captcha_retry_count) || 0) + 1,
+              reason: String(failure?.message || failure),
+            };
+            await persist();
+            await record("captcha_wait", metadata, { retry_at: state.captcha_retry_at, delay_ms: captchaReopenDelay });
+            await sleep(captchaReopenDelay);
+            const reopenedAt = now();
+            state = {
+              ...state,
+              updated_at: new Date(reopenedAt).toISOString(),
+              last_started_at: new Date(reopenedAt).toISOString(),
+              next_allowed_at_ms: reopenedAt + minimumInterval,
+              requires_manual_clear: false,
+              captcha_retry_pending: false,
+              captcha_reopened_at: new Date(reopenedAt).toISOString(),
+              reason: null,
+            };
+            await persist();
+            await record("captcha_reopened", metadata, { next_allowed_at_ms: state.next_allowed_at_ms });
+            try {
+              const result = await operation();
+              await settle();
+              await record("succeeded", metadata, { after_captcha_reopen: true });
+              return result;
+            } catch (retryError) {
+              failure = retryError;
+              state = { ...state, captcha_retry_pending: false };
+              await persist();
+            }
           }
-          if (isOzonSoftBlockError(error)) throw await stop(error?.message || error, metadata);
+          if (isOzonAccessStoppedError(failure)) {
+            await record("rejected_stopped", metadata, { reason: String(failure?.message || failure) });
+            throw failure;
+          }
+          if (isOzonSoftBlockError(failure)) throw await stop(failure?.message || failure, metadata);
           await settle();
-          await record("failed", metadata, { reason: String(error?.message || error) });
-          throw error;
+          await record("failed", metadata, { reason: String(failure?.message || failure) });
+          throw failure;
         }
       });
       chain = task.catch(() => {});
@@ -177,6 +229,7 @@ export function ozonAccessControllerFor(context, env = process.env) {
       env.FLOW_B_OZON_GLOBAL_INTERVAL_MS,
       interval(env.FLOW_B_FAVORITE_DETAIL_INTERVAL_MS, 15_000),
     ),
+    captchaReopenDelayMs: interval(env.FLOW_B_OZON_CAPTCHA_REOPEN_DELAY_MS, 600_000),
   });
   controllersByContext.set(context, controller);
   return controller;

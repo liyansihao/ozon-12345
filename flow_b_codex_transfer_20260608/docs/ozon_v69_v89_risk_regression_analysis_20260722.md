@@ -257,6 +257,18 @@ run：`runs/flow_b/20260723_083500_ozon10m_v92`
 
 按受控验证规则，本轮一旦出现 soft-block 即判定失败。新修复没有在当前风险状态下自动重测；profile 级停机锁继续保留，等待下一次人工验证后从 3 商品阶段重新开始。
 
+## 阶段 7：验证码等待后单次重开策略（2026-07-23）
+
+根据操作员的新规则，将明确验证码从网络软拦截和访问限制中独立分类：
+
+1. 检测到 CAPTCHA、俄文人机确认或中文人机验证后，统一调度器立即冻结全部 Ozon 队列，默认等待 10 分钟。
+2. 冷却结束后只重新打开同一 URL 一次，不自动点击、填写或绕过验证码。
+3. 单次重开成功则恢复流水线；再次出现验证码、访问限制或其他软拦截时，写入 profile 级人工锁并停止，不循环重试。
+4. 冷却期间持久化 `requires_manual_clear=true` 和 `captcha_retry_pending=true`；若进程崩溃或重启，不会由另一个 owner 越过等待状态。
+5. 等待和重开记录为 `captcha_wait`、`captcha_reopened` 时间线事件；等待时长可由 `FLOW_B_OZON_CAPTCHA_REOPEN_DELAY_MS` 显式配置，生产默认值为 600000ms。
+
+回归结果：验证码分类、单次重开、重复验证码人工锁停、source/favorite/publish 三条详情路径的相关定向测试 186/186 通过；完整 Node 测试 433/433、Python 测试 8/8、`git diff --check` 全部通过。当前 v92 停机原因是 `Похоже, нет соединения` 网络软拦截，不是验证码，所以本次代码变更没有清除现有锁或启动真实 Ozon 请求。
+
 ## 证据路径
 
 - v69 现场：`/Users/mac/.codex/ozon-stability-archive/20260722_v69_interrupted`

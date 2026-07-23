@@ -1,5 +1,6 @@
 import { canonicalProductUrl } from "./publish-state.mjs";
 import { AdaptiveConcurrency } from "./continuous-runtime.mjs";
+import { isOzonCaptchaText } from "./ozon-access-controller.mjs";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -114,7 +115,10 @@ export function createOzonDetailProvider({
                 || document.querySelector('a[href*="/seller/"]')?.href || "",
             })).catch(() => null);
             const diagnostic = `${payload?.title || ""} ${payload?.text?.slice(0, 1000) || ""}`;
-            if (/доступ ограничен|access denied|captcha|похоже, нет(?:\s|\u00a0)+соединения/i.test(diagnostic)) {
+            if (isOzonCaptchaText(diagnostic)) {
+              throw new Error(`Ozon CAPTCHA required for SKU ${sku}`);
+            }
+            if (/доступ ограничен|access denied|похоже, нет(?:\s|\u00a0)+соединения/i.test(diagnostic)) {
               throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
             }
             if (payload?.text && /发货模式：/.test(payload.text)) break;
