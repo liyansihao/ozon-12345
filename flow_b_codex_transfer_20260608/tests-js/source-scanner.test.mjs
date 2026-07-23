@@ -136,6 +136,17 @@ test("source allowlist constrains derived seller variants to explicitly selected
     urls[0],
     urls[2],
   ]);
+  assert.deepEqual(filterSourceUrlsByAllowlist(urls, [
+    urls[0],
+    urls[2],
+  ], { match: "exact" }), [
+    urls[0],
+    urls[2],
+  ]);
+  assert.deepEqual(filterSourceUrlsByAllowlist(urls, [
+    "https://www.ozon.ru/seller/nature-3460296/",
+    "https://www.ozon.ru/seller/fluff-joy/",
+  ], { match: "exact" }), []);
   assert.deepEqual(filterSourceUrlsByAllowlist(urls, []), urls);
 });
 

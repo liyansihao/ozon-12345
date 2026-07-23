@@ -911,10 +911,22 @@ function sourceUrlKey(value) {
   }
 }
 
-export function filterSourceUrlsByAllowlist(urls = [], allowlistUrls = []) {
+function exactSourceUrlKey(value) {
+  try {
+    const url = new URL(String(value));
+    url.hash = "";
+    url.searchParams.sort();
+    return url.toString();
+  } catch {
+    return String(value || "");
+  }
+}
+
+export function filterSourceUrlsByAllowlist(urls = [], allowlistUrls = [], { match = "family" } = {}) {
   if (!allowlistUrls.length) return [...urls];
-  const allowedKeys = new Set(allowlistUrls.map(sourceUrlKey).filter(Boolean));
-  return urls.filter((url) => allowedKeys.has(sourceUrlKey(url)));
+  const key = match === "exact" ? exactSourceUrlKey : sourceUrlKey;
+  const allowedKeys = new Set(allowlistUrls.map(key).filter(Boolean));
+  return urls.filter((url) => allowedKeys.has(key(url)));
 }
 
 function isSearchSource(value) {
@@ -2966,7 +2978,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ], yieldRows),
     ])],
     yieldRows,
-  ), allowlistUrls);
+  ), allowlistUrls, {
+    match: String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "family").toLowerCase(),
+  });
   let records = await readJsonArrayCached(outputPath);
   const done = completedSourceUrls(records, {
     transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
