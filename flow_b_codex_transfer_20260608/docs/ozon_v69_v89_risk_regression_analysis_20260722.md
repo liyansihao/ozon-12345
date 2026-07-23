@@ -195,6 +195,34 @@ v69 的 launcher、完整 frozen environment 和大部分 profile 已丢失，�
 
 本节完成时尚未启动浏览器；3 商品、10 分钟和 30 分钟验证结果需以新的 run 证据追加，不能由离线测试推断。
 
+## 阶段 5：第一次受控验证失败与新增根因（2026-07-23）
+
+用户授权继续后，以 commit `d7e3392de577c67afc6931213aba3f5c2770d2f0` 启动 3 商品只读验证。结果严格判定失败，未进入 10 分钟和 30 分钟阶段：
+
+- 首页只读预检正常。
+- SKU `3088016074` 正常，明确读到 FBS。
+- SKU `1907037527` 在前一受控操作开始后 15.002 秒启动，309ms 内返回 `Похоже, нет соединения`；统一控制器立即写入 `requires_manual_clear=true` 并停止。
+- 第 3 个 SKU 从未执行；进程复核为 0。
+
+随后对已关闭浏览器的 History、Preferences 和 Sessions 进行离线取证，发现该窗口并非纯粹的 15 秒单流量：
+
+1. CFT 在 `00:14:32Z` 启动后自动恢复上一会话的 13 个标签页；Preferences 的 `sessions.event_log` 明确记录 `restore_browser=true, tab_count=13`。
+2. 在统一控制器第一次操作 `00:14:54.414Z` 前，History 已记录至少 6 个 Ozon 页面在 `00:14:33Z`–`00:14:40Z` 被自动重载，包括 3 个旧软拦截商品、2 个 seller/search 页面和 1 个 `captchaDone=true` 商品页。
+3. 这些恢复导航的 History transition 为 `805306376`，与后续受控 `page.goto` 的 transition 不同，证明它们来自浏览器会话恢复而非 v90 脚本队列。
+4. 因此，阶段 4 的 scheduler 已正确约束脚本主动导航，但 CDP 浏览器启动前的 session restore 是一个旁路；它在 scheduler 接管前制造突发访问，足以污染随后第 2 个商品的判别。
+
+这使 v74 `2b33ad38d5` 的角色从“中等置信放大器”提升为“已实测的启动旁路”：外置 CDP profile 会保存并在下次启动恢复旧 Ozon tabs，而旧 launcher 没有在浏览器启动前隔离 Sessions。
+
+第二个最小修复采用可恢复归档，不删除登录态：
+
+- 新增 `prepare_cdp_profile.mjs`，只把 automation profile 的 `Default/Sessions/Session_*` 和 `Tabs_*` 移到当前 run 的 `profile_session_archive/`，保留 Cookies、Local Storage、扩展配置、History 和所有业务状态。
+- 每个归档文件记录大小和 SHA-256，并写入 `profile_session_archive.json`。
+- 新 launcher 必须在启动 CFT 前执行该 guard；旧 Sessions 有备份，可人工还原。
+- 离线测试证明 restorable tabs 被归档，Cookies 和无关文件保持字节不变。
+- 修复后完整 Node 测试 429/429、Python 测试 8/8 通过，`git diff --check` 通过。
+
+本轮已经出现一次软拦截，所以持久停机锁不在离线修复中清除，也不自动再次验证。只有人工确认 Ozon 已恢复后，才可在归档旧 Sessions 的前提下重新开始首页 → 3 商品完整阶段。
+
 ## 证据路径
 
 - v69 现场：`/Users/mac/.codex/ozon-stability-archive/20260722_v69_interrupted`
@@ -204,6 +232,9 @@ v69 的 launcher、完整 frozen environment 和大部分 profile 已丢失，�
 - v75 run：`/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_135200_ozon24h_stability_v75`
 - v85 run：`/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_215500_ozon10m_sample_v85`
 - v89 run：`/Users/mac/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/20260722_230308_ozon10m_sample_v89`
+- v90 3 商品失败证据：`runs/flow_b/20260723_081240_ozon3item_v90`
+- v90 Ozon 时间线：`runs/flow_b/20260723_081240_ozon3item_v90/ozon_access_timeline.jsonl`
+- v90 结果：`runs/flow_b/20260723_081240_ozon3item_v90/three_item_result.json`
 - 当前 cooldown 分支：`flow_b_codex_transfer_20260608/scripts/flow_b_playwright/source-scanner.mjs`
 - CDP 分支：`flow_b_codex_transfer_20260608/scripts/flow_b_playwright/browser-context.mjs`
 - 跨 run transient retry 测试：`flow_b_codex_transfer_20260608/tests-js/source-scanner.test.mjs`
