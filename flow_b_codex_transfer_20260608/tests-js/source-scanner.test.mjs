@@ -11,6 +11,8 @@ import {
   listingModeSkipReason,
   hasListingPluginFbsEvidence,
   filterListingFbsEvidenceLinks,
+  sellerFamilyFullFunnelSourceScores,
+  inheritedFullFunnelSourceScore,
   effectiveFavoriteTotal,
   excludedSkusFromHistories,
   excludedSkusFromEventHistories,
@@ -1227,6 +1229,41 @@ test("full-funnel source yield promotes repeated pure-FBS favorites over rejecte
     ...Array.from({ length: 5 }, (_, i) => ({ source_url: pureFbs, sku: `f-${i}`, status: "favorited" })),
   ];
   assert.deepEqual(prioritizeSourceUrls([rejected, pureFbs], { yieldRows: rows }), [pureFbs, rejected]);
+});
+
+test("an unseen seller variant inherits a confidence-limited full-funnel score", () => {
+  const rows = [
+    { sku: "winner-1", status: "published", source_url: "https://www.ozon.ru/seller/winner/" },
+    { sku: "winner-2", status: "published", source_url: "https://www.ozon.ru/seller/winner/?page=3" },
+    { sku: "dry-1", status: "skipped", reason: "1688-no-reliable-match", source_url: "https://www.ozon.ru/seller/dry/" },
+    { sku: "dry-2", status: "skipped", reason: "1688-no-reliable-match", source_url: "https://www.ozon.ru/seller/dry/?page=2" },
+  ];
+  const exact = fullFunnelSourceScores(rows);
+  const sellers = sellerFamilyFullFunnelSourceScores(rows);
+  const winnerVariant = "https://www.ozon.ru/seller/winner/?currency_price=1000.000%3B&sorting=rating";
+  const dryVariant = "https://www.ozon.ru/seller/dry/?currency_price=1000.000%3B&sorting=rating";
+  assert.ok(inheritedFullFunnelSourceScore(winnerVariant, exact, sellers) > 0);
+  assert.ok(inheritedFullFunnelSourceScore(dryVariant, exact, sellers) < 0);
+  assert.deepEqual(prioritizeSourceUrls([dryVariant, winnerVariant], {
+    yieldRows: rows,
+    verifiedFreshSourceUrls: [dryVariant, winnerVariant],
+  }), [winnerVariant, dryVariant]);
+});
+
+test("an exact dry variant cannot borrow its seller sibling success", () => {
+  const dryVariant = "https://www.ozon.ru/seller/mixed/?currency_price=150.000%3B&sorting=rating";
+  const rows = [
+    { sku: "winner-1", status: "published", source_url: "https://www.ozon.ru/seller/mixed/" },
+    { sku: "winner-2", status: "published", source_url: "https://www.ozon.ru/seller/mixed/?page=3" },
+    { sku: "dry-1", status: "skipped", reason: "1688-no-reliable-match", source_url: dryVariant },
+    { sku: "dry-2", status: "skipped", reason: "1688-no-reliable-match", source_url: dryVariant },
+    { sku: "dry-3", status: "skipped", reason: "1688-no-reliable-match", source_url: dryVariant },
+    { sku: "dry-4", status: "skipped", reason: "1688-no-reliable-match", source_url: dryVariant },
+  ];
+  const exact = fullFunnelSourceScores(rows);
+  const sellers = sellerFamilyFullFunnelSourceScores(rows);
+  assert.ok(sellers.get("https://www.ozon.ru/seller/mixed/") > 0);
+  assert.ok(inheritedFullFunnelSourceScore(dryVariant, exact, sellers) < 0);
 });
 
 test("full-funnel scores put a fully dry explored source below untried supply", () => {

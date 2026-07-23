@@ -1596,30 +1596,66 @@ function latestSourceSkuOutcomes(rows, acceptedStatuses) {
   return sources;
 }
 
+function fullFunnelOutcomeScore(key, values) {
+  const attempted = values.length;
+  const published = values.filter(({ status }) => status === "published").length;
+  const submitted = values.filter(({ status }) => status === "submitted").length;
+  const pureFbs = values.filter(({ status }) => status === "favorited").length;
+  const qualifiedYield = published + submitted * 0.65 + pureFbs * 0.35;
+  const targetYield = isPriceBandedSource(key) ? 0.2 : 0.1;
+  return ((qualifiedYield - attempted * targetYield) / (attempted + 5)) * 100_000
+    + Math.log1p(published) * 1000
+    + Math.log1p(submitted) * 500
+    + Math.log1p(pureFbs) * 100;
+}
+
+function confidenceAdjustedFunnelScore(key, outcomes, confidence = 1) {
+  const values = [...outcomes.values()];
+  const lifetimeScore = fullFunnelOutcomeScore(key, values);
+  const recent = [...values]
+    .sort((left, right) => right.time - left.time || right.order - left.order)
+    .slice(0, 6);
+  const recentScore = recent.length >= 4
+    ? fullFunnelOutcomeScore(key, recent)
+    : Number.NEGATIVE_INFINITY;
+  return Math.max(lifetimeScore, recentScore) * Number(confidence);
+}
+
 export function fullFunnelSourceScores(rows) {
   const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
   const sources = latestSourceSkuOutcomes(rows, new Set(Object.keys(outcomeRank)));
-  const scoreOutcomes = (key, values) => {
-    const attempted = values.length;
-    const published = values.filter(({ status }) => status === "published").length;
-    const submitted = values.filter(({ status }) => status === "submitted").length;
-    const pureFbs = values.filter(({ status }) => status === "favorited").length;
-    const qualifiedYield = published + submitted * 0.65 + pureFbs * 0.35;
-    const targetYield = isPriceBandedSource(key) ? 0.2 : 0.1;
-    return ((qualifiedYield - attempted * targetYield) / (attempted + 5)) * 100_000
-      + Math.log1p(published) * 1000
-      + Math.log1p(submitted) * 500
-      + Math.log1p(pureFbs) * 100;
-  };
   return new Map([...sources].map(([key, outcomes]) => {
-    const values = [...outcomes.values()];
-    const lifetimeScore = scoreOutcomes(key, values);
-    const recent = [...values]
-      .sort((left, right) => right.time - left.time || right.order - left.order)
-      .slice(0, 6);
-    const recentScore = recent.length >= 4 ? scoreOutcomes(key, recent) : Number.NEGATIVE_INFINITY;
-    return [key, Math.max(lifetimeScore, recentScore)];
+    return [key, confidenceAdjustedFunnelScore(key, outcomes)];
   }));
+}
+
+export function sellerFamilyFullFunnelSourceScores(rows, confidence = 0.75) {
+  const acceptedStatuses = new Set(["favorited", "rejected", "skipped", "submitted", "published"]);
+  const sellers = new Map();
+  (rows || []).forEach((row, order) => {
+    const key = canonicalSellerUrl(row?.source_url) || canonicalSellerUrl(row?.seller_url);
+    const status = String(row?.status || "");
+    const sku = String(row?.sku || "").trim();
+    if (!key || !sku || !acceptedStatuses.has(status)) return;
+    const outcomes = sellers.get(key) || new Map();
+    const previous = outcomes.get(sku);
+    const time = Date.parse(row?.at || row?.timestamp || "") || 0;
+    if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
+      outcomes.set(sku, { row, status, time, order });
+    }
+    sellers.set(key, outcomes);
+  });
+  return new Map([...sellers].map(([key, outcomes]) => [
+    key,
+    confidenceAdjustedFunnelScore(key, outcomes, confidence),
+  ]));
+}
+
+export function inheritedFullFunnelSourceScore(url, exactScores, sellerScores) {
+  const exactKey = sourceYieldKey(url);
+  if (exactScores?.has(exactKey)) return Number(exactScores.get(exactKey) || 0);
+  const sellerKey = canonicalSellerUrl(url);
+  return sellerKey ? Number(sellerScores?.get(sellerKey) || 0) : 0;
 }
 
 export function interleaveStrictSuccessExploration(urls, yieldRows, exploitBurst = 6) {
@@ -1842,6 +1878,7 @@ export function prioritizeSourceUrls(urls, {
     strictSuccessSkusBySource.set(key, skus);
   }
   const funnelScores = fullFunnelSourceScores(yieldRows);
+  const sellerFunnelScores = sellerFamilyFullFunnelSourceScores(yieldRows);
   const familyScores = observedTitleFamilyScores(yieldRows);
   const familyPenalties = exhaustedSourceFamilyPenalties(yieldRows);
   const sellerFamilyPenalties = recentSellerFamilyPenalties(yieldRows);
@@ -1861,7 +1898,8 @@ export function prioritizeSourceUrls(urls, {
     const key = isPriceBandedSource(url)
       ? yieldKey
       : boundedDeep ? `bounded-deep:${familyKey}` : familyKey;
-    const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
+    const inheritedYieldPriority = inheritedFullFunnelSourceScore(url, funnelScores, sellerFunnelScores);
+    const yieldPriority = inheritedYieldPriority || (successfulCounts.get(yieldKey) || 0) * 2000;
     const familyPenalty = familyPenalties.get(isPriceBandedSource(url) ? yieldKey : familyKey) || 0;
     const sellerFamilyPenalty = sellerFamilyPenalties.get(canonicalSellerUrl(url)) || 0;
     const effectiveFamilyPenalty = Math.min(familyPenalty, sellerFamilyPenalty);
@@ -2991,6 +3029,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     .filter(Boolean));
   const titleFamilyScores = observedTitleFamilyScores(yieldRows);
   const candidateSourceScores = fullFunnelSourceScores(yieldRows);
+  const candidateSellerScores = sellerFamilyFullFunnelSourceScores(yieldRows);
   const derivedPriceBands = String(env.FLOW_B_DERIVED_SEARCH_PRICE_BANDS || "150.000;")
     .split(",").map((value) => value.trim()).filter(Boolean);
   const derivedResultPages = String(env.FLOW_B_DERIVED_SEARCH_PAGES || "1")
@@ -3152,8 +3191,12 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     perSourceLimit: candidatePerSourceDrain,
     sourceKey: (row) => sourceCollectionBlockKey(row?.source_url) || row?.source_url,
     priority: (row) => favoriteLinkPriority(row, titleFamilyScores)
-      + Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
-    priorityTier: (row) => Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
+      + inheritedFullFunnelSourceScore(row?.source_url, candidateSourceScores, candidateSellerScores),
+    priorityTier: (row) => inheritedFullFunnelSourceScore(
+      row?.source_url,
+      candidateSourceScores,
+      candidateSellerScores,
+    ),
   };
   const recoveredCandidates = filterListingFbsEvidenceLinks(candidateQueue.pending({
     ...pendingCandidateOptions,
