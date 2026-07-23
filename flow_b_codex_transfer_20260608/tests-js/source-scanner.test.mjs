@@ -62,6 +62,8 @@ import {
   sourceSampleStatsFromEvents,
   sourceNonFbsSampleKey,
   deduplicateSearchSourceVariants,
+  deduplicateSourceDispatchFamilies,
+  excludeCompletedSourceFamilies,
   favoritePriceSkipReason,
   favoriteTitleSkipReason,
   nextLowYieldBatchStreak,
@@ -396,6 +398,35 @@ test("source dispatch scans one representative per search text and price band", 
     otherQuery,
     sellerPage2,
     sellerPage3,
+  ]);
+});
+
+test("source dispatch and checkpoint completion share one page/sorting family", () => {
+  const search = "https://www.ozon.ru/search/?text=metal+model&is_global=true&currency_price=150.000%3B";
+  const seller500 = "https://www.ozon.ru/seller/fluff-joy/?currency_price=500.000%3B";
+  const seller150 = "https://www.ozon.ru/seller/fluff-joy/?currency_price=150.000%3B";
+  const otherSeller = "https://www.ozon.ru/seller/upcloud-international/";
+  const urls = [
+    `${search}&sorting=discount&page=3`,
+    `${search}&page=2`,
+    `${seller500}&sorting=discount`,
+    `${seller500}&sorting=rating&page=2`,
+    seller150,
+    otherSeller,
+  ];
+
+  assert.deepEqual(deduplicateSourceDispatchFamilies(urls), [
+    urls[0],
+    urls[2],
+    seller150,
+    otherSeller,
+  ]);
+  assert.deepEqual(excludeCompletedSourceFamilies(urls, [
+    `${search}&sorting=rating`,
+    `${seller500}&page=3`,
+  ]), [
+    seller150,
+    otherSeller,
   ]);
 });
 
