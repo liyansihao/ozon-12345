@@ -789,6 +789,8 @@ export function productTitleFamily(value) {
   if (/для\s+(?:кош(?:ек|ки)?|собак(?:и)?|питомц)|домашн\w*\s+(?:животн|питомц)|pet\s+(?:hat|cap)/i.test(text)) return "pet";
   if (/водн\w*\s+(?:игров\w*\s+)?стол|стол\w*.*(?:игр\w*\s+)?с\s+вод|стол\w*.*водн/i.test(text)) return "bulky_kids";
   if (/(?:plants?\s*vs\.?\s*zombie|растени[яй]\s+против\s+зомби|зомби\s+против\s+растени|pvz).*(?:transform|трансформ)|(?:transform|трансформ).*(?:plants?\s*vs\.?\s*zombie|растени[яй]\s+против\s+зомби|pvz)/i.test(text)) return "pvz_transformer";
+  if (/детск[а-яё]*\s+электромоб|электроквадроцикл|\bбагги\b|\bквадроцикл|\bмотоцикл|джип.*(?:4.?4|пульт)|jeep.*(?:привод|пульт)/i.test(text)) return "ride_on_vehicle";
+  if (/(?:металлическ|коллекционн|масштабн).*(?:модел|машин)|(?:модел|машин).*(?:1\s*:\s*\d+|коллекционн|металлическ)/i.test(text)) return "standard_model";
   if (/чехол|ремеш(?:ок|к)?/i.test(text)) return "case_strap";
   if (/человек[- ]?паук|spider[- ]?man|супергер|мстител|marvel/i.test(text)) return "superhero";
   if (/трус|нижн(?:ее|его|ем)?\s+бель|бюст|лифчик/i.test(text)) return "underwear";
@@ -820,6 +822,8 @@ export function productTitlePriority(value) {
     toy: 250,
     electronics: 100,
     bulky_kids: 75,
+    standard_model: 450,
+    ride_on_vehicle: 175,
     pet: 50,
     superhero: 0,
     pvz_transformer: 0,
@@ -837,16 +841,63 @@ export function observedTitleFamilyScores(rows, recentLimit = 500) {
   }
   const totals = new Map();
   for (const row of latest.values()) {
-    const family = String(row.title_family || productTitleFamily(row.title || ""));
-    const value = totals.get(family) || { attempted: 0, published: 0 };
-    if (!["ignored", "favorited"].includes(String(row.status || ""))) value.attempted += 1;
-    if (row.status === "published") value.published += 1;
+    const title = String(row.title || row.data?.title || "");
+    const family = title ? productTitleFamily(title) : String(row.title_family || "other");
+    const value = totals.get(family) || {
+      attempted: 0,
+      pureFbs: 0,
+      entered1688: 0,
+      reliable1688: 0,
+      profitPass: 0,
+      submitted: 0,
+      published: 0,
+    };
+    const status = String(row.status || "");
+    const reason = String(row.reason || row.data?.reason || "");
+    if (["ignored", "favorited"].includes(status)) {
+      totals.set(family, value);
+      continue;
+    }
+    const submitted = status === "submitted" || status === "published";
+    const entered1688 = submitted || /^(?:1688-|profit(?:_|-))/i.test(reason)
+      || /duplicate-title|publish-|target-|online-|stock-|import-|daily-/i.test(reason);
+    const reliable1688 = submitted || /profit(?:_|-)|duplicate-title|publish-|target-|online-|stock-|import-|daily-/i.test(reason);
+    const profitPass = submitted || /duplicate-title|publish-|target-|online-|stock-|import-|daily-/i.test(reason);
+    value.attempted += 1;
+    value.pureFbs += Number(submitted || entered1688);
+    value.entered1688 += Number(entered1688);
+    value.reliable1688 += Number(reliable1688);
+    value.profitPass += Number(profitPass);
+    value.submitted += Number(submitted);
+    value.published += Number(status === "published");
     totals.set(family, value);
   }
   return Object.fromEntries([...totals].map(([family, value]) => {
-    if (!(value.published > 0)) return [family, 0];
-    const conversion = value.published / Math.max(1, value.attempted);
-    return [family, Math.min(1200, value.published * 300 + conversion * 700)];
+    const priors = {
+      pureFbs: 0.392,
+      reliable1688: 0.483,
+      profitPass: 0.714,
+      finalConfirmation: 0.6,
+    };
+    const baseline = priors.pureFbs * priors.reliable1688
+      * priors.profitPass * priors.finalConfirmation;
+    const smoothedPureFbs = (value.pureFbs + priors.pureFbs * 8) / (value.attempted + 8);
+    const smoothedReliable1688 = (
+      value.reliable1688 + priors.reliable1688 * 6
+    ) / (value.entered1688 + 6);
+    const smoothedProfitPass = (
+      value.profitPass + priors.profitPass * 2
+    ) / (value.reliable1688 + 2);
+    const smoothedFinalConfirmation = (
+      value.published + priors.finalConfirmation * 2
+    ) / (value.submitted + 2);
+    const expectedFinalYield = smoothedPureFbs * smoothedReliable1688
+      * smoothedProfitPass * smoothedFinalConfirmation;
+    const confidence = value.attempted / (value.attempted + 8);
+    const score = (expectedFinalYield - baseline)
+      * (0.35 + 0.65 * confidence)
+      * 10_000;
+    return [family, Math.max(-1200, Math.min(1800, Math.round(score)))];
   }));
 }
 

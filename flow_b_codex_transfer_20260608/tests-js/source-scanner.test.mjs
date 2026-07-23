@@ -2485,12 +2485,45 @@ test("title family priority follows observed strict-publication conversion", () 
   assert.equal(productTitleFamily("Летняя кепка для кошек"), "pet");
   assert.equal(productTitleFamily("Детский игровой столик для игр с водой"), "bulky_kids");
   assert.equal(productTitleFamily("Сквиш лапка антистресс"), "squish");
+  assert.equal(productTitleFamily("Металлическая коллекционная модель автомобиля 1:36"), "standard_model");
+  assert.equal(productTitleFamily("24В детский электромобиль Багги 4х4 с пультом"), "ride_on_vehicle");
   assert.ok(productTitlePriority("Носки для девочек") > productTitlePriority("Плюшевая игрушка Sprunki"));
   assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Фигурка героя"));
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Браслет с кулоном"));
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Летняя кепка для кошек"));
   assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Детский игровой столик для игр с водой"));
   assert.ok(productTitlePriority("Сквиш лапка антистресс") > productTitlePriority("Большая картина"));
+});
+
+test("title-family funnel scoring separates reliable standard models from broad other supply", () => {
+  const rows = [
+    ...Array.from({ length: 8 }, (_, index) => ({
+      sku: `model-${index}`,
+      status: index < 4 ? "published" : "skipped",
+      reason: index < 4 ? null : "1688-no-reliable-match",
+      title: `Металлическая коллекционная модель автомобиля 1:${32 + index}`,
+    })),
+    ...Array.from({ length: 24 }, (_, index) => ({
+      sku: `other-${index}`,
+      status: index === 0 ? "published" : "rejected",
+      reason: index === 0 ? null : "non-pure-fbs",
+      title: "Обычный товар для дома",
+    })),
+    ...Array.from({ length: 8 }, (_, index) => ({
+      sku: `building-${index}`,
+      status: "skipped",
+      reason: "1688-no-reliable-match",
+      title: "Детский конструктор из блоков",
+    })),
+  ];
+  const scores = observedTitleFamilyScores(rows);
+  assert.ok(scores.standard_model > scores.other);
+  const ordered = prioritizeFavoriteLinks([
+    { href: "ordinary", text: "Обычный товар для дома" },
+    { href: "model", text: "Металлическая коллекционная модель автомобиля 1:36" },
+    { href: "building", text: "Детский конструктор из блоков" },
+  ], scores).map((link) => link.href);
+  assert.equal(ordered[0], "model");
 });
 
 test("strict squish conversion promotes squish listings without borrowing broad other-family yield", () => {
