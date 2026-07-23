@@ -1,0 +1,34 @@
+{
+  "generated_at": "2026-07-23T02:07:53.566Z",
+  "criteria": "profit_rate > 30, online_status=selling, stock>0",
+  "excluded_skus": [
+    "2815247918"
+  ],
+  "stores": {
+    "104965": {
+      "name": "丽丽1号",
+      "confirmed": 0,
+      "file": "confirmed_store_104965.csv"
+    },
+    "106637": {
+      "name": "丽丽二号",
+      "confirmed": 0,
+      "file": "confirmed_store_106637.csv"
+    },
+    "106640": {
+      "name": "丽丽三号",
+      "confirmed": 0,
+      "file": "confirmed_store_106640.csv"
+    },
+    "106644": {
+      "name": "丽丽四号",
+      "confirmed": 0,
+      "file": "confirmed_store_106644.csv"
+    },
+    "106646": {
+      "name": "丽丽五号",
+      "confirmed": 0,
+      "file": "confirmed_store_106646.csv"
+    }
+  }
+}

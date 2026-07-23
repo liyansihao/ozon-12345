@@ -269,6 +269,71 @@ run：`runs/flow_b/20260723_083500_ozon10m_v92`
 
 回归结果：验证码分类、单次重开、重复验证码人工锁停、source/favorite/publish 三条详情路径的相关定向测试 186/186 通过；完整 Node 测试 433/433、Python 测试 8/8、`git diff --check` 全部通过。当前 v92 停机原因是 `Похоже, нет соединения` 网络软拦截，不是验证码，所以本次代码变更没有清除现有锁或启动真实 Ozon 请求。
 
+## 阶段 8：受控验证完成与 30 分钟正式结论（2026-07-23）
+
+本阶段冻结 commit 为 `86b8e5202e175716d6f7b51893d77c13ca5af262`。每次启动前都先归档 automation profile 的 Session/Tab 文件，并确认浏览器只打开 `about:blank`；各阶段之间不复用 supervisor 进程。
+
+### 3 商品受控验证 v93：PASS
+
+run：`runs/flow_b/20260723_091500_ozon3item_v93`
+
+- 首页预检及 SKU `3088016074`、`1907037527`、`3773926959` 全部成功，三个商品均明确读到 FBS。
+- 统一 controller 的完成到下一次开始间隔约 15 秒；in-flight owner 始终为 1。
+- 全程没有 CAPTCHA、软拦截、访问限制或 runtime error。
+
+### 10 分钟小样 v94：Ozon 稳定，吞吐不达标
+
+run：`runs/flow_b/20260723_092000_ozon10m_v94`
+
+- 正式窗口：`2026-07-23T01:20:52.147Z` 至 `2026-07-23T01:30:52.147Z`。
+- 最终严格确认 0，目标 5，速度 0/小时，五店均为 0。
+- Ozon 详情/类目 9 次，1688 成本查询 9 次；7 次 `1688-no-reliable-match`、2 次利润率不大于 30%、2 次标题重复。
+- 全程没有 CAPTCHA、软拦截、runtime error 或 supervisor 崩溃。
+- 正式截止后 producer 等待一个已启动 tranche 安全收尾；窗口外结果未计入验收。
+
+### 30 分钟正式验收 v95：NOT PASS
+
+run：`runs/flow_b/20260723_093300_ozon30m_v95`
+
+正式窗口为 `2026-07-23T01:35:00.463Z` 至 `2026-07-23T02:05:00.463Z`，连续 1800 秒：
+
+| 指标 | 结果 | 判定 |
+|---|---:|---|
+| ERP/Ozon 最终严格确认唯一 SKU | 0 | 未达到 15 |
+| 最终确认速度 | 0/小时 | 未达到 30/小时 |
+| 五店成功数 | 0 / 0 / 0 / 0 / 0 | 无店铺成功 |
+| 成功 SKU 重复数 | 0 | 通过 |
+| 成功 SKU 最低利润率 | N/A | 无成功样本，不能判定利润 PASS |
+| CAPTCHA / 软拦截 | 0 / 0 | 通过 |
+| runtime error / supervisor 崩溃 | 0 / 0 | 通过 |
+| Ozon owner | 1 | 通过 |
+
+Ozon 时间线共 102 次开始和 102 次终止：source 22 次、favorite detail 77 次、publish detail 3 次。所有操作串行，实测最短完成到下一次开始间隔为 14,995ms（15 秒计时器抖动范围），没有 `captcha_wait`、`captcha_reopened`、`stopped` 或 `rejected_stopped`。截止后仅有 3 个已经排队/启动的采集操作安全退出，最后事件为 `02:05:36.936Z`；这 36.473 秒不计入正式窗口。
+
+正式漏斗：
+
+- collection 尝试 81，失败 0；淘汰为 non-pure-fbs 43、禁售类目 2、低产超长标题 1。
+- Ozon 详情/类目进入 32，平均 6,400ms；利润上界 32，平均 187ms。
+- 1688 成本查询 30，平均 2,644ms；其中 28 次（93.3%）被 `1688-no-reliable-match` 严格淘汰。
+- 剩余淘汰为利润上界不大于 30% 两次、最终利润率不大于 30% 两次、标题重复一次。
+- 未进入 ERP 提交和最终确认，因此成功数为 0。
+
+### 最新唯一最大瓶颈
+
+`1688-no-reliable-match` 的 28 次中，24 次（占全部 1688 查询 80.0%）的原始输出是同一连接故障：`h5api.m.1688.com` session initialization 发生 `SSL: UNEXPECTED_EOF_WHILE_READING`，最终缺失有效 P70 成本；仅 4 次是真实价格簇证据不足。因此当前唯一最大瓶颈是 1688 会话初始化/连接可靠性，而不是 Ozon 风控、详情速度、利润阈值或 ERP 最终确认。
+
+严格口径不能把连接失败当作可靠成本，也不能放宽 P70、利润或最终确认规则。下一轮应先离线复现并为 1688 session 初始化的 transient SSL EOF 增加有界重试/健康恢复测试；完成完整回归后再做短小样，不能直接重复新的 30 分钟 Ozon 窗口。
+
+本阶段结束时 supervisor、Node worker、CDP browser owner 均为 0。五店严格确认 CSV 已导出到 `exports/20260723_093300_ozon30m_v95_confirmed`，所有文件只有表头，与严格成功数 0 一致。
+
+### 1688 单变量恢复实验：无改善，已撤销
+
+在不访问 Ozon 的条件下，先补了“SSL EOF 时销毁 session、指数退避、最多重试两次”的回归测试；定向测试、Node 433/433 和 Python 10/10 均通过。随后使用 v95 中三个原始失败图片做真实 1688 小样：`2485449252`、`3330156278`、`3799335357` 三个请求全部在三次 session 初始化后仍返回相同的 `SSL: UNEXPECTED_EOF_WHILE_READING`，恢复率 0/3。按“没有改善就撤销”规则，代码和新增测试已全部撤销，Python 测试恢复为 8/8。
+
+主机级对照进一步缩小了范围：同机 `curl` 访问 `h5api.m.1688.com` TLS 校验成功并得到 HTTP 404，普通 `m.1688.com` 得到 HTTP 200；生产 Python 3.14/OpenSSL 3.0.19 的 `requests/urllib3` 对同一 H5 API GET 稳定 EOF。临时 Python 3.9/LibreSSL 2.8.3 + requests 2.32.5 也稳定 EOF。因此该故障不是单个 worker session、Python 3.14 或四 worker 并发造成，而是当前 1688 H5 API 与 Python requests 客户端通路之间的持续 TLS 中断。
+
+切换代理、伪装 TLS/浏览器指纹或用其他隐匿客户端规避不符合本轮约束，不能作为修复。没有可靠 1688 成本时不能提交商品，所以不再重复启动 Ozon 验收窗口。最终结论保持 **NOT PASS**。
+
 ## 证据路径
 
 - v69 现场：`/Users/mac/.codex/ozon-stability-archive/20260722_v69_interrupted`
@@ -286,6 +351,11 @@ run：`runs/flow_b/20260723_083500_ozon10m_v92`
 - v92 10 分钟失败现场：`runs/flow_b/20260723_083500_ozon10m_v92`
 - v92 Ozon 时间线：`runs/flow_b/20260723_083500_ozon10m_v92/ozon_access_timeline.jsonl`
 - v92 fatal 日志：`runs/flow_b/20260723_083500_ozon10m_v92/runtime_errors.jsonl`
+- v93 3 商品 PASS：`runs/flow_b/20260723_091500_ozon3item_v93/three_item_result.json`
+- v94 10 分钟小样：`runs/flow_b/20260723_092000_ozon10m_v94/acceptance_summary.json`
+- v95 30 分钟正式结果：`runs/flow_b/20260723_093300_ozon30m_v95/acceptance_summary.json`
+- v95 Ozon 时间线：`runs/flow_b/20260723_093300_ozon30m_v95/ozon_access_timeline.jsonl`
+- v95 五店严格确认 CSV：`exports/20260723_093300_ozon30m_v95_confirmed`
 - 当前 cooldown 分支：`flow_b_codex_transfer_20260608/scripts/flow_b_playwright/source-scanner.mjs`
 - CDP 分支：`flow_b_codex_transfer_20260608/scripts/flow_b_playwright/browser-context.mjs`
 - 跨 run transient retry 测试：`flow_b_codex_transfer_20260608/tests-js/source-scanner.test.mjs`
