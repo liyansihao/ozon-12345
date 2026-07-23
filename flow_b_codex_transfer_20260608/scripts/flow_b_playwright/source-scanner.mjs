@@ -990,6 +990,11 @@ export function sourceNonFbsSampleKey(value) {
   try {
     const url = new URL(String(value));
     url.hash = "";
+    if (/^\/search\/?$/i.test(url.pathname)) {
+      url.searchParams.delete("page");
+      url.searchParams.delete("sorting");
+      url.searchParams.sort();
+    }
     return url.toString();
   } catch {
     return String(value);

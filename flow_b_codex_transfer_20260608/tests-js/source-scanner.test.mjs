@@ -361,6 +361,18 @@ test("non-pure-FBS sampling isolates seller page and sorting variants", () => {
   assert.equal(sourceNonFbsSampleKey(`${base}#products`), sourceNonFbsSampleKey(base));
 });
 
+test("non-pure-FBS sampling shares one failure streak across search pages and sorting variants", () => {
+  const base = "https://www.ozon.ru/search/?text=metal+model&is_global=true&currency_price=150.000%3B";
+  assert.equal(
+    sourceNonFbsSampleKey(`${base}&sorting=discount&page=2`),
+    sourceNonFbsSampleKey(`${base}&sorting=rating&page=4`),
+  );
+  assert.notEqual(
+    sourceNonFbsSampleKey(`${base}&page=2`),
+    sourceNonFbsSampleKey("https://www.ozon.ru/search/?text=metal+model&is_global=true&currency_price=500.000%3B&page=2"),
+  );
+});
+
 test("collection deadline stops an in-flight producer tranche", () => {
   const env = { FLOW_B_DEADLINE_AT: "2026-07-14T22:00:29.809Z" };
   assert.equal(collectionDeadlineMs(env), Date.parse(env.FLOW_B_DEADLINE_AT));
