@@ -15,7 +15,7 @@ import { createPublishRunner } from "./flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "./flow_b_playwright/publish-state.mjs";
 import { scanSources } from "./flow_b_playwright/source-scanner.mjs";
 import { runReadOnlyVerification } from "./flow_b_playwright/verification.mjs";
-import { acceptanceSummary, collectionErrorSummary, isFatalBrowserError, operationalErrorSummary, rankSourcesByYield, runProducerLoop, summarizeConsumerRound } from "./flow_b_playwright/continuous-runtime.mjs";
+import { acceptanceSummary, collectionErrorSummary, isFatalBrowserError, operationalErrorSummary, rankSourcesByYield, runProducerLoop, summarizeConsumerRound, withRuntimeCleanup } from "./flow_b_playwright/continuous-runtime.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
@@ -492,27 +492,33 @@ async function runAcceptance(context, options, env) {
       }
     },
   });
-  let roundSummary;
-  while (Date.now() < endedAt.getTime()) {
-    if (producerFatalError) throw producerFatalError;
-    try {
-      roundSummary = summarizeConsumerRound(roundSummary, await publishWithContext(context, options, runtimeEnv, shared));
-    } catch (error) {
-      await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), stage: "consumer", error: String(error?.message || error) })}\n`);
-      if (isFatalBrowserError(error)) {
-        producerFatalError = error;
-        break;
+  return withRuntimeCleanup(async () => {
+    let roundSummary;
+    while (Date.now() < endedAt.getTime()) {
+      if (producerFatalError) throw producerFatalError;
+      try {
+        roundSummary = summarizeConsumerRound(roundSummary, await publishWithContext(context, options, runtimeEnv, shared));
+      } catch (error) {
+        await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), stage: "consumer", error: String(error?.message || error) })}\n`);
+        if (isFatalBrowserError(error)) {
+          producerFatalError = error;
+          break;
+        }
       }
+      const wait = Math.min(Math.max(1_000, Number(env.FLOW_B_POLL_INTERVAL_MS || 10_000)), endedAt.getTime() - Date.now());
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
     }
-    const wait = Math.min(Math.max(1_000, Number(env.FLOW_B_POLL_INTERVAL_MS || 10_000)), endedAt.getTime() - Date.now());
-    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-  }
-  const scan = await scanTask;
-  await closePublishingSession(shared.session);
-  shared.session = null;
-  if (producerFatalError) throw producerFatalError;
-  const report = await writeAcceptanceReport(options.runDir, startedAt.toISOString(), endedAt.toISOString(), acceptanceTarget);
-  return { report, scan, round_summary: roundSummary || null };
+    const scan = await scanTask;
+    if (producerFatalError) throw producerFatalError;
+    const report = await writeAcceptanceReport(options.runDir, startedAt.toISOString(), endedAt.toISOString(), acceptanceTarget);
+    return { report, scan, round_summary: roundSummary || null };
+  }, {
+    backgroundTask: scanTask,
+    cleanup: async () => {
+      await closePublishingSession(shared.session);
+      shared.session = null;
+    },
+  });
 }
 
 function printHelp() {

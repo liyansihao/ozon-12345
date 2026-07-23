@@ -223,6 +223,40 @@ v69 的 launcher、完整 frozen environment 和大部分 profile 已丢失，�
 
 本轮已经出现一次软拦截，所以持久停机锁不在离线修复中清除，也不自动再次验证。只有人工确认 Ozon 已恢复后，才可在归档旧 Sessions 的前提下重新开始首页 → 3 商品完整阶段。
 
+## 阶段 6：干净启动通过、10 分钟小样失败与第二次最小修复（2026-07-23）
+
+用户完成人工验证后，以 commit `3e686e5039aa9de3a1ea64eecf1a5e8b5f879a79` 重新验证。启动前归档 4 个 Session/Tab 文件；CFT 启动时只有 `about:blank`，History 中没有 scheduler 接管前的 Ozon 访问，证明阶段 5 的 session restore 旁路已消除。
+
+### 3 商品受控验证：PASS
+
+run：`runs/flow_b/20260723_083111_ozon3item_v91`
+
+- 首页只读预检正常。
+- SKU `3088016074`、`1907037527`、`3773926959` 均成功读取为 FBS。
+- 四次受控操作（首页 + 3 个详情）的启动间隔分别为 15.002、15.003、15.001 秒。
+- 全程无验证码、软拦截和强制验证，统一停机锁保持 `requires_manual_clear=false`。
+
+### 10 分钟真实小样：NOT PASS
+
+run：`runs/flow_b/20260723_083500_ozon10m_v92`
+
+- 前 6 次 source 操作成功；第 7 次 favorite detail（SKU `3740125372`）成功并确认 FBS。
+- 第 8 次 Ozon 操作、第二个 favorite detail（SKU `3094196585`）在 `2026-07-23T00:38:43.867Z` 触发软拦截。
+- 控制器在该操作开始后 313ms 内写入 `requires_manual_clear=true`，没有继续发起 Ozon 请求。
+- 本轮仅产生 1 个 favorite，ERP/Ozon 最终严格确认数为 0；因此没有启动 30 分钟验收，不能据此计算达标速度。
+
+时间线暴露出统一调度器的第二个精确缺陷：它原先只保证“相邻开始时间”至少 15 秒，而不保证“页面完成后”有完整静默间隔。第三次 source 操作从 `00:37:20.916Z` 持续到 `00:37:43.545Z`，下一次 source 在 `00:37:43.552Z` 启动，完成到下一次开始仅 7ms。虽然 in-flight 始终为 1，长页面操作仍会把后续请求贴在完成边界，形成浏览器侧连续导航。
+
+软拦截后主流程正确判定致命停止，但 producer 的长生命周期任务和发布 session 没有在 fatal 路径统一收尾，导致 Node/browser 进程需要人工终止。这不造成额外 Ozon 导航，但违反自动安全停机要求。
+
+第二次最小修复仅针对这两个已复现问题：
+
+1. `ozon-access-controller.mjs` 在每次成功或普通失败操作完成后持久化 `last_completed_at`，并把 `next_allowed_at_ms` 推迟到“完成时间 + 15 秒”；soft-block 仍立即锁停，不再等待。
+2. `continuous-runtime.mjs` 增加统一 `finally` 收尾器；acceptance 无论正常返回还是 fatal，都等待 producer 结束并关闭长生命周期发布 session。
+3. 新测试先复现 completion quiet gap 和 fatal cleanup，修改后针对性测试 197/197、完整 Node 测试 430/430、Python 测试 8/8 全部通过，`git diff --check` 通过。
+
+按受控验证规则，本轮一旦出现 soft-block 即判定失败。新修复没有在当前风险状态下自动重测；profile 级停机锁继续保留，等待下一次人工验证后从 3 商品阶段重新开始。
+
 ## 证据路径
 
 - v69 现场：`/Users/mac/.codex/ozon-stability-archive/20260722_v69_interrupted`
@@ -235,6 +269,11 @@ v69 的 launcher、完整 frozen environment 和大部分 profile 已丢失，�
 - v90 3 商品失败证据：`runs/flow_b/20260723_081240_ozon3item_v90`
 - v90 Ozon 时间线：`runs/flow_b/20260723_081240_ozon3item_v90/ozon_access_timeline.jsonl`
 - v90 结果：`runs/flow_b/20260723_081240_ozon3item_v90/three_item_result.json`
+- v91 3 商品 PASS：`runs/flow_b/20260723_083111_ozon3item_v91/three_item_result.json`
+- v91 Ozon 时间线：`runs/flow_b/20260723_083111_ozon3item_v91/ozon_access_timeline.jsonl`
+- v92 10 分钟失败现场：`runs/flow_b/20260723_083500_ozon10m_v92`
+- v92 Ozon 时间线：`runs/flow_b/20260723_083500_ozon10m_v92/ozon_access_timeline.jsonl`
+- v92 fatal 日志：`runs/flow_b/20260723_083500_ozon10m_v92/runtime_errors.jsonl`
 - 当前 cooldown 分支：`flow_b_codex_transfer_20260608/scripts/flow_b_playwright/source-scanner.mjs`
 - CDP 分支：`flow_b_codex_transfer_20260608/scripts/flow_b_playwright/browser-context.mjs`
 - 跨 run transient retry 测试：`flow_b_codex_transfer_20260608/tests-js/source-scanner.test.mjs`

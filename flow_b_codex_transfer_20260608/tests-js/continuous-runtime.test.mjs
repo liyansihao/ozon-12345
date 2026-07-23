@@ -13,12 +13,26 @@ import {
   isFatalBrowserError,
   rankSourcesByYield,
   runProducerLoop,
+  withRuntimeCleanup,
   summarizeConsumerRound,
   clearCandidateFactsCache,
   candidateFactsCacheStats,
   loadCandidateFacts,
   loadPreflightPureSkus,
 } from "../scripts/flow_b_playwright/continuous-runtime.mjs";
+
+test("fatal acceptance errors await background shutdown and close long-lived resources", async () => {
+  const events = [];
+  const backgroundTask = Promise.resolve().then(() => { events.push("background-stopped"); });
+  await assert.rejects(withRuntimeCleanup(async () => {
+    events.push("operation-failed");
+    throw new Error("fatal acceptance error");
+  }, {
+    backgroundTask,
+    cleanup: async () => { events.push("resources-closed"); },
+  }), /fatal acceptance error/);
+  assert.deepEqual(events, ["operation-failed", "background-stopped", "resources-closed"]);
+});
 
 test("candidate facts reuse an unchanged favorite history and parse only appended bytes", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-facts-"));

@@ -370,6 +370,20 @@ export async function runProducerLoop({
   return lastResult || { deadline_reached: true };
 }
 
+export async function withRuntimeCleanup(operation, {
+  backgroundTask = null,
+  cleanup = async () => {},
+} = {}) {
+  if (typeof operation !== "function") throw new TypeError("operation is required");
+  if (typeof cleanup !== "function") throw new TypeError("cleanup must be a function");
+  try {
+    return await operation();
+  } finally {
+    if (backgroundTask) await Promise.resolve(backgroundTask).catch(() => {});
+    await cleanup();
+  }
+}
+
 export function isFatalBrowserError(error) {
   if (error?.code === "FLOW_B_OZON_ACCESS_STOPPED") return true;
   return /target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed/i

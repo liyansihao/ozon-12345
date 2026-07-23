@@ -10,7 +10,7 @@ import {
   resolveOzonAccessStateFile,
 } from "../scripts/flow_b_playwright/ozon-access-controller.mjs";
 
-test("global Ozon controller serializes callers and preserves the configured interval", async () => {
+test("global Ozon controller serializes callers and preserves a quiet interval after completion", async () => {
   let clock = 1_000;
   let active = 0;
   let peak = 0;
@@ -33,7 +33,7 @@ test("global Ozon controller serializes callers and preserves the configured int
     controller.run({ kind: "publish-detail", url: "https://www.ozon.ru/product/three" }, operation),
   ]);
   assert.equal(peak, 1);
-  assert.deepEqual(starts, [1_000, 1_250, 1_500]);
+  assert.deepEqual(starts, [1_000, 1_260, 1_520]);
 });
 
 test("one soft block persists a manual stop and prevents every queued Ozon operation", async () => {

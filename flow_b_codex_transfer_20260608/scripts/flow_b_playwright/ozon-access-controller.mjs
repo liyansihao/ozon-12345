@@ -74,6 +74,19 @@ export function createOzonAccessController({
     return state;
   };
   const persist = async () => writeState(filename, state || {});
+  const settle = async () => {
+    const settledAt = now();
+    state = {
+      ...state,
+      updated_at: new Date(settledAt).toISOString(),
+      last_completed_at: new Date(settledAt).toISOString(),
+      next_allowed_at_ms: Math.max(
+        Number(state?.next_allowed_at_ms) || 0,
+        settledAt + minimumInterval,
+      ),
+    };
+    await persist();
+  };
   const record = async (event, metadata = {}, details = {}) => {
     if (!timelineFilename) return;
     await fs.mkdir(path.dirname(timelineFilename), { recursive: true });
@@ -131,6 +144,7 @@ export function createOzonAccessController({
         await record("started", metadata, { next_allowed_at_ms: state.next_allowed_at_ms });
         try {
           const result = await operation();
+          await settle();
           await record("succeeded", metadata);
           return result;
         } catch (error) {
@@ -139,6 +153,7 @@ export function createOzonAccessController({
             throw error;
           }
           if (isOzonSoftBlockError(error)) throw await stop(error?.message || error, metadata);
+          await settle();
           await record("failed", metadata, { reason: String(error?.message || error) });
           throw error;
         }
