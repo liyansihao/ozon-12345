@@ -911,6 +911,12 @@ function sourceUrlKey(value) {
   }
 }
 
+export function filterSourceUrlsByAllowlist(urls = [], allowlistUrls = []) {
+  if (!allowlistUrls.length) return [...urls];
+  const allowedKeys = new Set(allowlistUrls.map(sourceUrlKey).filter(Boolean));
+  return urls.filter((url) => allowedKeys.has(sourceUrlKey(url)));
+}
+
 function isSearchSource(value) {
   try {
     return /^\/search\/?$/i.test(new URL(String(value || "")).pathname);
@@ -2862,6 +2868,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     ...(await fs.readFile(inputPath, "utf8")).split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
     ...expandedFreshInputUrls,
   ])];
+  const allowlistFile = String(env.FLOW_B_SOURCE_ALLOWLIST_FILE || "").trim();
+  const allowlistUrls = allowlistFile
+    ? (await fs.readFile(path.resolve(allowlistFile), "utf8"))
+      .split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+    : [];
   const yieldFiles = [...new Set([
     path.join(path.dirname(outputPath), "source_yield.jsonl"),
     path.join(path.dirname(outputPath), "favorite_collection.jsonl"),
@@ -2940,7 +2951,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const boundedEvidenceSourceKeys = new Set(
     boundedEvidenceSources.map(sourceNonFbsSampleKey).filter(Boolean),
   );
-  const urls = filterProductiveSourceVariants(
+  const urls = filterSourceUrlsByAllowlist(filterProductiveSourceVariants(
     [...new Set([
       ...publishedSourcePages,
       ...nextPublishedDiscoveryPages,
@@ -2955,7 +2966,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ], yieldRows),
     ])],
     yieldRows,
-  );
+  ), allowlistUrls);
   let records = await readJsonArrayCached(outputPath);
   const done = completedSourceUrls(records, {
     transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),

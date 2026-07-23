@@ -104,6 +104,7 @@ import {
   expandNextPublishedDiscoveryPages,
   expandRepeatedPublishedDiscoveryPageFour,
   fullFunnelSourceScores,
+  filterSourceUrlsByAllowlist,
   fatalSourceBatchError,
   completedSourceUrls,
   clearJsonLinesFileCache,
@@ -118,6 +119,25 @@ import {
   sourceBatchCollectionMode,
   shouldScanSourcesDuringDetailCooldown,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+
+test("source allowlist constrains derived seller variants to explicitly selected families", () => {
+  const urls = [
+    "https://www.ozon.ru/seller/nature-3460296/?currency_price=500.000%3B&sorting=rating&page=4",
+    "https://www.ozon.ru/seller/upcloud-international/?page=2",
+    "https://www.ozon.ru/seller/fluff-joy/?sorting=discount",
+    "https://www.ozon.ru/search/?text=toys&page=2",
+  ];
+  const allowlist = [
+    "https://www.ozon.ru/seller/nature-3460296/",
+    "https://www.ozon.ru/seller/fluff-joy/",
+  ];
+
+  assert.deepEqual(filterSourceUrlsByAllowlist(urls, allowlist), [
+    urls[0],
+    urls[2],
+  ]);
+  assert.deepEqual(filterSourceUrlsByAllowlist(urls, []), urls);
+});
 
 test("verified seller promotion requires at least two strict publications", () => {
   assert.equal(verifiedSellerMinimumPublished({}), 2);
