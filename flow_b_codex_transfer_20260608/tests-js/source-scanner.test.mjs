@@ -124,6 +124,7 @@ import {
 test("source allowlist constrains derived seller variants to explicitly selected families", () => {
   const urls = [
     "https://www.ozon.ru/seller/nature-3460296/?currency_price=500.000%3B&sorting=rating&page=4",
+    "https://www.ozon.ru/seller/nature-3460296/?page=4&sorting=rating&currency_price=500.000%3B",
     "https://www.ozon.ru/seller/upcloud-international/?page=2",
     "https://www.ozon.ru/seller/fluff-joy/?sorting=discount",
     "https://www.ozon.ru/search/?text=toys&page=2",
@@ -135,14 +136,14 @@ test("source allowlist constrains derived seller variants to explicitly selected
 
   assert.deepEqual(filterSourceUrlsByAllowlist(urls, allowlist), [
     urls[0],
-    urls[2],
+    urls[3],
   ]);
   assert.deepEqual(filterSourceUrlsByAllowlist(urls, [
     urls[0],
-    urls[2],
+    urls[3],
   ], { match: "exact" }), [
     urls[0],
-    urls[2],
+    urls[3],
   ]);
   assert.deepEqual(filterSourceUrlsByAllowlist(urls, [
     "https://www.ozon.ru/seller/nature-3460296/",
@@ -151,9 +152,9 @@ test("source allowlist constrains derived seller variants to explicitly selected
   assert.deepEqual(filterSourceUrlsByAllowlist(urls, []), urls);
   assert.deepEqual(filterSourceRowsByAllowlist(
     urls.map((source_url, index) => ({ source_url, index })),
-    [urls[1], urls[3]],
+    [urls[0], urls[2], urls[4]],
     { match: "exact" },
-  ).map((row) => row.index), [1, 3]);
+  ).map((row) => row.index), [0, 2, 4]);
 });
 
 test("verified seller promotion requires at least two strict publications", () => {

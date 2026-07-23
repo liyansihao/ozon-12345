@@ -926,16 +926,26 @@ export function filterSourceUrlsByAllowlist(urls = [], allowlistUrls = [], { mat
   if (!allowlistUrls.length) return [...urls];
   const key = match === "exact" ? exactSourceUrlKey : sourceUrlKey;
   const allowedKeys = new Set(allowlistUrls.map(key).filter(Boolean));
-  return urls.filter((url) => allowedKeys.has(key(url)));
+  const seen = new Set();
+  return urls.filter((url) => {
+    if (!allowedKeys.has(key(url))) return false;
+    const exactKey = exactSourceUrlKey(url);
+    if (seen.has(exactKey)) return false;
+    seen.add(exactKey);
+    return true;
+  });
 }
 
 export function filterSourceRowsByAllowlist(rows = [], allowlistUrls = [], options = {}) {
   if (!allowlistUrls.length) return [...rows];
-  return rows.filter((row) => filterSourceUrlsByAllowlist(
-    [row?.source_url],
-    allowlistUrls,
-    options,
-  ).length > 0);
+  const seen = new Set();
+  return rows.filter((row) => {
+    if (!filterSourceUrlsByAllowlist([row?.source_url], allowlistUrls, options).length) return false;
+    const exactKey = exactSourceUrlKey(row?.source_url);
+    if (seen.has(exactKey)) return false;
+    seen.add(exactKey);
+    return true;
+  });
 }
 
 function isSearchSource(value) {
