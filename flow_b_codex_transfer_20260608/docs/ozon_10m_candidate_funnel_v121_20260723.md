@@ -61,15 +61,18 @@ The exact-source results were:
 | Other sources | 3 | 3 | 0 | 0 |
 
 The run made 32 globally paced Ozon operations: 18 source pages and 14 detail
-pages. It ended with 160 evidence-qualified candidates still pending in the
-durable candidate queue. Repeating source discovery in the next window would
-waste the same global 15-second budget.
+pages. The scanner's `pending=160` value is the unscanned source-URL portfolio,
+not a candidate count. The durable candidate queue itself contained 14 unique
+SKUs and all 14 had reached terminal collection outcomes. The 18 persisted
+source-page records still retain unattempted listing-card evidence.
 
 ## Next single variable
 
-Seed the next run's durable candidate queue from v121 so the 160 already
-discovered, plugin-FBS-qualified cards can be detail-verified before more source
-pages are opened. Attempted and submitted SKUs remain excluded by the existing
+Seed the next run's source checkpoint from v121 so unattempted cards in the 18
+already scanned source pages can pass through the new listing-FBS gate before
+more source pages are opened. v118 showed that checkpoint reuse without this
+gate was ineffective; v122 tests the checkpoint only after ambiguous cards have
+been excluded. Attempted and submitted SKUs remain excluded by the existing
 state seeds. This does not trust cached FBS as final truth, does not change the
 15-second global interval, and does not change any 1688, P70, profit, store,
 inventory, deduplication, or final-confirmation rule.
