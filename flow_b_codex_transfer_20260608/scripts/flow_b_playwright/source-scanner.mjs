@@ -1001,6 +1001,17 @@ export function sourceNonFbsSampleKey(value) {
   }
 }
 
+export function deduplicateSearchSourceVariants(urls = []) {
+  const seenSearchFamilies = new Set();
+  return (urls || []).filter((value) => {
+    if (!isSearchSource(value)) return true;
+    const key = sourceNonFbsSampleKey(value);
+    if (!key || seenSearchFamilies.has(key)) return false;
+    seenSearchFamilies.add(key);
+    return true;
+  });
+}
+
 function sourceEvidenceKey(value, { keepSorting = false } = {}) {
   try {
     const url = new URL(String(value));
@@ -3046,7 +3057,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       derivedPriorityLimit,
     }),
   });
-  const pending = interleaveSourcePortfolio(prioritizedPending, yieldRows, {
+  const pending = interleaveSourcePortfolio(deduplicateSearchSourceVariants(prioritizedPending), yieldRows, {
     strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
     fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
     exploreWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORE_WEIGHT", 1),

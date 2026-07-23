@@ -61,6 +61,7 @@ import {
   nextSourceSampleStats,
   sourceSampleStatsFromEvents,
   sourceNonFbsSampleKey,
+  deduplicateSearchSourceVariants,
   favoritePriceSkipReason,
   favoriteTitleSkipReason,
   nextLowYieldBatchStreak,
@@ -371,6 +372,31 @@ test("non-pure-FBS sampling shares one failure streak across search pages and so
     sourceNonFbsSampleKey(`${base}&page=2`),
     sourceNonFbsSampleKey("https://www.ozon.ru/search/?text=metal+model&is_global=true&currency_price=500.000%3B&page=2"),
   );
+});
+
+test("source dispatch scans one representative per search text and price band", () => {
+  const base = "https://www.ozon.ru/search/?text=metal+model&is_global=true&currency_price=150.000%3B";
+  const otherBand = "https://www.ozon.ru/search/?text=metal+model&is_global=true&currency_price=500.000%3B";
+  const otherQuery = "https://www.ozon.ru/search/?text=toy+car&is_global=true&currency_price=150.000%3B";
+  const sellerPage2 = "https://www.ozon.ru/seller/nature-3460296/?page=2";
+  const sellerPage3 = "https://www.ozon.ru/seller/nature-3460296/?page=3";
+
+  assert.deepEqual(deduplicateSearchSourceVariants([
+    `${base}&sorting=discount&page=3`,
+    `${base}&page=2`,
+    base,
+    otherBand,
+    `${otherBand}&sorting=rating&page=2`,
+    otherQuery,
+    sellerPage2,
+    sellerPage3,
+  ]), [
+    `${base}&sorting=discount&page=3`,
+    otherBand,
+    otherQuery,
+    sellerPage2,
+    sellerPage3,
+  ]);
 });
 
 test("collection deadline stops an in-flight producer tranche", () => {
