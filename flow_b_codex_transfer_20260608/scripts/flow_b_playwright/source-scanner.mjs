@@ -4,6 +4,7 @@ import { ensureMaoziLogin, ensureMaoziPluginLogin, openMaoziPage } from "./brows
 import { createCandidateQueue } from "./candidate-queue.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError } from "./continuous-runtime.mjs";
 import { isPureFbs, prohibitedCategorySkipReason } from "./publish-policy.mjs";
+import { isOzonAccessStoppedError, ozonAccessControllerFor } from "./ozon-access-controller.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_SOURCE_YIELD_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/source_yield_history.jsonl");
@@ -391,15 +392,9 @@ export function sourceBatchCollectionMode({
 
 export function shouldScanSourcesDuringDetailCooldown({
   cooldownRemainingMs,
-  readyCandidateCount,
-  backlogTarget,
-  quietWindowMs,
 }) {
   const remaining = Math.max(0, Number(cooldownRemainingMs) || 0);
-  if (remaining === 0) return true;
-  const target = Math.max(1, Number(backlogTarget) || 1);
-  if (Number(readyCandidateCount) >= target) return false;
-  return remaining > Math.max(0, Number(quietWindowMs) || 0);
+  return remaining === 0;
 }
 
 export async function withTimeout(operation, timeoutMs, label = "operation") {
@@ -2327,7 +2322,7 @@ async function extractFavoriteProduct(page, url, timeout) {
   return parseFavoriteProductSnapshot(snapshot || { url });
 }
 
-async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, productiveSourceSampleKeys = new Set(), onResult = () => {}, workerPagePool = null }) {
+async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, productiveSourceSampleKeys = new Set(), onResult = () => {}, workerPagePool = null, accessController = null }) {
   if (currentTotal >= target || !links.length || isCollectionDeadlineReached(env)) return currentTotal;
   let existing = new Set();
   try {
@@ -2459,7 +2454,12 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         throw error;
       }
       try {
-        const result = await extractFavoriteProduct(page, item.href, timeout);
+        const result = accessController
+          ? await accessController.run(
+            { kind: "favorite-detail", url: item.href },
+            () => extractFavoriteProduct(page, item.href, timeout),
+          )
+          : await extractFavoriteProduct(page, item.href, timeout);
         if (updateDetailPacing("success")) {
           await queueCollectionRuntimeStatePersist(collectionPacingFile, runtime);
         }
@@ -2467,6 +2467,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         runtime.lastDetailSoftBlockAt = 0;
         return result;
       } catch (error) {
+        if (isOzonAccessStoppedError(error)) throw error;
         const policy = ozonDetailFailurePolicy(error, attempt, detailRetries);
         if (!policy.softBlocked) {
           updateDetailPacing(/^non-pure-fbs:/i.test(String(error?.message || error)) ? "success" : "failure");
@@ -2592,6 +2593,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           collection.favorited += 1;
           log(`favorite SKU ${productInfo.sku} total=${observedTotal}/${target}`);
         } catch (error) {
+          if (isOzonAccessStoppedError(error)) throw error;
           if (error?.code === "FLOW_B_DEADLINE_REACHED") {
             break;
           } else if (["FLOW_B_SOURCE_SOFT_BLOCKED", "FLOW_B_SOURCE_LOW_FBS_YIELD"].includes(error?.code)) {
@@ -2762,6 +2764,7 @@ export async function scanSourceWithPage({
   scan = scanOne,
   pagePool = null,
   pageIndex = 0,
+  accessController = null,
 }) {
   const label = `source page lifecycle ${url}`;
   const reusable = Array.isArray(pagePool);
@@ -2779,7 +2782,18 @@ export async function scanSourceWithPage({
     return createdPage;
   });
   try {
-    return await withTimeout(pagePromise.then((createdPage) => scan(createdPage, url, options)), timeoutMs, label);
+    const execute = async (createdPage) => {
+      const result = await scan(createdPage, url, options);
+      if (result?.blocked) throw new Error(`Ozon source soft blocked: ${url}`);
+      return result;
+    };
+    const createdPage = await withTimeout(pagePromise, timeoutMs, label);
+    return accessController
+      ? await accessController.run(
+        { kind: "source", url },
+        () => withTimeout(execute(createdPage), timeoutMs, label),
+      )
+      : await withTimeout(execute(createdPage), timeoutMs, label);
   } catch (error) {
     if (reusable && page) {
       pagePool[slot] = null;
@@ -3016,6 +3030,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     return { outFile: outputPath, records: records.length, pending: 0 };
   }
   const runtime = collectionRuntimeState(favoriteLog);
+  const accessController = ozonAccessControllerFor(context, env);
   const collectionPacingFile = path.join(path.dirname(outputPath), "collection_pacing.json");
   if (runtime.collectionPacingFile !== collectionPacingFile) {
     const detailPacing = favoriteDetailPacingOptions(env);
@@ -3057,6 +3072,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
             transitions.push(candidateQueue.transition(result.sku, transition.status, transition.data));
           }
         },
+        accessController,
       });
     } finally {
       await Promise.allSettled(transitions);
@@ -3231,13 +3247,17 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         closeTimeoutMs: pageCloseTimeout,
         pagePool: sourcePagePool,
         pageIndex: index,
-      }).catch((error) => ({
-        source_url: url,
-        blocked: false,
-        stop_reason: `error: ${error.message}`,
-        links: [],
-        cumulative_product_link_count: 0,
-      }))));
+        accessController,
+      }).catch((error) => {
+        if (isOzonAccessStoppedError(error)) throw error;
+        return {
+          source_url: url,
+          blocked: false,
+          stop_reason: `error: ${error.message}`,
+          links: [],
+          cumulative_product_link_count: 0,
+        };
+      })));
       return { batch, nextStart, rowsPromise };
     };
     let prefetchedBatch = null;

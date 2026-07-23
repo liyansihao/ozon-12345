@@ -9,6 +9,7 @@ import { ensureMaoziLogin, ensureMaoziPluginLogin, launchFlowContext, openMaoziP
 import { createCostBridge } from "./flow_b_playwright/cost-bridge.mjs";
 import { createMaoziClient, createMaoziPageTransport } from "./flow_b_playwright/maozi-client.mjs";
 import { createOzonDetailProvider } from "./flow_b_playwright/ozon-detail.mjs";
+import { ozonAccessControllerFor } from "./flow_b_playwright/ozon-access-controller.mjs";
 import { createLowTokenInterventionController } from "./flow_b_playwright/low-token-intervention.mjs";
 import { createPublishRunner } from "./flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "./flow_b_playwright/publish-state.mjs";
@@ -190,6 +191,7 @@ async function createPublishingSession(context, options, env, shared) {
     });
     const detailProvider = createOzonDetailProvider({
       context,
+      accessController: ozonAccessControllerFor(context, env),
       timeout: Math.max(1000, Number(env.FLOW_B_OZON_DETAIL_TIMEOUT_MS) || 10000),
       initialConcurrency: Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 8),
       maxConcurrency: Math.max(1, Number(env.FLOW_B_MAX_PUBLISH_WORKERS) || 12),

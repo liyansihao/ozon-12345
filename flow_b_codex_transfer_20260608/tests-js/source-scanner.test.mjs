@@ -416,7 +416,7 @@ test("detail cooldown keeps source discovery running in queue-only mode", () => 
   }), "done");
 });
 
-test("detail cooldown becomes quiet when backlog is full or recovery is near", () => {
+test("detail cooldown stops every source scan until the cooldown is cleared", () => {
   assert.equal(shouldScanSourcesDuringDetailCooldown({
     cooldownRemainingMs: 600_000,
     readyCandidateCount: 48,
@@ -434,7 +434,7 @@ test("detail cooldown becomes quiet when backlog is full or recovery is near", (
     readyCandidateCount: 10,
     backlogTarget: 48,
     quietWindowMs: 90_000,
-  }), true);
+  }), false);
   assert.equal(shouldScanSourcesDuringDetailCooldown({
     cooldownRemainingMs: 0,
     readyCandidateCount: 48,

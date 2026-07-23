@@ -48,6 +48,7 @@ export function parseOzonDetailText(text, fallbackPrice, webPriceText = "") {
 
 export function createOzonDetailProvider({
   context,
+  accessController = null,
   timeout = 20000,
   pollInterval = 750,
   initialConcurrency = 8,
@@ -99,24 +100,32 @@ export function createOzonDetailProvider({
       let reusable = true;
       try {
         const url = item.link || item.detail_url || canonicalProductUrl(sku);
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-        const deadline = Date.now() + Math.max(0, timeout);
-        let payload = null;
-        do {
-          payload = await page.evaluate(() => ({
-            url: location.href,
-            title: document.title,
-            text: document.body?.innerText || "",
-            webPriceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
-            sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
-              || document.querySelector('a[href*="/seller/"]')?.href || "",
-          })).catch(() => null);
-          const diagnostic = `${payload?.title || ""} ${payload?.text?.slice(0, 1000) || ""}`;
-          if (/доступ ограничен|access denied|captcha/i.test(diagnostic)) throw new Error(`Ozon detail is blocked for SKU ${sku}`);
-          if (payload?.text && /发货模式：/.test(payload.text)) break;
-          if (Date.now() >= deadline) break;
-          await delay(Math.max(1, pollInterval));
-        } while (true);
+        const readDetail = async () => {
+          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+          const deadline = Date.now() + Math.max(0, timeout);
+          let payload = null;
+          do {
+            payload = await page.evaluate(() => ({
+              url: location.href,
+              title: document.title,
+              text: document.body?.innerText || "",
+              webPriceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
+              sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
+                || document.querySelector('a[href*="/seller/"]')?.href || "",
+            })).catch(() => null);
+            const diagnostic = `${payload?.title || ""} ${payload?.text?.slice(0, 1000) || ""}`;
+            if (/доступ ограничен|access denied|captcha|похоже, нет(?:\s|\u00a0)+соединения/i.test(diagnostic)) {
+              throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
+            }
+            if (payload?.text && /发货模式：/.test(payload.text)) break;
+            if (Date.now() >= deadline) break;
+            await delay(Math.max(1, pollInterval));
+          } while (true);
+          return payload;
+        };
+        const payload = accessController
+          ? await accessController.run({ kind: "publish-detail", url }, readDetail)
+          : await readDetail();
         if (!payload?.text) throw new Error(`Ozon detail text unavailable for SKU ${sku}`);
         const fallback = String(item.source_currency || "").toUpperCase() === "CNY"
           ? (item.sell_price ?? item.current_price ?? item.price)
