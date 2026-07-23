@@ -9,6 +9,49 @@ SCRIPT = ROOT / "scripts" / "flow_b_1688_sync.py"
 
 
 class Sync1688EntryTest(unittest.TestCase):
+    def test_production_session_does_not_inherit_environment_proxies(self):
+        spec = importlib.util.spec_from_file_location("flow_b_1688_sync_direct", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        class FakeSession:
+            def __init__(self, debug=True):
+                self.debug = debug
+                self.trust_env = True
+
+            def request(self, method, url, **kwargs):
+                return method, url, kwargs
+
+        module.load_sync_session_class = lambda: FakeSession
+        session = module.load_session()
+
+        self.assertFalse(session.debug)
+        self.assertFalse(session.trust_env)
+
+    def test_production_session_applies_a_default_request_timeout(self):
+        spec = importlib.util.spec_from_file_location("flow_b_1688_sync_timeout", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+
+        class FakeSession:
+            def __init__(self, debug=True):
+                self.debug = debug
+                self.trust_env = True
+                self.calls = []
+
+            def request(self, method, url, **kwargs):
+                self.calls.append((method, url, kwargs))
+                return "ok"
+
+        module.load_sync_session_class = lambda: FakeSession
+        session = module.load_session()
+        result = session.request("GET", "https://h5api.m.1688.com/test")
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(session.calls[0][2]["timeout"], 5.0)
+
     def test_sync_session_loader_skips_async_package_initializer(self):
         spec = importlib.util.spec_from_file_location("flow_b_1688_sync", SCRIPT)
         module = importlib.util.module_from_spec(spec)

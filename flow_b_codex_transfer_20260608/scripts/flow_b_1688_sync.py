@@ -11,6 +11,7 @@ cost and matching decision to ``1688_image_median.py`` unchanged.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import types
 from pathlib import Path
@@ -78,7 +79,21 @@ def load_session():
             "Missing dependency `search1688api`. Install with:\n"
             "python3 -m pip install search1688api requests beautifulsoup4 lxml"
         ) from exc
-    return session_class(debug=False)
+    session = session_class(debug=False)
+    # The Ozon runtime exports proxy variables for unrelated tooling. Requests
+    # otherwise sends every 1688 TLS connection through those proxies, which
+    # consistently closes the H5 API handshake with SSL EOF. Keep this worker
+    # on one certificate-verified direct connection instead of inheriting them.
+    session.trust_env = False
+    request_timeout = max(1.0, float(os.environ.get("FLOW_B_1688_REQUEST_TIMEOUT_SECONDS", "5")))
+    original_request = session.request
+
+    def request_with_default_timeout(method, url, **kwargs):
+        kwargs.setdefault("timeout", request_timeout)
+        return original_request(method, url, **kwargs)
+
+    session.request = request_with_default_timeout
+    return session
 
 
 def main() -> int:
