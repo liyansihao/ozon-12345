@@ -9,6 +9,8 @@ import {
   favoriteRetryDelay,
   favoriteModeSkipReason,
   listingModeSkipReason,
+  hasListingPluginFbsEvidence,
+  filterListingFbsEvidenceLinks,
   effectiveFavoriteTotal,
   excludedSkusFromHistories,
   excludedSkusFromEventHistories,
@@ -2592,6 +2594,23 @@ test("listing plugin pure-FBS telemetry receives first detail-page quota", () =>
     { href: "pure-fbs", text: "Обычный товар", card_text: "月销量：8\n发货模式：FBS\n退货取消率：1.2%" },
   ];
   assert.deepEqual(prioritizeFavoriteLinks(links).map((link) => link.href), ["pure-fbs", "proven", "underwear"]);
+});
+
+test("listing FBS evidence gate admits only exact plugin FBS cards without inferring detail outcome", () => {
+  const links = [
+    { href: "pure-fbs", card_text: "月销量：8\n发货模式：FBS\n退货取消率：1.2%" },
+    { href: "mixed", card_text: "发货模式：FBO,FBS" },
+    { href: "rfbs", card_text: "发货模式：rFBS" },
+    { href: "missing", card_text: "发货模式：--" },
+    { href: "ambiguous", card_text: "card without plugin telemetry" },
+    "legacy-string-link",
+  ];
+  assert.equal(hasListingPluginFbsEvidence(links[0].card_text), true);
+  assert.equal(hasListingPluginFbsEvidence(links[1].card_text), false);
+  assert.equal(hasListingPluginFbsEvidence(links[2].card_text), false);
+  assert.deepEqual(filterListingFbsEvidenceLinks(links, true).map((link) => link.href), ["pure-fbs"]);
+  assert.deepEqual(filterListingFbsEvidenceLinks(links, false), links);
+  assert.equal(listingModeSkipReason(links[0].card_text), null);
 });
 
 test("title family priority follows observed strict-publication conversion", () => {

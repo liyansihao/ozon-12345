@@ -727,6 +727,17 @@ export function listingModeSkipReason(cardText) {
   return isPureFbs(mode) ? null : "non-pure-fbs";
 }
 
+export function hasListingPluginFbsEvidence(cardText) {
+  return /(?:^|\n)\s*发货模式\s*[：:]\s*FBS\s*(?:\n|$)/i.test(String(cardText || ""));
+}
+
+export function filterListingFbsEvidenceLinks(links, required = false) {
+  if (!required) return [...(links || [])];
+  return (links || []).filter((link) => (
+    typeof link === "object" && hasListingPluginFbsEvidence(link?.card_text)
+  ));
+}
+
 export function isOzonSoftBlock(value) {
   return /похоже, нет(?:\s|\u00a0)+соединения|выключите VPN|incident:\s*[a-z0-9_]+/i.test(String(value || ""));
 }
@@ -861,7 +872,7 @@ export function createScannerLogger(log = console.log, level = "summary") {
 function favoriteLinkPriority(link, familyScores = {}) {
   const provenSeller = isProvenSellerSource(link?.source_url);
   const cardText = String(link?.card_text || "");
-  const pluginPureFbs = /(?:^|\n)\s*发货模式\s*[：:]\s*FBS\s*(?:\n|$)/i.test(cardText);
+  const pluginPureFbs = hasListingPluginFbsEvidence(cardText);
   const explicitGlobal = /доставка\s+из\s+(?:китая|за\s+рубежа)|cross.?border|ozon\s+global/i.test(cardText);
   const cardPriceMatch = cardText.match(/(\d+(?:[.,]\d+)?)\s*¥/);
   const cardPrice = Number(String(cardPriceMatch?.[1] || "").replace(",", "."));
@@ -2430,7 +2441,11 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     log(`favorite SKU telemetry unavailable; continuing with run-local deduplication: ${error?.message || error}`);
   }
   const queue = [];
-  for (const link of prioritizeFavoriteLinks(links, familyScores)) {
+  const eligibleLinks = filterListingFbsEvidenceLinks(
+    links,
+    env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1",
+  );
+  for (const link of prioritizeFavoriteLinks(eligibleLinks, familyScores)) {
     const href = typeof link === "string" ? link : link?.href;
     const sku = skuFromProductUrl(href);
     if (!sku) continue;
@@ -3140,10 +3155,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       + Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
     priorityTier: (row) => Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
   };
-  const recoveredCandidates = candidateQueue.pending({
+  const recoveredCandidates = filterListingFbsEvidenceLinks(candidateQueue.pending({
     ...pendingCandidateOptions,
     limit: candidateDrainLimit,
-  });
+  }), env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1");
   if (!pending.length && !recoveredCandidates.length) {
     return { outFile: outputPath, records: records.length, pending: 0 };
   }
@@ -3168,7 +3183,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const sourcePagePool = reusablePools.sourcePages;
   const favoriteWorkerPagePool = reusablePools.favoritePages;
   const collectWithCandidateQueue = async ({ links, onResult = () => {}, ...args }) => {
-    const discoveries = (links || []).filter((link) => {
+    const eligibleLinks = filterListingFbsEvidenceLinks(
+      links,
+      env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1",
+    );
+    const discoveries = eligibleLinks.filter((link) => {
       const href = typeof link === "string" ? link : link?.href;
       const sku = skuFromProductUrl(href);
       return sku && !attempted.has(sku);
@@ -3179,7 +3198,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     try {
       total = await collectFavorites({
         ...args,
-        links,
+        links: eligibleLinks,
         attempted,
         onResult: (result) => {
           onResult(result);
