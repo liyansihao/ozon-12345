@@ -2143,6 +2143,23 @@ export function terminalSkusFromEvents(events = []) {
   return new Set([...latest].filter(([, status]) => status === "skipped" || status === "published").map(([sku]) => sku));
 }
 
+export function sourceExcludedSkusFromStateEvents(events = []) {
+  const latest = new Map();
+  for (const event of events || []) {
+    const sku = String(event?.sku ?? "").trim();
+    if (sku) latest.set(sku, event);
+  }
+  return new Set([...latest].filter(([, event]) => {
+    const status = String(event?.status || "");
+    const data = event?.data || {};
+    return status === "skipped"
+      || status === "published"
+      || data.submitted === true
+      || data.submission_pending === true
+      || data.reconcile_only === true;
+  }).map(([sku]) => sku));
+}
+
 export function excludedSkusFromHistories({ stateTexts = [], favoriteTexts = [] } = {}) {
   return excludedSkusFromEventHistories({
     stateEventGroups: stateTexts.map((text) => parseJsonLinesChunk(text).rows),
@@ -2153,7 +2170,7 @@ export function excludedSkusFromHistories({ stateTexts = [], favoriteTexts = [] 
 export function excludedSkusFromEventHistories({ stateEventGroups = [], favoriteEventGroups = [] } = {}) {
   const excluded = new Set();
   for (const events of stateEventGroups) {
-    for (const sku of terminalSkusFromEvents(events)) excluded.add(sku);
+    for (const sku of sourceExcludedSkusFromStateEvents(events)) excluded.add(sku);
   }
   for (const events of favoriteEventGroups) {
     for (const event of events || []) {

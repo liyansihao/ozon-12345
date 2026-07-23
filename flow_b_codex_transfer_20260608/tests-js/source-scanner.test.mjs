@@ -211,6 +211,9 @@ test("parsed exclusion histories preserve latest-state and retry semantics", () 
       { sku: "retry-later", status: "skipped" },
       { sku: "retry-later", status: "failed" },
       { sku: "published", status: "published" },
+      { sku: "pending-submit", status: "processing", data: { submitted: true, submission_pending: true } },
+      { sku: "reconcile-only", status: "failed", data: { submitted: true, reconcile_only: true } },
+      { sku: "retry-unsubmitted", status: "failed", data: { submitted: false } },
     ]],
     favoriteEventGroups: [[
       { sku: "deterministic", status: "rejected", reason: "non-pure-fbs" },
@@ -219,7 +222,13 @@ test("parsed exclusion histories preserve latest-state and retry semantics", () 
       { sku: "transient", status: "failed", error: "page timeout" },
     ]],
   });
-  assert.deepEqual([...excluded].sort(), ["deterministic", "missing-mode", "published"]);
+  assert.deepEqual([...excluded].sort(), [
+    "deterministic",
+    "missing-mode",
+    "pending-submit",
+    "published",
+    "reconcile-only",
+  ]);
   assert.deepEqual([...favoritedSkusFromEvents([
     { sku: "one", status: "favorited" },
     { sku: "two", status: "rejected" },
