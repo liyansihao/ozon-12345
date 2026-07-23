@@ -100,6 +100,12 @@ function isTransientDownloadError(error) {
     || ["ABORT_ERR", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(String(error?.code || "").toUpperCase());
 }
 
+function isTransient1688TransportFailure(result, combinedOutput) {
+  if (Number(result?.code) !== 1) return false;
+  const text = `${String(combinedOutput || "")}\n${String(result?.stderr || "")}`;
+  return /unexpected_eof_while_reading|eof occurred in violation of protocol|sslerror|connection(?:error| reset)|remote end closed|failed to resolve|name or service not known|timed?\s*out|timeout/i.test(text);
+}
+
 function defaultRunProcess({ command, args, cwd, timeout = 90000 }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
@@ -169,6 +175,7 @@ export function createCostBridge({
     openedAt: null,
     nextProbeAt: 0,
     probeInFlight: false,
+    reason: null,
   };
 
   function matchEvidence(item) {
@@ -195,7 +202,7 @@ export function createCostBridge({
     return {
       circuit: health.circuit,
       consecutive_failures: health.consecutiveFailures,
-      reason: "1688-first-page-candidate-collapse",
+      reason: health.reason || "1688-first-page-candidate-collapse",
       opened_at: health.openedAt,
       next_probe_at: health.nextProbeAt > 0 ? new Date(health.nextProbeAt).toISOString() : null,
       ...extra,
@@ -376,10 +383,15 @@ export function createCostBridge({
         await fs.writeFile(outputPath, combined, "utf8");
         if (Number(result?.code) !== 0) {
           const parsed = parseCostOutput(combined, item?.sell_price);
+          const transportError = isTransient1688TransportFailure(result, combined);
           return {
             ok: false,
-            reason: lineValue(combined, "REASON") || parsed.reason || `1688 process exited ${result?.code}`,
+            reason: transportError
+              ? "1688 transient transport failure"
+              : lineValue(combined, "REASON") || parsed.reason || `1688 process exited ${result?.code}`,
             process_code: Number(result?.code),
+            transport_error: transportError,
+            retry_count: Number(result?.retry_count) || Number(lineValue(combined, "TRANSIENT_RETRY_COUNT")) || 0,
             outputPath,
             health_probe: result?.health_probe === true,
           };
@@ -423,8 +435,9 @@ export function createCostBridge({
       const legacyCandidateCollapse = cached.terminal === true
         && cached.deferred !== true
         && isCandidateCollapse({ ...parsed, reason: cached.reason || parsed.reason });
+      const legacyTransportFailure = cached.terminal === true && Number(cached.process_code) === 1;
       const expiresAt = Date.parse(String(cached.expires_at || ""));
-      if (!legacyCandidateCollapse && cached.deferred && Number.isFinite(expiresAt) && expiresAt > now()) {
+      if (!legacyCandidateCollapse && !legacyTransportFailure && cached.deferred && Number.isFinite(expiresAt) && expiresAt > now()) {
         return {
           ...parsed,
           reason: cached.reason || parsed.reason,
@@ -433,13 +446,15 @@ export function createCostBridge({
           retry_at: cached.expires_at,
           health: cached.health || healthMetadata(),
           process_code: Number.isFinite(Number(cached.process_code)) ? Number(cached.process_code) : undefined,
+          transport_error: cached.transport_error === true,
+          retry_count: Number(cached.retry_count) || 0,
           cached: true,
           shared_cache: true,
           cross_run_cache: crossRunKeysByRun.get(root)?.has(key) === true,
           cache_key: key,
         };
       }
-      if (!legacyCandidateCollapse && (parsed.ok || cached.terminal)) {
+      if (!legacyCandidateCollapse && !legacyTransportFailure && (parsed.ok || cached.terminal)) {
         return {
           ...parsed,
           process_code: Number.isFinite(Number(cached.process_code)) ? Number(cached.process_code) : undefined,
@@ -481,7 +496,11 @@ export function createCostBridge({
       let healthRetryCount = cachedHealthRetryCount;
       try {
         result = await estimateUncached(item, root);
-        if (isCandidateCollapse(result)) {
+        if (isCandidateCollapse(result) || result?.transport_error === true) {
+          const transportFailure = result?.transport_error === true;
+          health.reason = transportFailure
+            ? "1688-transient-transport-failure"
+            : "1688-first-page-candidate-collapse";
           healthRetryCount += 1;
           health.consecutiveFailures += 1;
           const thresholdReached = health.consecutiveFailures >= Math.max(1, Number(healthFailureThreshold) || 1);
@@ -492,7 +511,8 @@ export function createCostBridge({
             health.nextProbeAt = now() + Math.max(0, Number(healthProbeBackoffMs) || 0);
             if (!wasOpen || isHealthProbe) await rebuildOwnedWorkerPool();
           }
-          const isolatedRetryExhausted = health.circuit !== "open"
+          const isolatedRetryExhausted = !transportFailure
+            && health.circuit !== "open"
             && healthRetryCount > Math.max(0, Number(healthSkuRetryLimit) || 0);
           if (isolatedRetryExhausted) {
             result = { ...result, terminal: true, health_retry_count: healthRetryCount, health: healthMetadata() };
@@ -515,6 +535,7 @@ export function createCostBridge({
           health.consecutiveFailures = 0;
           health.openedAt = null;
           health.nextProbeAt = 0;
+          health.reason = null;
           result = {
             ...result,
             health_retry_count: 0,
@@ -533,6 +554,7 @@ export function createCostBridge({
           };
         } else {
           health.consecutiveFailures = 0;
+          health.reason = null;
         }
       } finally {
         if (isHealthProbe) health.probeInFlight = false;
@@ -548,6 +570,8 @@ export function createCostBridge({
           health: result.health,
           health_retry_count: result.health_retry_count,
           process_code: result.process_code,
+          transport_error: result.transport_error === true,
+          retry_count: Number(result.retry_count) || 0,
           source_image: String(item.cover_image),
           updated_at: new Date().toISOString(),
         };

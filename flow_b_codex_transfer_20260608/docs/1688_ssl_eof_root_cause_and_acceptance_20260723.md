@@ -12,6 +12,7 @@
 2. 每个 HTTP 请求默认超时 5 秒。
 3. 只对 SSL EOF、连接重置、DNS/超时等 transport 异常最多重试 2 次；每次销毁旧 session、创建新 session，使用 0.5 秒指数退避和最多 0.25 秒随机抖动，总重试预算 45 秒。
 4. 价格簇、同品匹配、P70、利润和业务错误不重试；失败不会写入 0、默认价或虚假成本。
+5. transport 最终失败只进入可过期 deferred cache；旧 `process_code=1` 终态缓存自动失效重查。连续 transport 失败达到阈值后打开统一 health circuit，避免多 worker 放大请求。
 
 ## v95 历史现场
 
@@ -84,9 +85,9 @@ run：`runs/flow_b/20260723_111000_1688_repeatability_accept_v99`
 
 ## 回归测试
 
-- Node：433/433 PASS。
+- Node：436/436 PASS。
 - Python：13/13 PASS。
 - `git diff --check`：PASS。
-- 新测试覆盖：不继承环境代理、默认请求超时、EOF 后销毁/重建 session、指数退避与抖动、重试上限、总预算、非 transport 错误不重试。
+- 新测试覆盖：不继承环境代理、默认请求超时、EOF 后销毁/重建 session、指数退避与抖动、重试上限、总预算、非 transport 错误不重试、transport deferred cache、旧 code=1 缓存失效和统一熔断。
 
 本修复没有修改 Ozon 访问控制、CAPTCHA/soft-block 策略、利润公式、P70 算法、五店轮换、状态持久化或最终确认逻辑。

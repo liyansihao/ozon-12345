@@ -158,6 +158,122 @@ test("opaque terminal 1688 failures remain cached after evidence compaction", as
   });
 });
 
+test("SSL EOF worker failures are deferred and never become terminal cache entries", async () => {
+  await withTempDir(async (runDir) => {
+    let clock = Date.parse("2026-07-23T00:00:00.000Z");
+    let runs = 0;
+    const bridge = createCostBridge({
+      healthDeferredTtlMs: 1_000,
+      now: () => clock,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        if (runs === 1) return {
+          code: 1,
+          stdout: "",
+          stderr: "SSLError: SSL: UNEXPECTED_EOF_WHILE_READING",
+        };
+        return {
+          code: 0,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+            "P70_COST 11",
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    });
+    const item = { sku: "ssl-eof", cover_image: "https://img.example/ssl-eof.jpg", sell_price: 100 };
+
+    const failed = await bridge.estimate(item, runDir);
+    assert.equal(failed.ok, false);
+    assert.equal(failed.deferred, true);
+    assert.equal(failed.terminal, false);
+    assert.equal(failed.transport_error, true);
+    assert.match(failed.reason, /transient transport/i);
+
+    const backedOff = await bridge.estimate(item, runDir);
+    assert.equal(backedOff.deferred, true);
+    assert.equal(backedOff.cached, true);
+    assert.equal(runs, 1);
+
+    clock += 1_001;
+    const recovered = await bridge.estimate(item, runDir);
+    assert.equal(recovered.ok, true);
+    assert.equal(runs, 2);
+  });
+});
+
+test("legacy process-code-one terminal cache is ignored and re-queried", async () => {
+  await withTempDir(async (root) => {
+    const runDir = path.join(root, "run");
+    const sharedCachePath = path.join(root, "shared", "1688_cache.json");
+    const image = "https://img.example/legacy-transport.jpg";
+    const key = crypto.createHash("sha256").update(image).digest("hex");
+    await fs.mkdir(path.dirname(sharedCachePath), { recursive: true });
+    await fs.writeFile(sharedCachePath, JSON.stringify({ entries: {
+      [key]: {
+        output: "REASON missing or invalid P70 cost\nP70_COST None",
+        terminal: true,
+        process_code: 1,
+        updated_at: "2026-07-23T00:00:00.000Z",
+      },
+    } }));
+    let runs = 0;
+    const result = await createCostBridge({
+      sharedCachePath,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        return {
+          code: 0,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+            "P70_COST 11",
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    }).estimate({ sku: "legacy-transport", cover_image: image, sell_price: 100 }, runDir);
+
+    assert.equal(result.ok, true);
+    assert.equal(result.shared_cache, false);
+    assert.equal(runs, 1);
+  });
+});
+
+test("repeated transport failures open one global circuit instead of amplifying retries", async () => {
+  await withTempDir(async (runDir) => {
+    let runs = 0;
+    const bridge = createCostBridge({
+      healthFailureThreshold: 2,
+      healthProbeBackoffMs: 10_000,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async () => {
+        runs += 1;
+        return {
+          code: 1,
+          stdout: "",
+          stderr: "ConnectionError: Connection reset by peer",
+        };
+      },
+    });
+
+    const first = await bridge.estimate({ sku: "transport-1", cover_image: "https://img.example/transport-1.jpg", sell_price: 100 }, runDir);
+    const second = await bridge.estimate({ sku: "transport-2", cover_image: "https://img.example/transport-2.jpg", sell_price: 100 }, runDir);
+    const blocked = await bridge.estimate({ sku: "transport-3", cover_image: "https://img.example/transport-3.jpg", sell_price: 100 }, runDir);
+
+    assert.equal(first.deferred, true);
+    assert.equal(second.health?.circuit, "open");
+    assert.equal(second.health?.reason, "1688-transient-transport-failure");
+    assert.equal(blocked.deferred, true);
+    assert.equal(blocked.health?.probe_blocked, true);
+    assert.equal(runs, 2);
+  });
+});
+
 test("estimate reuses parseable cached output without redownloading or rerunning", async () => {
   await withTempDir(async (runDir) => {
     const imagesDir = path.join(runDir, "images");
