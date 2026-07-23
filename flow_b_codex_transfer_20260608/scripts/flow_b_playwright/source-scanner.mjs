@@ -678,7 +678,7 @@ export function nextSourceSampleStats(stats = {}, outcome = {}) {
 export function sourceSampleStatsFromEvents(events = []) {
   const stats = new Map();
   for (const event of events || []) {
-    const key = sourceLowFbsSampleKey(event?.source_url);
+    const key = sourceNonFbsSampleKey(event?.source_url);
     if (!key) continue;
     if (String(event?.status || "") === "favorited") {
       stats.set(key, { attempted: 0, nonPureFbs: 0, favorited: 0 });
@@ -956,22 +956,6 @@ export function sourceNonFbsSampleKey(value) {
     return url.toString();
   } catch {
     return String(value);
-  }
-}
-
-export function sourceLowFbsSampleKey(value) {
-  if (!value) return null;
-  try {
-    const url = new URL(String(value));
-    url.hash = "";
-    url.searchParams.delete("sorting");
-    url.searchParams.delete("page");
-    return url.toString();
-  } catch {
-    return String(value)
-      .replace(/#.*$/, "")
-      .replace(/([?&])(?:sorting|page)=[^&]*&?/gi, "$1")
-      .replace(/[?&]$/, "");
   }
 }
 
@@ -2451,7 +2435,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const loadProduct = async (page, item) => {
     for (let attempt = 0; ; attempt += 1) {
       const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
-      const nonFbsSampleKey = sourceLowFbsSampleKey(item.source_url);
+      const nonFbsSampleKey = sourceNonFbsSampleKey(item.source_url);
       if (sourceBlockKey && softBlockedSources.has(sourceBlockKey)) {
         const error = new Error(`source deferred after Ozon detail soft block: ${sourceBlockKey}`);
         error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
@@ -2560,7 +2544,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         const item = queue[cursor++];
         if (!item) break;
         const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
-        const nonFbsSampleKey = sourceLowFbsSampleKey(item.source_url);
+        const nonFbsSampleKey = sourceNonFbsSampleKey(item.source_url);
         if ((sourceBlockKey && softBlockedSources.has(sourceBlockKey))
           || (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey))) {
           attempted.delete(item.sku);
@@ -2892,7 +2876,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   }
   const productiveSourceSampleKeys = new Set(yieldRows
     .filter((row) => ["favorited", "submitted", "published"].includes(String(row?.status || "")))
-    .map((row) => sourceLowFbsSampleKey(row?.source_url))
+    .map((row) => sourceNonFbsSampleKey(row?.source_url))
     .filter(Boolean));
   const titleFamilyScores = observedTitleFamilyScores(yieldRows);
   const candidateSourceScores = fullFunnelSourceScores(yieldRows);
