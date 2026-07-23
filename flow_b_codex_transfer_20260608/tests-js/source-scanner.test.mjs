@@ -61,6 +61,7 @@ import {
   nextSourceSampleStats,
   sourceSampleStatsFromEvents,
   sourceNonFbsSampleKey,
+  sourceLowFbsSampleKey,
   favoritePriceSkipReason,
   favoriteTitleSkipReason,
   nextLowYieldBatchStreak,
@@ -316,11 +317,16 @@ test("source sample history restores only the dry tail after the latest favorite
   });
 });
 
-test("non-pure-FBS sampling isolates seller page and sorting variants", () => {
+test("non-pure-FBS sampling shares page and sorting failures within one price band", () => {
   const base = "https://www.ozon.ru/seller/shi-dada/?currency_price=150.000%3B";
-  assert.notEqual(sourceNonFbsSampleKey(base), sourceNonFbsSampleKey(`${base}&sorting=rating`));
+  assert.equal(sourceLowFbsSampleKey(base), sourceLowFbsSampleKey(`${base}&sorting=rating`));
+  assert.equal(sourceLowFbsSampleKey(base), sourceLowFbsSampleKey(`${base}&page=2`));
+  assert.notEqual(
+    sourceLowFbsSampleKey(base),
+    sourceLowFbsSampleKey("https://www.ozon.ru/seller/shi-dada/?currency_price=500.000%3B"),
+  );
+  assert.equal(sourceLowFbsSampleKey(`${base}#products`), sourceLowFbsSampleKey(base));
   assert.notEqual(sourceNonFbsSampleKey(base), sourceNonFbsSampleKey(`${base}&page=2`));
-  assert.equal(sourceNonFbsSampleKey(`${base}#products`), sourceNonFbsSampleKey(base));
 });
 
 test("collection deadline stops an in-flight producer tranche", () => {
