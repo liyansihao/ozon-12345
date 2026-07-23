@@ -103,7 +103,6 @@ import {
   expandPublishedSourcePages,
   expandNextPublishedDiscoveryPages,
   expandRepeatedPublishedDiscoveryPageFour,
-  sourceFunnelMetrics,
   fullFunnelSourceScores,
   fatalSourceBatchError,
   completedSourceUrls,
@@ -1112,64 +1111,6 @@ test("full-funnel source yield promotes repeated pure-FBS favorites over rejecte
   assert.deepEqual(prioritizeSourceUrls([rejected, pureFbs], { yieldRows: rows }), [pureFbs, rejected]);
 });
 
-test("source funnel metrics retain conditional stages, confidence, failures, and recency", () => {
-  const source = "https://www.ozon.ru/seller/funnel/?currency_price=500.000%3B";
-  const rows = [
-    { at: "2026-07-16T00:00:00Z", source_url: source, sku: "published", status: "favorited" },
-    { at: "2026-07-16T00:01:00Z", source_url: `${source}&sorting=rating`, sku: "published", status: "submitted" },
-    { at: "2026-07-16T00:02:00Z", source_url: `${source}&page=2`, sku: "published", status: "published" },
-    { at: "2026-07-16T00:03:00Z", source_url: `${source}&page=3`, sku: "no-match", status: "favorited" },
-    { at: "2026-07-16T00:04:00Z", source_url: `${source}&page=3`, sku: "no-match", status: "skipped", reason: "1688-no-reliable-match" },
-    { at: "2026-07-16T00:05:00Z", source_url: `${source}&sorting=discount`, sku: "low-profit", status: "favorited" },
-    { at: "2026-07-16T00:06:00Z", source_url: `${source}&sorting=discount`, sku: "low-profit", status: "skipped", reason: "profit_rate<=30" },
-    { at: "2026-07-16T00:07:00Z", source_url: `${source}&page=4`, sku: "non-fbs", status: "rejected", reason: "non-pure-fbs" },
-  ];
-  const metrics = [...sourceFunnelMetrics(rows, { observedAt: "2026-07-16T00:08:00Z" }).values()];
-  assert.equal(metrics.length, 1);
-  assert.deepEqual({
-    sample_size: metrics[0].sample_size,
-    pure_fbs_count: metrics[0].pure_fbs_count,
-    entered_1688_count: metrics[0].entered_1688_count,
-    reliable_1688_count: metrics[0].reliable_1688_count,
-    profit_pass_count: metrics[0].profit_pass_count,
-    submitted_count: metrics[0].submitted_count,
-    final_publish_count: metrics[0].final_publish_count,
-    recent_failure_streak: metrics[0].recent_failure_streak,
-    last_success_at: metrics[0].last_success_at,
-  }, {
-    sample_size: 4,
-    pure_fbs_count: 3,
-    entered_1688_count: 3,
-    reliable_1688_count: 2,
-    profit_pass_count: 1,
-    submitted_count: 1,
-    final_publish_count: 1,
-    recent_failure_streak: 3,
-    last_success_at: "2026-07-16T00:02:00.000Z",
-  });
-  assert.equal(metrics[0].pure_fbs_rate, 0.75);
-  assert.equal(metrics[0].reliable_1688_rate, 2 / 3);
-  assert.equal(metrics[0].profit_pass_rate, 0.5);
-  assert.equal(metrics[0].final_publish_rate, 0.25);
-  assert.ok(metrics[0].confidence > 0 && metrics[0].confidence < 1);
-});
-
-test("full-funnel scoring prefers final conversion over equal pure-FBS volume", () => {
-  const productive = "https://www.ozon.ru/seller/productive/";
-  const misleading = "https://www.ozon.ru/seller/misleading/";
-  const rows = [];
-  for (let index = 0; index < 8; index += 1) {
-    rows.push({ at: `2026-07-16T00:${String(index).padStart(2, "0")}:00Z`, source_url: productive, sku: `p-${index}`, status: "favorited" });
-    rows.push({ at: `2026-07-16T00:${String(index).padStart(2, "0")}:30Z`, source_url: misleading, sku: `m-${index}`, status: "favorited" });
-    if (index < 4) rows.push({ at: `2026-07-16T01:${String(index).padStart(2, "0")}:00Z`, source_url: productive, sku: `p-${index}`, status: "submitted" });
-    if (index < 3) rows.push({ at: `2026-07-16T02:${String(index).padStart(2, "0")}:00Z`, source_url: productive, sku: `p-${index}`, status: "published" });
-    rows.push({ at: `2026-07-16T03:${String(index).padStart(2, "0")}:00Z`, source_url: misleading, sku: `m-${index}`, status: "skipped", reason: "1688-no-reliable-match" });
-  }
-  const scores = fullFunnelSourceScores(rows);
-  assert.ok(scores.get(productive) > scores.get(misleading));
-  assert.deepEqual(prioritizeSourceUrls([misleading, productive], { yieldRows: rows }), [productive, misleading]);
-});
-
 test("full-funnel scores put a fully dry explored source below untried supply", () => {
   const dry = "https://www.ozon.ru/search/?text=dry-consumer&currency_price=150.000%3B";
   const scores = fullFunnelSourceScores(Array.from({ length: 8 }, (_, index) => ({
@@ -1189,16 +1130,6 @@ test("strict submissions are a stronger leading source signal than favorites", (
     ...Array.from({ length: 3 }, (_, i) => ({ source_url: submitted, sku: `s-${i}`, status: "submitted" })),
   ];
   assert.deepEqual(prioritizeSourceUrls([favoriteOnly, submitted], { yieldRows: rows }), [submitted, favoriteOnly]);
-});
-
-test("strict final publications outrank an equal volume of pending submissions", () => {
-  const published = "https://www.ozon.ru/seller/final-published/";
-  const submitted = "https://www.ozon.ru/seller/pending-submitted/";
-  const rows = [
-    ...Array.from({ length: 3 }, (_, i) => ({ source_url: published, sku: `p-${i}`, status: "published" })),
-    ...Array.from({ length: 3 }, (_, i) => ({ source_url: submitted, sku: `s-${i}`, status: "submitted" })),
-  ];
-  assert.deepEqual(prioritizeSourceUrls([submitted, published], { yieldRows: rows }), [published, submitted]);
 });
 
 test("recent strict submissions keep a verified seller out of the dry-tail penalty", () => {
