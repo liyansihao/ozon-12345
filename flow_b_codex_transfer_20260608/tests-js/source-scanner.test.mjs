@@ -379,6 +379,10 @@ test("source portfolio does not re-promote a strict seller after two zero-eligib
     interleaveSourcePortfolio(prioritized, yieldRows, { scanRows }).slice(0, 2),
     [exploreA, exploreB],
   );
+  assert.deepEqual(
+    prioritizeSourceUrls(urls, { yieldRows, scanRows }).slice(0, 2),
+    [exploreA, exploreB],
+  );
 });
 
 test("source sample history restores only the dry tail after the latest favorite", () => {
@@ -1629,6 +1633,27 @@ test("two exhausted scan variants demote an overlapping verified family", () => 
       eligible_link_count_before_collection: 4,
     }],
   }), [seller, untried]);
+});
+
+test("two dry bounded-deep pages stop protecting the next deep page from rotation", () => {
+  const seller = "https://www.ozon.ru/seller/stale-bounded/";
+  const pageFour = `${seller}?page=4`;
+  const pageFive = `${seller}?page=5`;
+  const pageSix = `${seller}?page=6`;
+  const untried = "https://www.ozon.ru/seller/untried-after-bounded/";
+  const scanRows = [pageFour, pageFive].map((source_url) => ({
+    source_url,
+    cumulative_product_link_count: 36,
+    eligible_link_count_before_collection: 0,
+  }));
+  assert.deepEqual(prioritizeSourceUrls([pageSix, untried], {
+    yieldRows: [
+      { source_url: seller, sku: "old-win", status: "published" },
+    ],
+    verifiedFreshSourceUrls: [seller],
+    boundedDeepFreshSourceUrls: [pageFour, pageFive, pageSix],
+    scanRows,
+  }), [untried, pageSix]);
 });
 
 test("bounded deep pages rotate seller families before taking another same-seller page", () => {

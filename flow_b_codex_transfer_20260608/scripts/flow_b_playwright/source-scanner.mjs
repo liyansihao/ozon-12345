@@ -1861,6 +1861,9 @@ export function prioritizeSourceUrls(urls, {
   const qualifiedFreshKeys = new Set(qualifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
   const boundedDeepFreshKeys = new Set(boundedDeepFreshSourceUrls.map(sourceNonFbsSampleKey).filter(Boolean));
+  const exhaustedBoundedScanFamilies = exhaustedScanFamilyKeys((scanRows || []).filter(
+    (row) => boundedDeepFreshKeys.has(sourceNonFbsSampleKey(row?.source_url)),
+  ));
   const verifiedSellerKeys = new Set(verifiedFreshSourceUrls
     .filter((url) => canonicalSellerUrl(url))
     .map(sourceUrlKey));
@@ -1869,9 +1872,11 @@ export function prioritizeSourceUrls(urls, {
     const familyKey = sourceUrlKey(url);
     const yieldKey = sourceYieldKey(url);
     const boundedDeep = boundedDeepFreshKeys.has(sourceNonFbsSampleKey(url));
+    const boundedDeepProtected = boundedDeep
+      && !exhaustedBoundedScanFamilies.has(isPriceBandedSource(url) ? yieldKey : familyKey);
     const key = isPriceBandedSource(url)
       ? yieldKey
-      : boundedDeep ? `bounded-deep:${familyKey}` : familyKey;
+      : boundedDeepProtected ? `bounded-deep:${familyKey}` : familyKey;
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
     const familyPenalty = familyPenalties.get(isPriceBandedSource(url) ? yieldKey : familyKey) || 0;
     const sellerFamilyPenalty = sellerFamilyPenalties.get(canonicalSellerUrl(url)) || 0;
@@ -1892,9 +1897,9 @@ export function prioritizeSourceUrls(urls, {
     let tier = sellerFamilyPenalty < 0
       ? 0
       : familyPenalty < 0
-      ? boundedDeep ? 3 : (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
+      ? boundedDeepProtected ? 3 : (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
-    if (scanPenalty < 0 && !boundedDeep) tier = 0;
+    if (scanPenalty < 0 && !boundedDeepProtected) tier = 0;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
       + (freshKeys.has(familyKey) ? 200_000 : 0)
       + (qualifiedFreshKeys.has(familyKey) ? 300_000 : 0)
