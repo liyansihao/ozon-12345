@@ -441,6 +441,31 @@ test("source dispatch and checkpoint completion share one page/sorting family", 
   ]);
 });
 
+test("exact allowlist dispatch preserves explicit page and sorting variants", () => {
+  const seller = "https://www.ozon.ru/seller/fluff-joy/";
+  const page3 = `${seller}?page=3`;
+  const page4 = `${seller}?page=4`;
+  const ratingPage4 = `${seller}?sorting=rating&page=4`;
+  const duplicateWithReorderedParams = `${seller}?page=4&sorting=rating`;
+  const urls = [page3, page4, ratingPage4, duplicateWithReorderedParams];
+  const exact = { match: "exact" };
+
+  assert.deepEqual(deduplicateSourceDispatchFamilies(urls, exact), [
+    page3,
+    page4,
+    ratingPage4,
+  ]);
+  assert.deepEqual(excludeCompletedSourceFamilies(urls, [page3], exact), [
+    page4,
+    ratingPage4,
+    duplicateWithReorderedParams,
+  ]);
+  assert.deepEqual(excludeCompletedSourceFamilies(urls, [ratingPage4], exact), [
+    page3,
+    page4,
+  ]);
+});
+
 test("collection deadline stops an in-flight producer tranche", () => {
   const env = { FLOW_B_DEADLINE_AT: "2026-07-14T22:00:29.809Z" };
   assert.equal(collectionDeadlineMs(env), Date.parse(env.FLOW_B_DEADLINE_AT));

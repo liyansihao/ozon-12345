@@ -1023,25 +1023,25 @@ export function deduplicateSearchSourceVariants(urls = []) {
   });
 }
 
-export function sourceDispatchFamilyKey(value) {
-  return sourceYieldKey(value);
+export function sourceDispatchFamilyKey(value, { match = "family" } = {}) {
+  return match === "exact" ? exactSourceUrlKey(value) : sourceYieldKey(value);
 }
 
-export function deduplicateSourceDispatchFamilies(urls = []) {
+export function deduplicateSourceDispatchFamilies(urls = [], options = {}) {
   const seen = new Set();
   return (urls || []).filter((value) => {
-    const key = sourceDispatchFamilyKey(value);
+    const key = sourceDispatchFamilyKey(value, options);
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 }
 
-export function excludeCompletedSourceFamilies(urls = [], completedUrls = []) {
+export function excludeCompletedSourceFamilies(urls = [], completedUrls = [], options = {}) {
   const completedFamilies = new Set(
-    [...(completedUrls || [])].map(sourceDispatchFamilyKey).filter(Boolean),
+    [...(completedUrls || [])].map((value) => sourceDispatchFamilyKey(value, options)).filter(Boolean),
   );
-  return (urls || []).filter((value) => !completedFamilies.has(sourceDispatchFamilyKey(value)));
+  return (urls || []).filter((value) => !completedFamilies.has(sourceDispatchFamilyKey(value, options)));
 }
 
 function sourceEvidenceKey(value, { keepSorting = false } = {}) {
@@ -3084,7 +3084,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
   });
   const highYieldSources = yieldRows.filter((row) => row?.status === "published").map((row) => row.source_url);
-  const prioritizedPending = prioritizeSourceUrls(excludeCompletedSourceFamilies(urls, done), {
+  const prioritizedPending = prioritizeSourceUrls(excludeCompletedSourceFamilies(
+    urls,
+    done,
+    allowlistOptions,
+  ), {
     highYieldSources,
     yieldRows,
     scanRows: records,
@@ -3113,7 +3117,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       derivedPriorityLimit,
     }),
   });
-  const pending = interleaveSourcePortfolio(deduplicateSourceDispatchFamilies(prioritizedPending), yieldRows, {
+  const pending = interleaveSourcePortfolio(deduplicateSourceDispatchFamilies(
+    prioritizedPending,
+    allowlistOptions,
+  ), yieldRows, {
     strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
     fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
     exploreWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORE_WEIGHT", 1),
