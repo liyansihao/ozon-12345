@@ -9,6 +9,7 @@ import {
   acceptanceSummary,
   collectionErrorSummary,
   operationalErrorSummary,
+  perStoreAcceptanceTarget,
   mergeCandidateFacts,
   isFatalBrowserError,
   rankSourcesByYield,
@@ -230,6 +231,18 @@ test("five-store acceptance requires 100 strict publications in every configured
   assert.deepEqual(summary.success_by_store, { "1": 100, "2": 100, "3": 100, "4": 100, "5": 99 });
   assert.deepEqual(summary.remaining_by_store, { "1": 0, "2": 0, "3": 0, "4": 0, "5": 1 });
   assert.equal(summary.passed, false);
+});
+
+test("short throughput gates can disable per-store acceptance without changing store quotas", () => {
+  assert.equal(perStoreAcceptanceTarget({
+    FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE: "0",
+    FLOW_B_STORE_ACCEPTANCE_TARGET: "100",
+    FLOW_B_STORE_TOTAL_LIMIT: "100",
+  }), null);
+  assert.equal(perStoreAcceptanceTarget({
+    FLOW_B_STORE_ACCEPTANCE_TARGET: "100",
+    FLOW_B_STORE_TOTAL_LIMIT: "100",
+  }), 100);
 });
 
 test("producer loop keeps rescanning after success and survives one failed scan", async () => {

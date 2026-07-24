@@ -299,6 +299,16 @@ export function acceptanceSummary({ rows, startedAt, endedAt, target = 50, store
   };
 }
 
+export function perStoreAcceptanceTarget(env = {}) {
+  if (String(env.FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE ?? "1") === "0") return null;
+  return Math.max(
+    1,
+    Number(env.FLOW_B_STORE_ACCEPTANCE_TARGET)
+      || Number(env.FLOW_B_STORE_TOTAL_LIMIT)
+      || 100,
+  );
+}
+
 export function operationalErrorSummary({ successCount = 0, skippedCount = 0, failedCount = 0, runtimeErrorCount = 0 } = {}) {
   const skuAttempts = Math.max(0, Number(successCount)) + Math.max(0, Number(skippedCount)) + Math.max(0, Number(failedCount));
   const runtimeErrors = Math.max(0, Number(runtimeErrorCount));

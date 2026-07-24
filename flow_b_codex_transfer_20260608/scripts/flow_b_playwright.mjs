@@ -15,7 +15,7 @@ import { createPublishRunner } from "./flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "./flow_b_playwright/publish-state.mjs";
 import { scanSources } from "./flow_b_playwright/source-scanner.mjs";
 import { runReadOnlyVerification } from "./flow_b_playwright/verification.mjs";
-import { acceptanceSummary, collectionErrorSummary, isFatalBrowserError, operationalErrorSummary, rankSourcesByYield, runProducerLoop, summarizeConsumerRound, withRuntimeCleanup } from "./flow_b_playwright/continuous-runtime.mjs";
+import { acceptanceSummary, collectionErrorSummary, isFatalBrowserError, operationalErrorSummary, perStoreAcceptanceTarget, rankSourcesByYield, runProducerLoop, summarizeConsumerRound, withRuntimeCleanup } from "./flow_b_playwright/continuous-runtime.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
@@ -452,7 +452,7 @@ async function runAcceptance(context, options, env) {
     window_ended_at: endedAt.toISOString(),
     publish_target: options.target,
     acceptance_target: acceptanceTarget,
-    per_store_target: Math.max(1, Number(env.FLOW_B_STORE_ACCEPTANCE_TARGET) || Number(env.FLOW_B_STORE_TOTAL_LIMIT) || 100),
+    per_store_target: perStoreAcceptanceTarget(env),
     store_id: Number(env.FLOW_B_STORE_ID || 104965),
     store_targets: storeTargets,
     watermark_id: Number(env.FLOW_B_WATERMARK_ID || 60822),
