@@ -1533,7 +1533,7 @@ test("verified source variants finish their tier before ordinary sources", () =>
   }), [verifiedPage, verified, verifiedVariant, ordinary]);
 });
 
-test("two exhausted scan variants demote an overlapping verified family", () => {
+test("two exhausted scan variants demote every unverified variant of an overlapping verified family", () => {
   const seller = "https://www.ozon.ru/seller/overlap/";
   const untried = "https://www.ozon.ru/search/?text=untried&is_global=true";
   const scanRows = [
@@ -1551,7 +1551,7 @@ test("two exhausted scan variants demote an overlapping verified family", () => 
     boundedDeepFreshSourceUrls: [evidenceBackedPageFour],
     freshSourceUrls: [untried],
     scanRows,
-  }), [evidenceBackedPageFour, untried]);
+  }), [untried, evidenceBackedPageFour]);
   assert.deepEqual([...exhaustedScanFamilyKeys(scanRows)], [seller]);
   assert.deepEqual([...exhaustedScanFamilyKeys([
     scanRows[0],
