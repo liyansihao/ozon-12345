@@ -1679,8 +1679,10 @@ function sourcePortfolioIndex(rows = []) {
   return { collectionByKey, strictSkusByKey };
 }
 
-function sourcePortfolioTierFromIndex(url, index) {
+function sourcePortfolioTierFromIndex(url, index, exhaustedScanFamilies = new Set()) {
   const key = canonicalSellerUrl(url) || sourceYieldKey(url);
+  const scanFamilyKey = isPriceBandedSource(url) ? sourceYieldKey(url) : sourceUrlKey(url);
+  if (exhaustedScanFamilies.has(scanFamilyKey)) return "explore";
   if ((index.strictSkusByKey.get(key)?.size || 0) > 0) return "strict";
   const collection = index.collectionByKey.get(key) || new Map();
   const attempted = collection.size;
@@ -1690,23 +1692,32 @@ function sourcePortfolioTierFromIndex(url, index) {
   return "explore";
 }
 
-export function sourcePortfolioTier(url, rows = []) {
-  return sourcePortfolioTierFromIndex(url, sourcePortfolioIndex(rows));
+export function sourcePortfolioTier(url, rows = [], { scanRows = [] } = {}) {
+  return sourcePortfolioTierFromIndex(
+    url,
+    sourcePortfolioIndex(rows),
+    exhaustedScanFamilyKeys(scanRows),
+  );
 }
 
-export function sourcePortfolioTiers(urls, rows = []) {
+export function sourcePortfolioTiers(urls, rows = [], { scanRows = [] } = {}) {
   const index = sourcePortfolioIndex(rows);
+  const exhaustedScanFamilies = exhaustedScanFamilyKeys(scanRows);
   return new Map([...new Set((urls || []).filter(Boolean))]
-    .map((url) => [url, sourcePortfolioTierFromIndex(url, index)]));
+    .map((url) => [
+      url,
+      sourcePortfolioTierFromIndex(url, index, exhaustedScanFamilies),
+    ]));
 }
 
 export function interleaveSourcePortfolio(urls, yieldRows = [], {
   strictWeight = 7,
   fbsWeight = 2,
   exploreWeight = 1,
+  scanRows = [],
 } = {}) {
   const queues = { strict: [], fbs: [], explore: [] };
-  for (const [url, tier] of sourcePortfolioTiers(urls, yieldRows)) {
+  for (const [url, tier] of sourcePortfolioTiers(urls, yieldRows, { scanRows })) {
     queues[tier].push(url);
   }
   const weights = {
@@ -3124,6 +3135,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
     fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
     exploreWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORE_WEIGHT", 1),
+    scanRows: records,
   });
   const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const workers = Math.max(1, envNumber(env, "FLOW_B_TAB_WORKERS", 4));

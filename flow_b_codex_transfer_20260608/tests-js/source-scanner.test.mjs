@@ -343,6 +343,44 @@ test("source portfolio schedules strict, pure-FBS, and exploration sources at 70
   assert.deepEqual(new Set(ordered), new Set([...strict, ...pureFbs, ...explore]));
 });
 
+test("source portfolio does not re-promote a strict seller after two zero-eligible pages", () => {
+  const strict = "https://www.ozon.ru/seller/strict-but-dry/";
+  const exploreA = "https://www.ozon.ru/seller/untried-a/";
+  const exploreB = "https://www.ozon.ru/seller/untried-b/";
+  const urls = [
+    strict,
+    `${strict}?page=2`,
+    `${strict}?page=3`,
+    exploreA,
+    exploreB,
+  ];
+  const yieldRows = [
+    { source_url: strict, sku: "old-strict-win", status: "published" },
+  ];
+  const scanRows = [
+    {
+      source_url: strict,
+      cumulative_product_link_count: 36,
+      eligible_link_count_before_collection: 0,
+    },
+    {
+      source_url: `${strict}?page=2`,
+      cumulative_product_link_count: 36,
+      eligible_link_count_before_collection: 0,
+    },
+  ];
+  const prioritized = prioritizeSourceUrls(urls, {
+    yieldRows,
+    scanRows,
+    freshSourceUrls: [exploreA, exploreB],
+  });
+  assert.deepEqual(prioritized.slice(0, 2), [exploreA, exploreB]);
+  assert.deepEqual(
+    interleaveSourcePortfolio(prioritized, yieldRows, { scanRows }).slice(0, 2),
+    [exploreA, exploreB],
+  );
+});
+
 test("source sample history restores only the dry tail after the latest favorite", () => {
   const sourceA = "https://www.ozon.ru/search/?text=a";
   const sourceB = "https://www.ozon.ru/search/?text=b";
