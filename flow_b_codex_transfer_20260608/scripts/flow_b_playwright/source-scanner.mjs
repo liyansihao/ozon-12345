@@ -738,33 +738,6 @@ export function filterListingFbsEvidenceLinks(links, required = false) {
   ));
 }
 
-export function filterUnknownListingTitleFamilyLinks(links, allowedFamilies = []) {
-  const allowed = allowedFamilies instanceof Set
-    ? allowedFamilies
-    : new Set(
-      (Array.isArray(allowedFamilies) ? allowedFamilies : String(allowedFamilies || "").split(","))
-        .map((value) => String(value || "").trim())
-        .filter(Boolean),
-    );
-  if (!allowed.size) return [...(links || [])];
-  return (links || []).filter((link) => {
-    if (typeof link !== "object") return false;
-    if (hasListingPluginFbsEvidence(link?.card_text)) return true;
-    if (listingModeSkipReason(link?.card_text)) return false;
-    return allowed.has(productTitleFamily(link?.text));
-  });
-}
-
-function configuredListingCandidateLinks(links, env = {}) {
-  const requireEvidence = env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1";
-  const evidenceFiltered = filterListingFbsEvidenceLinks(links, requireEvidence);
-  if (requireEvidence) return evidenceFiltered;
-  return filterUnknownListingTitleFamilyLinks(
-    evidenceFiltered,
-    env.FLOW_B_UNKNOWN_LISTING_ALLOWED_TITLE_FAMILIES,
-  );
-}
-
 export function isOzonSoftBlock(value) {
   return /похоже, нет(?:\s|\u00a0)+соединения|выключите VPN|incident:\s*[a-z0-9_]+/i.test(String(value || ""));
 }
@@ -830,8 +803,6 @@ export function productTitleFamily(value) {
   if (/чехол|ремеш(?:ок|к)?/i.test(text)) return "case_strap";
   if (/человек[- ]?паук|spider[- ]?man|супергер|мстител|marvel/i.test(text)) return "superhero";
   if (/трус|нижн(?:ее|его|ем)?\s+бель|бюст|лифчик/i.test(text)) return "underwear";
-  if (/аквашуз|обув|кроссов|тапоч|сланц|сандал|ботин|туфл|балетк|стельк/i.test(text)) return "footwear";
-  if (/футболк|брюк|джинс|пижам|плать|юбк|шорт|толстовк|свитшот|кофт|(?:^|\s)топ(?:\s|$)|рубаш|блуз/i.test(text)) return "clothing";
   if (/сквиш|антистресс|squish/i.test(text)) return "squish";
   if (/мягк(?:ая|ие|ой)?\s+(?:плюшев|игруш)|плюшев|спрунк|sprunki/i.test(text)) return "plush";
   if (/аккумулятор|батаре[яй]|электроинструмент|power\s*tool/i.test(text)) return "electronics";
@@ -848,10 +819,8 @@ export function productTitleFamily(value) {
 export function productTitlePriority(value) {
   return {
     socks: 700,
-    footwear: 675,
     underwear: 650,
     squish: 625,
-    clothing: 600,
     headwear: 575,
     building: 525,
     other: 400,
@@ -2475,7 +2444,10 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     log(`favorite SKU telemetry unavailable; continuing with run-local deduplication: ${error?.message || error}`);
   }
   const queue = [];
-  const eligibleLinks = configuredListingCandidateLinks(links, env);
+  const eligibleLinks = filterListingFbsEvidenceLinks(
+    links,
+    env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1",
+  );
   for (const link of prioritizeFavoriteLinks(eligibleLinks, familyScores)) {
     const href = typeof link === "string" ? link : link?.href;
     const sku = skuFromProductUrl(href);
@@ -3193,10 +3165,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       + Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
     priorityTier: (row) => Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
   };
-  const recoveredCandidates = configuredListingCandidateLinks(candidateQueue.pending({
+  const recoveredCandidates = filterListingFbsEvidenceLinks(candidateQueue.pending({
     ...pendingCandidateOptions,
     limit: candidateDrainLimit,
-  }), env);
+  }), env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1");
   if (!pending.length && !recoveredCandidates.length) {
     return { outFile: outputPath, records: records.length, pending: 0 };
   }
@@ -3221,7 +3193,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const sourcePagePool = reusablePools.sourcePages;
   const favoriteWorkerPagePool = reusablePools.favoritePages;
   const collectWithCandidateQueue = async ({ links, onResult = () => {}, ...args }) => {
-    const eligibleLinks = configuredListingCandidateLinks(links, env);
+    const eligibleLinks = filterListingFbsEvidenceLinks(
+      links,
+      env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1",
+    );
     const discoveries = eligibleLinks.filter((link) => {
       const href = typeof link === "string" ? link : link?.href;
       const sku = skuFromProductUrl(href);
@@ -3497,9 +3472,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         perSourceLinkLimit,
         titleFamilyScores,
       );
-      const eligibleCollectionLinks = configuredListingCandidateLinks(collectionLinks, env);
-      const eligibleCounts = eligibleLinkCountsBySource(eligibleCollectionLinks, attempted, {
-        requireListingFbsEvidence: false,
+      const requireListingFbsEvidence = env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1";
+      const eligibleCollectionLinks = filterListingFbsEvidenceLinks(
+        collectionLinks,
+        requireListingFbsEvidence,
+      );
+      const eligibleCounts = eligibleLinkCountsBySource(collectionLinks, attempted, {
+        requireListingFbsEvidence,
       });
       const collectionMode = sourceBatchCollectionMode({
         favoriteTotal: favoriteBefore,
@@ -3607,13 +3586,17 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         perSourceLinkLimit,
         titleFamilyScores,
       );
-      const eligiblePrefetchedLinks = configuredListingCandidateLinks(prefetchedLinks, env);
+      const requireListingFbsEvidence = env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1";
+      const eligiblePrefetchedLinks = filterListingFbsEvidenceLinks(
+        prefetchedLinks,
+        requireListingFbsEvidence,
+      );
       const queued = await candidateQueue.discover(eligiblePrefetchedLinks.filter((link) => {
         const sku = skuFromProductUrl(link?.href);
         return sku && !attempted.has(sku);
       }));
-      const eligibleCounts = eligibleLinkCountsBySource(eligiblePrefetchedLinks, attempted, {
-        requireListingFbsEvidence: false,
+      const eligibleCounts = eligibleLinkCountsBySource(prefetchedLinks, attempted, {
+        requireListingFbsEvidence,
       });
       const scannedAt = new Date().toISOString();
       records.push(...prefetchedRows.map((row, index) => ({

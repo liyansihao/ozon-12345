@@ -11,7 +11,6 @@ import {
   listingModeSkipReason,
   hasListingPluginFbsEvidence,
   filterListingFbsEvidenceLinks,
-  filterUnknownListingTitleFamilyLinks,
   effectiveFavoriteTotal,
   excludedSkusFromHistories,
   excludedSkusFromEventHistories,
@@ -2637,26 +2636,6 @@ test("listing FBS evidence gate admits only exact plugin FBS cards without infer
   assert.deepEqual(filterListingFbsEvidenceLinks(links, true).map((link) => link.href), ["pure-fbs"]);
   assert.deepEqual(filterListingFbsEvidenceLinks(links, false), links);
   assert.equal(listingModeSkipReason(links[0].card_text), null);
-});
-
-test("unknown listing title-family gate keeps exact FBS and standardized apparel without inferring FBS", () => {
-  const links = [
-    { href: "exact-fbs-building", text: "Конструктор детский", card_text: "发货模式：FBS" },
-    { href: "unknown-socks", text: "Носки мужские, 5 пар", card_text: "发货模式：暂无数据" },
-    { href: "unknown-footwear", text: "Аквашуз спортивная обувь", card_text: "" },
-    { href: "unknown-clothing", text: "Футболка женская", card_text: "card without plugin telemetry" },
-    { href: "unknown-building", text: "Конструктор детский", card_text: "发货模式：暂无数据" },
-    { href: "explicit-rfbs-socks", text: "Носки женские", card_text: "发货模式：rFBS" },
-  ];
-  assert.equal(productTitleFamily("Аквашуз спортивная обувь"), "footwear");
-  assert.equal(productTitleFamily("Футболка женская"), "clothing");
-  assert.deepEqual(
-    filterUnknownListingTitleFamilyLinks(
-      links,
-      new Set(["socks", "underwear", "footwear", "clothing", "headwear"]),
-    ).map((link) => link.href),
-    ["exact-fbs-building", "unknown-socks", "unknown-footwear", "unknown-clothing"],
-  );
 });
 
 test("title family priority follows observed strict-publication conversion", () => {
