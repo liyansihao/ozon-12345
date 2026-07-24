@@ -1883,7 +1883,7 @@ export function prioritizeSourceUrls(urls, {
       : familyPenalty < 0
       ? boundedDeep ? 3 : (canonicalSellerUrl(url) ? Math.min(baseTier, 1) : 0)
       : baseTier;
-    if (scanPenalty < 0) tier = 0;
+    if (scanPenalty < 0 && !boundedDeep) tier = 0;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
       + (freshKeys.has(familyKey) ? 200_000 : 0)
       + (qualifiedFreshKeys.has(familyKey) ? 300_000 : 0)
