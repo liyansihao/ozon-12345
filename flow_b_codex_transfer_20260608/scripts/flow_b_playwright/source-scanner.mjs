@@ -1861,9 +1861,6 @@ export function prioritizeSourceUrls(urls, {
   const qualifiedFreshKeys = new Set(qualifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
   const boundedDeepFreshKeys = new Set(boundedDeepFreshSourceUrls.map(sourceNonFbsSampleKey).filter(Boolean));
-  const exhaustedBoundedScanFamilies = exhaustedScanFamilyKeys((scanRows || []).filter(
-    (row) => boundedDeepFreshKeys.has(sourceNonFbsSampleKey(row?.source_url)),
-  ));
   const verifiedSellerKeys = new Set(verifiedFreshSourceUrls
     .filter((url) => canonicalSellerUrl(url))
     .map(sourceUrlKey));
@@ -1871,9 +1868,10 @@ export function prioritizeSourceUrls(urls, {
   [...urls].forEach((url, index) => {
     const familyKey = sourceUrlKey(url);
     const yieldKey = sourceYieldKey(url);
+    const scanFamilyKey = isPriceBandedSource(url) ? yieldKey : familyKey;
     const boundedDeep = boundedDeepFreshKeys.has(sourceNonFbsSampleKey(url));
     const boundedDeepProtected = boundedDeep
-      && !exhaustedBoundedScanFamilies.has(isPriceBandedSource(url) ? yieldKey : familyKey);
+      && !exhaustedScanFamilies.has(scanFamilyKey);
     const key = isPriceBandedSource(url)
       ? yieldKey
       : boundedDeepProtected ? `bounded-deep:${familyKey}` : familyKey;
@@ -1881,7 +1879,6 @@ export function prioritizeSourceUrls(urls, {
     const familyPenalty = familyPenalties.get(isPriceBandedSource(url) ? yieldKey : familyKey) || 0;
     const sellerFamilyPenalty = sellerFamilyPenalties.get(canonicalSellerUrl(url)) || 0;
     const effectiveFamilyPenalty = Math.min(familyPenalty, sellerFamilyPenalty);
-    const scanFamilyKey = isPriceBandedSource(url) ? yieldKey : familyKey;
     const scanPenalty = exhaustedScanFamilies.has(scanFamilyKey) ? -600_000 : 0;
     const repeatedStrictGlobal = /(?:[?&]is_global=true(?:&|$)|ozon-global|tovary-iz-kitaya)/i.test(String(url))
       && (strictSuccessSkusBySource.get(yieldKey)?.size || 0) >= 2

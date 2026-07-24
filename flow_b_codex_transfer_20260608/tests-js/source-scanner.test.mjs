@@ -354,9 +354,11 @@ test("source portfolio does not re-promote a strict seller after two zero-eligib
     exploreA,
     exploreB,
   ];
-  const yieldRows = [
-    { source_url: strict, sku: "old-strict-win", status: "published" },
-  ];
+  const yieldRows = Array.from({ length: 20 }, (_, index) => ({
+    source_url: strict,
+    sku: `old-strict-win-${index}`,
+    status: "published",
+  }));
   const scanRows = [
     {
       source_url: strict,
@@ -1618,7 +1620,7 @@ test("two exhausted scan variants demote an overlapping verified family", () => 
     boundedDeepFreshSourceUrls: [evidenceBackedPageFour],
     freshSourceUrls: [untried],
     scanRows,
-  }), [evidenceBackedPageFour, untried]);
+  }), [untried, evidenceBackedPageFour]);
   assert.deepEqual([...exhaustedScanFamilyKeys(scanRows)], [seller]);
   assert.deepEqual([...exhaustedScanFamilyKeys([
     scanRows[0],
@@ -1647,9 +1649,11 @@ test("two dry bounded-deep pages stop protecting the next deep page from rotatio
     eligible_link_count_before_collection: 0,
   }));
   assert.deepEqual(prioritizeSourceUrls([pageSix, untried], {
-    yieldRows: [
-      { source_url: seller, sku: "old-win", status: "published" },
-    ],
+    yieldRows: Array.from({ length: 20 }, (_, index) => ({
+      source_url: seller,
+      sku: `old-win-${index}`,
+      status: "published",
+    })),
     verifiedFreshSourceUrls: [seller],
     boundedDeepFreshSourceUrls: [pageFour, pageFive, pageSix],
     scanRows,
