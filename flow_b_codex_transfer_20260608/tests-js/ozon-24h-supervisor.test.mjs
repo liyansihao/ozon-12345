@@ -12,6 +12,7 @@ import {
   nextRestartDelaySeconds,
   pendingPrewarmDue,
   resolveProductionLayout,
+  resolveSupervisorAppRoot,
   runFinalArtifacts,
   supervisorShouldHonorSafeStop,
 } from "../scripts/ozon_24h_supervisor.mjs";
@@ -27,6 +28,13 @@ test("production layout is installed outside a disposable git worktree", () => {
   assert.equal(layout.stateRoot, "/Users/mac/.ozon-24h-production/state");
   assert.equal(layout.entryScript, "/Users/mac/.ozon-24h-production/app/scripts/ozon_24h_production.sh");
   assert.equal(layout.entryScript.includes(".codex/worktrees"), false);
+});
+
+test("supervisor launches children from its real release instead of the app symlink", () => {
+  assert.equal(
+    resolveSupervisorAppRoot("/Users/mac/.ozon-24h-production/releases/stable/scripts"),
+    "/Users/mac/.ozon-24h-production/releases/stable",
+  );
 });
 
 test("pending candidate prewarm is bounded and yields to the quota reset", () => {

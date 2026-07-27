@@ -48,6 +48,10 @@ export function resolveProductionLayout({
   };
 }
 
+export function resolveSupervisorAppRoot(moduleDirectory = import.meta.dirname) {
+  return path.resolve(moduleDirectory, "..");
+}
+
 export function nextRestartDelaySeconds(attempt, configured = [30, 60, 120]) {
   const values = configured
     .map(Number)
@@ -571,7 +575,10 @@ async function writeProcessOwners({ stateRoot, currentRun, browserPid, workerPid
 
 export async function supervise(configPath) {
   const config = expandedConfig(await readJson(configPath));
-  const appRoot = absolute(config.install_root, path.resolve(import.meta.dirname, ".."));
+  // Node resolves an invoked symlink to the real release path for import.meta.
+  // Spawn child entry points from that same release so their main-module guard
+  // executes instead of silently returning code 0.
+  const appRoot = resolveSupervisorAppRoot();
   const deployment = await readJson(path.join(appRoot, "deployment_manifest.json"), {});
   config.frozen_commit = deployment?.source_commit || null;
   config.frozen_config_hash = deployment?.config_sha256 || null;
