@@ -245,6 +245,40 @@ test("short throughput gates can disable per-store acceptance without changing s
   }), 100);
 });
 
+test("formal acceptance requires strictly more than 20 per hour and zero duplicate SKU events", () => {
+  const startedAt = "2026-07-27T00:00:00.000Z";
+  const endedAt = "2026-07-28T00:00:00.000Z";
+  const rows = Array.from({ length: 481 }, (_, index) => ({
+    sku: String(index + 1),
+    profit_rate: 31,
+    online_status: "selling",
+    stock: 1,
+    published_at: "2026-07-27T12:00:00.000Z",
+  }));
+  const passed = acceptanceSummary({
+    rows,
+    startedAt,
+    endedAt,
+    target: 481,
+    minimumAveragePerHourExclusive: 20,
+    requireZeroDuplicates: true,
+  });
+  assert.equal(passed.effective_per_hour, 20.04);
+  assert.equal(passed.duplicate_skus, 0);
+  assert.equal(passed.passed, true);
+
+  const duplicate = acceptanceSummary({
+    rows: [...rows, rows[0]],
+    startedAt,
+    endedAt,
+    target: 481,
+    minimumAveragePerHourExclusive: 20,
+    requireZeroDuplicates: true,
+  });
+  assert.equal(duplicate.duplicate_skus, 1);
+  assert.equal(duplicate.passed, false);
+});
+
 test("producer loop keeps rescanning after success and survives one failed scan", async () => {
   let now = 0;
   let calls = 0;
@@ -264,6 +298,29 @@ test("producer loop keeps rescanning after success and survives one failed scan"
   assert.equal(calls, 4);
   assert.deepEqual(errors, ["transient producer failure"]);
   assert.deepEqual(result, { round: 4 });
+});
+
+test("producer loop uses 30/60/120 second quiet backoff when source activity is zero", async () => {
+  let now = 0;
+  let calls = 0;
+  const waits = [];
+  await runProducerLoop({
+    deadlineMs: 215_000,
+    intervalMs: 5_000,
+    idleIntervalsMs: [30_000, 60_000, 120_000],
+    isIdleResult: (result) => result.activity_count === 0,
+    now: () => now,
+    sleep: async (ms) => {
+      waits.push(ms);
+      now += ms;
+    },
+    scan: async () => {
+      calls += 1;
+      return { activity_count: calls < 4 ? 0 : 1 };
+    },
+  });
+  assert.deepEqual(waits.slice(0, 3), [30_000, 60_000, 120_000]);
+  assert.equal(calls, 4);
 });
 
 test("closed Playwright contexts are fatal while individual page timeouts are recoverable", () => {

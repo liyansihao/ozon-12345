@@ -3,7 +3,9 @@ import test from "node:test";
 
 import {
   buildLaunchdPlist,
+  capacityPreflightDecision,
   classifyWorkerFailure,
+  currentRunDisposition,
   nextRestartDelaySeconds,
   resolveProductionLayout,
 } from "../scripts/ozon_24h_supervisor.mjs";
@@ -21,6 +23,32 @@ test("production layout is installed outside a disposable git worktree", () => {
   assert.equal(layout.entryScript.includes(".codex/worktrees"), false);
 });
 
+test("capacity preflight waits for reset and never opens an under-capacity window", () => {
+  assert.deepEqual(capacityPreflightDecision({
+    all_stores_found: true,
+    all_warehouses_verified: true,
+    all_quotas_verified: true,
+    total_remaining_capacity: 469,
+    next_reset_at: "2026-07-27T16:00:00.000Z",
+  }), {
+    action: "wait-for-quota-reset",
+    reason: "insufficient-current-day-capacity",
+    next_reset_at: "2026-07-27T16:00:00.000Z",
+  });
+  assert.equal(capacityPreflightDecision({
+    all_stores_found: true,
+    all_warehouses_verified: true,
+    all_quotas_verified: true,
+    total_remaining_capacity: 481,
+  }).action, "start-formal-window");
+  assert.equal(capacityPreflightDecision({
+    all_stores_found: true,
+    all_warehouses_verified: false,
+    all_quotas_verified: true,
+    total_remaining_capacity: 500,
+  }).action, "fatal-stop");
+});
+
 test("launchd restarts abnormal exits without busy-looping a completed window", () => {
   const plist = buildLaunchdPlist({
     label: "com.codex.ozon.24h-production",
@@ -35,6 +63,17 @@ test("launchd restarts abnormal exits without busy-looping a completed window", 
   );
   assert.match(plist, /<string>supervise<\/string>/u);
   assert.doesNotMatch(plist, /\.codex\/worktrees|gitdir|git rev-parse/u);
+});
+
+test("launchd supervisor exits successfully when no daily run is active", () => {
+  assert.equal(currentRunDisposition(null), "idle");
+  assert.equal(currentRunDisposition({}), "idle");
+  assert.equal(currentRunDisposition({ run_id: "partial" }), "invalid");
+  assert.equal(currentRunDisposition({
+    run_id: "20260728_ozon_24h",
+    run_dir: "/tmp/run",
+    urls_file: "/tmp/sources.txt",
+  }), "active");
 });
 
 test("browser and CDP failures recover the same run with bounded backoff", () => {

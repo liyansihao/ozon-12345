@@ -37,6 +37,15 @@ test("only pure FBS mode is accepted", () => {
 
 test("preflight rejects prohibited categories", () => {
   assert.equal(preflightSkipReason({ mode: "FBS", title: "food storage", category: "" }), "prohibited-category");
+  for (const title of [
+    "Комплект трусов бикини, 4 шт",
+    "Носки женские, 5 пар",
+    "Балетки женские",
+    "Кепка летняя",
+    "Футболка оверсайз",
+  ]) {
+    assert.equal(preflightSkipReason({ mode: "FBS", title, category: "" }), "prohibited-category");
+  }
 });
 
 test("preflight rejects a calculation without a CEL Economy result", () => {

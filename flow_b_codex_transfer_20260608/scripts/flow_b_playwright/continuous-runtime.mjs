@@ -247,7 +247,16 @@ export function rankSourcesByYield(rows) {
   }).sort((left, right) => right.yield_score - left.yield_score || Number(right.published || 0) - Number(left.published || 0));
 }
 
-export function acceptanceSummary({ rows, startedAt, endedAt, target = 50, storeIds = [], perStoreTarget = null }) {
+export function acceptanceSummary({
+  rows,
+  startedAt,
+  endedAt,
+  target = 50,
+  storeIds = [],
+  perStoreTarget = null,
+  minimumAveragePerHourExclusive = null,
+  requireZeroDuplicates = false,
+}) {
   const start = Date.parse(startedAt);
   const end = Date.parse(endedAt);
   const durationHours = Math.max(0, end - start) / 3_600_000;
@@ -264,6 +273,26 @@ export function acceptanceSummary({ rows, startedAt, endedAt, target = 50, store
     unique.set(sku, row);
   }
   const successCount = unique.size;
+  const strictEventCount = (rows || []).filter((row) => {
+    const sku = String(row?.sku || "").trim();
+    const at = Date.parse(row?.published_at || row?.timestamp || "");
+    return sku
+      && !BAD_SKUS.has(sku)
+      && Number(row?.profit_rate) > 30
+      && String(row?.online_status || "") === "selling"
+      && Number(row?.stock) > 0
+      && at >= start
+      && at <= end;
+  }).length;
+  const duplicateSkus = Math.max(0, strictEventCount - successCount);
+  const effectivePerHour = durationHours
+    ? Math.round((successCount / durationHours) * 100) / 100
+    : 0;
+  const hasSpeedThreshold = minimumAveragePerHourExclusive !== null
+    && minimumAveragePerHourExclusive !== undefined
+    && Number.isFinite(Number(minimumAveragePerHourExclusive));
+  const speedThreshold = hasSpeedThreshold ? Number(minimumAveragePerHourExclusive) : null;
+  const speedPassed = !hasSpeedThreshold || effectivePerHour > speedThreshold;
   const normalizedStoreIds = [...new Set((storeIds || []).map(Number).filter((id) => id > 0))];
   const successByStore = Object.fromEntries(normalizedStoreIds.map((id) => [String(id), 0]));
   for (const row of unique.values()) {
@@ -288,12 +317,17 @@ export function acceptanceSummary({ rows, startedAt, endedAt, target = 50, store
     window_ended_at: new Date(end).toISOString(),
     duration_hours: Math.round(durationHours * 1000) / 1000,
     success_count: successCount,
-    effective_per_hour: durationHours ? Math.round((successCount / durationHours) * 100) / 100 : 0,
+    effective_per_hour: effectivePerHour,
+    minimum_average_per_hour_exclusive: speedThreshold,
+    duplicate_skus: duplicateSkus,
     target: Number(target),
     per_store_target: requirePerStore ? normalizedPerStoreTarget : null,
     success_by_store: successByStore,
     remaining_by_store: remainingByStore,
-    passed: successCount >= Number(target) && storesPassed,
+    passed: successCount >= Number(target)
+      && storesPassed
+      && speedPassed
+      && (!requireZeroDuplicates || duplicateSkus === 0),
     excluded_skus: [...BAD_SKUS],
     skus: [...unique.keys()],
   };
@@ -358,6 +392,8 @@ export async function runProducerLoop({
   scan,
   deadlineMs,
   intervalMs = 10_000,
+  idleIntervalsMs = [30_000, 60_000, 120_000],
+  isIdleResult = () => false,
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   onError = async () => {},
@@ -367,14 +403,21 @@ export async function runProducerLoop({
   const deadline = Number(deadlineMs);
   if (!Number.isFinite(deadline)) throw new TypeError("deadlineMs must be finite");
   let lastResult = null;
+  let idleStreak = 0;
   while (now() < deadline && !shouldStop()) {
     try {
       lastResult = await scan();
+      idleStreak = isIdleResult(lastResult) ? idleStreak + 1 : 0;
     } catch (error) {
       await onError(error);
+      idleStreak = 0;
     }
     if (shouldStop()) break;
-    const wait = Math.min(Math.max(1, Number(intervalMs) || 1), deadline - now());
+    const idleDelays = (idleIntervalsMs || []).map(Number).filter((value) => Number.isFinite(value) && value > 0);
+    const requestedWait = idleStreak > 0 && idleDelays.length > 0
+      ? idleDelays[Math.min(idleStreak - 1, idleDelays.length - 1)]
+      : Math.max(1, Number(intervalMs) || 1);
+    const wait = Math.min(requestedWait, deadline - now());
     if (wait > 0) await sleep(wait);
   }
   return lastResult || { deadline_reached: true };

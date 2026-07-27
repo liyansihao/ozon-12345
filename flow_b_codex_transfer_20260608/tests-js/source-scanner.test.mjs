@@ -1886,7 +1886,7 @@ test("cached fallback uses only unattempted cards with complete exact-FBS eviden
 test("cooldown fallback keeps only CNY cards whose facts can bypass Ozon detail", () => {
   const card = (sku, currency) => ({
     href: `https://www.ozon.ru/product/item-${sku}/`,
-    text: `Носки ${sku}`,
+    text: `Игрушка ${sku}`,
     image_url: `https://ir.ozone.ru/${sku}.jpg`,
     card_text: `99 ${currency}\n发货模式：FBS\n库存`,
   });
@@ -1956,7 +1956,7 @@ test("one source does not enqueue numeric variants of the same title family", ()
       { href: "a-3", text: "Носки для девочек" },
     ],
   }];
-  assert.deepEqual(limitLinksPerSource(rows, 3).map((row) => row.href), ["a-3", "a-1"]);
+  assert.deepEqual(limitLinksPerSource(rows, 3).map((row) => row.href), ["a-1", "a-3"]);
 });
 
 test("title dedup retains the variant with plugin-confirmed FBS telemetry", () => {
@@ -1987,8 +1987,8 @@ test("each source round is globally ordered by observed title-family yield", () 
     { source_url: "b", links: [{ href: "b-underwear", text: "Комплект трусов" }] },
   ];
   assert.deepEqual(limitLinksPerSource(rows, 2).map((row) => row.href), [
-    "b-underwear",
     "a-other",
+    "b-underwear",
     "a-case",
   ]);
 });
@@ -2662,12 +2662,12 @@ test("favorite collection prioritizes observed profitable title families stably"
   ];
   assert.deepEqual(prioritizeFavoriteLinks(links).map((link) => link.href), [
     "proven-seller",
-    "underwear",
-    "hat",
     "ordinary",
     "ordinary-2",
     "strap",
     "toy",
+    "underwear",
+    "hat",
   ]);
 });
 
@@ -2712,7 +2712,7 @@ test("title family priority follows observed strict-publication conversion", () 
   assert.equal(productTitleFamily("Летняя кепка для кошек"), "pet");
   assert.equal(productTitleFamily("Детский игровой столик для игр с водой"), "bulky_kids");
   assert.equal(productTitleFamily("Сквиш лапка антистресс"), "squish");
-  assert.ok(productTitlePriority("Носки для девочек") > productTitlePriority("Плюшевая игрушка Sprunki"));
+  assert.ok(productTitlePriority("Носки для девочек") < productTitlePriority("Плюшевая игрушка Sprunki"));
   assert.ok(productTitlePriority("Большая картина") > productTitlePriority("Фигурка героя"));
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Браслет с кулоном"));
   assert.ok(productTitlePriority("Плюшевая игрушка Sprunki") > productTitlePriority("Летняя кепка для кошек"));
@@ -2763,7 +2763,7 @@ test("favorite title preflight rejects proven low-yield oversized categories", (
   assert.equal(favoriteTitleSkipReason("Зеркало настенное круглое 80 см в ванную"), "oversized-low-yield-title");
   assert.equal(favoriteTitleSkipReason("Ванна акриловая 160х70 см"), "oversized-low-yield-title");
   assert.equal(favoriteTitleSkipReason("Цифровое пианино 88 клавиш"), "oversized-low-yield-title");
-  assert.equal(favoriteTitleSkipReason("Носки для девочек"), null);
+  assert.equal(favoriteTitleSkipReason("Носки для девочек"), "prohibited-category");
   assert.deepEqual(favoriteFailureDisposition(new Error("oversized-low-yield-title: SKU 1")), {
     status: "rejected",
     reason: "oversized-low-yield-title",

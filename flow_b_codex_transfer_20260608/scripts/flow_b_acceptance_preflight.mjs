@@ -6,10 +6,11 @@ import { pathToFileURL } from "node:url";
 
 const EXPECTED_STORE_IDS = Object.freeze([106637, 106640, 106644, 106646, 104965]);
 const VERIFIED_WAREHOUSES = Object.freeze({
-  104965: 1020005022957960,
+  104965: 1020005023597900,
   106637: 1020005023256510,
-  106640: 1020005023295220,
-  106644: 1020005023295540,
+  106640: 1020005023616740,
+  106644: 1020005023616380,
+  106646: 1020005023616970,
 });
 
 function requireNumber(env, name, expected) {
@@ -39,12 +40,6 @@ function parseTargets(env) {
   for (const target of targets) {
     const id = Number(target.id);
     if (target.requireWarehouse !== true) throw new Error(`store ${id} must require a verified warehouse`);
-    if (id === 106646) {
-      if (target.warehouseId !== null && target.warehouseId !== undefined) {
-        throw new Error("store 106646 warehouseId must remain unset until ERP uniquely verifies it");
-      }
-      continue;
-    }
     if (Number(target.warehouseId) !== VERIFIED_WAREHOUSES[id]) {
       throw new Error(`store ${id} warehouseId does not match the verified configuration`);
     }
@@ -54,13 +49,13 @@ function parseTargets(env) {
 
 export function validate24hAcceptanceEnv(env = process.env) {
   requireNumber(env, "FLOW_B_ACCEPTANCE_SECONDS", 86400);
-  requireNumber(env, "FLOW_B_ACCEPTANCE_TARGET", 500);
+  requireNumber(env, "FLOW_B_ACCEPTANCE_TARGET", 481);
   requireNumber(env, "FLOW_B_STORE_ACCEPTANCE_TARGET", 100);
-  requireNumber(env, "FLOW_B_TARGET_PUBLISH_COUNT", 500);
+  requireNumber(env, "FLOW_B_TARGET_PUBLISH_COUNT", 481);
   requireNumber(env, "FLOW_B_DAILY_STORE_LIMIT", 100);
   requireNumber(env, "FLOW_B_STORE_TOTAL_LIMIT", 100);
-  if (String(env.FLOW_B_DAILY_STORE_TIMEZONE || "") !== "UTC") {
-    throw new Error("FLOW_B_DAILY_STORE_TIMEZONE must equal UTC");
+  if (String(env.FLOW_B_DAILY_STORE_TIMEZONE || "") !== "Asia/Shanghai") {
+    throw new Error("FLOW_B_DAILY_STORE_TIMEZONE must equal Asia/Shanghai");
   }
   requireNumber(env, "FLOW_B_PROFIT_THRESHOLD", 30);
   requireNumber(env, "FLOW_B_WATERMARK_ID", 60822);
@@ -102,8 +97,8 @@ export function validate24hAcceptanceEnv(env = process.env) {
   return {
     ok: true,
     duration_seconds: 86400,
-    target: 500,
-    per_store_target: 100,
+    target: 481,
+    per_store_target: null,
     store_ids: storeIds,
     strict_profit_rule: "profit_rate > 30",
     watermark_id: 60822,

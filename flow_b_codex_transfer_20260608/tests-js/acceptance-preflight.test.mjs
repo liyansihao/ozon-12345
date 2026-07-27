@@ -6,12 +6,12 @@ import { validate24hAcceptanceEnv } from "../scripts/flow_b_acceptance_preflight
 function validEnv() {
   return {
     FLOW_B_ACCEPTANCE_SECONDS: "86400",
-    FLOW_B_ACCEPTANCE_TARGET: "500",
+    FLOW_B_ACCEPTANCE_TARGET: "481",
     FLOW_B_STORE_ACCEPTANCE_TARGET: "100",
-    FLOW_B_TARGET_PUBLISH_COUNT: "500",
+    FLOW_B_TARGET_PUBLISH_COUNT: "481",
     FLOW_B_DAILY_STORE_LIMIT: "100",
     FLOW_B_STORE_TOTAL_LIMIT: "100",
-    FLOW_B_DAILY_STORE_TIMEZONE: "UTC",
+    FLOW_B_DAILY_STORE_TIMEZONE: "Asia/Shanghai",
     FLOW_B_PROFIT_THRESHOLD: "30",
     FLOW_B_EXCLUDED_SKUS: "2815247918",
     FLOW_B_WATERMARK_ID: "60822",
@@ -31,10 +31,10 @@ function validEnv() {
     FLOW_B_UNAVAILABLE_STORE_RETRY_MS: "300000",
     FLOW_B_STORE_TARGETS: JSON.stringify([
       { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
-      { id: 106640, needle: "丽丽三号", warehouseId: 1020005023295220, requireWarehouse: true },
-      { id: 106644, needle: "丽丽四号", warehouseId: 1020005023295540, requireWarehouse: true },
-      { id: 106646, needle: "丽丽五号", requireWarehouse: true },
-      { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
+      { id: 106640, needle: "丽丽三号", warehouseId: 1020005023616740, requireWarehouse: true },
+      { id: 106644, needle: "丽丽四号", warehouseId: 1020005023616380, requireWarehouse: true },
+      { id: 106646, needle: "丽丽五号", warehouseId: 1020005023616970, requireWarehouse: true },
+      { id: 104965, needle: "丽丽1号", warehouseId: 1020005023597900, requireWarehouse: true },
     ]),
   };
 }
@@ -43,7 +43,7 @@ test("24-hour acceptance preflight accepts the verified five-store contract", ()
   const result = validate24hAcceptanceEnv(validEnv());
   assert.deepEqual(result.store_ids, [106637, 106640, 106644, 106646, 104965]);
   assert.equal(result.strict_profit_rule, "profit_rate > 30");
-  assert.equal(result.target, 500);
+  assert.equal(result.target, 481);
 });
 
 test("24-hour acceptance preflight rejects a relaxed or implicit profit threshold", () => {
@@ -65,7 +65,7 @@ test("24-hour acceptance preflight rejects store order, unsafe warehouse, and mi
   const targets = JSON.parse(guessedWarehouse.FLOW_B_STORE_TARGETS);
   targets[3].warehouseId = 999;
   guessedWarehouse.FLOW_B_STORE_TARGETS = JSON.stringify(targets);
-  assert.throws(() => validate24hAcceptanceEnv(guessedWarehouse), /warehouseId must remain unset/);
+  assert.throws(() => validate24hAcceptanceEnv(guessedWarehouse), /warehouseId does not match/);
 
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_EXCLUDED_SKUS: "" }),
@@ -107,7 +107,7 @@ test("24-hour acceptance preflight rejects disabled quality and reuse controls",
     /confirmation attempts must equal 1/,
   );
   assert.throws(
-    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_DAILY_STORE_TIMEZONE: "Asia\/Shanghai" }),
-    /FLOW_B_DAILY_STORE_TIMEZONE must equal UTC/,
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_DAILY_STORE_TIMEZONE: "UTC" }),
+    /FLOW_B_DAILY_STORE_TIMEZONE must equal Asia\/Shanghai/,
   );
 });

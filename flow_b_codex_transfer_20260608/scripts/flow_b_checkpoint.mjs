@@ -99,7 +99,10 @@ async function processHealth(runDir, profileDir) {
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,command="]);
     const lines = stdout.split(/\r?\n/u).filter(Boolean);
-    const supervised = lines.filter((line) => line.includes("run_acceptance_supervised.sh") && matchesRunCommand(line, runDir));
+    const supervised = lines.filter((line) => (
+      (line.includes("run_acceptance_supervised.sh") && matchesRunCommand(line, runDir))
+      || line.includes("ozon_24h_supervisor.mjs supervise")
+    ));
     const workers = lines.filter((line) => line.includes("flow_b_playwright.mjs accept") && matchesRunCommand(line, runDir));
     const browsers = lines.filter((line) => profileDir && line.includes(`--user-data-dir=${profileDir}`));
     return {
@@ -191,6 +194,7 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     liveness: await processHealth(root, profileDir),
     frozen: {
       git_commit: process.env.FLOW_B_FROZEN_COMMIT || null,
+      config_sha256: process.env.FLOW_B_FROZEN_CONFIG_HASH || null,
       profit_rule: "profit_rate > 30",
       watermark_id: config?.watermark_id ?? 60822,
       store_targets: config?.store_targets || [],

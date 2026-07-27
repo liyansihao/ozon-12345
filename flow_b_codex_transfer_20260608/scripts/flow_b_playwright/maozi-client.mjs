@@ -144,6 +144,7 @@ export function createMaoziClient({ transport }) {
     listImportedFavorites,
     listAllFavorites,
     listShops,
+    listUserShops,
     listWatermarks,
 
     async listCategoryCommissions() {

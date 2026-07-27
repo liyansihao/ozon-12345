@@ -15,7 +15,14 @@ import {
 
 const execFileAsync = promisify(execFile);
 const LABEL = "com.codex.ozon.24h-production";
-const ACTIVE_STATUSES = new Set(["RUNNING", "RECOVERING", "WAITING_FOR_VERIFICATION"]);
+const ACTIVE_STATUSES = new Set([
+  "STARTING",
+  "PREFLIGHTING_CAPACITY",
+  "WAITING_FOR_QUOTA_RESET",
+  "RUNNING",
+  "RECOVERING",
+  "WAITING_FOR_VERIFICATION",
+]);
 
 function expandHome(value) {
   return String(value || "").replaceAll("${HOME}", process.env.HOME || "/Users/mac");
@@ -158,6 +165,16 @@ async function installCandidate({ sourceRoot, config, configSource }) {
   ], { cwd: paths.candidate });
   if (!npm.ok) throw new Error(`candidate dependency install failed: ${npm.stderr || npm.error}`);
   await copyInitialState(sourceRoot, paths.stateRoot);
+  const sourceRefresh = await run(process.execPath, [
+    path.join(paths.candidate, "scripts", "ozon_source_portfolio.mjs"),
+    "refresh",
+    paths.stateRoot,
+    "-",
+    path.join(paths.candidate, "config", "ozon_source_seed.txt"),
+  ], { cwd: paths.candidate });
+  if (!sourceRefresh.ok) {
+    throw new Error(`candidate source portfolio refresh failed: ${sourceRefresh.stderr || sourceRefresh.error}`);
+  }
   const configText = await fsp.readFile(configSource, "utf8");
   const revision = await run("/usr/bin/git", ["rev-parse", "HEAD"], { cwd: repositoryRoot });
   await writeJsonAtomic(path.join(paths.candidate, "deployment_manifest.json"), {
@@ -301,14 +318,14 @@ async function start(config) {
     await kickstart(config);
     return { ok: true, resumed: true, run_id: current.run_id, run_dir: current.run_dir };
   }
-  const preflight = await readJson(path.join(paths.stateRoot, "capacity_preflight.json"), {});
-  const checkedAt = Date.parse(preflight?.checked_at || "");
-  const fresh = Number.isFinite(checkedAt) && Date.now() - checkedAt <= 15 * 60_000;
-  if (!fresh || preflight?.all_warehouses_verified !== true || Number(preflight?.total_remaining_capacity) < 481) {
-    const error = new Error("fresh ERP capacity preflight with at least 481 remaining slots is required before opening the formal window");
-    error.code = "OZON_CAPACITY_PREFLIGHT_REQUIRED";
-    throw error;
-  }
+  const sourceRefresh = await run(process.execPath, [
+    path.join(paths.appLink, "scripts", "ozon_source_portfolio.mjs"),
+    "refresh",
+    paths.stateRoot,
+    "-",
+    path.join(paths.appLink, "config", "ozon_source_seed.txt"),
+  ], { cwd: paths.appLink });
+  if (!sourceRefresh.ok) throw new Error(`source portfolio refresh failed: ${sourceRefresh.stderr || sourceRefresh.error}`);
   const sources = path.join(paths.stateRoot, "sources", "active_urls.txt");
   if (!await pathExists(sources)) throw new Error("active source pool is missing");
   const sourceText = await fsp.readFile(sources, "utf8");
@@ -318,32 +335,26 @@ async function start(config) {
   const runId = localRunId();
   const runDir = path.join(paths.stateRoot, "runs", runId);
   await fsp.mkdir(runDir, { recursive: true });
-  const startedAt = new Date();
-  const endedAt = new Date(startedAt.getTime() + Number(config.acceptance.duration_seconds) * 1000);
-  await writeJsonAtomic(path.join(runDir, "acceptance_window.json"), {
-    started_at: startedAt.toISOString(),
-    ended_at: endedAt.toISOString(),
-  });
+  const requestedAt = new Date();
   const configText = await fsp.readFile(path.join(paths.appLink, "config", "ozon_24h_production.json"), "utf8");
-  await writeJsonAtomic(path.join(runDir, "frozen_manifest.json"), {
+  await writeJsonAtomic(path.join(runDir, "pending_manifest.json"), {
     run_id: runId,
-    started_at: startedAt.toISOString(),
-    ended_at: endedAt.toISOString(),
+    requested_at: requestedAt.toISOString(),
     config_sha256: sha256(configText),
     source_sha256: sha256(sourceText),
-    capacity_preflight: preflight,
-    current_window_only: true,
+    formal_window_started: false,
   });
   await writeJsonAtomic(path.join(paths.stateRoot, "current_run.json"), {
     run_id: runId,
     run_dir: runDir,
     urls_file: sources,
-    started_at: startedAt.toISOString(),
-    ended_at: endedAt.toISOString(),
+    requested_at: requestedAt.toISOString(),
+    formal_started: false,
     config_sha256: sha256(configText),
+    source_sha256: sha256(sourceText),
   });
   await writeJsonAtomic(path.join(paths.stateRoot, "operational_status.json"), {
-    status: "STARTING",
+    status: "PREFLIGHTING_CAPACITY",
     observed_at: new Date().toISOString(),
     run_id: runId,
     run_dir: runDir,

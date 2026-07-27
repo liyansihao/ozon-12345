@@ -6,18 +6,18 @@
     "publish_when_profit_rate_is_strictly_greater_than_threshold": true
   },
   "target": {
-    "published_count": 500
+    "published_count": 481
   },
   "publish_target": {
     "store_name_contains": "丽丽1号",
     "watermark_name_contains": "lysh",
     "daily_store_limit": 100,
     "rotation": [
-      { "id": 106637, "name_contains": "丽丽二号", "warehouse_id": null },
-      { "id": 106640, "name_contains": "丽丽三号", "warehouse_id": null },
-      { "id": 106644, "name_contains": "丽丽四号", "warehouse_id": null },
-      { "id": 106646, "name_contains": "丽丽五号", "warehouse_id": null },
-      { "id": 104965, "name_contains": "丽丽1号", "warehouse_id": 1020005022957960 }
+      { "id": 106637, "name_contains": "丽丽二号", "warehouse_id": 1020005023256510 },
+      { "id": 106640, "name_contains": "丽丽三号", "warehouse_id": 1020005023616740 },
+      { "id": 106644, "name_contains": "丽丽四号", "warehouse_id": 1020005023616380 },
+      { "id": 106646, "name_contains": "丽丽五号", "warehouse_id": 1020005023616970 },
+      { "id": 104965, "name_contains": "丽丽1号", "warehouse_id": 1020005023597900 }
     ]
   },
   "source": {

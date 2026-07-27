@@ -71,6 +71,28 @@ export function classifyWorkerFailure({ message = "", profileOwnerCount = 0 } = 
   return { action: "restart-worker", reason: "ordinary-worker-recoverable" };
 }
 
+export function currentRunDisposition(currentRun) {
+  if (!currentRun || Object.keys(currentRun).length === 0) return "idle";
+  if (!currentRun.run_id || !currentRun.run_dir || !currentRun.urls_file) return "invalid";
+  return "active";
+}
+
+export function capacityPreflightDecision(snapshot, requiredCapacity = 481) {
+  if (snapshot?.all_stores_found !== true
+    || snapshot?.all_warehouses_verified !== true
+    || snapshot?.all_quotas_verified !== true) {
+    return { action: "fatal-stop", reason: "capacity-or-warehouse-verification-failed" };
+  }
+  if (Number(snapshot?.total_remaining_capacity) < Number(requiredCapacity)) {
+    return {
+      action: "wait-for-quota-reset",
+      reason: "insufficient-current-day-capacity",
+      next_reset_at: snapshot?.next_reset_at || null,
+    };
+  }
+  return { action: "start-formal-window", reason: null };
+}
+
 export function buildLaunchdPlist({
   label = DEFAULT_LABEL,
   entryScript,
@@ -317,6 +339,9 @@ function workerEnvironment(config, currentRun) {
   environment.FLOW_B_RESUME_WINDOW = "1";
   environment.FLOW_B_PRODUCTION_STATE_ROOT = absolute(config.state_root);
   environment.FLOW_B_PRODUCTION_RUN_ID = String(currentRun.run_id);
+  environment.FLOW_B_CAPACITY_STORES = JSON.stringify(config.stores || []);
+  environment.FLOW_B_FROZEN_COMMIT = String(config.frozen_commit || "");
+  environment.FLOW_B_FROZEN_CONFIG_HASH = String(config.frozen_config_hash || "");
   return environment;
 }
 
@@ -370,6 +395,85 @@ async function runCheckpoint(appRoot, runDir, label) {
   });
 }
 
+async function runFinalArtifacts(appRoot, stateRoot, currentRun, runDir) {
+  const output = path.join(stateRoot, "exports", currentRun.run_id);
+  await fsp.mkdir(output, { recursive: true });
+  const exported = await runCommand(process.execPath, [
+    path.join(appRoot, "scripts", "export_confirmed_store_skus.mjs"),
+    runDir,
+    output,
+  ], {
+    cwd: appRoot,
+    env: process.env,
+    stdio: "ignore",
+  });
+  if (exported.code !== 0) throw new Error("final five-store CSV export failed");
+  const acceptanceReport = path.join(runDir, "acceptance_summary.json");
+  let report = null;
+  if (fs.existsSync(acceptanceReport)) {
+    report = await readJson(acceptanceReport);
+    await fsp.copyFile(acceptanceReport, path.join(output, "24h_report.json"));
+  }
+  return { output, report };
+}
+
+async function runSourceRefresh(appRoot, stateRoot, runDir) {
+  const script = path.join(appRoot, "scripts", "ozon_source_portfolio.mjs");
+  const seed = path.join(appRoot, "config", "ozon_source_seed.txt");
+  return runCommand(process.execPath, [script, "refresh", stateRoot, runDir || "-", seed], {
+    cwd: appRoot,
+    env: process.env,
+    stdio: "ignore",
+  });
+}
+
+async function runCapacityPreflight(config, appRoot, stateRoot, currentRun) {
+  const script = path.join(appRoot, "scripts", "ozon_capacity_preflight.mjs");
+  const output = path.join(stateRoot, "capacity_preflight.json");
+  const stdoutFd = fs.openSync(path.join(stateRoot, "capacity.stdout.log"), "a");
+  const stderrFd = fs.openSync(path.join(stateRoot, "capacity.stderr.log"), "a");
+  try {
+    return await runCommand(process.execPath, [script, output], {
+      cwd: appRoot,
+      env: workerEnvironment(config, currentRun),
+      stdio: ["ignore", stdoutFd, stderrFd],
+    });
+  } finally {
+    fs.closeSync(stdoutFd);
+    fs.closeSync(stderrFd);
+  }
+}
+
+async function activateFormalWindow({ config, stateRoot, currentRun, runDir, appRoot }) {
+  const startedAt = new Date();
+  const endedAt = new Date(startedAt.getTime() + Number(config.acceptance.duration_seconds) * 1000);
+  const preflight = await readJson(path.join(stateRoot, "capacity_preflight.json"));
+  const configText = await fsp.readFile(path.join(appRoot, "config", "ozon_24h_production.json"), "utf8");
+  const crypto = await import("node:crypto");
+  const configHash = crypto.createHash("sha256").update(configText).digest("hex");
+  await writeJsonAtomic(path.join(runDir, "acceptance_window.json"), {
+    started_at: startedAt.toISOString(),
+    ended_at: endedAt.toISOString(),
+  });
+  await writeJsonAtomic(path.join(runDir, "frozen_manifest.json"), {
+    run_id: currentRun.run_id,
+    requested_at: currentRun.requested_at,
+    started_at: startedAt.toISOString(),
+    ended_at: endedAt.toISOString(),
+    config_sha256: configHash,
+    source_sha256: currentRun.source_sha256 || null,
+    capacity_preflight: preflight,
+    current_window_only: true,
+  });
+  Object.assign(currentRun, {
+    formal_started: true,
+    started_at: startedAt.toISOString(),
+    ended_at: endedAt.toISOString(),
+    config_sha256: configHash,
+  });
+  await writeJsonAtomic(path.join(stateRoot, "current_run.json"), currentRun);
+}
+
 async function waitForVerification({ stateRoot, currentRun, appRoot, runDir, stopFile }) {
   const resumeFile = path.join(stateRoot, "resume.request");
   await updateOperationalState(stateRoot, currentRun, {
@@ -402,15 +506,35 @@ async function writeProcessOwners({ stateRoot, currentRun, browserPid, workerPid
 export async function supervise(configPath) {
   const config = expandedConfig(await readJson(configPath));
   const appRoot = absolute(config.install_root, path.resolve(import.meta.dirname, ".."));
+  const deployment = await readJson(path.join(appRoot, "deployment_manifest.json"), {});
+  config.frozen_commit = deployment?.source_commit || null;
+  config.frozen_config_hash = deployment?.config_sha256 || null;
   const stateRoot = absolute(config.state_root, path.join(DEFAULT_INSTALL_ROOT, "state"));
   const currentRunPath = path.join(stateRoot, "current_run.json");
-  const currentRun = await readJson(currentRunPath);
+  const releaseLock = await acquireSupervisorLock(stateRoot);
+  const currentRun = await readJson(currentRunPath, {});
+  const disposition = currentRunDisposition(currentRun);
+  if (disposition === "idle") {
+    await writeJsonAtomic(path.join(stateRoot, "operational_status.json"), {
+      observed_at: new Date().toISOString(),
+      status: "IDLE",
+      reason: "no active production run",
+    });
+    await releaseLock();
+    return 0;
+  }
+  if (disposition === "invalid") {
+    await releaseLock();
+    const error = new Error(`invalid current run state: ${currentRunPath}`);
+    error.code = "OZON_INVALID_CURRENT_RUN";
+    throw error;
+  }
   const runDir = absolute(currentRun.run_dir);
   const urlsFile = absolute(currentRun.urls_file);
   const stopFile = path.join(stateRoot, "stop.request");
-  const releaseLock = await acquireSupervisorLock(stateRoot);
   let worker = null;
   let checkpointTimer = null;
+  let sourceRefreshTimer = null;
   let shuttingDown = false;
   const stopWorker = async () => {
     if (worker && pidAlive(worker.pid)) {
@@ -429,11 +553,84 @@ export async function supervise(configPath) {
   process.on("SIGHUP", onSignal);
   try {
     await fsp.mkdir(runDir, { recursive: true });
+    const sourceRefresh = await runSourceRefresh(appRoot, stateRoot, runDir);
+    if (sourceRefresh.code !== 0) throw new Error("initial source portfolio refresh failed");
+    while (currentRun.formal_started === false && !shuttingDown) {
+      if (fs.existsSync(stopFile)) {
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "STOPPED",
+          reason: "safe stop requested before formal window",
+        });
+        await fsp.unlink(stopFile).catch(() => {});
+        return 0;
+      }
+      let browserOwner;
+      try {
+        browserOwner = await ensureBrowserOwner({ config, stateRoot, runDir });
+        await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid });
+        const result = await runCapacityPreflight(config, appRoot, stateRoot, currentRun);
+        if (result.code !== 0) throw result.error || new Error(`capacity preflight exited ${result.code}`);
+        const snapshot = await readJson(path.join(stateRoot, "capacity_preflight.json"));
+        const decision = capacityPreflightDecision(snapshot, config.acceptance.strict_target);
+        if (decision.action === "fatal-stop") {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "FATAL_STOP",
+            reason: decision.reason,
+            capacity_preflight: snapshot,
+          });
+          return 0;
+        }
+        if (decision.action === "start-formal-window") {
+          await activateFormalWindow({ config, stateRoot, currentRun, runDir, appRoot });
+          break;
+        }
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "WAITING_FOR_QUOTA_RESET",
+          reason: decision.reason,
+          total_remaining_capacity: snapshot.total_remaining_capacity,
+          required_capacity: config.acceptance.strict_target,
+          next_reset_at: decision.next_reset_at,
+        });
+        const resetAt = Date.parse(decision.next_reset_at || "");
+        const waitMs = Number.isFinite(resetAt)
+          ? Math.max(1_000, Math.min(30_000, resetAt - Date.now() + 5_000))
+          : 30_000;
+        await delay(waitMs);
+      } catch (error) {
+        const evidence = `${error?.message || error}\n${await readTail(path.join(stateRoot, "capacity.stderr.log"))}`;
+        const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
+        const decision = classifyWorkerFailure({ message: evidence, profileOwnerCount: owners.length });
+        if (decision.action === "fatal-stop") {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "FATAL_STOP",
+            reason: decision.reason,
+            error: String(error?.message || error),
+          });
+          return 0;
+        }
+        if (decision.action === "wait-for-verification") {
+          await waitForVerification({ stateRoot, currentRun, appRoot, runDir, stopFile });
+          continue;
+        }
+        const seconds = nextRestartDelaySeconds(0, config.restart_delays_seconds);
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "RECOVERING",
+          reason: "capacity-preflight-recoverable",
+          retry_in_seconds: seconds,
+        });
+        await delay(seconds * 1000);
+      }
+    }
+    if (shuttingDown || currentRun.formal_started === false) return 0;
     await runCheckpoint(appRoot, runDir, "supervisor-start");
     checkpointTimer = setInterval(() => {
       void runCheckpoint(appRoot, runDir, "2h");
     }, Math.max(60_000, Number(config.checkpoint_interval_seconds || 7200) * 1000));
     checkpointTimer.unref();
+    sourceRefreshTimer = setInterval(() => {
+      void runSourceRefresh(appRoot, stateRoot, runDir);
+    }, Math.max(60_000, Number(config.source_refresh_seconds || 900) * 1000));
+    sourceRefreshTimer.unref();
     let restartAttempt = 0;
     while (!shuttingDown) {
       if (fs.existsSync(stopFile)) {
@@ -442,8 +639,14 @@ export async function supervise(configPath) {
         break;
       }
       if (await acceptanceEnded(runDir)) {
-        await updateOperationalState(stateRoot, currentRun, { status: "WINDOW_COMPLETE", reason: null });
         await runCheckpoint(appRoot, runDir, "window-complete");
+        const artifacts = await runFinalArtifacts(appRoot, stateRoot, currentRun, runDir);
+        await updateOperationalState(stateRoot, currentRun, {
+          status: artifacts.report?.passed === true ? "WINDOW_COMPLETE" : "TARGET_NOT_MET",
+          reason: artifacts.report?.passed === true ? null : "strict 24-hour acceptance criteria not met",
+          artifacts_dir: artifacts.output,
+          strict_result: artifacts.report || null,
+        });
         break;
       }
 
@@ -547,6 +750,7 @@ export async function supervise(configPath) {
     return 0;
   } finally {
     if (checkpointTimer) clearInterval(checkpointTimer);
+    if (sourceRefreshTimer) clearInterval(sourceRefreshTimer);
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
     process.off("SIGHUP", onSignal);

@@ -818,10 +818,10 @@ export function productTitleFamily(value) {
 
 export function productTitlePriority(value) {
   return {
-    socks: 700,
-    underwear: 650,
+    socks: -1000,
+    underwear: -1000,
     squish: 625,
-    headwear: 575,
+    headwear: -1000,
     building: 525,
     other: 400,
     plush: 350,
@@ -3165,6 +3165,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   records = pruneAttemptedSourceLinks(records, attempted);
   const candidateQueue = createCandidateQueue(path.join(path.dirname(outputPath), "candidate_queue.jsonl"));
   await candidateQueue.load();
+  let scanActivityCount = 0;
   const candidateDrainLimit = Math.max(1, envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48));
   const candidatePerSourceDrain = Math.max(1, envNumber(env, "FLOW_B_CANDIDATE_QUEUE_PER_SOURCE_DRAIN", 6));
   const candidateBacklogTarget = Math.max(1, Math.min(
@@ -3184,7 +3185,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     limit: candidateDrainLimit,
   }), env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1");
   if (!pending.length && !recoveredCandidates.length) {
-    return { outFile: outputPath, records: records.length, pending: 0 };
+    return { outFile: outputPath, records: records.length, pending: 0, activity_count: 0 };
   }
   const runtime = collectionRuntimeState(favoriteLog);
   const accessController = ozonAccessControllerFor(context, env);
@@ -3216,7 +3217,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       const sku = skuFromProductUrl(href);
       return sku && !attempted.has(sku);
     });
-    await candidateQueue.discover(discoveries);
+    scanActivityCount += await candidateQueue.discover(discoveries);
     const transitions = [];
     let total;
     try {
@@ -3225,6 +3226,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         links: eligibleLinks,
         attempted,
         onResult: (result) => {
+          if (["favorited", "rejected", "failed"].includes(String(result?.status || ""))) {
+            scanActivityCount += 1;
+          }
           onResult(result);
           const transition = candidateQueueTransitionForCollectionResult(result, {
             deferMs: envNumber(env, "FLOW_B_CANDIDATE_DEFER_MS", 10 * 60_000),
@@ -3276,6 +3280,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           const sku = skuFromProductUrl(link?.href);
           return sku && !attempted.has(sku);
         }));
+        scanActivityCount += queued;
         emit(`Ozon detail cooldown queue-only cached=${queued} remaining=${cooldownRemaining}ms`);
       }
       const readyCandidateCount = candidateQueue.pending({
@@ -3295,6 +3300,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           pending: pending.length,
           candidate_backlog: readyCandidateCount,
           cooldown_remaining_ms: cooldownRemaining,
+          activity_count: scanActivityCount,
         };
       }
     }
@@ -3382,6 +3388,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           records: records.length,
           pending: pending.length,
           retained_attempted: retainedLinks.length,
+          activity_count: scanActivityCount,
         };
       }
     }
@@ -3505,6 +3512,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           const sku = skuFromProductUrl(link?.href);
           return sku && !attempted.has(sku);
         }));
+        scanActivityCount += queued;
         if (queued > 0) emit(`queued ${queued} source candidates without detail during cooldown`);
       } else if (collectionMode === "collect") {
         let collectionSoftBlocked = false;
@@ -3609,6 +3617,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         const sku = skuFromProductUrl(link?.href);
         return sku && !attempted.has(sku);
       }));
+      scanActivityCount += queued;
       const eligibleCounts = eligibleLinkCountsBySource(prefetchedLinks, attempted, {
         requireListingFbsEvidence,
       });
@@ -3629,7 +3638,12 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       sourceCheckpointDirty = true;
       emit(`persisted lookahead batch candidates=${queued} for the next consumer tranche`);
     }
-    return { outFile: outputPath, records: records.length, pending: pending.length };
+    return {
+      outFile: outputPath,
+      records: records.length,
+      pending: pending.length,
+      activity_count: scanActivityCount,
+    };
   } catch (error) {
     keepReusablePages = false;
     throw error;

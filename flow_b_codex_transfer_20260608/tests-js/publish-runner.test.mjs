@@ -447,7 +447,7 @@ test("same-store exact-title variants remain eligible", async () => {
     && event.data.reason === "duplicate-title"));
 });
 
-test("publish candidates prioritize observed strict-yield titles independently of API order", () => {
+test("publish candidates demote prohibited title families independently of API order", () => {
   const items = [
     { sku: "ordinary-low", title: "Воздушные шары из фольги", sell_price: 10 },
     { sku: "ordinary-high", title: "Рюкзак", sell_price: 60 },
@@ -456,11 +456,11 @@ test("publish candidates prioritize observed strict-yield titles independently o
     { sku: "underwear", title: "Комплект трусов" },
   ];
   assert.deepEqual(prioritizePublishCandidates(items).map((item) => item.sku), [
-    "underwear",
-    "hat",
     "ordinary-high",
     "ordinary-low",
     "toy",
+    "hat",
+    "underwear",
   ]);
 });
 

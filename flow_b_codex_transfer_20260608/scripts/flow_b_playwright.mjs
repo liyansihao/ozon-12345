@@ -21,10 +21,10 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
 const DEFAULT_STORE_TARGETS = Object.freeze([
   { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
-  { id: 106640, needle: "丽丽三号", warehouseId: 1020005023295220, requireWarehouse: true },
-  { id: 106644, needle: "丽丽四号", warehouseId: 1020005023295540, requireWarehouse: true },
-  { id: 106646, needle: "丽丽五号", warehouseId: null, requireWarehouse: true },
-  { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
+  { id: 106640, needle: "丽丽三号", warehouseId: 1020005023616740, requireWarehouse: true },
+  { id: 106644, needle: "丽丽四号", warehouseId: 1020005023616380, requireWarehouse: true },
+  { id: 106646, needle: "丽丽五号", warehouseId: 1020005023616970, requireWarehouse: true },
+  { id: 104965, needle: "丽丽1号", warehouseId: 1020005023597900, requireWarehouse: true },
 ]);
 
 function required(value, label) {
@@ -355,6 +355,8 @@ export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) 
     target,
     storeIds: (sourceConfig.store_targets || []).map((entry) => entry?.id),
     perStoreTarget: sourceConfig.per_store_target ?? null,
+    minimumAveragePerHourExclusive: 20,
+    requireZeroDuplicates: true,
   });
   const windowStart = Date.parse(startedAt);
   const windowEnd = Date.parse(endedAt);
@@ -454,6 +456,7 @@ async function runAcceptance(context, options, env) {
     window_ended_at: endedAt.toISOString(),
     publish_target: options.target,
     acceptance_target: acceptanceTarget,
+    minimum_average_per_hour_exclusive: 20,
     per_store_target: perStoreAcceptanceTarget(env),
     store_id: Number(env.FLOW_B_STORE_ID || 104965),
     store_targets: storeTargets,
@@ -474,6 +477,10 @@ async function runAcceptance(context, options, env) {
   const scanTask = runProducerLoop({
     deadlineMs: endedAt.getTime(),
     intervalMs: Math.max(1_000, Number(env.FLOW_B_PRODUCER_INTERVAL_MS || 20_000)),
+    idleIntervalsMs: String(env.FLOW_B_EMPTY_SOURCE_BACKOFF_MS || "30000,60000,120000")
+      .split(",")
+      .map(Number),
+    isIdleResult: (result) => Number(result?.activity_count || 0) === 0,
     shouldStop: () => Boolean(producerFatalError),
     scan: async () => {
       try {

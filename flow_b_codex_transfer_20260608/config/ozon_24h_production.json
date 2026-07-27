@@ -6,6 +6,7 @@
   "install_root": "${HOME}/.ozon-24h-production/app",
   "state_root": "${HOME}/.ozon-24h-production/state",
   "checkpoint_interval_seconds": 7200,
+  "source_refresh_seconds": 900,
   "restart_delays_seconds": [
     30,
     60,
@@ -41,14 +42,14 @@
     {
       "id": 106640,
       "name": "丽丽三号",
-      "warehouse_id": 1020005023295220,
-      "warehouse_evidence": "ERP verified"
+      "warehouse_id": 1020005023616740,
+      "warehouse_evidence": "ERP live preflight 2026-07-27: unique 邮政陆运经济仓"
     },
     {
       "id": 106644,
       "name": "丽丽四号",
-      "warehouse_id": 1020005023295540,
-      "warehouse_evidence": "ERP verified"
+      "warehouse_id": 1020005023616380,
+      "warehouse_evidence": "ERP live preflight 2026-07-27: unique 邮政陆运经济仓"
     },
     {
       "id": 106646,
@@ -59,8 +60,8 @@
     {
       "id": 104965,
       "name": "丽丽1号",
-      "warehouse_id": 1020005022957960,
-      "warehouse_evidence": "ERP verified"
+      "warehouse_id": 1020005023597900,
+      "warehouse_evidence": "ERP live preflight 2026-07-27: unique 邮政陆运经济仓 among named ERP warehouses"
     }
   ],
   "source_pool": {
@@ -83,13 +84,13 @@
       {
         "id": 106640,
         "needle": "丽丽三号",
-        "warehouseId": 1020005023295220,
+        "warehouseId": 1020005023616740,
         "requireWarehouse": true
       },
       {
         "id": 106644,
         "needle": "丽丽四号",
-        "warehouseId": 1020005023295540,
+        "warehouseId": 1020005023616380,
         "requireWarehouse": true
       },
       {
@@ -101,7 +102,7 @@
       {
         "id": 104965,
         "needle": "丽丽1号",
-        "warehouseId": 1020005022957960,
+        "warehouseId": 1020005023597900,
         "requireWarehouse": true
       }
     ],
@@ -130,6 +131,7 @@
     "FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE": "8",
     "FLOW_B_POLL_INTERVAL_MS": "3000",
     "FLOW_B_PRODUCER_INTERVAL_MS": "5000",
+    "FLOW_B_EMPTY_SOURCE_BACKOFF_MS": "30000,60000,120000",
     "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS": "4000",
     "FLOW_B_FAVORITE_API_INTERVAL_MS": "500",
     "FLOW_B_MAX_FAVORITE_DETAIL_INTERVAL_MS": "6000",
