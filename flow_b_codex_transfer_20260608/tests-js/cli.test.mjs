@@ -2,7 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { parseCli, parseDailyStoreUsageSeed, parseStoreTargets, parseStoreTotalUsageSeed, publishedCsvPath } from "../scripts/flow_b_playwright.mjs";
+import {
+  parseCli,
+  parseDailyStoreUsageSeed,
+  parseStoreTargets,
+  parseStoreTotalUsageSeed,
+  publishedCsvPath,
+  sourceScanOutputFile,
+} from "../scripts/flow_b_playwright.mjs";
 
 test("publish CLI uses strict production defaults", () => {
   const parsed = parseCli(["publish", "/tmp/flow-run"], {});
@@ -26,6 +33,22 @@ test("CLI accepts setup, scan, and run shapes", () => {
   assert.equal(run.runDir, "/tmp/run");
   assert.equal(run.urlsFile, path.resolve("urls.txt"));
   assert.equal(run.outFile, "/tmp/run/source_deep_scan.json");
+});
+
+test("run and accept can rotate to a safe gate-specific scan checkpoint", () => {
+  const env = { FLOW_B_SOURCE_SCAN_STATE_FILE: "source_deep_scan_detail_verified.json" };
+  assert.equal(
+    sourceScanOutputFile("/tmp/run", env),
+    "/tmp/run/source_deep_scan_detail_verified.json",
+  );
+  assert.equal(
+    parseCli(["accept", "/tmp/run", "urls.txt"], env).outFile,
+    "/tmp/run/source_deep_scan_detail_verified.json",
+  );
+  assert.throws(
+    () => sourceScanOutputFile("/tmp/run", { FLOW_B_SOURCE_SCAN_STATE_FILE: "../outside.json" }),
+    /safe JSON filename/,
+  );
 });
 
 test("CLI validates numbers, commands, and required paths without launching", () => {

@@ -12,6 +12,7 @@ import {
   nextRestartDelaySeconds,
   pendingPrewarmDue,
   resolveProductionLayout,
+  resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
   runFinalArtifacts,
   supervisorShouldHonorSafeStop,
@@ -34,6 +35,21 @@ test("supervisor launches children from its real release instead of the app syml
   assert.equal(
     resolveSupervisorAppRoot("/Users/mac/.ozon-24h-production/releases/stable/scripts"),
     "/Users/mac/.ozon-24h-production/releases/stable",
+  );
+});
+
+test("supervisor prewarm uses only a run-local scan checkpoint filename", () => {
+  assert.equal(
+    resolveSourceScanStateFile("/tmp/run", {
+      flow_env: { FLOW_B_SOURCE_SCAN_STATE_FILE: "source_deep_scan_detail_verified.json" },
+    }),
+    "/tmp/run/source_deep_scan_detail_verified.json",
+  );
+  assert.throws(
+    () => resolveSourceScanStateFile("/tmp/run", {
+      flow_env: { FLOW_B_SOURCE_SCAN_STATE_FILE: "../../outside.json" },
+    }),
+    /safe JSON filename/,
   );
 });
 

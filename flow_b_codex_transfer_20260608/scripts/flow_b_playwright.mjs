@@ -106,6 +106,14 @@ export function parseStoreTotalUsageSeed(env = process.env) {
   return usage;
 }
 
+export function sourceScanOutputFile(runDir, env = process.env) {
+  const configured = String(env.FLOW_B_SOURCE_SCAN_STATE_FILE || "source_deep_scan.json").trim();
+  if (!/^[a-zA-Z0-9._-]+\.json$/u.test(configured)) {
+    throw new Error("FLOW_B_SOURCE_SCAN_STATE_FILE must be a safe JSON filename");
+  }
+  return path.join(path.resolve(runDir), configured);
+}
+
 export function parseCli(argv, env = process.env) {
   const args = [...argv];
   if (!args.length || args.includes("--help") || args.includes("-h")) return { command: "help" };
@@ -123,11 +131,11 @@ export function parseCli(argv, env = process.env) {
   }
   if (command === "run") {
     const runDir = required(rest[0], "RUN_DIR");
-    return { command, runDir, urlsFile: required(rest[1], "URLS.txt"), outFile: path.join(runDir, "source_deep_scan.json"), ...defaults };
+    return { command, runDir, urlsFile: required(rest[1], "URLS.txt"), outFile: sourceScanOutputFile(runDir, env), ...defaults };
   }
   if (command === "accept") {
     const runDir = required(rest[0], "RUN_DIR");
-    return { command, runDir, urlsFile: required(rest[1], "URLS.txt"), outFile: path.join(runDir, "source_deep_scan.json"), ...defaults };
+    return { command, runDir, urlsFile: required(rest[1], "URLS.txt"), outFile: sourceScanOutputFile(runDir, env), ...defaults };
   }
   throw new Error(`unknown command: ${command}`);
 }

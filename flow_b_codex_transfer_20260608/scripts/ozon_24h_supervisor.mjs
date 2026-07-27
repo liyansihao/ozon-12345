@@ -52,6 +52,14 @@ export function resolveSupervisorAppRoot(moduleDirectory = import.meta.dirname) 
   return path.resolve(moduleDirectory, "..");
 }
 
+export function resolveSourceScanStateFile(runDir, config = {}) {
+  const configured = String(config.flow_env?.FLOW_B_SOURCE_SCAN_STATE_FILE || "source_deep_scan.json").trim();
+  if (!/^[a-zA-Z0-9._-]+\.json$/u.test(configured)) {
+    throw new Error("FLOW_B_SOURCE_SCAN_STATE_FILE must be a safe JSON filename");
+  }
+  return path.join(path.resolve(runDir), configured);
+}
+
 export function nextRestartDelaySeconds(attempt, configured = [30, 60, 120]) {
   const values = configured
     .map(Number)
@@ -503,7 +511,7 @@ function spawnPendingPrewarm(config, appRoot, runDir, urlsFile, currentRun, rese
     path.join(appRoot, "scripts", "flow_b_playwright.mjs"),
     "scan",
     urlsFile,
-    path.join(runDir, "source_deep_scan.json"),
+    resolveSourceScanStateFile(runDir, config),
   ], {
     cwd: appRoot,
     env: {
