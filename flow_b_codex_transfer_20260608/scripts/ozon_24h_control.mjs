@@ -381,9 +381,11 @@ async function start(config) {
 async function stop(config) {
   const paths = deploymentPaths(config);
   await fsp.writeFile(path.join(paths.stateRoot, "stop.request"), `${new Date().toISOString()}\n`, "utf8");
-  const service = `gui/${process.getuid()}/${config.launchd_label || LABEL}`;
-  await run("/bin/launchctl", ["kill", "SIGTERM", service]);
-  return { ok: true, stop_requested: true };
+  return {
+    ok: true,
+    stop_requested: true,
+    behavior: "supervisor will stop safely at the next state-machine boundary",
+  };
 }
 
 async function resume(config) {
