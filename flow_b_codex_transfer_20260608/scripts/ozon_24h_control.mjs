@@ -23,6 +23,12 @@ const ACTIVE_STATUSES = new Set([
   "RECOVERING",
   "WAITING_FOR_VERIFICATION",
 ]);
+const RESUMABLE_STATUSES = new Set([...ACTIVE_STATUSES, "STOPPED"]);
+
+export function shouldResumeCurrentRun(status, current) {
+  if (!current?.run_id || !current?.run_dir || !current?.urls_file) return false;
+  return RESUMABLE_STATUSES.has(String(status?.status || ""));
+}
 
 function expandHome(value) {
   return String(value || "").replaceAll("${HOME}", process.env.HOME || "/Users/mac");
@@ -314,7 +320,8 @@ async function start(config) {
   const paths = deploymentPaths(config);
   const status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
-  if (ACTIVE_STATUSES.has(String(status?.status || "")) && current?.run_dir) {
+  if (shouldResumeCurrentRun(status, current)) {
+    await fsp.unlink(path.join(paths.stateRoot, "stop.request")).catch(() => {});
     await kickstart(config);
     return { ok: true, resumed: true, run_id: current.run_id, run_dir: current.run_dir };
   }

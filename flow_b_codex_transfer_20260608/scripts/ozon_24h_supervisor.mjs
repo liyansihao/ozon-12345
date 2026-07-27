@@ -4,7 +4,7 @@ import { spawn, execFile } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -395,9 +395,20 @@ async function runCheckpoint(appRoot, runDir, label) {
   });
 }
 
-async function runFinalArtifacts(appRoot, stateRoot, currentRun, runDir) {
+export async function runFinalArtifacts(appRoot, stateRoot, currentRun, runDir) {
   const output = path.join(stateRoot, "exports", currentRun.run_id);
   await fsp.mkdir(output, { recursive: true });
+  const acceptanceReport = path.join(runDir, "acceptance_summary.json");
+  if (!fs.existsSync(acceptanceReport)) {
+    const window = await readJson(path.join(runDir, "acceptance_window.json"));
+    const reportModule = await import(pathToFileURL(path.join(appRoot, "scripts", "flow_b_playwright.mjs")).href);
+    await reportModule.writeAcceptanceReport(
+      runDir,
+      window.started_at,
+      window.ended_at,
+      Number((await readJson(path.join(runDir, "source_config.json"), {}))?.acceptance_target || 481),
+    );
+  }
   const exported = await runCommand(process.execPath, [
     path.join(appRoot, "scripts", "export_confirmed_store_skus.mjs"),
     runDir,
@@ -408,7 +419,6 @@ async function runFinalArtifacts(appRoot, stateRoot, currentRun, runDir) {
     stdio: "ignore",
   });
   if (exported.code !== 0) throw new Error("final five-store CSV export failed");
-  const acceptanceReport = path.join(runDir, "acceptance_summary.json");
   let report = null;
   if (fs.existsSync(acceptanceReport)) {
     report = await readJson(acceptanceReport);

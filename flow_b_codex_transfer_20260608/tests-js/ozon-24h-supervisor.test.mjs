@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -8,6 +11,7 @@ import {
   currentRunDisposition,
   nextRestartDelaySeconds,
   resolveProductionLayout,
+  runFinalArtifacts,
 } from "../scripts/ozon_24h_supervisor.mjs";
 
 test("production layout is installed outside a disposable git worktree", () => {
@@ -110,4 +114,44 @@ test("security checks wait in-place and duplicate profile owners hard-stop", () 
     action: "fatal-stop",
     reason: "duplicate-profile-owner-risk",
   });
+});
+
+test("window finalization reconstructs a missing report before exporting five-store CSVs", async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-final-state-"));
+  const runDir = path.join(stateRoot, "runs", "formal");
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.writeFile(path.join(runDir, "acceptance_window.json"), JSON.stringify({
+    started_at: "2026-07-27T00:00:00.000Z",
+    ended_at: "2026-07-28T00:00:00.000Z",
+  }));
+  await fs.writeFile(path.join(runDir, "source_config.json"), JSON.stringify({
+    acceptance_target: 481,
+    per_store_target: null,
+    store_targets: [{ id: 104965, needle: "丽丽1号" }],
+  }));
+  await fs.writeFile(path.join(runDir, "published.jsonl"), `${JSON.stringify({
+    status: "published",
+    sku: "123456",
+    data: {
+      store_id: 104965,
+      store_name: "丽丽1号",
+      profit_rate: 31,
+      online_status: "selling",
+      stock: 1,
+      published_at: "2026-07-27T01:00:00.000Z",
+    },
+  })}\n`);
+  const result = await runFinalArtifacts(
+    path.resolve(import.meta.dirname, ".."),
+    stateRoot,
+    { run_id: "formal" },
+    runDir,
+  );
+  assert.equal(result.output, path.join(stateRoot, "exports", "formal"));
+  assert.equal(result.report.success_count, 1);
+  assert.equal(result.report.passed, false);
+  await fs.access(path.join(result.output, "24h_report.json"));
+  await fs.access(path.join(result.output, "confirmed_all_stores.csv"));
+  await fs.access(path.join(result.output, "confirmed_store_104965.csv"));
+  await fs.rm(stateRoot, { recursive: true, force: true });
 });
