@@ -21,8 +21,8 @@ const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
 const DEFAULT_STORE_TARGETS = Object.freeze([
   { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
-  { id: 106640, needle: "丽丽三号", warehouseId: 1020005023616740, requireWarehouse: true },
-  { id: 106644, needle: "丽丽四号", warehouseId: 1020005023616380, requireWarehouse: true },
+  { id: 106640, needle: "丽丽三号", warehouseId: 1020005023295220, requireWarehouse: true },
+  { id: 106644, needle: "丽丽四号", warehouseId: 1020005023295540, requireWarehouse: true },
   { id: 106646, needle: "丽丽五号", warehouseId: null, requireWarehouse: true },
   { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
 ]);
@@ -210,6 +210,8 @@ async function createPublishingSession(context, options, env, shared) {
       watermarkId: Number(env.FLOW_B_WATERMARK_ID || 60822),
       storeTargets: parseStoreTargets(env),
       reconciliationOnly: env.FLOW_B_RECONCILIATION_ONLY === "1",
+      validationOnly: env.FLOW_B_VALIDATION_ONLY === "1",
+      validationTarget: Math.max(1, Number(env.FLOW_B_VALIDATION_TARGET) || 3),
       concurrency: Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 8),
       maxConcurrency: Math.max(1, Number(env.FLOW_B_MAX_PUBLISH_WORKERS) || 12),
       dryCandidateLimit: Math.max(0, Number(env.FLOW_B_MAX_DRY_CANDIDATES) || 0),

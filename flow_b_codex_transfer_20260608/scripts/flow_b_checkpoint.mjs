@@ -208,7 +208,10 @@ export async function writeCheckpoint(runDir, observedAt = new Date().toISOStrin
   const temp = `${filename}.tmp`;
   await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`);
   await fs.rename(temp, filename);
-  await fs.writeFile(path.join(root, "compact_checkpoint.json"), `${JSON.stringify(value, null, 2)}\n`);
+  const compactFilename = path.join(root, "compact_checkpoint.json");
+  const compactTemp = `${compactFilename}.${process.pid}.tmp`;
+  await fs.writeFile(compactTemp, `${JSON.stringify(value, null, 2)}\n`);
+  await fs.rename(compactTemp, compactFilename);
   return { filename, value };
 }
 

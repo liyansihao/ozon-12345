@@ -82,6 +82,18 @@ export function createOzonAccessController({
   const load = async () => {
     if (state) return state;
     state = await readState(filename);
+    if (state.requires_manual_clear
+      && isOzonSoftBlockError(state.reason)
+      && !isOzonCaptchaText(state.reason)) {
+      state = {
+        ...state,
+        updated_at: new Date(now()).toISOString(),
+        requires_manual_clear: false,
+        auto_recovered_soft_block_at: new Date(now()).toISOString(),
+        reason: null,
+      };
+      await writeState(filename, state);
+    }
     return state;
   };
   const persist = async () => writeState(filename, state || {});
@@ -200,11 +212,16 @@ export function createOzonAccessController({
               await persist();
             }
           }
+          if (isOzonCaptchaError(failure)) throw await stop(failure?.message || failure, metadata);
           if (isOzonAccessStoppedError(failure)) {
             await record("rejected_stopped", metadata, { reason: String(failure?.message || failure) });
             throw failure;
           }
-          if (isOzonSoftBlockError(failure)) throw await stop(failure?.message || failure, metadata);
+          if (isOzonSoftBlockError(failure)) {
+            await settle();
+            await record("soft_block", metadata, { reason: String(failure?.message || failure) });
+            throw failure;
+          }
           await settle();
           await record("failed", metadata, { reason: String(failure?.message || failure) });
           throw failure;

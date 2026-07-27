@@ -44,7 +44,7 @@ test("global Ozon controller serializes callers and preserves a quiet interval a
   assert.deepEqual(starts, [1_000, 1_260, 1_520]);
 });
 
-test("one soft block persists a manual stop and prevents every queued Ozon operation", async () => {
+test("ordinary Ozon soft blocks remain retryable and do not require manual clearance", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-access-"));
   const stateFile = path.join(dir, "ozon_access_state.json");
   const logFile = path.join(dir, "ozon_access_timeline.jsonl");
@@ -56,23 +56,36 @@ test("one soft block persists a manual stop and prevents every queued Ozon opera
   const second = controller.run({ kind: "favorite-detail", url: "https://www.ozon.ru/product/never" }, async () => {
     secondRan = true;
   });
-  await assert.rejects(first, isOzonAccessStoppedError);
-  await assert.rejects(second, isOzonAccessStoppedError);
-  assert.equal(secondRan, false);
+  await assert.rejects(first, /soft blocked/i);
+  await second;
+  assert.equal(secondRan, true);
 
   const saved = JSON.parse(await fs.readFile(stateFile, "utf8"));
-  assert.equal(saved.requires_manual_clear, true);
-  assert.match(saved.reason, /soft blocked/i);
+  assert.equal(saved.requires_manual_clear, false);
   const timeline = (await fs.readFile(logFile, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.deepEqual(timeline.map((row) => row.event), ["started", "stopped"]);
+  assert.deepEqual(timeline.map((row) => row.event), ["started", "soft_block", "started", "succeeded"]);
   assert.equal(timeline[0].kind, "source");
   assert.equal(timeline[0].url, "https://www.ozon.ru/search/blocked");
 
   const nextRun = createOzonAccessController({ stateFile, minIntervalMs: 0 });
-  await assert.rejects(
-    nextRun.run({ kind: "source", url: "https://www.ozon.ru/search/new-run" }, async () => {}),
-    isOzonAccessStoppedError,
-  );
+  await nextRun.run({ kind: "source", url: "https://www.ozon.ru/search/new-run" }, async () => {});
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("a stale manual stop caused only by access denied is automatically recovered", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-stale-soft-block-"));
+  const stateFile = path.join(dir, "ozon_access_state.json");
+  await fs.writeFile(stateFile, `${JSON.stringify({
+    version: 1,
+    requires_manual_clear: true,
+    reason: "Ozon source access denied",
+    next_allowed_at_ms: 0,
+  })}\n`);
+  let ran = false;
+  const controller = createOzonAccessController({ stateFile, minIntervalMs: 0 });
+  await controller.run({}, async () => { ran = true; });
+  assert.equal(ran, true);
+  assert.equal((await controller.snapshot()).requires_manual_clear, false);
   await fs.rm(dir, { recursive: true, force: true });
 });
 

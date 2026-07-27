@@ -348,6 +348,8 @@ export function createPublishRunner({
   watermarkId = 60822,
   storeTargets = null,
   reconciliationOnly = false,
+  validationOnly = false,
+  validationTarget = 3,
   concurrency = 1,
   maxConcurrency = 12,
   dryCandidateLimit = 0,
@@ -393,6 +395,10 @@ export function createPublishRunner({
   if (!Number.isInteger(workerCount) || workerCount <= 0) throw new TypeError("concurrency must be a positive integer");
   const dryLimit = Number(dryCandidateLimit);
   if (!Number.isInteger(dryLimit) || dryLimit < 0) throw new TypeError("dryCandidateLimit must be a non-negative integer");
+  const validationTargetCount = Number(validationTarget);
+  if (!Number.isInteger(validationTargetCount) || validationTargetCount <= 0) {
+    throw new TypeError("validationTarget must be a positive integer");
+  }
   const verifiedWarehouseId = Number(warehouseId);
   const activationStock = Number(initialStock);
   if (warehouseId !== null && warehouseId !== undefined && !(verifiedWarehouseId > 0)) {
@@ -651,6 +657,15 @@ export function createPublishRunner({
 
   async function skip(item, reason, data = {}) {
     const sku = asSku(item);
+    if (validationOnly) {
+      recordMetric("validation_gate.jsonl", {
+        sku,
+        status: "rejected",
+        reason,
+        ...data,
+      });
+      return { status: "skipped", sku, source_url: item.source_url ?? null, reason };
+    }
     try {
       await client.deleteFavorite(item);
     } catch (error) {
@@ -669,7 +684,7 @@ export function createPublishRunner({
   async function processItem(item, targetConfig) {
     const sku = asSku(item);
     try {
-      await state.transition(sku, "processing", { started_at: now().toISOString() });
+      if (!validationOnly) await state.transition(sku, "processing", { started_at: now().toISOString() });
       const reusable = hasReusableCandidateFacts(item);
       const [detailResult, categoryData] = await timed(sku, "ozon_detail_and_category", () => Promise.all([
         reusable ? Promise.resolve({
@@ -807,6 +822,24 @@ export function createPublishRunner({
           duplicate_of_sku: duplicateOwner.sku,
           duplicate_store_id: duplicateOwner.storeId,
         });
+      }
+      if (validationOnly) {
+        recordMetric("validation_gate.jsonl", {
+          sku,
+          status: "validated",
+          title: submissionState.title,
+          link: submissionState.link,
+          shipping_mode: detail.mode ?? detail.shipping_mode ?? item.preflight_mode,
+          sale_price: submissionState.sell_price,
+          purchase_price: submissionState.purchase_price,
+          profit_rate: submissionState.profit_rate,
+          store_id: submissionState.store_id,
+          watermark_id: submissionState.watermark_id,
+          cost,
+          validated_at: now().toISOString(),
+        });
+        await metricsChain;
+        return { status: "validated", sku, source_url: item.source_url ?? null };
       }
       reserveSelectedTitle(submissionState.title, sku, targetConfig.store.id);
       await state.recordSelected?.(submissionState);
@@ -1379,6 +1412,7 @@ export function createPublishRunner({
     let attempted = 0;
     let submittedPending = 0;
     let dryCandidates = 0;
+    let validated = 0;
 
     async function handleCandidate(inputItem) {
       const sku = asSku(inputItem);
@@ -1614,6 +1648,7 @@ export function createPublishRunner({
     while (cursor < candidates.length
       && !haltReason
       && (!deadlineAt || Date.now() < Date.parse(deadlineAt))
+      && (!validationOnly || validated < validationTargetCount)
       && (dryLimit === 0 || dryCandidates < dryLimit)) {
       const activeStoreId = Number(targetConfig.store.id);
       const nextCandidate = candidates[cursor];
@@ -1654,7 +1689,11 @@ export function createPublishRunner({
       const nearTarget = published >= targetCount - (adaptive.current - 1);
       const width = nextIsReconciliation
         ? (nearTarget ? 1 : adaptive.current)
-        : Math.min(remainingStoreQuota, nearTarget ? 1 : adaptive.current);
+        : Math.min(
+          remainingStoreQuota,
+          nearTarget ? 1 : adaptive.current,
+          validationOnly ? validationTargetCount - validated : Number.POSITIVE_INFINITY,
+        );
       const batch = candidates.slice(cursor, cursor + width);
       cursor += batch.length;
       const results = await Promise.all(batch.map(handleCandidate));
@@ -1680,6 +1719,9 @@ export function createPublishRunner({
         } else if (result.status === "submitted") {
           submittedPending += 1;
           dryCandidates = 0;
+        } else if (result.status === "validated") {
+          validated += 1;
+          dryCandidates = 0;
         } else {
           if (result.attempted) dryCandidates += 1;
           if (result.status === "failed") failed += 1;
@@ -1703,6 +1745,7 @@ export function createPublishRunner({
 
     return {
       published,
+      validated,
       failed,
       skipped,
       attempted,

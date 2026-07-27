@@ -127,6 +127,48 @@ test("1688 failures use bounded summary reasons while retaining raw cost evidenc
   assert.equal(normalizeCostFailureReason({ error: { code: "IMAGE_DOWNLOAD_FAILED" } }), "1688-image-fetch-failed");
 });
 
+test("validation-only stops after three fully gated candidates without submitting or mutating favorites", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-validation-only-"));
+  try {
+    let publishCalls = 0;
+    let favoriteDeletes = 0;
+    const state = fakeState();
+    const client = clientFor([
+      { sku: "gate-1", title: "Детский аксессуар один" },
+      { sku: "gate-2", title: "Детский аксессуар два" },
+      { sku: "gate-3", title: "Детский аксессуар три" },
+      { sku: "gate-4", title: "Детский аксессуар четыре" },
+    ], {
+      publish: async () => { publishCalls += 1; return { ok: true }; },
+      deleteFavorite: async () => { favoriteDeletes += 1; return true; },
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ok: true, cost: 20, evidence: { reliable: true } }) },
+      state,
+      target: 500,
+      runDir,
+      validationOnly: true,
+      validationTarget: 3,
+    }).run();
+
+    assert.equal(result.validated, 3);
+    assert.equal(result.published, 0);
+    assert.equal(publishCalls, 0);
+    assert.equal(favoriteDeletes, 0);
+    assert.equal(state.selections.length, 0);
+    assert.equal(state.transitions.length, 0);
+    const rows = (await fs.readFile(path.join(runDir, "validation_gate.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.equal(rows.length, 3);
+    assert.ok(rows.every((row) => row.status === "validated"
+      && row.shipping_mode === "FBS"
+      && row.profit_rate > 30));
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("1688 health collapse defers the favorite without consuming it and retries after recovery", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-health-defer-"));
   try {
