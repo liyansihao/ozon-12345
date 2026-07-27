@@ -77,6 +77,10 @@ export function currentRunDisposition(currentRun) {
   return "active";
 }
 
+export function supervisorShouldHonorSafeStop(operationalStatus) {
+  return String(operationalStatus?.status || "") === "STOPPED";
+}
+
 export function capacityPreflightDecision(snapshot, requiredCapacity = 481) {
   if (snapshot?.all_stores_found !== true
     || snapshot?.all_warehouses_verified !== true
@@ -538,6 +542,11 @@ export async function supervise(configPath) {
     const error = new Error(`invalid current run state: ${currentRunPath}`);
     error.code = "OZON_INVALID_CURRENT_RUN";
     throw error;
+  }
+  const startupStatus = await readJson(path.join(stateRoot, "operational_status.json"), {});
+  if (supervisorShouldHonorSafeStop(startupStatus)) {
+    await releaseLock();
+    return 0;
   }
   const runDir = absolute(currentRun.run_dir);
   const urlsFile = absolute(currentRun.urls_file);

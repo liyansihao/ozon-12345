@@ -322,6 +322,14 @@ async function start(config) {
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   if (shouldResumeCurrentRun(status, current)) {
     await fsp.unlink(path.join(paths.stateRoot, "stop.request")).catch(() => {});
+    await writeJsonAtomic(path.join(paths.stateRoot, "operational_status.json"), {
+      ...status,
+      status: "STARTING",
+      reason: "user requested same-run resume",
+      observed_at: new Date().toISOString(),
+      run_id: current.run_id,
+      run_dir: current.run_dir,
+    });
     await kickstart(config);
     return { ok: true, resumed: true, run_id: current.run_id, run_dir: current.run_dir };
   }

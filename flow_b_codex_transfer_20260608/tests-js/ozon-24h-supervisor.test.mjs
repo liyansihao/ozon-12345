@@ -12,6 +12,7 @@ import {
   nextRestartDelaySeconds,
   resolveProductionLayout,
   runFinalArtifacts,
+  supervisorShouldHonorSafeStop,
 } from "../scripts/ozon_24h_supervisor.mjs";
 
 test("production layout is installed outside a disposable git worktree", () => {
@@ -78,6 +79,12 @@ test("launchd supervisor exits successfully when no daily run is active", () => 
     run_dir: "/tmp/run",
     urls_file: "/tmp/sources.txt",
   }), "active");
+});
+
+test("launchd honors an intentional safe stop across computer restart", () => {
+  assert.equal(supervisorShouldHonorSafeStop({ status: "STOPPED" }), true);
+  assert.equal(supervisorShouldHonorSafeStop({ status: "RUNNING" }), false);
+  assert.equal(supervisorShouldHonorSafeStop({ status: "RECOVERING" }), false);
 });
 
 test("browser and CDP failures recover the same run with bounded backoff", () => {
