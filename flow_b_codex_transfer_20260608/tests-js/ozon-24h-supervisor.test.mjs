@@ -51,6 +51,13 @@ test("pending candidate prewarm is bounded and yields to the quota reset", () =>
     intervalSeconds: 900,
   }), false);
   assert.equal(pendingPrewarmDue({
+    now,
+    resetAt: "2026-07-27T16:00:00.000Z",
+    lastCompletedAt: "2026-07-27T13:59:30.000Z",
+    lastSourceCommit: "old",
+    currentSourceCommit: "new",
+  }), true);
+  assert.equal(pendingPrewarmDue({
     now: Date.parse("2026-07-27T15:58:30.000Z"),
     resetAt: "2026-07-27T16:00:00.000Z",
     lastCompletedAt: null,

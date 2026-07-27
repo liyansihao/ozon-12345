@@ -107,11 +107,14 @@ export function pendingPrewarmDue({
   resetAt = null,
   intervalSeconds = 900,
   minimumResetHeadroomSeconds = 120,
+  lastSourceCommit = null,
+  currentSourceCommit = null,
 } = {}) {
   const current = Number(now);
   const reset = Date.parse(String(resetAt || ""));
   if (!Number.isFinite(current)) return false;
   if (Number.isFinite(reset) && reset - current <= Number(minimumResetHeadroomSeconds) * 1000) return false;
+  if (currentSourceCommit && currentSourceCommit !== lastSourceCommit) return true;
   const previous = Date.parse(String(lastCompletedAt || ""));
   return !Number.isFinite(previous)
     || current - previous >= Math.max(60, Number(intervalSeconds) || 900) * 1000;
@@ -667,6 +670,8 @@ export async function supervise(configPath) {
           lastCompletedAt: prewarmStatus?.last_completed_at,
           resetAt: decision.next_reset_at,
           intervalSeconds: config.pending_prewarm_interval_seconds,
+          lastSourceCommit: prewarmStatus?.source_commit,
+          currentSourceCommit: config.frozen_commit,
         })) {
           const prewarmStartedAt = new Date();
           worker = spawnPendingPrewarm(
@@ -709,6 +714,7 @@ export async function supervise(configPath) {
             last_completed_at: new Date().toISOString(),
             exit_code: result.code,
             signal: result.signal,
+            source_commit: config.frozen_commit,
             candidate_queue_rows: await readJsonLineCount(path.join(runDir, "candidate_queue.jsonl")),
             favorite_collection_rows: await readJsonLineCount(path.join(runDir, "favorite_collection.jsonl")),
           };
