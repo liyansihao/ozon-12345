@@ -97,6 +97,22 @@ export function capacityPreflightDecision(snapshot, requiredCapacity = 481) {
   return { action: "start-formal-window", reason: null };
 }
 
+export function pendingPrewarmDue({
+  lastCompletedAt = null,
+  now = Date.now(),
+  resetAt = null,
+  intervalSeconds = 900,
+  minimumResetHeadroomSeconds = 120,
+} = {}) {
+  const current = Number(now);
+  const reset = Date.parse(String(resetAt || ""));
+  if (!Number.isFinite(current)) return false;
+  if (Number.isFinite(reset) && reset - current <= Number(minimumResetHeadroomSeconds) * 1000) return false;
+  const previous = Date.parse(String(lastCompletedAt || ""));
+  return !Number.isFinite(previous)
+    || current - previous >= Math.max(60, Number(intervalSeconds) || 900) * 1000;
+}
+
 export function buildLaunchdPlist({
   label = DEFAULT_LABEL,
   entryScript,
@@ -159,6 +175,16 @@ async function writeJsonAtomic(filename, value) {
 async function appendJsonLine(filename, value) {
   await fsp.mkdir(path.dirname(filename), { recursive: true });
   await fsp.appendFile(filename, `${JSON.stringify(value)}\n`, "utf8");
+}
+
+async function readJsonLineCount(filename) {
+  try {
+    const text = await fsp.readFile(filename, "utf8");
+    return text.split(/\r?\n/u).filter(Boolean).length;
+  } catch (error) {
+    if (error.code === "ENOENT") return 0;
+    throw error;
+  }
 }
 
 function pidAlive(pid) {
@@ -458,6 +484,32 @@ async function runCapacityPreflight(config, appRoot, stateRoot, currentRun) {
   }
 }
 
+function spawnPendingPrewarm(config, appRoot, runDir, urlsFile, currentRun, resetAt) {
+  const stdoutFd = fs.openSync(path.join(runDir, "prewarm.stdout.log"), "a");
+  const stderrFd = fs.openSync(path.join(runDir, "prewarm.stderr.log"), "a");
+  const maximumMs = Math.max(60, Number(config.pending_prewarm_max_run_seconds) || 600) * 1000;
+  const resetMs = Date.parse(String(resetAt || ""));
+  const deadlineMs = Number.isFinite(resetMs)
+    ? Math.min(Date.now() + maximumMs, resetMs - 5_000)
+    : Date.now() + maximumMs;
+  const child = spawn(process.execPath, [
+    path.join(appRoot, "scripts", "flow_b_playwright.mjs"),
+    "scan",
+    urlsFile,
+    path.join(runDir, "source_deep_scan.json"),
+  ], {
+    cwd: appRoot,
+    env: {
+      ...workerEnvironment(config, currentRun),
+      FLOW_B_DEADLINE_AT: new Date(Math.max(Date.now() + 1_000, deadlineMs)).toISOString(),
+    },
+    stdio: ["ignore", stdoutFd, stderrFd],
+  });
+  fs.closeSync(stdoutFd);
+  fs.closeSync(stderrFd);
+  return child;
+}
+
 async function activateFormalWindow({ config, stateRoot, currentRun, runDir, appRoot }) {
   const startedAt = new Date();
   const endedAt = new Date(startedAt.getTime() + Number(config.acceptance.duration_seconds) * 1000);
@@ -574,6 +626,7 @@ export async function supervise(configPath) {
     await fsp.mkdir(runDir, { recursive: true });
     const sourceRefresh = await runSourceRefresh(appRoot, stateRoot, runDir);
     if (sourceRefresh.code !== 0) throw new Error("initial source portfolio refresh failed");
+    let prewarmStatus = await readJson(path.join(stateRoot, "prewarm_status.json"), {});
     while (currentRun.formal_started === false && !shuttingDown) {
       if (fs.existsSync(stopFile)) {
         await updateOperationalState(stateRoot, currentRun, {
@@ -602,6 +655,62 @@ export async function supervise(configPath) {
         if (decision.action === "start-formal-window") {
           await activateFormalWindow({ config, stateRoot, currentRun, runDir, appRoot });
           break;
+        }
+        if (pendingPrewarmDue({
+          lastCompletedAt: prewarmStatus?.last_completed_at,
+          resetAt: decision.next_reset_at,
+          intervalSeconds: config.pending_prewarm_interval_seconds,
+        })) {
+          const prewarmStartedAt = new Date();
+          worker = spawnPendingPrewarm(
+            config,
+            appRoot,
+            runDir,
+            urlsFile,
+            currentRun,
+            decision.next_reset_at,
+          );
+          await writeProcessOwners({
+            stateRoot,
+            currentRun,
+            browserPid: browserOwner.pid,
+            workerPid: worker.pid,
+          });
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "PREWARMING_CANDIDATES",
+            reason: "building strict-gated candidate supply before quota reset",
+            prewarm_started_at: prewarmStartedAt.toISOString(),
+            next_reset_at: decision.next_reset_at,
+          });
+          const result = await new Promise((resolve) => {
+            worker.once("error", (error) => resolve({ code: 127, signal: null, error }));
+            worker.once("exit", (code, signal) => resolve({
+              code: Number(code ?? 1),
+              signal,
+              error: null,
+            }));
+          });
+          worker = null;
+          await writeProcessOwners({
+            stateRoot,
+            currentRun,
+            browserPid: browserOwner.pid,
+          });
+          prewarmStatus = {
+            run_id: currentRun.run_id,
+            last_started_at: prewarmStartedAt.toISOString(),
+            last_completed_at: new Date().toISOString(),
+            exit_code: result.code,
+            signal: result.signal,
+            candidate_queue_rows: await readJsonLineCount(path.join(runDir, "candidate_queue.jsonl")),
+            favorite_collection_rows: await readJsonLineCount(path.join(runDir, "favorite_collection.jsonl")),
+          };
+          await writeJsonAtomic(path.join(stateRoot, "prewarm_status.json"), prewarmStatus);
+          if (shuttingDown) continue;
+          if (result.code !== 0) {
+            throw result.error || new Error(`pending candidate prewarm exited ${result.code}`);
+          }
+          continue;
         }
         await updateOperationalState(stateRoot, currentRun, {
           status: "WAITING_FOR_QUOTA_RESET",
@@ -640,7 +749,15 @@ export async function supervise(configPath) {
         await delay(seconds * 1000);
       }
     }
-    if (shuttingDown || currentRun.formal_started === false) return 0;
+    if (shuttingDown) {
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "STOPPED",
+        reason: "safe stop requested before formal window",
+      });
+      await fsp.unlink(stopFile).catch(() => {});
+      return 0;
+    }
+    if (currentRun.formal_started === false) return 0;
     await runCheckpoint(appRoot, runDir, "supervisor-start");
     checkpointTimer = setInterval(() => {
       void runCheckpoint(appRoot, runDir, "2h");
@@ -765,6 +882,13 @@ export async function supervise(configPath) {
       await delay(seconds * 1000);
     }
     await stopWorker();
+    if (shuttingDown) {
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "STOPPED",
+        reason: "safe stop requested",
+      });
+      await fsp.unlink(stopFile).catch(() => {});
+    }
     await runCheckpoint(appRoot, runDir, "supervisor-stop");
     return 0;
   } finally {

@@ -18,6 +18,7 @@ const LABEL = "com.codex.ozon.24h-production";
 const ACTIVE_STATUSES = new Set([
   "STARTING",
   "PREFLIGHTING_CAPACITY",
+  "PREWARMING_CANDIDATES",
   "WAITING_FOR_QUOTA_RESET",
   "RUNNING",
   "RECOVERING",
@@ -381,10 +382,12 @@ async function start(config) {
 async function stop(config) {
   const paths = deploymentPaths(config);
   await fsp.writeFile(path.join(paths.stateRoot, "stop.request"), `${new Date().toISOString()}\n`, "utf8");
+  const service = `gui/${process.getuid()}/${config.launchd_label || LABEL}`;
+  await run("/bin/launchctl", ["kill", "SIGTERM", service]);
   return {
     ok: true,
     stop_requested: true,
-    behavior: "supervisor will stop safely at the next state-machine boundary",
+    behavior: "supervisor is stopping its owned child at a durable state-machine boundary",
   };
 }
 

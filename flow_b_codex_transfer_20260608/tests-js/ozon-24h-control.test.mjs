@@ -19,6 +19,7 @@ test("daily start resumes the same safely stopped pending or formal run", () => 
     formal_started: true,
   }), true);
   assert.equal(shouldResumeCurrentRun({ status: "WAITING_FOR_QUOTA_RESET" }, current), true);
+  assert.equal(shouldResumeCurrentRun({ status: "PREWARMING_CANDIDATES" }, current), true);
 });
 
 test("daily start never silently resumes fatal or completed state", () => {

@@ -10,6 +10,7 @@ import {
   classifyWorkerFailure,
   currentRunDisposition,
   nextRestartDelaySeconds,
+  pendingPrewarmDue,
   resolveProductionLayout,
   runFinalArtifacts,
   supervisorShouldHonorSafeStop,
@@ -26,6 +27,26 @@ test("production layout is installed outside a disposable git worktree", () => {
   assert.equal(layout.stateRoot, "/Users/mac/.ozon-24h-production/state");
   assert.equal(layout.entryScript, "/Users/mac/.ozon-24h-production/app/scripts/ozon_24h_production.sh");
   assert.equal(layout.entryScript.includes(".codex/worktrees"), false);
+});
+
+test("pending candidate prewarm is bounded and yields to the quota reset", () => {
+  const now = Date.parse("2026-07-27T14:00:00.000Z");
+  assert.equal(pendingPrewarmDue({
+    now,
+    resetAt: "2026-07-27T16:00:00.000Z",
+    lastCompletedAt: null,
+  }), true);
+  assert.equal(pendingPrewarmDue({
+    now,
+    resetAt: "2026-07-27T16:00:00.000Z",
+    lastCompletedAt: "2026-07-27T13:50:00.000Z",
+    intervalSeconds: 900,
+  }), false);
+  assert.equal(pendingPrewarmDue({
+    now: Date.parse("2026-07-27T15:58:30.000Z"),
+    resetAt: "2026-07-27T16:00:00.000Z",
+    lastCompletedAt: null,
+  }), false);
 });
 
 test("capacity preflight waits for reset and never opens an under-capacity window", () => {
