@@ -22,6 +22,30 @@ export function nextShanghaiQuotaReset(value = new Date()) {
   )).toISOString();
 }
 
+function normalizedResetAt(value) {
+  const timestamp = Date.parse(String(value || ""));
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function nextCapacityReset(rows, checkedAt) {
+  const checkedMs = checkedAt.getTime();
+  const erpReset = rows
+    .filter((row) => Number(row.erp_daily_usage) > 0)
+    .map((row) => row.erp_daily_reset_at)
+    .filter((value) => value && Date.parse(value) > checkedMs)
+    .sort((left, right) => Date.parse(left) - Date.parse(right))[0];
+  if (erpReset) {
+    return {
+      at: erpReset,
+      source: "erp-daily-create",
+    };
+  }
+  return {
+    at: nextShanghaiQuotaReset(checkedAt),
+    source: "shanghai-midnight-fallback",
+  };
+}
+
 export function buildCapacityPreflight({
   configuredStores,
   erpStores,
@@ -57,6 +81,7 @@ export function buildCapacityPreflight({
     const dailyCreate = erp?.product_limit?.daily_create ?? profile?.product_limit?.daily_create;
     const erpLimit = Number(dailyCreate?.limit);
     const erpUsage = Number(dailyCreate?.usage);
+    const erpResetAt = normalizedResetAt(dailyCreate?.reset_at ?? dailyCreate?.resetAt);
     const quotaVerified = Number.isInteger(erpLimit)
       && erpLimit > 0
       && Number.isInteger(erpUsage)
@@ -74,6 +99,7 @@ export function buildCapacityPreflight({
       warehouse_verified: warehouseVerified,
       erp_daily_limit: quotaVerified ? erpLimit : null,
       erp_daily_usage: quotaVerified ? erpUsage : null,
+      erp_daily_reset_at: erpResetAt,
       effective_daily_limit: effectiveLimit,
       remaining_capacity: remaining,
       quota_verified: quotaVerified,
@@ -81,11 +107,13 @@ export function buildCapacityPreflight({
     };
   });
   const totalRemainingCapacity = rows.reduce((sum, row) => sum + row.remaining_capacity, 0);
+  const nextReset = nextCapacityReset(rows, checked);
   return {
     checked_at: checked.toISOString(),
     timezone: "Asia/Shanghai",
     quota_day: `${day.year}-${day.month}-${day.day}`,
-    next_reset_at: nextShanghaiQuotaReset(checked),
+    next_reset_at: nextReset.at,
+    next_reset_source: nextReset.source,
     required_capacity: Number(requiredCapacity),
     total_remaining_capacity: totalRemainingCapacity,
     all_stores_found: rows.every((row) => row.store_name),
