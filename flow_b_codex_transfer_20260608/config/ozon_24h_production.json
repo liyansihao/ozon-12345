@@ -7,7 +7,7 @@
   "state_root": "${HOME}/.ozon-24h-production/state",
   "checkpoint_interval_seconds": 7200,
   "source_refresh_seconds": 900,
-  "pending_prewarm_interval_seconds": 900,
+  "pending_prewarm_interval_seconds": 60,
   "pending_prewarm_max_run_seconds": 600,
   "restart_delays_seconds": [
     30,
