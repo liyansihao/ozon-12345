@@ -66,9 +66,34 @@ test("publish feedback reuses an unchanged source-yield history and refreshes af
   await fs.rm(seedDir, { recursive: true, force: true });
 });
 
+const VALID_FBS_EVIDENCE = Object.freeze({
+  verified: true,
+  rule: "test fixture with two independent live exact-FBS observations",
+  observations: Object.freeze([
+    Object.freeze({ mode: "FBS", detail_url: "https://www.ozon.ru/product/test?observation=1" }),
+    Object.freeze({ mode: "FBS", detail_url: "https://www.ozon.ru/product/test?observation=2" }),
+  ]),
+});
+
 function fakeState(initial = {}, initialRunPublished = 0) {
   const statuses = new Map(Object.entries(initial).map(([sku, value]) => [sku,
-    typeof value === "string" ? { status: value, data: {} } : { status: value.status, data: { ...(value.data || {}) } },
+    typeof value === "string" ? { status: value, data: {} } : {
+      status: value.status,
+      data: (() => {
+        const data = { ...(value.data || {}) };
+        if ((data.submitted === true || data.submission_pending === true)
+          && !Object.hasOwn(data, "fbs_evidence")) {
+          data.mode = "FBS";
+          data.shipping_mode = "FBS";
+          data.preflight_mode = "FBS";
+          data.fbs_evidence = {
+            ...VALID_FBS_EVIDENCE,
+            observations: VALID_FBS_EVIDENCE.observations.map((row) => ({ ...row })),
+          };
+        }
+        return data;
+      })(),
+    },
   ]));
   const transitions = [];
   const records = [];
@@ -164,6 +189,121 @@ test("validation-only stops after three fully gated candidates without submittin
     assert.ok(rows.every((row) => row.status === "validated"
       && row.shipping_mode === "FBS"
       && row.profit_rate > 30));
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("fresh submission requires two consistent live exact-FBS observations", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-double-fbs-"));
+  try {
+    let detailCalls = 0;
+    let publishCalls = 0;
+    const state = fakeState();
+    const client = clientFor([{ sku: "unstable-fbs" }], {
+      getProductDetail: async (sku) => {
+        detailCalls += 1;
+        return {
+          sku,
+          mode: detailCalls === 1 ? "FBS" : null,
+          title: "unstable shipping evidence",
+          cover_image: "https://img.example/unstable.jpg",
+          current_price: 100,
+        };
+      },
+      publish: async () => { publishCalls += 1; return { ok: true }; },
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+      state,
+      target: 1,
+      runDir,
+    }).run();
+
+    assert.equal(detailCalls, 2);
+    assert.equal(publishCalls, 0);
+    assert.equal(result.published, 0);
+    assert.ok(state.transitions.some((row) => row.status === "skipped"
+      && row.data.reason === "fbs-confirmation-inconsistent"));
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("selected and published state persist both exact-FBS observations", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-fbs-evidence-"));
+  try {
+    let detailCalls = 0;
+    const state = fakeState();
+    const client = clientFor([{ sku: "stable-fbs" }], {
+      getProductDetail: async (sku) => ({
+        sku,
+        mode: "FBS",
+        title: "stable shipping evidence",
+        cover_image: "https://img.example/stable.jpg",
+        current_price: 100,
+        detail_url: `https://www.ozon.ru/product/${sku}?observation=${++detailCalls}`,
+      }),
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+      state,
+      target: 1,
+      runDir,
+    }).run();
+
+    assert.equal(result.published, 1);
+    assert.equal(detailCalls, 2);
+    assert.equal(state.selections[0].shipping_mode, "FBS");
+    assert.equal(state.selections[0].preflight_mode, "FBS");
+    assert.equal(state.selections[0].fbs_evidence.verified, true);
+    assert.equal(state.selections[0].fbs_evidence.observations.length, 2);
+    assert.equal(state.records[0].fbs_evidence.verified, true);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("restored submitted rows without durable FBS proof are quarantined without reconciliation", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-fbs-quarantine-"));
+  try {
+    let importChecks = 0;
+    const state = fakeState({
+      unsafe: {
+        status: "processing",
+        data: {
+          sku: "unsafe",
+          title: "missing proof",
+          store_id: 104965,
+          submitted: true,
+          submission_pending: true,
+          offer_id: "mz-unsafe",
+          prepared_at: "2026-07-27T04:00:00.000Z",
+          fbs_evidence: null,
+        },
+      },
+    });
+    const client = clientFor([], {
+      findImportLog: async () => { importChecks += 1; return null; },
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+      state,
+      target: 1,
+      runDir,
+      now: () => new Date("2026-07-27T05:00:00.000Z"),
+    }).run();
+
+    assert.equal(importChecks, 0);
+    assert.equal(result.published, 0);
+    const quarantined = state.entries().find((row) => row.sku === "unsafe");
+    assert.equal(quarantined.status, "failed");
+    assert.equal(quarantined.data.reason, "fbs-evidence-missing");
+    assert.equal(quarantined.data.submitted, true);
+    assert.equal(quarantined.data.submission_pending, false);
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }
@@ -391,7 +531,7 @@ test("fresh favorites are scheduled before a large restored reconciliation backl
   assert.equal(events[0], "publish:fresh-900");
 });
 
-test("cross-window candidate facts bypass duplicate Ozon detail while retaining downstream gates", async () => {
+test("cross-window candidate facts retain cached economics but require two live exact-FBS observations", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-cross-window-facts-"));
   const seedFile = path.join(runDir, "previous-favorites.jsonl");
   await fs.writeFile(seedFile, `${JSON.stringify({
@@ -412,7 +552,17 @@ test("cross-window candidate facts bypass duplicate Ozon detail while retaining 
   let estimatedMatchEvidence = null;
   const state = fakeState();
   const client = clientFor([{ sku: "seeded-900", sell_price: 22.64 }], {
-    getProductDetail: async () => { detailCalls += 1; throw new Error("detail should be reused"); },
+    getProductDetail: async (sku) => {
+      detailCalls += 1;
+      return {
+        sku,
+        mode: "FBS",
+        title: "Детский аксессуар",
+        current_price: 22.64,
+        cover_image: "https://img.example/seeded-900.jpg",
+        detail_url: `https://www.ozon.ru/product/${sku}?observation=${detailCalls}`,
+      };
+    },
     getCategoryBySku: async () => {
       categoryCalls += 1;
       return { cate: [11, 22, "1,12.00"], product_info: { weight: 100, depth: 20, width: 10, height: 5, model: "KIDS-900" } };
@@ -448,7 +598,7 @@ test("cross-window candidate facts bypass duplicate Ozon detail while retaining 
   }).run();
 
   assert.equal(result.published, 1);
-  assert.equal(detailCalls, 0);
+  assert.equal(detailCalls, 2);
   assert.equal(categoryCalls, 1);
   assert.equal(costCalls, 1);
   assert.equal(estimatedSalePrice, 22.64);
@@ -1733,7 +1883,7 @@ test("runner records a failed SKU and continues until confirmed success target",
   assert.equal(result.published, 1);
   assert.ok(state.transitions.some((event) => event.sku === "1" && event.status === "failed"));
   assert.equal(state.records[0].sku, "2");
-  assert.deepEqual(detailCalls, ["1", "2"]);
+  assert.deepEqual(detailCalls, ["1", "1", "2", "2"]);
 });
 
 test("accepted imports that are still pending stay retryable without blocking the next SKU", async () => {
@@ -2978,7 +3128,7 @@ test("resumed skipped candidates are terminal and are not recalculated", async (
   }).run();
 
   assert.equal(result.published, 1);
-  assert.equal(detailCalls, 1);
+  assert.equal(detailCalls, 2);
   assert.equal(state.records[0].sku, "21");
   assert.ok(deleted.includes("20"));
 });

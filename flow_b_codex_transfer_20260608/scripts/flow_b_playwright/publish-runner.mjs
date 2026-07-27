@@ -14,7 +14,7 @@ import {
   readJsonLinesIncremental,
   sourceYieldKey,
 } from "./source-scanner.mjs";
-import { AdaptiveConcurrency, hasReusableCandidateFacts, isFatalBrowserError, loadCandidateFacts, loadPreflightPureSkus, mergeCandidateFacts } from "./continuous-runtime.mjs";
+import { AdaptiveConcurrency, isFatalBrowserError, loadCandidateFacts, loadPreflightPureSkus, mergeCandidateFacts } from "./continuous-runtime.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -205,7 +205,7 @@ function hasWarehouseStatusRejection(stockUpdate) {
 function isTerminalSubmittedFailure(entry) {
   const data = entry?.data || entry || {};
   const reason = String(data.reason || "");
-  if (["daily-product-limit", "import-failed", "reconciliation-store-not-configured", "stock-activation-terminal-rejected"].includes(reason)) return true;
+  if (["daily-product-limit", "import-failed", "reconciliation-store-not-configured", "stock-activation-terminal-rejected", "fbs-evidence-missing"].includes(reason)) return true;
   if (reason === "stock-activation-rejected"
     && hasTerminalStockActivationRejection(data?.final_result?.stock_update || data?.stock_update)) return true;
   const moderationProduct = data?.final_result?.online_product || data?.online_product;
@@ -685,19 +685,39 @@ export function createPublishRunner({
     const sku = asSku(item);
     try {
       if (!validationOnly) await state.transition(sku, "processing", { started_at: now().toISOString() });
-      const reusable = hasReusableCandidateFacts(item);
       const [detailResult, categoryData] = await timed(sku, "ozon_detail_and_category", () => Promise.all([
-        reusable ? Promise.resolve({
-          mode: item.shipping_mode ?? item.mode,
-          title: item.title,
-          cover_image: item.cover_image,
-          current_price: item.sale_price ?? item.sell_price,
-          detail_url: item.link,
-          reused_collection_facts: true,
-        }) : detailProvider.getProductDetail(sku, item),
+        detailProvider.getProductDetail(sku, item),
         client.getCategoryBySku(sku),
       ]));
-      const detail = { ...item, ...(detailResult || {}) };
+      const firstDetail = { ...item, ...(detailResult || {}) };
+      const firstReason = policy.preflightSkipReason({ ...firstDetail, economy: ECONOMY_SENTINEL });
+      if (firstReason) return skip(item, firstReason);
+      const confirmationResult = await timed(sku, "ozon_fbs_confirmation", () => (
+        detailProvider.getProductDetail(sku, {
+          ...item,
+          link: firstDetail.detail_url || firstDetail.link || item.link,
+        })
+      ));
+      const fbsEvidence = {
+        verified: policy.isPureFbs(firstDetail.mode) && policy.isPureFbs(confirmationResult?.mode),
+        rule: "two independent live Ozon detail observations must both be exact FBS",
+        observations: [
+          {
+            observed_at: now().toISOString(),
+            mode: firstDetail.mode ?? null,
+            detail_url: firstDetail.detail_url || firstDetail.link || null,
+          },
+          {
+            observed_at: now().toISOString(),
+            mode: confirmationResult?.mode ?? null,
+            detail_url: confirmationResult?.detail_url || confirmationResult?.link || null,
+          },
+        ],
+      };
+      if (!fbsEvidence.verified) {
+        return skip(item, "fbs-confirmation-inconsistent", { fbs_evidence: fbsEvidence });
+      }
+      const detail = { ...firstDetail, ...(confirmationResult || {}), mode: "FBS", shipping_mode: "FBS" };
       if (!item.seller_url && detail.seller_url) item.seller_url = detail.seller_url;
 
       // Reuse the central policy for mode/category checks before paying the 1688 cost.
@@ -812,6 +832,10 @@ export function createPublishRunner({
         store_name: targetConfig.store.name ?? targetConfig.store.title ?? "",
         watermark_id: targetConfig.watermark.id,
         offer_id: payload.rows[0].offer_id,
+        mode: "FBS",
+        shipping_mode: "FBS",
+        preflight_mode: "FBS",
+        fbs_evidence: fbsEvidence,
         submission_pending: true,
         prepared_at: now().toISOString(),
         selected_at: now().toISOString(),
@@ -836,6 +860,7 @@ export function createPublishRunner({
           store_id: submissionState.store_id,
           watermark_id: submissionState.watermark_id,
           cost,
+          fbs_evidence: fbsEvidence,
           validated_at: now().toISOString(),
         });
         await metricsChain;
@@ -894,6 +919,10 @@ export function createPublishRunner({
         online_status: onlineProduct.online_status,
         stock: onlineProduct.stock,
         import_status: normalizedImportStatus(finalResult.import_log),
+        mode: "FBS",
+        shipping_mode: "FBS",
+        preflight_mode: "FBS",
+        fbs_evidence: fbsEvidence,
         published_at: now().toISOString(),
       });
       return { status: "published", sku, source_url: item.source_url ?? null, payload, finalResult };
@@ -1441,6 +1470,18 @@ export function createPublishRunner({
       const item = latestEntry
         ? mergeCandidateFacts({ ...inputItem, ...(latestEntry.data || {}), sku }, facts.get(String(sku)) || {})
         : inputItem;
+      if (["processing", "failed"].includes(restoredStatus)
+        && (item?.submitted === true || item?.submission_pending === true)
+        && item?.fbs_evidence?.verified !== true) {
+        await state.transition(sku, "failed", {
+          ...item,
+          reason: "fbs-evidence-missing",
+          submitted: true,
+          submission_pending: false,
+          quarantined_at: now().toISOString(),
+        });
+        return { status: "failed", sku, source_url: item.source_url ?? null, reason: "fbs-evidence-missing" };
+      }
       const costHealthDeferred = item?.reason === "1688-health-deferred";
       const costHealthRetryAt = Date.parse(item?.retry_at || "");
       if (costHealthDeferred
