@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "frozen": true,
+  "system_name": "ozon-five-store-24h-production",
+  "launchd_label": "com.codex.ozon.24h-production",
+  "install_root": "${HOME}/.ozon-24h-production/app",
+  "state_root": "${HOME}/.ozon-24h-production/state",
+  "checkpoint_interval_seconds": 7200,
+  "restart_delays_seconds": [
+    30,
+    60,
+    120
+  ],
+  "minimum_free_disk_kb": 5242880,
+  "acceptance": {
+    "duration_seconds": 86400,
+    "strict_target": 481,
+    "minimum_average_per_hour_exclusive": 20,
+    "minimum_profit_rate_exclusive": 30,
+    "duplicate_skus_required": 0,
+    "final_status": "selling",
+    "minimum_stock": 1
+  },
+  "browser": {
+    "cdp_endpoint": "http://127.0.0.1:9223",
+    "executable": "${HOME}/.ozon-24h-acceptance-v70/browser/chrome-for-testing-150.0.7871.129/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "profile_dir": "${HOME}/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/playwright_setup/playwright_profile_v2",
+    "extension_dir": "${HOME}/Downloads/maozi-plugin-3.0.9/maozi-plugin-3.0.9",
+    "start_timeout_ms": 60000,
+    "disk_cache_size_bytes": 104857600,
+    "media_cache_size_bytes": 52428800,
+    "no_proxy_server": true
+  },
+  "stores": [
+    {
+      "id": 106637,
+      "name": "丽丽二号",
+      "warehouse_id": 1020005023256510,
+      "warehouse_evidence": "ERP verified"
+    },
+    {
+      "id": 106640,
+      "name": "丽丽三号",
+      "warehouse_id": 1020005023295220,
+      "warehouse_evidence": "ERP verified"
+    },
+    {
+      "id": 106644,
+      "name": "丽丽四号",
+      "warehouse_id": 1020005023295540,
+      "warehouse_evidence": "ERP verified"
+    },
+    {
+      "id": 106646,
+      "name": "丽丽五号",
+      "warehouse_id": 1020005023616970,
+      "warehouse_evidence": "ERP-discovered repeatedly in run 20260727_120626_ozon_stable_30h"
+    },
+    {
+      "id": 104965,
+      "name": "丽丽1号",
+      "warehouse_id": 1020005022957960,
+      "warehouse_evidence": "ERP verified"
+    }
+  ],
+  "source_pool": {
+    "active_file": "${STATE_ROOT}/sources/active_urls.txt",
+    "seed_file": "${APP_ROOT}/config/ozon_source_seed.txt",
+    "yield_history": "${STATE_ROOT}/history/source_yield_history.jsonl",
+    "fbs_history": "${STATE_ROOT}/history/fbs_source_history.jsonl"
+  },
+  "flow_env": {
+    "FLOW_B_NO_PROXY_SERVER": "1",
+    "FLOW_B_MAOZI_CONTINUE_LOGIN": "1",
+    "FLOW_B_PUBLISHED_CSV": "${STATE_ROOT}/dedupe/published_links.csv",
+    "FLOW_B_STORE_TARGETS": [
+      {
+        "id": 106637,
+        "needle": "丽丽二号",
+        "warehouseId": 1020005023256510,
+        "requireWarehouse": true
+      },
+      {
+        "id": 106640,
+        "needle": "丽丽三号",
+        "warehouseId": 1020005023295220,
+        "requireWarehouse": true
+      },
+      {
+        "id": 106644,
+        "needle": "丽丽四号",
+        "warehouseId": 1020005023295540,
+        "requireWarehouse": true
+      },
+      {
+        "id": 106646,
+        "needle": "丽丽五号",
+        "warehouseId": 1020005023616970,
+        "requireWarehouse": true
+      },
+      {
+        "id": 104965,
+        "needle": "丽丽1号",
+        "warehouseId": 1020005022957960,
+        "requireWarehouse": true
+      }
+    ],
+    "FLOW_B_WATERMARK_ID": "60822",
+    "FLOW_B_WATERMARK_NEEDLE": "lysh",
+    "FLOW_B_INITIAL_STOCK": "1",
+    "FLOW_B_PROFIT_THRESHOLD": "30",
+    "FLOW_B_EXCLUDED_SKUS": "2815247918",
+    "FLOW_B_ACCEPTANCE_SECONDS": "86400",
+    "FLOW_B_ACCEPTANCE_TARGET": "481",
+    "FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE": "0",
+    "FLOW_B_STORE_ACCEPTANCE_TARGET": "100",
+    "FLOW_B_TARGET_PUBLISH_COUNT": "481",
+    "FLOW_B_DAILY_STORE_LIMIT": "100",
+    "FLOW_B_STORE_TOTAL_LIMIT": "100",
+    "FLOW_B_DAILY_STORE_TIMEZONE": "Asia/Shanghai",
+    "FLOW_B_PUBLISH_WORKERS": "8",
+    "FLOW_B_MAX_PUBLISH_WORKERS": "12",
+    "FLOW_B_TAB_WORKERS": "3",
+    "FLOW_B_MAX_TAB_WORKERS": "4",
+    "FLOW_B_FAVORITE_WORKERS": "3",
+    "FLOW_B_TARGET_FAVORITES": "1000",
+    "FLOW_B_MAX_LINKS_PER_SOURCE": "8",
+    "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT": "48",
+    "FLOW_B_CANDIDATE_QUEUE_PER_SOURCE_DRAIN": "6",
+    "FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE": "8",
+    "FLOW_B_POLL_INTERVAL_MS": "3000",
+    "FLOW_B_PRODUCER_INTERVAL_MS": "5000",
+    "FLOW_B_FAVORITE_DETAIL_INTERVAL_MS": "4000",
+    "FLOW_B_FAVORITE_API_INTERVAL_MS": "500",
+    "FLOW_B_MAX_FAVORITE_DETAIL_INTERVAL_MS": "6000",
+    "FLOW_B_FAVORITE_DETAIL_SOFT_BLOCK_STEP_MS": "1000",
+    "FLOW_B_VERIFY_LISTING_FBS_DETAIL": "1",
+    "FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE": "1",
+    "FLOW_B_SOURCE_NON_FBS_SAMPLE_LIMIT": "4",
+    "FLOW_B_OZON_DETAIL_TIMEOUT_MS": "12000",
+    "FLOW_B_1688_ITEM_TIMEOUT": "60",
+    "FLOW_B_1688_PERSISTENT_POOL": "1",
+    "FLOW_B_1688_WORKERS": "4",
+    "FLOW_B_1688_HEALTH_FAILURE_THRESHOLD": "5",
+    "FLOW_B_1688_HEALTH_DEFERRED_TTL_MS": "120000",
+    "FLOW_B_1688_HEALTH_PROBE_BACKOFF_MS": "30000",
+    "FLOW_B_1688_HEALTH_SKU_RETRY_LIMIT": "1",
+    "FLOW_B_CONFIRMATION_ATTEMPTS": "1",
+    "FLOW_B_CONFIRMATION_INTERVAL_MS": "0",
+    "FLOW_B_ONLINE_SYNC_INTERVAL_MS": "1800000",
+    "FLOW_B_URGENT_ONLINE_SYNC_INTERVAL_MS": "60000",
+    "FLOW_B_URGENT_ONLINE_SYNC_PENDING_COUNT": "3",
+    "FLOW_B_UNAVAILABLE_STORE_RETRY_MS": "300000",
+    "FLOW_B_PROBE_INACTIVE_STORES": "1",
+    "FLOW_B_WAREHOUSE_SYNC_ATTEMPTS": "2",
+    "FLOW_B_WAREHOUSE_SYNC_INTERVAL_MS": "5000",
+    "FLOW_B_PENDING_STORE_STALL_MS": "300000",
+    "FLOW_B_PENDING_STORE_STALL_COUNT": "3",
+    "FLOW_B_PENDING_STORE_RETRY_MS": "300000",
+    "FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED": "2",
+    "FLOW_B_PUBLISHED_SOURCE_PAGES": "2,3",
+    "FLOW_B_FBS_SOURCE_HISTORY": "${STATE_ROOT}/history/fbs_source_history.jsonl",
+    "FLOW_B_SOURCE_YIELD_HISTORY": "${STATE_ROOT}/history/source_yield_history.jsonl",
+    "FLOW_B_PUBLISH_FEEDBACK_SEED_FILES": "${STATE_ROOT}/history/source_yield_history.jsonl",
+    "FLOW_B_1688_SHARED_CACHE": "${STATE_ROOT}/cache/1688_cache.json",
+    "FLOW_B_PYTHON": "python3",
+    "FLOW_B_1688_SCRIPT": "${APP_ROOT}/scripts/flow_b_1688_sync.py",
+    "FLOW_B_LOG_LEVEL": "summary",
+    "FLOW_B_LOW_TOKEN_INTERVENTION": "1"
+  },
+  "immutable_rules": {
+    "pure_fbs_only": true,
+    "exact_same_item_model_spec_quantity": true,
+    "reliable_1688_cost_required": true,
+    "default_cost_forbidden": true,
+    "profit_rate_strictly_greater_than_30": true,
+    "prohibited_category_preflight": true,
+    "historical_and_window_dedupe": true,
+    "strict_confirmation_only": true,
+    "security_bypass_forbidden": true
+  }
+}
