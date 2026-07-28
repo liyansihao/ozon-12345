@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import {
   buildCheckpoint,
+  checkpointFrozenEvidence,
   checkpointProfileDir,
   matchesRunCommand,
 } from "../scripts/flow_b_checkpoint.mjs";
@@ -26,6 +27,27 @@ test("checkpoint liveness falls back to the frozen production browser profile", 
     },
     cwd: "/workspace/project",
   }), "/Users/operator/.ozon-production/profile");
+});
+
+test("manual checkpoint invocation falls back to the stable deployment manifest", async (t) => {
+  const appRoot = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-checkpoint-release-"));
+  t.after(() => fs.rm(appRoot, { recursive: true, force: true }));
+  const configPath = path.join(appRoot, "config", "ozon_24h_production.json");
+  await fs.mkdir(path.dirname(configPath), { recursive: true });
+  await fs.writeFile(configPath, "{\"frozen\":true}\n");
+  await fs.writeFile(path.join(appRoot, "deployment_manifest.json"), JSON.stringify({
+    source_commit: "release-commit",
+    config_sha256: "release-config-sha256",
+  }));
+
+  assert.deepEqual(await checkpointFrozenEvidence({
+    env: {},
+    appRoot,
+    configPath,
+  }), {
+    git_commit: "release-commit",
+    config_sha256: "release-config-sha256",
+  });
 });
 
 test("checkpoint reports interval/cumulative strict truth, funnel, failures, and profit floor", async (t) => {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execFile } from "node:child_process";
@@ -25,6 +26,25 @@ async function readJsonLines(filename) {
     if (error?.code === "ENOENT") return [];
     throw error;
   }
+}
+
+export async function checkpointFrozenEvidence({
+  env = process.env,
+  appRoot = path.resolve(import.meta.dirname, ".."),
+  configPath = path.join(appRoot, "config", "ozon_24h_production.json"),
+} = {}) {
+  const [deployment, configText] = await Promise.all([
+    readJson(path.join(appRoot, "deployment_manifest.json"), {}),
+    fs.readFile(configPath, "utf8").catch(() => ""),
+  ]);
+  const environmentCommit = String(env?.FLOW_B_FROZEN_COMMIT || "").trim();
+  const environmentConfigHash = String(env?.FLOW_B_FROZEN_CONFIG_HASH || "").trim();
+  return {
+    git_commit: environmentCommit || deployment?.source_commit || null,
+    config_sha256: environmentConfigHash
+      || deployment?.config_sha256
+      || (configText ? crypto.createHash("sha256").update(configText).digest("hex") : null),
+  };
 }
 
 function eventAt(row) {
@@ -140,6 +160,8 @@ async function processHealth(runDir, profileDir) {
 
 export async function buildCheckpoint(runDir, observedAt = new Date().toISOString()) {
   const root = path.resolve(runDir);
+  const appRoot = path.resolve(import.meta.dirname, "..");
+  const productionConfigPath = path.join(appRoot, "config", "ozon_24h_production.json");
   const window = await readJson(path.join(root, "acceptance_window.json"), {});
   const observedMs = Date.parse(observedAt);
   const startedMs = Date.parse(window?.started_at || "");
@@ -166,6 +188,7 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     runtimeErrors,
     config,
     productionConfig,
+    frozenEvidence,
   ] = await Promise.all([
     snapshotRun(root, observedAt),
     readJsonLines(path.join(root, "candidate_queue.jsonl")),
@@ -176,7 +199,8 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     readJsonLines(path.join(root, "skipped.jsonl")),
     readJsonLines(path.join(root, "runtime_errors.jsonl")),
     readJson(path.join(root, "source_config.json"), {}),
-    readJson(path.resolve(import.meta.dirname, "../config/ozon_24h_production.json"), {}),
+    readJson(productionConfigPath, {}),
+    checkpointFrozenEvidence({ appRoot, configPath: productionConfigPath }),
   ]);
   const cumulativeFailures = [...failed, ...skipped, ...runtimeErrors];
   const intervalFailures = cumulativeFailures.filter((row) => inInterval(row, intervalStartedMs, observedMs));
@@ -223,8 +247,7 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     compact: compactStatusSnapshot(snapshot),
     liveness: await processHealth(root, profileDir),
     frozen: {
-      git_commit: process.env.FLOW_B_FROZEN_COMMIT || null,
-      config_sha256: process.env.FLOW_B_FROZEN_CONFIG_HASH || null,
+      ...frozenEvidence,
       profit_rule: "profit_rate > 30",
       watermark_id: config?.watermark_id ?? 60822,
       store_targets: config?.store_targets || [],
