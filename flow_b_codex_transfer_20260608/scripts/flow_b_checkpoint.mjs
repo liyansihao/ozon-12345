@@ -9,6 +9,12 @@ import { pathToFileURL } from "node:url";
 import { snapshotRun, compactStatusSnapshot } from "./flow_b_status_snapshot.mjs";
 
 const execFileAsync = promisify(execFile);
+const AUTOMATIC_RECOVERY_ACTIONS = new Set([
+  "recycled-unresponsive-profile-owner",
+  "restart-browser-and-worker",
+  "restart-worker",
+  "terminated-unresponsive-profile-owner",
+]);
 
 async function readJson(filename, fallback = null) {
   try { return JSON.parse(await fs.readFile(filename, "utf8")); } catch (error) {
@@ -69,6 +75,16 @@ function classify(rows) {
   for (const row of rows) {
     const key = String(row?.reason || row?.stage || row?.data?.reason || row?.data?.cost?.reason || "unknown");
     counts[key] = Number(counts[key] || 0) + 1;
+  }
+  return Object.fromEntries(Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
+}
+
+function classifyRecoveryActions(rows) {
+  const counts = {};
+  for (const row of rows) {
+    const action = String(row?.action || "").trim();
+    if (!AUTOMATIC_RECOVERY_ACTIONS.has(action)) continue;
+    counts[action] = Number(counts[action] || 0) + 1;
   }
   return Object.fromEntries(Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])));
 }
@@ -162,6 +178,8 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
   const root = path.resolve(runDir);
   const appRoot = path.resolve(import.meta.dirname, "..");
   const productionConfigPath = path.join(appRoot, "config", "ozon_24h_production.json");
+  const runParent = path.dirname(root);
+  const stateRoot = path.basename(runParent) === "runs" ? path.dirname(runParent) : runParent;
   const window = await readJson(path.join(root, "acceptance_window.json"), {});
   const observedMs = Date.parse(observedAt);
   const startedMs = Date.parse(window?.started_at || "");
@@ -189,6 +207,7 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     config,
     productionConfig,
     frozenEvidence,
+    recoveries,
   ] = await Promise.all([
     snapshotRun(root, observedAt),
     readJsonLines(path.join(root, "candidate_queue.jsonl")),
@@ -201,7 +220,16 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     readJson(path.join(root, "source_config.json"), {}),
     readJson(productionConfigPath, {}),
     checkpointFrozenEvidence({ appRoot, configPath: productionConfigPath }),
+    readJsonLines(path.join(stateRoot, "recovery.jsonl")),
   ]);
+  const runRecoveries = recoveries.filter((row) => {
+    const recoveryRunDir = String(row?.run_dir || "").trim();
+    return recoveryRunDir
+      && path.resolve(recoveryRunDir) === root
+      && AUTOMATIC_RECOVERY_ACTIONS.has(String(row?.action || "").trim());
+  });
+  const cumulativeRecoveries = runRecoveries.filter((row) => eventAt(row) <= observedMs);
+  const intervalRecoveries = runRecoveries.filter((row) => inInterval(row, intervalStartedMs, observedMs));
   const cumulativeFailures = [...failed, ...skipped, ...runtimeErrors];
   const intervalFailures = cumulativeFailures.filter((row) => inInterval(row, intervalStartedMs, observedMs));
   const intervalTimings = timings.filter((row) => inInterval(row, intervalStartedMs, observedMs));
@@ -230,6 +258,8 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
       strict_successes: intervalStrict.length,
       funnel: intervalStages,
       failures: classify(intervalFailures),
+      automatic_recoveries: intervalRecoveries.length,
+      recovery_actions: classifyRecoveryActions(intervalRecoveries),
       stage_timings: stageStats(intervalTimings),
     },
     cumulative: {
@@ -240,11 +270,16 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
       quota: snapshot.quota,
       funnel: cumulativeStages,
       failures: classify(cumulativeFailures.filter((row) => eventAt(row) <= observedMs)),
+      automatic_recoveries: cumulativeRecoveries.length,
+      recovery_actions: classifyRecoveryActions(cumulativeRecoveries),
       stage_timings: stageStats(timings.filter((row) => eventAt(row) <= observedMs)),
       duplicate_skus: Math.max(0, published.filter((row) => strictPublished([row], startedMs - 1, observedMs).length).length - cumulativeStrict.length),
       minimum_profit_rate: cumulativeStrict.length ? Math.min(...cumulativeStrict.map((row) => Number(row.profit_rate))) : null,
     },
-    compact: compactStatusSnapshot(snapshot),
+    compact: {
+      ...compactStatusSnapshot(snapshot),
+      automatic_recoveries: cumulativeRecoveries.length,
+    },
     liveness: await processHealth(root, profileDir),
     frozen: {
       ...frozenEvidence,

@@ -51,8 +51,10 @@ test("manual checkpoint invocation falls back to the stable deployment manifest"
 });
 
 test("checkpoint reports interval/cumulative strict truth, funnel, failures, and profit floor", async (t) => {
-  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-checkpoint-"));
-  t.after(() => fs.rm(runDir, { recursive: true, force: true }));
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-checkpoint-"));
+  const runDir = path.join(stateRoot, "runs", "test-run");
+  await fs.mkdir(runDir, { recursive: true });
+  t.after(() => fs.rm(stateRoot, { recursive: true, force: true }));
   await fs.writeFile(path.join(runDir, "acceptance_window.json"), JSON.stringify({
     started_at: "2026-07-21T00:00:00.000Z",
     ended_at: "2026-07-22T00:00:00.000Z",
@@ -75,6 +77,12 @@ test("checkpoint reports interval/cumulative strict truth, funnel, failures, and
     { sku: "b", timestamp: "2026-07-21T00:08:00.000Z", published_at: "2026-07-21T00:08:00.000Z", store_id: 1, profit_rate: 30, online_status: "selling", stock: 1 },
   ].map(JSON.stringify).join("\n"));
   await fs.writeFile(path.join(runDir, "failed.jsonl"), `${JSON.stringify({ at: "2026-07-21T00:09:00.000Z", reason: "worker-timeout", sku: "c" })}\n`);
+  await fs.writeFile(path.join(stateRoot, "recovery.jsonl"), [
+    { at: "2026-07-21T00:10:00.000Z", run_dir: runDir, action: "restart-browser-and-worker" },
+    { at: "2026-07-21T00:11:00.000Z", run_dir: "/tmp/another-run", action: "restart-worker" },
+    { at: "2026-07-21T00:12:00.000Z", run_dir: runDir, action: "window-complete-owner-cleanup" },
+    { at: "2026-07-21T02:01:00.000Z", run_dir: runDir, action: "restart-worker" },
+  ].map(JSON.stringify).join("\n"));
 
   const checkpoint = await buildCheckpoint(runDir, "2026-07-21T02:00:00.000Z");
   assert.equal(checkpoint.cumulative.strict_successes, 1);
@@ -82,5 +90,9 @@ test("checkpoint reports interval/cumulative strict truth, funnel, failures, and
   assert.equal(checkpoint.cumulative.minimum_profit_rate, 31);
   assert.deepEqual(checkpoint.cumulative.funnel, { candidate: 2, cost_1688: 1, profit: 1, submitted: 1, final_confirmed: 1 });
   assert.equal(checkpoint.cumulative.failures["worker-timeout"], 1);
+  assert.equal(checkpoint.interval.automatic_recoveries, 1);
+  assert.equal(checkpoint.cumulative.automatic_recoveries, 1);
+  assert.deepEqual(checkpoint.cumulative.recovery_actions, { "restart-browser-and-worker": 1 });
+  assert.equal(checkpoint.compact.automatic_recoveries, 1);
   assert.equal(checkpoint.interval.stage_timings["1688_cost"].p95_ms, 100);
 });
