@@ -386,22 +386,28 @@ function expandedConfig(config) {
   return cloned;
 }
 
+export function checkpointEnvironment(config, currentRun, baseEnvironment = process.env) {
+  const environment = { ...baseEnvironment };
+  environment.FLOW_B_PW_PROFILE = absolute(config.browser.profile_dir);
+  environment.FLOW_B_PRODUCTION_STATE_ROOT = absolute(config.state_root);
+  environment.FLOW_B_PRODUCTION_RUN_ID = String(currentRun.run_id);
+  environment.FLOW_B_FROZEN_COMMIT = String(config.frozen_commit || "");
+  environment.FLOW_B_FROZEN_CONFIG_HASH = String(config.frozen_config_hash || "");
+  return environment;
+}
+
 export function workerEnvironment(config, currentRun) {
-  const environment = { ...process.env };
+  let environment = { ...process.env };
   for (const [key, value] of Object.entries(config.flow_env || {})) {
     if (value === null || value === undefined) continue;
     environment[key] = typeof value === "string" ? expandTemplate(value, config) : JSON.stringify(value);
   }
+  environment = checkpointEnvironment(config, currentRun, environment);
   environment.FLOW_B_CDP_ENDPOINT = config.browser.cdp_endpoint;
-  environment.FLOW_B_PW_PROFILE = absolute(config.browser.profile_dir);
   environment.FLOW_B_EXTENSION_DIR = absolute(config.browser.extension_dir);
   environment.FLOW_B_CHROMIUM_EXECUTABLE = absolute(config.browser.executable);
   environment.FLOW_B_RESUME_WINDOW = "1";
-  environment.FLOW_B_PRODUCTION_STATE_ROOT = absolute(config.state_root);
-  environment.FLOW_B_PRODUCTION_RUN_ID = String(currentRun.run_id);
   environment.FLOW_B_CAPACITY_STORES = JSON.stringify(config.stores || []);
-  environment.FLOW_B_FROZEN_COMMIT = String(config.frozen_commit || "");
-  environment.FLOW_B_FROZEN_CONFIG_HASH = String(config.frozen_config_hash || "");
   if (Number.isInteger(Number(currentRun.acceptance_target)) && Number(currentRun.acceptance_target) > 0) {
     environment.FLOW_B_ACCEPTANCE_TARGET = String(currentRun.acceptance_target);
     environment.FLOW_B_TARGET_PUBLISH_COUNT = String(currentRun.acceptance_target);
@@ -455,11 +461,11 @@ async function acceptanceEnded(runDir) {
   return Number.isFinite(endedAt) && Date.now() >= endedAt;
 }
 
-async function runCheckpoint(appRoot, runDir, label) {
+async function runCheckpoint(appRoot, runDir, label, environment = process.env) {
   const script = path.join(appRoot, "scripts", "flow_b_checkpoint.mjs");
   return runCommand(process.execPath, [script, runDir, label], {
     cwd: appRoot,
-    env: process.env,
+    env: environment,
     stdio: "ignore",
   });
 }
@@ -595,7 +601,14 @@ async function activateFormalWindow({
   await writeJsonAtomic(path.join(stateRoot, "current_run.json"), currentRun);
 }
 
-async function waitForVerification({ stateRoot, currentRun, appRoot, runDir, stopFile }) {
+async function waitForVerification({
+  stateRoot,
+  currentRun,
+  appRoot,
+  runDir,
+  stopFile,
+  checkpointEnv = process.env,
+}) {
   const resumeFile = path.join(stateRoot, "resume.request");
   await updateOperationalState(stateRoot, currentRun, {
     status: "WAITING_FOR_VERIFICATION",
@@ -606,7 +619,7 @@ async function waitForVerification({ stateRoot, currentRun, appRoot, runDir, sto
     await delay(30_000);
   }
   if (fs.existsSync(resumeFile)) await fsp.unlink(resumeFile).catch(() => {});
-  await runCheckpoint(appRoot, runDir, "verification-wait");
+  await runCheckpoint(appRoot, runDir, "verification-wait", checkpointEnv);
 }
 
 async function writeProcessOwners({ stateRoot, currentRun, browserPid, workerPid = null }) {
@@ -811,7 +824,14 @@ export async function supervise(configPath) {
           return 0;
         }
         if (decision.action === "wait-for-verification") {
-          await waitForVerification({ stateRoot, currentRun, appRoot, runDir, stopFile });
+          await waitForVerification({
+            stateRoot,
+            currentRun,
+            appRoot,
+            runDir,
+            stopFile,
+            checkpointEnv: checkpointEnvironment(config, currentRun),
+          });
           continue;
         }
         const seconds = nextRestartDelaySeconds(0, config.restart_delays_seconds);
@@ -832,9 +852,14 @@ export async function supervise(configPath) {
       return 0;
     }
     if (currentRun.formal_started === false) return 0;
-    await runCheckpoint(appRoot, runDir, "supervisor-start");
+    await runCheckpoint(
+      appRoot,
+      runDir,
+      "supervisor-start",
+      checkpointEnvironment(config, currentRun),
+    );
     checkpointTimer = setInterval(() => {
-      void runCheckpoint(appRoot, runDir, "2h");
+      void runCheckpoint(appRoot, runDir, "2h", checkpointEnvironment(config, currentRun));
     }, Math.max(60_000, Number(config.checkpoint_interval_seconds || 7200) * 1000));
     checkpointTimer.unref();
     sourceRefreshTimer = setInterval(() => {
@@ -849,7 +874,12 @@ export async function supervise(configPath) {
         break;
       }
       if (await acceptanceEnded(runDir)) {
-        await runCheckpoint(appRoot, runDir, "window-complete");
+        await runCheckpoint(
+          appRoot,
+          runDir,
+          "window-complete",
+          checkpointEnvironment(config, currentRun),
+        );
         const artifacts = await runFinalArtifacts(appRoot, stateRoot, currentRun, runDir);
         await updateOperationalState(stateRoot, currentRun, {
           status: artifacts.report?.passed === true ? "WINDOW_COMPLETE" : "TARGET_NOT_MET",
@@ -933,7 +963,14 @@ export async function supervise(configPath) {
         return 0;
       }
       if (decision.action === "wait-for-verification") {
-        await waitForVerification({ stateRoot, currentRun, appRoot, runDir, stopFile });
+        await waitForVerification({
+          stateRoot,
+          currentRun,
+          appRoot,
+          runDir,
+          stopFile,
+          checkpointEnv: checkpointEnvironment(config, currentRun),
+        });
         restartAttempt = 0;
         continue;
       }
@@ -963,7 +1000,12 @@ export async function supervise(configPath) {
       });
       await fsp.unlink(stopFile).catch(() => {});
     }
-    await runCheckpoint(appRoot, runDir, "supervisor-stop");
+    await runCheckpoint(
+      appRoot,
+      runDir,
+      "supervisor-stop",
+      checkpointEnvironment(config, currentRun),
+    );
     return 0;
   } finally {
     if (checkpointTimer) clearInterval(checkpointTimer);

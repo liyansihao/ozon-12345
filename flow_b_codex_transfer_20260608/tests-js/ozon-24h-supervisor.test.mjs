@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   buildLaunchdPlist,
   capacityPreflightDecision,
+  checkpointEnvironment,
   classifyWorkerFailure,
   currentRunDisposition,
   nextRestartDelaySeconds,
@@ -151,6 +152,28 @@ test("worker inherits the one frozen ERP target instead of the static fallback",
   assert.equal(environment.FLOW_B_ACCEPTANCE_TARGET, "469");
   assert.equal(environment.FLOW_B_TARGET_PUBLISH_COUNT, "469");
   assert.equal(environment.FLOW_B_ACCEPTANCE_TARGET_POLICY, "erp_remaining_capacity");
+});
+
+test("checkpoint subprocess inherits the frozen release evidence and exact browser profile", () => {
+  const environment = checkpointEnvironment({
+    browser: {
+      profile_dir: "/tmp/exact-profile",
+    },
+    state_root: "/tmp/production-state",
+    frozen_commit: "abc123",
+    frozen_config_hash: "config-sha256",
+  }, {
+    run_id: "daily-run",
+  }, {
+    PATH: "/usr/bin",
+  });
+
+  assert.equal(environment.PATH, "/usr/bin");
+  assert.equal(environment.FLOW_B_PW_PROFILE, "/tmp/exact-profile");
+  assert.equal(environment.FLOW_B_FROZEN_COMMIT, "abc123");
+  assert.equal(environment.FLOW_B_FROZEN_CONFIG_HASH, "config-sha256");
+  assert.equal(environment.FLOW_B_PRODUCTION_STATE_ROOT, "/tmp/production-state");
+  assert.equal(environment.FLOW_B_PRODUCTION_RUN_ID, "daily-run");
 });
 
 test("launchd restarts abnormal exits without busy-looping a completed window", () => {
