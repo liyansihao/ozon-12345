@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { prohibitedCategorySkipReason } from "./flow_b_playwright/publish-policy.mjs";
 import {
   deriveSearchSourceUrls,
+  hasListingPluginFbsEvidence,
   isStrictSourceYieldRow,
   normalizeRuntimeSourceYieldRows,
   sourceYieldKey,
@@ -330,6 +331,53 @@ function pureFbsSellerEvidenceUrls(fbsRows = []) {
   return sellers;
 }
 
+function listingProductTitle(link = {}) {
+  const title = String(link?.title || "").trim();
+  if (title) return title;
+  try {
+    const pathname = decodeURIComponent(new URL(String(link?.href || "")).pathname);
+    const slug = pathname.match(/\/product\/([^/]+)/iu)?.[1]
+      ?.replace(/-\d+$/u, "")
+      ?.replaceAll("-", " ")
+      ?.trim();
+    return slug || "";
+  } catch {
+    return "";
+  }
+}
+
+export function listingFbsQuerySeedRows(scanRows = []) {
+  const bySource = new Map();
+  for (const scan of scanRows || []) {
+    const source_url = sourceUrl(scan);
+    if (!source_url || prohibitedSourceUrl(source_url)) continue;
+    for (const [index, link] of (scan?.links || []).entries()) {
+      if (!hasListingPluginFbsEvidence(link?.card_text)) continue;
+      const title = listingProductTitle(link);
+      if (!title || prohibitedCategorySkipReason(title)) continue;
+      const href = String(link?.href || "").trim();
+      const sku = skuOf(link, href.match(/-(\d+)\/?$/u)?.[1] || `listing-${index}`);
+      if (!sku) continue;
+      const key = sourceYieldKey(source_url);
+      const rows = bySource.get(key) || new Map();
+      if (!rows.has(sku)) {
+        rows.set(sku, {
+          at: scan?.scanned_at || scan?.at,
+          sku,
+          source_url,
+          title,
+          status: "submitted",
+          evidence_quality: "listing-fbs-source-seed",
+        });
+      }
+      bySource.set(key, rows);
+    }
+  }
+  return [...bySource.values()].flatMap((rows) => (
+    rows.size >= 2 ? [...rows.values()] : []
+  ));
+}
+
 function sourceDispatchFamily(value) {
   try {
     const url = new URL(String(value || ""));
@@ -427,12 +475,24 @@ export function buildSourcePortfolio({
   const fbs = enabled.filter((row) => row.funnel.pure_fbs > 0 && row.funnel.final_confirmed === 0);
   const desired = Math.max(1, Number(minimumActiveSources) || 60);
   const limit = Math.max(desired, Number(maximumActiveSources) || 120);
-  const derivedQueries = deriveSearchSourceUrls(
-    yieldRows,
-    sourcePortfolioDerivedQueryLimit(desired),
+  const derivedLimit = sourcePortfolioDerivedQueryLimit(desired);
+  const listingFbsSeeds = listingFbsQuerySeedRows(scanRows);
+  const listingDerivedQueries = deriveSearchSourceUrls(
+    listingFbsSeeds,
+    derivedLimit,
     ["150.000;", "500.000;"],
     [1],
   );
+  const historicalDerivedQueries = deriveSearchSourceUrls(
+    yieldRows,
+    derivedLimit,
+    ["150.000;", "500.000;"],
+    [1],
+  );
+  const derivedQueries = distinctDispatchUrls([
+    ...listingDerivedQueries,
+    ...historicalDerivedQueries,
+  ]);
   const active = [];
   const seen = new Set();
   const strictBudget = Math.max(1, Math.ceil(desired * 0.7));
@@ -534,6 +594,9 @@ export function buildSourcePortfolio({
       disabled_sources: disabled.length,
       strict_sources: strict.length,
       pure_fbs_sources: fbs.length,
+      listing_fbs_query_seed_sources: new Set(listingFbsSeeds.map((row) => (
+        sourceYieldKey(row.source_url)
+      ))).size,
       exploration_sources: new Set(active
         .map(sourceDispatchFamily)
         .filter((family) => family && !evidenceFamilies.has(family))).size,

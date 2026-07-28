@@ -684,6 +684,50 @@ test("portfolio explores curated safe queries before arbitrary historical title 
   assert.equal(searchTexts.includes(historicalTitle.toLowerCase()), false);
 });
 
+test("portfolio develops fresh searches from repeated exact listing-FBS scan evidence", () => {
+  const scanSource = "https://www.ozon.ru/search/?text=детские+товары&is_global=true";
+  const portfolio = buildSourcePortfolio({
+    scanRows: [{
+      source_url: scanSource,
+      scanned_at: "2026-07-28T14:00:00.000Z",
+      links: [
+        {
+          sku: "listing-fbs-1",
+          href: "https://www.ozon.ru/product/magnitnyy-konstruktor-kosmicheskaya-stantsiya-4100000001/",
+          card_text: "999 ₽\n发货模式：FBS",
+        },
+        {
+          sku: "listing-fbs-2",
+          href: "https://www.ozon.ru/product/magnitnyy-konstruktor-gonochnaya-mashina-4100000002/",
+          card_text: "899 ₽\n发货模式: FBS",
+        },
+        {
+          sku: "listing-fbo",
+          href: "https://www.ozon.ru/product/redkiy-pribor-nedopustimyy-signal-4100000003/",
+          card_text: "Редкий прибор недопустимый сигнал\n发货模式：FBO",
+        },
+        {
+          sku: "listing-prohibited",
+          title: "Комплект женского нижнего белья",
+          card_text: "Комплект женского нижнего белья\n发货模式：FBS",
+        },
+      ],
+    }],
+    minimumActiveSources: 2,
+    maximumActiveSources: 2,
+  });
+  const searchTexts = portfolio.active_urls.flatMap((value) => {
+    const url = new URL(value);
+    return url.pathname === "/search/" ? [url.searchParams.get("text")] : [];
+  });
+
+  assert.ok(searchTexts.some((text) => /magnitnyy konstruktor/u.test(String(text))));
+  assert.equal(searchTexts.some((text) => /redkiy pribor/u.test(String(text))), false);
+  assert.equal(searchTexts.some((text) => /нижнего белья/u.test(String(text))), false);
+  assert.equal(portfolio.counts.strict_sources, 0);
+  assert.equal(portfolio.counts.pure_fbs_sources, 0);
+});
+
 test("portfolio shares additional exploration slots with proven non-prohibited title queries", () => {
   const yieldRows = Array.from({ length: 7 }, (_, index) => ({
     sku: `strict-mix-${index}`,
