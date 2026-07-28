@@ -120,6 +120,13 @@ export function createCandidateQueue(filename, { now = () => new Date() } = {}) 
       return row;
     },
 
+    inCooldown(sku, { nowMs = Date.now() } = {}) {
+      const row = latest.get(String(sku || "").trim());
+      if (!row || !PENDING_STATUSES.has(String(row.status || ""))) return false;
+      const retryAt = Date.parse(row.retry_at || "");
+      return Number.isFinite(retryAt) && retryAt > Number(nowMs);
+    },
+
     pending({
       attempted = new Set(),
       limit = Number.POSITIVE_INFINITY,

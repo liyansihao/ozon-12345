@@ -2285,6 +2285,13 @@ function skuFromProductUrl(value) {
   return String(value || "").match(/\/product\/(?:[^/?#]*-)?(\d+)(?:[/?#]|$)/)?.[1] || "";
 }
 
+export function filterCandidateCooldownLinks(rows = [], candidateQueue, { nowMs = Date.now() } = {}) {
+  return (rows || []).filter((row) => {
+    const sku = String(row?.sku || "").trim() || skuFromProductUrl(row?.href);
+    return !sku || !candidateQueue?.inCooldown?.(sku, { nowMs });
+  });
+}
+
 export function compactListingCardText(value) {
   const evidence = [];
   let hasMode = false;
@@ -3389,6 +3396,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         }), fallbackLimit);
         retainedLinks.splice(0, retainedLinks.length, ...filled);
       }
+      retainedLinks.splice(
+        0,
+        retainedLinks.length,
+        ...filterCandidateCooldownLinks(retainedLinks, candidateQueue),
+      );
       emit(`collecting favorites from ${retainedLinks.length} retained product links`);
       let retainedAttempted = 0;
       favoriteBefore = await collectWithCandidateQueue({

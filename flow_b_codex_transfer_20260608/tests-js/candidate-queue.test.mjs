@@ -82,6 +82,18 @@ test("deferred candidates respect retry_at without becoming terminal", async () 
   assert.deepEqual(queue.pending({ nowMs: Date.parse("2026-07-17T12:10:00.000Z") }).map((row) => row.sku), ["100"]);
 });
 
+test("queue exposes a deferred retry cooldown to retained replay", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-cooldown-"));
+  const queue = createCandidateQueue(path.join(dir, "candidate_queue.jsonl"));
+  await queue.load();
+  await queue.discover([card("100")]);
+  await queue.transition("100", "deferred", { retry_at: "2026-07-17T12:10:00.000Z" });
+
+  assert.equal(queue.inCooldown("100", { nowMs: Date.parse("2026-07-17T12:09:59.999Z") }), true);
+  assert.equal(queue.inCooldown("100", { nowMs: Date.parse("2026-07-17T12:10:00.000Z") }), false);
+  assert.equal(queue.inCooldown("missing", { nowMs: Date.parse("2026-07-17T12:09:59.999Z") }), false);
+});
+
 test("pending candidates round-robin sources and cap one source per consumer tranche", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-fair-"));
   const queue = createCandidateQueue(path.join(dir, "candidate_queue.jsonl"));

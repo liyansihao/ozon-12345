@@ -44,6 +44,7 @@ import {
   expandFreshSellerSourceUrls,
   retryMaoziPageFetch,
   retainedRowsForCollection,
+  filterCandidateCooldownLinks,
   orderRowsBySourceYield,
   waitForMovingDeadline,
   waitForListingEnrichment,
@@ -558,6 +559,23 @@ test("low pure-FBS deferred backlog cannot starve fresh source scanning", () => 
     "low-0", "low-1", "low-2", "low-3",
     "ordinary-0", "ordinary-1", "ordinary-2", "ordinary-3", "ordinary-4", "ordinary-5",
   ]);
+});
+
+test("retained replay does not bypass a durable candidate retry cooldown", () => {
+  const rows = [
+    { href: "https://www.ozon.ru/product/cooling-100/", text: "cooling" },
+    { href: "https://www.ozon.ru/product/ready-200/", text: "ready" },
+  ];
+  const queue = {
+    inCooldown(sku) {
+      return sku === "100";
+    },
+  };
+
+  assert.deepEqual(
+    filterCandidateCooldownLinks(rows, queue).map((row) => row.text),
+    ["ready"],
+  );
 });
 
 test("listing enrichment wait exits early once enough product cards are ready", async () => {
