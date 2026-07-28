@@ -2368,12 +2368,12 @@ test("favorite preflight accepts only an explicit pure FBS mode", () => {
   assert.equal(favoriteModeSkipReason(null), "missing-shipping-mode");
 });
 
-test("listing cards reject only explicit non-pure modes before opening product details", () => {
+test("listing cards reject explicit non-pure modes and deterministic missing placeholders before opening product details", () => {
   assert.equal(listingModeSkipReason("商品\n发货模式：FBS\n库存"), null);
   assert.equal(listingModeSkipReason("商品\n发货模式：FBO\n库存"), "non-pure-fbs");
   assert.equal(listingModeSkipReason("商品\n发货模式：FBO,FBS\n库存"), "non-pure-fbs");
-  assert.equal(listingModeSkipReason("商品\n发货模式：暂无数据\n库存"), null);
-  assert.equal(listingModeSkipReason("商品\n发货模式：--\n库存"), null);
+  assert.equal(listingModeSkipReason("商品\n发货模式：暂无数据\n库存"), "missing-shipping-mode");
+  assert.equal(listingModeSkipReason("商品\n发货模式：--\n库存"), "missing-shipping-mode");
   assert.equal(listingModeSkipReason("card without plugin telemetry"), null);
 });
 

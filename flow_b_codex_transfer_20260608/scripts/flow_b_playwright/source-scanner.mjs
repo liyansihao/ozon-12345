@@ -748,7 +748,8 @@ export function favoriteModeSkipReason(mode) {
 export function listingModeSkipReason(cardText) {
   const mode = String(cardText || "")
     .match(/(?:^|\n)\s*发货模式\s*[：:]\s*([^\n]+)/i)?.[1]?.trim() || "";
-  if (!mode || /^(?:暂无数据|--|-|unknown)$/i.test(mode)) return null;
+  if (!mode) return null;
+  if (/^(?:暂无数据|--|-|unknown)$/i.test(mode)) return "missing-shipping-mode";
   return isPureFbs(mode) ? null : "non-pure-fbs";
 }
 
