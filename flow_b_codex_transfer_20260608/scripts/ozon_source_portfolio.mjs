@@ -379,6 +379,11 @@ function addUnique(target, seen, value, limit) {
   return true;
 }
 
+export function sourcePortfolioDerivedQueryLimit(minimumActiveSources = 60) {
+  const desired = Math.max(1, Number(minimumActiveSources) || 60);
+  return Math.max(600, desired * 10);
+}
+
 export function buildSourcePortfolio({
   yieldRows = [],
   fbsRows = [],
@@ -396,7 +401,7 @@ export function buildSourcePortfolio({
   const limit = Math.max(desired, Number(maximumActiveSources) || 120);
   const derivedQueries = deriveSearchSourceUrls(
     yieldRows,
-    Math.max(desired * 4, 60),
+    sourcePortfolioDerivedQueryLimit(desired),
     ["150.000;", "500.000;"],
     [1],
   );
@@ -419,17 +424,21 @@ export function buildSourcePortfolio({
     .filter(Boolean));
   const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
   const evidenceFamilies = new Set(evidence.map((row) => row.family_key).filter(Boolean));
-  const configuredSeedFamilies = new Set();
-  for (const url of seedUrls) {
+  const explorationFamilies = new Set();
+  const unseenConfiguredSeeds = distinctDispatchUrls(seedUrls).filter((url) => {
     const family = sourceYieldKey(url);
     const dispatchFamily = sourceDispatchFamily(url);
-    if (disabledUrls.has(family)
-      || disabledFamilies.has(dispatchFamily)
-      || prohibitedSourceUrl(url)) continue;
-    addUnique(active, seen, url, limit);
-    if (seen.has(family)) configuredSeedFamilies.add(dispatchFamily);
+    return !disabledUrls.has(family)
+      && !disabledFamilies.has(dispatchFamily)
+      && !prohibitedSourceUrl(url)
+      && !evidenceUrls.has(family);
+  });
+  for (const url of unseenConfiguredSeeds) {
+    const dispatchFamily = sourceDispatchFamily(url);
+    if (addUnique(active, seen, url, limit) && !evidenceFamilies.has(dispatchFamily)) {
+      explorationFamilies.add(dispatchFamily);
+    }
   }
-  const explorationFamilies = new Set(configuredSeedFamilies);
   const freshExplorationUrls = explorationUrls(safeQueryUrls(), derivedQueries);
   for (const url of freshExplorationUrls) {
     const family = sourceYieldKey(url);
@@ -442,6 +451,15 @@ export function buildSourcePortfolio({
       && !evidenceUrls.has(family)
       && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
     if (explorationFamilies.size >= explorationBudget) break;
+  }
+  for (const url of seedUrls) {
+    if (active.length >= desired) break;
+    const family = sourceYieldKey(url);
+    const dispatchFamily = sourceDispatchFamily(url);
+    if (disabledUrls.has(family)
+      || disabledFamilies.has(dispatchFamily)
+      || prohibitedSourceUrl(url)) continue;
+    addUnique(active, seen, url, limit);
   }
   for (const row of strict) {
     for (const variant of nextSellerVariants(row)) {

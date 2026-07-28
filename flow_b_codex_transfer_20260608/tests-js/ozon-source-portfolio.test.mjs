@@ -10,6 +10,7 @@ import {
   enrichCurrentRunStrictSourceYieldRows,
   refreshSourcePortfolio,
   sourceScanCheckpointPath,
+  sourcePortfolioDerivedQueryLimit,
 } from "../scripts/ozon_source_portfolio.mjs";
 
 const good = "https://www.ozon.ru/seller/safe-toys/";
@@ -563,6 +564,46 @@ test("portfolio reallocates an empty FBS budget to distinct new exploration fami
     seedUrls,
   );
   assert.equal(portfolio.counts.exploration_sources, 3);
+});
+
+test("portfolio reserves new exploration slots when configured seeds already have evidence", () => {
+  const strictRows = Array.from({ length: 2 }, (_, index) => ({
+    sku: `strict-reserve-${index}`,
+    source_url: `https://www.ozon.ru/seller/strict-reserve-${index}/`,
+    title: `Строгий товар ${index}`,
+    status: "published",
+    strict_confirmed: true,
+    online_status: "selling",
+    stock: 1,
+    profit_rate: 31,
+    shipping_mode: "FBS",
+  }));
+  const seedUrls = Array.from({ length: 8 }, (_, index) => (
+    `https://www.ozon.ru/search/?text=historical-seed-${index}&is_global=true&currency_price=500.000%3B`
+  ));
+  const historicalSeedRows = seedUrls.map((source_url, index) => ({
+    sku: `historical-seed-${index}`,
+    source_url,
+    status: "skipped",
+    reason: "profit_rate<=30",
+  }));
+
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [...strictRows, ...historicalSeedRows],
+    seedUrls,
+    minimumActiveSources: 10,
+    maximumActiveSources: 10,
+  });
+
+  assert.equal(portfolio.counts.strict_sources, 2);
+  assert.equal(portfolio.counts.exploration_sources, 8);
+  assert.equal(seedUrls.some((url) => portfolio.active_urls.includes(url)), false);
+});
+
+test("portfolio derives a deep enough query pool to replace exhausted production sources", () => {
+  assert.equal(sourcePortfolioDerivedQueryLimit(10), 600);
+  assert.equal(sourcePortfolioDerivedQueryLimit(60), 600);
+  assert.equal(sourcePortfolioDerivedQueryLimit(120), 1200);
 });
 
 test("portfolio explores curated safe queries before arbitrary historical title derivations", () => {
