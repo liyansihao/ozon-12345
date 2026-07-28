@@ -212,7 +212,7 @@ test("portfolio keeps a strictly confirmed source active despite a low pure-FBS 
   assert.equal(portfolio.active_urls[0], strictLowFbs);
 });
 
-test("portfolio disables historical high-submit sources below the production pure-FBS floor", () => {
+test("portfolio keeps a clean high-submit source active despite a low pure-FBS sample rate", () => {
   const productiveLowFbs = "https://www.ozon.ru/seller/productive-low-fbs/";
   const fbsRows = Array.from({ length: 10 }, (_, index) => ({
     sku: `candidate-${index}`,
@@ -240,11 +240,11 @@ test("portfolio disables historical high-submit sources below the production pur
   assert.equal(metric?.rates.submit, 0.2);
   assert.equal(metric?.failures.online_product_rejected, 0);
   assert.equal(metric?.prohibited_count, 0);
-  assert.equal(metric?.disabled_reason, "low-pure-fbs-rate");
-  assert.equal(portfolio.active_urls.includes(productiveLowFbs), false);
+  assert.equal(metric?.disabled_reason, null);
+  assert.equal(portfolio.active_urls[0], productiveLowFbs);
 });
 
-test("portfolio disables an entire seller family when its best variant remains below the pure-FBS floor", () => {
+test("portfolio keeps only the clean productive seller variant when its family has low pure-FBS yield", () => {
   const productiveBand = "https://www.ozon.ru/seller/productive-family/?currency_price=150.000%3B&sorting=rating";
   const dryBand = "https://www.ozon.ru/seller/productive-family/?currency_price=500.000%3B&sorting=rating";
   const productiveRows = Array.from({ length: 8 }, (_, index) => ({
@@ -278,11 +278,11 @@ test("portfolio disables an entire seller family when its best variant remains b
   const dry = portfolio.metrics.find((row) => row.source_url === dryBand);
   assert.equal(productive?.rates.pure_fbs, 0.125);
   assert.equal(productive?.rates.submit, 0.125);
-  assert.equal(productive?.family_disabled_reason, "low-pure-fbs-rate");
-  assert.equal(productive?.disabled_reason, "low-pure-fbs-rate");
+  assert.equal(productive?.family_disabled_reason, null);
+  assert.equal(productive?.disabled_reason, null);
   assert.equal(dry?.family_disabled_reason, "low-pure-fbs-rate");
   assert.equal(dry?.disabled_reason, "low-pure-fbs-rate");
-  assert.equal(portfolio.active_urls.includes(productiveBand), false);
+  assert.ok(portfolio.active_urls.includes(productiveBand));
   assert.equal(portfolio.active_urls.includes(dryBand), false);
 });
 
