@@ -769,6 +769,7 @@ async function waitForVerification({
   checkpointEnv = process.env,
 }) {
   const resumeFile = path.join(stateRoot, "resume.request");
+  await clearStaleVerificationResumeRequest(stateRoot);
   await updateOperationalState(stateRoot, currentRun, {
     status: "WAITING_FOR_VERIFICATION",
     reason: "CAPTCHA, slider, MFA, or account security verification is required",
@@ -779,6 +780,17 @@ async function waitForVerification({
   }
   if (fs.existsSync(resumeFile)) await fsp.unlink(resumeFile).catch(() => {});
   await runCheckpoint(appRoot, runDir, "verification-wait", checkpointEnv);
+}
+
+export async function clearStaleVerificationResumeRequest(stateRoot) {
+  const resumeFile = path.join(absolute(stateRoot), "resume.request");
+  try {
+    await fsp.unlink(resumeFile);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 async function writeProcessOwners({

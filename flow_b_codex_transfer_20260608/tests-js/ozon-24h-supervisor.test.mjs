@@ -11,6 +11,7 @@ import {
   capacityPreflightDecision,
   checkpointEnvironment,
   classifyWorkerFailure,
+  clearStaleVerificationResumeRequest,
   cleanupBrowserProfileCaches,
   cleanupProfileCachesForConfig,
   currentRunDisposition,
@@ -398,6 +399,18 @@ test("security checks wait in-place and duplicate profile owners hard-stop", () 
     action: "fatal-stop",
     reason: "duplicate-profile-owner-risk",
   });
+});
+
+test("verification wait discards a stale resume request before accepting a new one", async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-verification-resume-"));
+  const resumeFile = path.join(stateRoot, "resume.request");
+  await fs.writeFile(resumeFile, "stale-request\n");
+
+  assert.equal(await clearStaleVerificationResumeRequest(stateRoot), true);
+  await assert.rejects(fs.access(resumeFile), { code: "ENOENT" });
+  assert.equal(await clearStaleVerificationResumeRequest(stateRoot), false);
+
+  await fs.rm(stateRoot, { recursive: true, force: true });
 });
 
 test("window finalization reconstructs a missing report before exporting five-store CSVs", async () => {
