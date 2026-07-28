@@ -20,6 +20,22 @@ const DEFAULT_SAFE_QUERIES = [
   "силиконовые кухонные принадлежности",
   "набор инструментов ручных",
   "развивающая игрушка",
+  "деревянный пазл",
+  "мозаика детская",
+  "органайзер канцелярский",
+  "набор художественных кистей",
+  "щетка для посуды",
+  "губка для уборки",
+  "крючки самоклеящиеся",
+  "зажимы для пакетов",
+  "мерные ложки кухонные",
+  "форма для льда силиконовая",
+  "контейнер для хранения мелочей",
+  "набор отверток ручных",
+  "кабельные стяжки",
+  "скотч двусторонний",
+  "точилка канцелярская",
+  "линейка школьная",
 ];
 
 function sourceUrl(row) {
@@ -346,7 +362,12 @@ export function buildSourcePortfolio({
   const seen = new Set();
   const strictBudget = Math.max(1, Math.ceil(desired * 0.7));
   const fbsBudget = Math.max(1, Math.ceil(desired * 0.2));
-  const explorationBudget = Math.max(1, desired - strictBudget - fbsBudget);
+  const explorationBudget = Math.max(
+    1,
+    desired
+      - Math.min(strict.length, strictBudget)
+      - Math.min(fbs.length, fbsBudget),
+  );
   for (const row of strict.slice(0, strictBudget)) addUnique(active, seen, row.source_url, limit);
   for (const row of fbs.slice(0, fbsBudget)) addUnique(active, seen, row.source_url, limit);
   const disabledUrls = new Set(disabled.map((row) => sourceYieldKey(row.source_url)));
@@ -355,15 +376,19 @@ export function buildSourcePortfolio({
     .map((row) => row.family_key)
     .filter(Boolean));
   const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
-  let explorationAdded = 0;
-  for (const url of [...seedUrls, ...derivedQueries, ...safeQueryUrls()]) {
+  const evidenceFamilies = new Set(evidence.map((row) => row.family_key).filter(Boolean));
+  const explorationFamilies = new Set();
+  for (const url of [...seedUrls, ...safeQueryUrls(), ...derivedQueries]) {
     const family = sourceYieldKey(url);
+    const dispatchFamily = sourceDispatchFamily(url);
     if (!disabledUrls.has(family)
-      && !disabledFamilies.has(sourceDispatchFamily(url))
+      && !disabledFamilies.has(dispatchFamily)
       && !prohibitedSourceUrl(url)
+      && !evidenceFamilies.has(dispatchFamily)
+      && !explorationFamilies.has(dispatchFamily)
       && !evidenceUrls.has(family)
-      && addUnique(active, seen, url, limit)) explorationAdded += 1;
-    if (explorationAdded >= explorationBudget) break;
+      && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
+    if (explorationFamilies.size >= explorationBudget) break;
   }
   for (const row of strict) {
     for (const variant of nextSellerVariants(row)) {
@@ -376,7 +401,7 @@ export function buildSourcePortfolio({
     if (active.length >= desired) break;
   }
   if (active.length < desired) {
-    for (const url of [...seedUrls, ...derivedQueries, ...safeQueryUrls()]) {
+    for (const url of [...seedUrls, ...safeQueryUrls(), ...derivedQueries]) {
       const family = sourceYieldKey(url);
       if (!disabledUrls.has(family)
         && !disabledFamilies.has(sourceDispatchFamily(url))
@@ -398,7 +423,9 @@ export function buildSourcePortfolio({
       disabled_sources: disabled.length,
       strict_sources: strict.length,
       pure_fbs_sources: fbs.length,
-      exploration_sources: active.filter((url) => !evidence.some((row) => row.source_url === url)).length,
+      exploration_sources: new Set(active
+        .map(sourceDispatchFamily)
+        .filter((family) => family && !evidenceFamilies.has(family))).size,
     },
   };
 }

@@ -304,3 +304,51 @@ test("portfolio fills dispatch families with fresh strict-title searches instead
     new URL(value).searchParams.get("text")?.includes("деревянный конструктор")
   )));
 });
+
+test("portfolio reallocates an empty FBS budget to distinct new exploration families", () => {
+  const yieldRows = Array.from({ length: 7 }, (_, index) => ({
+    sku: `strict-budget-${index}`,
+    source_url: `https://www.ozon.ru/seller/strict-budget-${index}/`,
+    title: `Строгий товар ${index}`,
+    status: "published",
+  }));
+  const seedUrls = [
+    "https://www.ozon.ru/search/?text=новый+источник+один&is_global=true&currency_price=500.000%3B",
+    "https://www.ozon.ru/search/?text=новый+источник+два&is_global=true&currency_price=500.000%3B",
+    "https://www.ozon.ru/search/?text=новый+источник+три&is_global=true&currency_price=500.000%3B",
+  ];
+
+  const portfolio = buildSourcePortfolio({
+    yieldRows,
+    seedUrls,
+    minimumActiveSources: 10,
+    maximumActiveSources: 10,
+  });
+
+  assert.deepEqual(
+    seedUrls.filter((url) => portfolio.active_urls.includes(url)),
+    seedUrls,
+  );
+  assert.equal(portfolio.counts.exploration_sources, 3);
+});
+
+test("portfolio explores curated safe queries before arbitrary historical title derivations", () => {
+  const historicalTitle = "Редкий исторический прибор ультра";
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      sku: "strict-curated-order",
+      source_url: "https://www.ozon.ru/seller/strict-curated-order/",
+      title: historicalTitle,
+      status: "published",
+    }],
+    minimumActiveSources: 2,
+    maximumActiveSources: 2,
+  });
+  const searchTexts = portfolio.active_urls.flatMap((value) => {
+    const url = new URL(value);
+    return url.pathname === "/search/" ? [url.searchParams.get("text")] : [];
+  });
+
+  assert.ok(searchTexts.includes("деревянный конструктор"));
+  assert.equal(searchTexts.includes(historicalTitle.toLowerCase()), false);
+});
