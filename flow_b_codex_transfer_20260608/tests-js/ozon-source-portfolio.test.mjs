@@ -79,6 +79,16 @@ test("production seeds include explicit China highlight sources for standardized
     .every((value) => !["50.000;", "120.000;"].includes(new URL(value).searchParams.get("currency_price"))));
 });
 
+test("production spends live detail capacity only on cards with explicit listing FBS evidence", async () => {
+  const config = JSON.parse(await fs.readFile(
+    path.resolve(import.meta.dirname, "../config/ozon_24h_production.json"),
+    "utf8",
+  ));
+
+  assert.equal(config.flow_env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE, "1");
+  assert.equal(config.flow_env.FLOW_B_VERIFY_LISTING_FBS_DETAIL, "1");
+});
+
 test("portfolio excludes an encoded Russian underwear search before scanning", () => {
   const prohibitedSearch = "https://www.ozon.ru/search/?text=%D0%9A%D0%BE%D0%BC%D0%BF%D0%BB%D0%B5%D0%BA%D1%82+%D0%BD%D0%B8%D0%B6%D0%BD%D0%B5%D0%B3%D0%BE+%D0%B1%D0%B5%D0%BB%D1%8C%D1%8F+SYJWY&is_global=true";
   const portfolio = buildSourcePortfolio({
