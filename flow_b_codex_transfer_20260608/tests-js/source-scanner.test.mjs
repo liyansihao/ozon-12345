@@ -84,6 +84,7 @@ import {
   sourceAdaptiveStableWindow,
   sourceScanLinkTarget,
   sourceScanLinkTargetForSource,
+  normalizeRuntimeSourceYieldRows,
   boundedEvidenceSourceUrls,
   eligibleLinkCountsBySource,
   exhaustedScanFamilyKeys,
@@ -127,6 +128,29 @@ import {
   sourceBatchCollectionMode,
   shouldScanSourcesDuringDetailCooldown,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+
+test("runtime source evidence demotes legacy published rows without strict proof", () => {
+  const source = "https://www.ozon.ru/seller/legacy/";
+  const [legacy, strict] = normalizeRuntimeSourceYieldRows([
+    { sku: "legacy", source_url: source, status: "published" },
+    {
+      sku: "strict",
+      source_url: source,
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 30.01,
+      shipping_mode: "FBS",
+    },
+  ]);
+
+  assert.equal(legacy.status, "submitted");
+  assert.equal(legacy.original_status, "published");
+  assert.equal(legacy.evidence_quality, "legacy-unverified-final");
+  assert.equal(strict.status, "published");
+  assert.equal(strict.strict_confirmed, true);
+});
 
 test("source allowlist constrains derived seller variants to explicitly selected families", () => {
   const urls = [

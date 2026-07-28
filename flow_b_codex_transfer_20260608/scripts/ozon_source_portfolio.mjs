@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 import { prohibitedCategorySkipReason } from "./flow_b_playwright/publish-policy.mjs";
 import {
   deriveSearchSourceUrls,
+  isStrictSourceYieldRow,
+  normalizeRuntimeSourceYieldRows,
   sourceYieldKey,
 } from "./flow_b_playwright/source-scanner.mjs";
 
@@ -60,6 +62,7 @@ function skuRecord(source, sku) {
       reasons: new Set(),
       fbs_statuses: new Set(),
       exact_fbs: false,
+      strict_confirmed: false,
     });
   }
   return source.skus.get(sku);
@@ -160,6 +163,10 @@ export function aggregateSourceEvidence({
     if (row?.title) sku.titles.add(String(row.title));
     if (row?.status) sku.statuses.add(String(row.status));
     if (row?.reason) sku.reasons.add(String(row.reason));
+    if (isStrictSourceYieldRow(row)) {
+      sku.strict_confirmed = true;
+      sku.exact_fbs = true;
+    }
   }
   for (const [index, row] of fbsRows.entries()) {
     const url = sourceUrl(row);
@@ -192,7 +199,7 @@ export function aggregateSourceEvidence({
       || sku.statuses.has("submitted")
       || reasonMatches(sku.reasons, /online-product-rejected|publish-final-status-timeout/i)
     ));
-    const finalConfirmed = skus.filter((sku) => sku.statuses.has("published"));
+    const finalConfirmed = skus.filter((sku) => sku.strict_confirmed);
     const onlineRejected = skus.filter((sku) => reasonMatches(sku.reasons, /online-product-rejected/i));
     const noMatch = skus.filter((sku) => reasonMatches(sku.reasons, /1688-no-reliable-match/i));
     const prohibitedCount = skus.filter((sku) => (
@@ -214,7 +221,7 @@ export function aggregateSourceEvidence({
         online_product_rejected: onlineRejected.length,
         no_reliable_1688_match: noMatch.length,
       },
-      fbs_checked: skus.filter((sku) => sku.fbs_statuses.size > 0).length,
+      fbs_checked: skus.filter((sku) => sku.fbs_statuses.size > 0 || sku.strict_confirmed).length,
       prohibited_count: prohibitedCount,
       source_url_prohibited: prohibitedSourceUrl(source.source_url),
       no_new_candidate_streak: noCandidateStreak(source.scans),
@@ -518,6 +525,30 @@ async function readUrls(filename) {
   }
 }
 
+export function enrichCurrentRunStrictSourceYieldRows(yieldRows = [], publishedRows = []) {
+  const strictBySku = new Map();
+  for (const event of publishedRows || []) {
+    const row = { ...(event?.data || {}), ...event };
+    const sku = String(row?.sku || "").trim();
+    if (!sku || sku === "2815247918") continue;
+    const evidence = {
+      strict_confirmed: true,
+      online_status: row.online_status,
+      stock: row.stock,
+      profit_rate: row.profit_rate,
+      shipping_mode: row.shipping_mode || row.preflight_mode || row.mode,
+    };
+    if (isStrictSourceYieldRow({ status: "published", ...evidence })) strictBySku.set(sku, evidence);
+  }
+  return (yieldRows || []).map((row) => {
+    const sku = String(row?.sku || "").trim();
+    const evidence = strictBySku.get(sku);
+    return evidence && String(row?.status || "") === "published"
+      ? { ...row, ...evidence }
+      : row;
+  });
+}
+
 async function writeAtomic(filename, content) {
   await fsp.mkdir(path.dirname(filename), { recursive: true });
   const temporary = `${filename}.tmp-${process.pid}`;
@@ -537,10 +568,16 @@ export async function refreshSourcePortfolio({
       /source deferred after low pure-FBS yield/i.test(String(row?.reason || ""))
     ))
     : [];
-  const yieldRows = [
+  const rawYieldRows = [
     ...await readJsonLines(path.join(historyDir, "source_yield_history.jsonl")),
     ...(runDir ? await readJsonLines(path.join(runDir, "source_yield.jsonl")) : []),
   ];
+  const currentPublishedRows = runDir
+    ? await readJsonLines(path.join(runDir, "published.jsonl"))
+    : [];
+  const yieldRows = normalizeRuntimeSourceYieldRows(
+    enrichCurrentRunStrictSourceYieldRows(rawYieldRows, currentPublishedRows),
+  );
   const fbsRows = [
     ...await readJsonLines(path.join(historyDir, "fbs_source_history.jsonl")),
     ...(runDir ? await readJsonLines(path.join(runDir, "favorite_collection.jsonl")) : []),

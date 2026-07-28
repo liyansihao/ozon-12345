@@ -1019,6 +1019,29 @@ export function sourceYieldKey(value) {
   }
 }
 
+export function isStrictSourceYieldRow(row = {}) {
+  const value = { ...(row?.data || {}), ...row };
+  const shippingMode = String(value.shipping_mode || value.preflight_mode || value.mode || "").toUpperCase();
+  return String(value.status || "") === "published"
+    && value.strict_confirmed === true
+    && String(value.online_status || "").toLowerCase() === "selling"
+    && Number(value.stock) > 0
+    && Number(value.profit_rate) > 30
+    && shippingMode === "FBS";
+}
+
+export function normalizeRuntimeSourceYieldRows(rows = []) {
+  return (rows || []).map((row) => {
+    if (String(row?.status || "") !== "published" || isStrictSourceYieldRow(row)) return row;
+    return {
+      ...row,
+      status: "submitted",
+      original_status: "published",
+      evidence_quality: "legacy-unverified-final",
+    };
+  });
+}
+
 export function sourceCollectionBlockKey(value) {
   return value ? sourceYieldKey(value) : null;
 }
@@ -3046,7 +3069,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   ].map((value) => path.resolve(value)))];
   const yieldRows = [];
   for (const yieldFile of yieldFiles) {
-    yieldRows.push(...await readJsonLinesIncremental(yieldFile));
+    yieldRows.push(...normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(yieldFile)));
   }
   const productiveSourceSampleKeys = new Set(yieldRows
     .filter((row) => ["favorited", "submitted", "published"].includes(String(row?.status || "")))

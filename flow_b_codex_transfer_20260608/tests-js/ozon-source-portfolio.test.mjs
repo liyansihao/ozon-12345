@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   aggregateSourceEvidence,
   buildSourcePortfolio,
+  enrichCurrentRunStrictSourceYieldRows,
   refreshSourcePortfolio,
   sourceScanCheckpointPath,
 } from "../scripts/ozon_source_portfolio.mjs";
@@ -15,6 +16,46 @@ const good = "https://www.ozon.ru/seller/safe-toys/";
 const rejected = "https://www.ozon.ru/seller/rejected-source/";
 const prohibited = "https://www.ozon.ru/seller/underwear-source/";
 const dry = "https://www.ozon.ru/seller/ambiguous-source/";
+
+test("current authoritative publication upgrades only its matching source-yield row", () => {
+  const source = "https://www.ozon.ru/seller/current-strict/";
+  const rows = enrichCurrentRunStrictSourceYieldRows([
+    { sku: "strict-current", source_url: source, status: "published" },
+    { sku: "legacy-other", source_url: source, status: "published" },
+  ], [{
+    sku: "strict-current",
+    online_status: "selling",
+    stock: 1,
+    profit_rate: 31,
+    shipping_mode: "FBS",
+  }]);
+
+  assert.equal(rows[0].strict_confirmed, true);
+  assert.equal(rows[0].online_status, "selling");
+  assert.equal(rows[0].profit_rate, 31);
+  assert.equal(rows[1].strict_confirmed, undefined);
+});
+
+test("source funnel counts only strict-proof publications as final confirmations", () => {
+  const source = "https://www.ozon.ru/seller/strict-proof/";
+  const [row] = aggregateSourceEvidence({
+    yieldRows: [{
+      sku: "strict-proof",
+      source_url: source,
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 31,
+      shipping_mode: "FBS",
+    }],
+  });
+
+  assert.equal(row.funnel.final_confirmed, 1);
+  assert.equal(row.funnel.pure_fbs, 1);
+  assert.equal(row.rates.final_confirmed, 1);
+  assert.equal(row.rates.pure_fbs, 1);
+});
 
 test("production seeds include explicit China highlight sources for standardized safe goods", async () => {
   const seedText = await fs.readFile(
@@ -172,6 +213,11 @@ test("portfolio preserves a strict-confirmed search variant while disabling its 
     source_url: strict150,
     status: "published",
     title: "Силиконовая подставка",
+    strict_confirmed: true,
+    online_status: "selling",
+    stock: 1,
+    profit_rate: 31,
+    shipping_mode: "FBS",
   }];
   const fbsRows = Array.from({ length: 4 }, (_, index) => ({
     sku: `dry-search-${index}`,
@@ -236,7 +282,17 @@ test("current strict FBS failure overrides stale listing-FBS source evidence", a
 
 test("source evidence records the complete candidate-to-final funnel per source", () => {
   const yieldRows = [
-    { sku: "1", source_url: good, title: "Деревянный конструктор", status: "published" },
+    {
+      sku: "1",
+      source_url: good,
+      title: "Деревянный конструктор",
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 31,
+      shipping_mode: "FBS",
+    },
     { sku: "2", source_url: good, title: "Набор кубиков", status: "submitted", reason: "publish-final-status-timeout" },
     { sku: "3", source_url: good, title: "Игрушечная машинка", status: "skipped", reason: "profit_rate<=30" },
     { sku: "4", source_url: good, title: "Плюшевый щенок", status: "skipped", reason: "1688-no-reliable-match" },
@@ -356,6 +412,11 @@ test("portfolio reallocates an empty FBS budget to distinct new exploration fami
     source_url: `https://www.ozon.ru/seller/strict-budget-${index}/`,
     title: `Строгий товар ${index}`,
     status: "published",
+    strict_confirmed: true,
+    online_status: "selling",
+    stock: 1,
+    profit_rate: 31,
+    shipping_mode: "FBS",
   }));
   const seedUrls = [
     "https://www.ozon.ru/search/?text=новый+источник+один&is_global=true&currency_price=500.000%3B",

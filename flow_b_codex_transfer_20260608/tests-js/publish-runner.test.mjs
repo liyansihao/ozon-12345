@@ -14,8 +14,38 @@ import {
   offerIdForSku,
   prioritizePublishCandidates,
   restoredDailyStoreUsage,
+  strictSourceYieldEvidence,
   verifiedWarehouseCandidates,
 } from "../scripts/flow_b_playwright/publish-runner.mjs";
+
+test("source-yield strict proof requires selling stock profit and pure FBS", () => {
+  assert.deepEqual(strictSourceYieldEvidence({
+    onlineProduct: { online_status: "selling", stock: 1 },
+    profitRate: 30.01,
+    shippingMode: "FBS",
+  }), {
+    strict_confirmed: true,
+    online_status: "selling",
+    stock: 1,
+    profit_rate: 30.01,
+    shipping_mode: "FBS",
+  });
+  assert.deepEqual(strictSourceYieldEvidence({
+    onlineProduct: { online_status: "selling", stock: 0 },
+    profitRate: 31,
+    shippingMode: "FBS",
+  }), {});
+  assert.deepEqual(strictSourceYieldEvidence({
+    onlineProduct: { online_status: "selling", stock: 1 },
+    profitRate: 30,
+    shippingMode: "FBS",
+  }), {});
+  assert.deepEqual(strictSourceYieldEvidence({
+    onlineProduct: { online_status: "selling", stock: 1 },
+    profitRate: 31,
+    shippingMode: "FBO",
+  }), {});
+});
 
 test("duplicate title keys require a long exact normalized title", () => {
   assert.equal(duplicateTitleKey("Комплект трусов"), null);

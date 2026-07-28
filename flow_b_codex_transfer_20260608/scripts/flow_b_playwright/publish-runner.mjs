@@ -8,6 +8,7 @@ import {
   fullFunnelSourceScores,
   clearJsonLinesFileCache,
   jsonLinesFileCacheStats,
+  normalizeRuntimeSourceYieldRows,
   observedTitleFamilyScores,
   productTitleFamily,
   productTitlePriority,
@@ -21,6 +22,25 @@ const ECONOMY_SENTINEL = Object.freeze({
   price_list: { logistics_name: "CEL", logistics_speed: "economy" },
 });
 const observedPublishFeedbackCompositeCache = new Map();
+
+export function strictSourceYieldEvidence({
+  onlineProduct,
+  profitRate,
+  shippingMode,
+} = {}) {
+  const onlineStatus = String(onlineProduct?.online_status || "").toLowerCase();
+  const stock = Number(onlineProduct?.stock);
+  const profit = Number(profitRate);
+  const mode = String(shippingMode || "").toUpperCase();
+  if (onlineStatus !== "selling" || !(stock > 0) || !(profit > 30) || mode !== "FBS") return {};
+  return {
+    strict_confirmed: true,
+    online_status: onlineStatus,
+    stock,
+    profit_rate: profit,
+    shipping_mode: "FBS",
+  };
+}
 
 export function duplicateTitleKey(value) {
   const normalized = defaultPolicy.normalizeName(value);
@@ -277,7 +297,7 @@ export async function loadObservedPublishFeedback(runDir, seedFiles = []) {
   if (cached
     && cached.histories.length === histories.length
     && cached.histories.every((history, index) => history === histories[index])) return cached.value;
-  const rows = histories.flat();
+  const rows = normalizeRuntimeSourceYieldRows(histories.flat());
   const value = {
     familyScores: observedTitleFamilyScores(rows),
     sourceScores: fullFunnelSourceScores(rows),
@@ -925,7 +945,18 @@ export function createPublishRunner({
         fbs_evidence: fbsEvidence,
         published_at: now().toISOString(),
       });
-      return { status: "published", sku, source_url: item.source_url ?? null, payload, finalResult };
+      return {
+        status: "published",
+        sku,
+        source_url: item.source_url ?? null,
+        payload,
+        finalResult,
+        source_yield_evidence: strictSourceYieldEvidence({
+          onlineProduct,
+          profitRate: profit.profit_rate,
+          shippingMode: "FBS",
+        }),
+      };
     } catch (error) {
       if (isFatalBrowserError(error)) throw error;
       const deterministicReason = deterministicProfitFailureReason(error);
@@ -1607,7 +1638,17 @@ export function createPublishRunner({
               reconciled_at: now().toISOString(),
               published_at: now().toISOString(),
             });
-            return { status: "published", sku, source_url: item.source_url ?? null, reconciled: true };
+            return {
+              status: "published",
+              sku,
+              source_url: item.source_url ?? null,
+              reconciled: true,
+              source_yield_evidence: strictSourceYieldEvidence({
+                onlineProduct: existing,
+                profitRate: item.profit_rate,
+                shippingMode: item.shipping_mode || item.preflight_mode || item.mode,
+              }),
+            };
           }
           const pendingOfferId = importLog?.offer_id || item.offer_id;
           if (pendingOfferId && (importLog || item.submitted || item.submission_pending)) {
@@ -1653,7 +1694,17 @@ export function createPublishRunner({
                 reconciled_at: now().toISOString(),
                 published_at: now().toISOString(),
               });
-              return { status: "published", sku, source_url: item.source_url ?? null, reconciled: true };
+              return {
+                status: "published",
+                sku,
+                source_url: item.source_url ?? null,
+                reconciled: true,
+                source_yield_evidence: strictSourceYieldEvidence({
+                  onlineProduct: existing,
+                  profitRate: item.profit_rate,
+                  shippingMode: item.shipping_mode || item.preflight_mode || item.mode,
+                }),
+              };
             }
           }
           if (importLog) {
@@ -1749,6 +1800,7 @@ export function createPublishRunner({
             title_family: productTitleFamily(item?.title),
             status: result.status,
             reason: result.reason ?? null,
+            ...(result.source_yield_evidence || {}),
           });
         }
         if (result.status === "failed") adaptive.recordFailure(result.error || new Error(result.reason || "publish-failed"));
