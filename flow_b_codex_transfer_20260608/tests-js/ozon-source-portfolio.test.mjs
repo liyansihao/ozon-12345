@@ -78,6 +78,18 @@ test("production seeds include explicit China highlight sources for standardized
     .every((value) => !["50.000;", "120.000;"].includes(new URL(value).searchParams.get("currency_price"))));
 });
 
+test("portfolio excludes an encoded Russian underwear search before scanning", () => {
+  const prohibitedSearch = "https://www.ozon.ru/search/?text=%D0%9A%D0%BE%D0%BC%D0%BF%D0%BB%D0%B5%D0%BA%D1%82+%D0%BD%D0%B8%D0%B6%D0%BD%D0%B5%D0%B3%D0%BE+%D0%B1%D0%B5%D0%BB%D1%8C%D1%8F+SYJWY&is_global=true";
+  const portfolio = buildSourcePortfolio({
+    seedUrls: [prohibitedSearch, good],
+    minimumActiveSources: 1,
+    maximumActiveSources: 1,
+  });
+
+  assert.equal(portfolio.active_urls.includes(prohibitedSearch), false);
+  assert.ok(portfolio.active_urls.includes(good));
+});
+
 test("portfolio reads the run-authoritative configured scan checkpoint", () => {
   const runDir = "/state/runs/daily-run";
 
