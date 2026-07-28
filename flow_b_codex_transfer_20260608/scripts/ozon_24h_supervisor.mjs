@@ -12,7 +12,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_LABEL = "com.codex.ozon.24h-production";
 const DEFAULT_INSTALL_ROOT = path.join(process.env.HOME || "/Users/mac", ".ozon-24h-production");
 const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|安全检查|验证码/i;
-const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
+const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
 
 function absolute(value, fallback) {
   return path.resolve(String(value || fallback || ""));
@@ -314,6 +314,62 @@ async function cdpReady(endpoint, timeoutMs = 1500) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function waitForWorkerOrBrowserFailure(worker, {
+  cdpEndpoint,
+  probeIntervalMs = 15_000,
+  probeTimeoutMs = 3_000,
+  failureThreshold = 2,
+  cdpReadyFn = cdpReady,
+  delayFn = delay,
+} = {}) {
+  const interval = Math.max(1, Number(probeIntervalMs) || 15_000);
+  const timeout = Math.max(100, Number(probeTimeoutMs) || 3_000);
+  const threshold = Math.max(1, Math.floor(Number(failureThreshold) || 2));
+  let settled = false;
+  return new Promise((resolve) => {
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    worker.once("error", (error) => finish({
+      code: 127,
+      signal: null,
+      error,
+      browser_unhealthy: false,
+    }));
+    worker.once("exit", (code, signal) => finish({
+      code: Number(code ?? 1),
+      signal,
+      error: null,
+      browser_unhealthy: false,
+    }));
+    void (async () => {
+      let consecutiveFailures = 0;
+      while (!settled) {
+        await delayFn(interval);
+        if (settled) return;
+        const healthy = await cdpReadyFn(cdpEndpoint, timeout);
+        if (settled) return;
+        consecutiveFailures = healthy ? 0 : consecutiveFailures + 1;
+        if (consecutiveFailures >= threshold) {
+          finish({
+            code: 1,
+            signal: null,
+            error: new Error(`Chrome CDP health check failed ${consecutiveFailures} consecutive times at ${cdpEndpoint}`),
+            browser_unhealthy: true,
+          });
+        }
+      }
+    })().catch((error) => finish({
+      code: 1,
+      signal: null,
+      error,
+      browser_unhealthy: true,
+    }));
+  });
 }
 
 async function stopExactOwner(pid, waitMs = 10_000) {
@@ -956,10 +1012,14 @@ export async function supervise(configPath) {
         workerPid: worker.pid,
       });
       await updateOperationalState(stateRoot, currentRun, { status: "RUNNING", reason: null });
-      const result = await new Promise((resolve) => {
-        worker.once("error", (error) => resolve({ code: 127, signal: null, error }));
-        worker.once("exit", (code, signal) => resolve({ code: Number(code ?? 1), signal, error: null }));
+      const activeWorker = worker;
+      const result = await waitForWorkerOrBrowserFailure(activeWorker, {
+        cdpEndpoint: config.browser.cdp_endpoint,
+        probeIntervalMs: config.browser.cdp_health_interval_ms,
+        probeTimeoutMs: config.browser.cdp_health_timeout_ms,
+        failureThreshold: config.browser.cdp_health_failure_threshold,
       });
+      if (result.browser_unhealthy) await stopOwnedWorker(activeWorker);
       worker = null;
       await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid });
       if (shuttingDown) break;

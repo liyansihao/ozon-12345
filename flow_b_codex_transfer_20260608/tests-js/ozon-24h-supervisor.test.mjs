@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +20,7 @@ import {
   runFinalArtifacts,
   stopOwnedWorker,
   supervisorShouldHonorSafeStop,
+  waitForWorkerOrBrowserFailure,
   workerEnvironment,
 } from "../scripts/ozon_24h_supervisor.mjs";
 
@@ -265,6 +267,29 @@ test("browser and CDP failures recover the same run with bounded backoff", () =>
     browserOwnerPidsForRecovery({ action: "restart-worker" }, [{ pid: 92462 }]),
     [],
   );
+});
+
+test("supervisor detects an unresponsive CDP while the worker is still running", async () => {
+  const worker = new EventEmitter();
+  const probes = [false, false];
+  const result = await waitForWorkerOrBrowserFailure(worker, {
+    cdpEndpoint: "http://127.0.0.1:9223",
+    probeIntervalMs: 1,
+    probeTimeoutMs: 1,
+    failureThreshold: 2,
+    cdpReadyFn: async () => probes.shift() ?? true,
+    delayFn: async () => {},
+  });
+
+  assert.equal(result.browser_unhealthy, true);
+  assert.match(result.error.message, /CDP health check failed/i);
+  assert.deepEqual(classifyWorkerFailure({
+    message: result.error.message,
+    profileOwnerCount: 1,
+  }), {
+    action: "restart-browser-and-worker",
+    reason: "browser-or-network-recoverable",
+  });
 });
 
 test("security checks wait in-place and duplicate profile owners hard-stop", () => {
