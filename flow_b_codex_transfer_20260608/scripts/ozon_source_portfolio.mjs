@@ -153,7 +153,10 @@ export function aggregateSourceEvidence({
     if (row?.title) sku.titles.add(String(row.title));
     if (row?.status) sku.fbs_statuses.add(String(row.status));
     if (row?.reason) sku.reasons.add(String(row.reason));
-    if (row?.status === "favorited"
+    if (/non-pure-fbs|fbs-confirmation-inconsistent|source deferred after low pure-FBS yield/i
+      .test(String(row?.reason || ""))) {
+      sku.exact_fbs = false;
+    } else if (row?.status === "favorited"
       && String(row?.shipping_mode || row?.preflight_mode || "").toUpperCase() === "FBS") {
       sku.exact_fbs = true;
     }
@@ -482,6 +485,9 @@ export async function refreshSourcePortfolio({
     ...await readJsonLines(path.join(historyDir, "fbs_source_history.jsonl")),
     ...(runDir ? await readJsonLines(path.join(runDir, "favorite_collection.jsonl")) : []),
     ...candidateFbsRows,
+    ...yieldRows.filter((row) => (
+      /non-pure-fbs|fbs-confirmation-inconsistent/i.test(String(row?.reason || ""))
+    )),
   ];
   const sourceConfig = runDir
     ? await readJsonObject(path.join(runDir, "source_config.json"))

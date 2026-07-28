@@ -153,6 +153,42 @@ test("portfolio preserves a strict-confirmed search variant while disabling its 
   );
 });
 
+test("current strict FBS failure overrides stale listing-FBS source evidence", async (t) => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-source-fbs-override-"));
+  t.after(() => fs.rm(stateRoot, { recursive: true, force: true }));
+  const runDir = path.join(stateRoot, "runs", "daily-run");
+  await fs.mkdir(path.join(stateRoot, "history"), { recursive: true });
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.writeFile(path.join(runDir, "favorite_collection.jsonl"), JSON.stringify({
+    at: "2026-07-27T15:00:00.000Z",
+    sku: "stale-fbs-1",
+    source_url: good,
+    status: "favorited",
+    shipping_mode: "FBS",
+  }));
+  await fs.writeFile(path.join(runDir, "source_yield.jsonl"), JSON.stringify({
+    at: "2026-07-28T01:00:00.000Z",
+    sku: "stale-fbs-1",
+    source_url: good,
+    status: "skipped",
+    reason: "fbs-confirmation-inconsistent",
+  }));
+  const seedFile = path.join(stateRoot, "seed.txt");
+  await fs.writeFile(seedFile, `${good}\n`);
+
+  const portfolio = await refreshSourcePortfolio({
+    stateRoot,
+    runDir,
+    seedFile,
+    minimumActiveSources: 1,
+  });
+  const metric = portfolio.metrics.find((row) => row.source_url === good);
+
+  assert.equal(metric.funnel.pure_fbs, 0);
+  assert.equal(metric.fbs_checked, 1);
+  assert.equal(portfolio.counts.pure_fbs_sources, 0);
+});
+
 test("source evidence records the complete candidate-to-final funnel per source", () => {
   const yieldRows = [
     { sku: "1", source_url: good, title: "Деревянный конструктор", status: "published" },
