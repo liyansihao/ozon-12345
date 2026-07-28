@@ -215,10 +215,11 @@ export function aggregateSourceEvidence({
   });
   const families = new Map();
   for (const row of rows) {
-    const family = sellerRoot(row.source_url);
+    const family = sourceDispatchFamily(row.source_url);
     if (!family) continue;
     const aggregate = families.get(family) || {
       source_url: family,
+      family_kind: sourceFamilyKind(row.source_url),
       funnel: Object.fromEntries(Object.keys(row.funnel).map((key) => [key, 0])),
       failures: Object.fromEntries(Object.keys(row.failures).map((key) => [key, 0])),
       fbs_checked: 0,
@@ -238,9 +239,16 @@ export function aggregateSourceEvidence({
     families.set(family, aggregate);
   }
   for (const row of rows) {
-    const family = sellerRoot(row.source_url);
-    const familyReason = family ? disableReason(families.get(family)) : null;
-    if (!row.disabled_reason && familyReason) row.disabled_reason = `seller-family-${familyReason}`;
+    const family = sourceDispatchFamily(row.source_url);
+    const aggregate = family ? families.get(family) : null;
+    const familyReason = aggregate ? disableReason(aggregate) : null;
+    const preserveStrictSource = familyReason === "low-pure-fbs-rate"
+      && row.funnel.final_confirmed > 0;
+    row.family_key = family;
+    row.family_disabled_reason = preserveStrictSource ? null : familyReason;
+    if (!row.disabled_reason && familyReason && !preserveStrictSource) {
+      row.disabled_reason = `${aggregate.family_kind}-family-${familyReason}`;
+    }
   }
   return rows.sort((left, right) => right.score - left.score || left.source_url.localeCompare(right.source_url));
 }
@@ -252,6 +260,31 @@ function sellerRoot(value) {
     return match ? `${url.origin}${match[1]}` : null;
   } catch {
     return null;
+  }
+}
+
+function sourceDispatchFamily(value) {
+  try {
+    const url = new URL(String(value || ""));
+    url.hash = "";
+    url.searchParams.delete("sorting");
+    url.searchParams.delete("currency_price");
+    url.searchParams.delete("page");
+    url.searchParams.sort();
+    return url.toString();
+  } catch {
+    return String(value || "")
+      .replace(/([?&])(?:sorting|currency_price|page)=[^&]*&?/giu, "$1")
+      .replace(/[?&]$/u, "");
+  }
+}
+
+function sourceFamilyKind(value) {
+  if (sellerRoot(value)) return "seller";
+  try {
+    return /^\/search\/?$/iu.test(new URL(String(value || "")).pathname) ? "search" : "source";
+  } catch {
+    return "source";
   }
 }
 
@@ -314,11 +347,16 @@ export function buildSourcePortfolio({
   for (const row of strict.slice(0, strictBudget)) addUnique(active, seen, row.source_url, limit);
   for (const row of fbs.slice(0, fbsBudget)) addUnique(active, seen, row.source_url, limit);
   const disabledUrls = new Set(disabled.map((row) => sourceYieldKey(row.source_url)));
+  const disabledFamilies = new Set(evidence
+    .filter((row) => row.family_disabled_reason)
+    .map((row) => row.family_key)
+    .filter(Boolean));
   const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
   let explorationAdded = 0;
   for (const url of [...seedUrls, ...derivedQueries, ...safeQueryUrls()]) {
     const family = sourceYieldKey(url);
     if (!disabledUrls.has(family)
+      && !disabledFamilies.has(sourceDispatchFamily(url))
       && !prohibitedSourceUrl(url)
       && !evidenceUrls.has(family)
       && addUnique(active, seen, url, limit)) explorationAdded += 1;
@@ -338,6 +376,7 @@ export function buildSourcePortfolio({
     for (const url of [...seedUrls, ...derivedQueries, ...safeQueryUrls()]) {
       const family = sourceYieldKey(url);
       if (!disabledUrls.has(family)
+        && !disabledFamilies.has(sourceDispatchFamily(url))
         && !prohibitedSourceUrl(url)
         && !evidenceUrls.has(family)) {
         addUnique(active, seen, url, limit);

@@ -96,6 +96,63 @@ test("portfolio refresh disables candidate sources with repeated low pure-FBS ou
   assert.equal(portfolio.active_urls.includes(dry), false);
 });
 
+test("portfolio disables a low pure-FBS search family across unobserved price bands", () => {
+  const search150 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=150.000%3B";
+  const search500 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=500.000%3B&sorting=rating";
+  const search1000 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=1000.000%3B&sorting=rating";
+  const fbsRows = [
+    { sku: "low-search-1", source_url: search150, status: "deferred", reason: "source deferred after low pure-FBS yield" },
+    { sku: "low-search-2", source_url: search150, status: "deferred", reason: "source deferred after low pure-FBS yield" },
+    { sku: "low-search-3", source_url: search500, status: "deferred", reason: "source deferred after low pure-FBS yield" },
+    { sku: "low-search-4", source_url: search500, status: "deferred", reason: "source deferred after low pure-FBS yield" },
+  ];
+
+  const portfolio = buildSourcePortfolio({
+    fbsRows,
+    seedUrls: [search1000, good],
+    minimumActiveSources: 1,
+  });
+
+  assert.ok(portfolio.disabled.some((row) => row.disabled_reason === "search-family-low-pure-fbs-rate"));
+  assert.equal(portfolio.active_urls.some((value) => (
+    new URL(value).searchParams.get("text") === "плюшевая игрушка"
+  )), false);
+});
+
+test("portfolio preserves a strict-confirmed search variant while disabling its dry price band", () => {
+  const strict150 = "https://www.ozon.ru/search/?text=силиконовая+подставка&is_global=true&currency_price=150.000%3B";
+  const dry500 = "https://www.ozon.ru/search/?text=силиконовая+подставка&is_global=true&currency_price=500.000%3B&sorting=rating";
+  const yieldRows = [{
+    sku: "strict-search-1",
+    source_url: strict150,
+    status: "published",
+    title: "Силиконовая подставка",
+  }];
+  const fbsRows = Array.from({ length: 4 }, (_, index) => ({
+    sku: `dry-search-${index}`,
+    source_url: dry500,
+    status: "deferred",
+    reason: "source deferred after low pure-FBS yield",
+  }));
+
+  const portfolio = buildSourcePortfolio({
+    yieldRows,
+    fbsRows,
+    seedUrls: [good],
+    minimumActiveSources: 1,
+  });
+
+  assert.ok(portfolio.active_urls.includes(strict150));
+  assert.equal(
+    portfolio.disabled.find((row) => row.source_url === dry500)?.disabled_reason,
+    "low-pure-fbs-rate",
+  );
+  assert.equal(
+    portfolio.metrics.find((row) => row.source_url === strict150)?.family_disabled_reason,
+    null,
+  );
+});
+
 test("source evidence records the complete candidate-to-final funnel per source", () => {
   const yieldRows = [
     { sku: "1", source_url: good, title: "Деревянный конструктор", status: "published" },
