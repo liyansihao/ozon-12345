@@ -95,6 +95,24 @@ export function matchesRunCommand(line, runDir) {
   return [absolute, relative, basename].filter(Boolean).some((value) => String(line || "").includes(value));
 }
 
+export function checkpointProfileDir({
+  env = process.env,
+  productionConfig = {},
+  cwd = process.cwd(),
+} = {}) {
+  const home = String(env?.HOME || "").trim();
+  const configured = String(
+    env?.FLOW_B_PW_PROFILE
+      || productionConfig?.browser?.profile_dir
+      || "runs/flow_b/playwright_setup/playwright_profile",
+  ).trim();
+  const expanded = configured
+    .replaceAll("${HOME}", home)
+    .replace(/^\$HOME(?=\/|$)/u, home)
+    .replace(/^~(?=\/|$)/u, home);
+  return path.resolve(cwd, expanded);
+}
+
 async function processHealth(runDir, profileDir) {
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "pid=,ppid=,command="]);
@@ -137,7 +155,18 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     const at = Date.parse(value?.observed_at || "");
     if (Number.isFinite(at) && at < observedMs) { intervalStartedMs = at; break; }
   }
-  const [snapshot, candidates, timings, selected, published, failed, skipped, runtimeErrors, config] = await Promise.all([
+  const [
+    snapshot,
+    candidates,
+    timings,
+    selected,
+    published,
+    failed,
+    skipped,
+    runtimeErrors,
+    config,
+    productionConfig,
+  ] = await Promise.all([
     snapshotRun(root, observedAt),
     readJsonLines(path.join(root, "candidate_queue.jsonl")),
     readJsonLines(path.join(root, "stage_timings.jsonl")),
@@ -147,6 +176,7 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     readJsonLines(path.join(root, "skipped.jsonl")),
     readJsonLines(path.join(root, "runtime_errors.jsonl")),
     readJson(path.join(root, "source_config.json"), {}),
+    readJson(path.resolve(import.meta.dirname, "../config/ozon_24h_production.json"), {}),
   ]);
   const cumulativeFailures = [...failed, ...skipped, ...runtimeErrors];
   const intervalFailures = cumulativeFailures.filter((row) => inInterval(row, intervalStartedMs, observedMs));
@@ -167,7 +197,7 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
     submitted: uniqueSkuCount(selected.filter((row) => inInterval(row, intervalStartedMs, observedMs))),
     final_confirmed: intervalStrict.length,
   };
-  const profileDir = process.env.FLOW_B_PW_PROFILE || path.resolve("runs/flow_b/playwright_setup/playwright_profile");
+  const profileDir = checkpointProfileDir({ productionConfig });
   return {
     observed_at: new Date(observedMs).toISOString(),
     interval: {

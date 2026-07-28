@@ -3,13 +3,29 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildCheckpoint, matchesRunCommand } from "../scripts/flow_b_checkpoint.mjs";
+import {
+  buildCheckpoint,
+  checkpointProfileDir,
+  matchesRunCommand,
+} from "../scripts/flow_b_checkpoint.mjs";
 
 test("checkpoint liveness matches relative and absolute run directory command lines", () => {
   const absolute = "/workspace/project/runs/flow_b/20260721_v63";
   assert.equal(matchesRunCommand("run_acceptance_supervised.sh runs/flow_b/20260721_v63 urls.txt", absolute), true);
   assert.equal(matchesRunCommand(`flow_b_playwright.mjs accept ${absolute} urls.txt`, absolute), true);
   assert.equal(matchesRunCommand("run_acceptance_supervised.sh runs/flow_b/another-run urls.txt", absolute), false);
+});
+
+test("checkpoint liveness falls back to the frozen production browser profile", () => {
+  assert.equal(checkpointProfileDir({
+    env: { HOME: "/Users/operator" },
+    productionConfig: {
+      browser: {
+        profile_dir: "${HOME}/.ozon-production/profile",
+      },
+    },
+    cwd: "/workspace/project",
+  }), "/Users/operator/.ozon-production/profile");
 });
 
 test("checkpoint reports interval/cumulative strict truth, funnel, failures, and profit floor", async (t) => {
