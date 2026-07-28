@@ -495,6 +495,23 @@ export function createPublishRunner({
     });
   }
 
+  function recordCurrentStore(targetConfig, reason = "active") {
+    metricsChain = metricsChain.then(async () => {
+      const filename = path.join(runDir, "current_store.json");
+      const temp = `${filename}.${process.pid}.tmp`;
+      const value = {
+        at: now().toISOString(),
+        store_id: Number(targetConfig?.store?.id || 0),
+        store_name: String(targetConfig?.store?.name || targetConfig?.store?.title || "").trim() || null,
+        warehouse_id: Number(targetConfig?.warehouseId || 0) || null,
+        reason,
+      };
+      await fs.mkdir(runDir, { recursive: true });
+      await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`);
+      await fs.rename(temp, filename);
+    });
+  }
+
   function recordStoreTargetMetric(row) {
     const key = String(Number(row?.store_id || 0));
     const signature = JSON.stringify(row);
@@ -1321,6 +1338,7 @@ export function createPublishRunner({
           const nextConfig = await resolveTargetConfig(activeTargetIndex);
           storeSwitches.push({ from_store_id: fromStoreId, to_store_id: Number(nextConfig.store.id), reason });
           recordMetric("store_switches.jsonl", storeSwitches.at(-1));
+          recordCurrentStore(nextConfig, reason);
           haltReason = null;
           return nextConfig;
         } catch (error) {
@@ -1409,6 +1427,10 @@ export function createPublishRunner({
         }
       }
     }
+    recordCurrentStore(
+      targetConfig,
+      storeSwitches.at(-1)?.reason || initialPauseReason || "active",
+    );
     const facts = await loadCandidateFacts(runDir, candidateFactSeedFiles);
     const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
     const favorites = (await client.listFavorites()).map((item) => {

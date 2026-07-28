@@ -755,6 +755,38 @@ test("runner skips a store whose daily creation quota is already exhausted", asy
   assert.deepEqual(result.store_switches, [{ from_store_id: 104965, to_store_id: 106637, reason: "daily-product-limit" }]);
 });
 
+test("runner persists the current store even when no store switch occurs", async (t) => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-current-store-"));
+  t.after(() => fs.rm(runDir, { recursive: true, force: true }));
+  const state = fakeState();
+  const client = clientFor([], {
+    resolvePublishTarget: async ({ storeId }) => ({
+      store: { id: Number(storeId), name: "丽丽二号" },
+      watermark: { id: 60822, name: "lysh" },
+    }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    runDir,
+    target: 1,
+    storeTargets: [{ id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510 }],
+  }).run();
+
+  assert.equal(result.active_store_id, 106637);
+  const currentStore = JSON.parse(await fs.readFile(path.join(runDir, "current_store.json"), "utf8"));
+  assert.match(currentStore.at, /^20\d\d-/u);
+  assert.deepEqual({ ...currentStore, at: null }, {
+    at: null,
+    store_id: 106637,
+    store_name: "丽丽二号",
+    warehouse_id: 1020005023256510,
+    reason: "active",
+  });
+});
+
 test("date-scoped prior-run usage rotates after the combined store total reaches its cap", async () => {
   const state = fakeState();
   const shopIds = [];
