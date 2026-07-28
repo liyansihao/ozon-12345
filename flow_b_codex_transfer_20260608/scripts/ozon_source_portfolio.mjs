@@ -6,6 +6,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { prohibitedCategorySkipReason } from "./flow_b_playwright/publish-policy.mjs";
+import {
+  deriveSearchSourceUrls,
+  sourceYieldKey,
+} from "./flow_b_playwright/source-scanner.mjs";
 
 const DEFAULT_SAFE_QUERIES = [
   "деревянный конструктор",
@@ -274,8 +278,9 @@ function safeQueryUrls() {
 
 function addUnique(target, seen, value, limit) {
   const normalized = String(value || "").trim();
-  if (!normalized || seen.has(normalized) || target.length >= limit) return false;
-  seen.add(normalized);
+  const family = sourceYieldKey(normalized);
+  if (!normalized || !family || seen.has(family) || target.length >= limit) return false;
+  seen.add(family);
   target.push(normalized);
   return true;
 }
@@ -295,6 +300,12 @@ export function buildSourcePortfolio({
   const fbs = enabled.filter((row) => row.funnel.pure_fbs > 0 && row.funnel.final_confirmed === 0);
   const desired = Math.max(1, Number(minimumActiveSources) || 60);
   const limit = Math.max(desired, Number(maximumActiveSources) || 120);
+  const derivedQueries = deriveSearchSourceUrls(
+    yieldRows,
+    Math.max(desired * 4, 60),
+    ["150.000;", "500.000;"],
+    [1],
+  );
   const active = [];
   const seen = new Set();
   const strictBudget = Math.max(1, Math.ceil(desired * 0.7));
@@ -302,13 +313,14 @@ export function buildSourcePortfolio({
   const explorationBudget = Math.max(1, desired - strictBudget - fbsBudget);
   for (const row of strict.slice(0, strictBudget)) addUnique(active, seen, row.source_url, limit);
   for (const row of fbs.slice(0, fbsBudget)) addUnique(active, seen, row.source_url, limit);
-  const disabledUrls = new Set(disabled.map((row) => row.source_url));
-  const evidenceUrls = new Set(evidence.map((row) => row.source_url));
+  const disabledUrls = new Set(disabled.map((row) => sourceYieldKey(row.source_url)));
+  const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
   let explorationAdded = 0;
-  for (const url of [...seedUrls, ...safeQueryUrls()]) {
-    if (!disabledUrls.has(url)
+  for (const url of [...seedUrls, ...derivedQueries, ...safeQueryUrls()]) {
+    const family = sourceYieldKey(url);
+    if (!disabledUrls.has(family)
       && !prohibitedSourceUrl(url)
-      && !evidenceUrls.has(url)
+      && !evidenceUrls.has(family)
       && addUnique(active, seen, url, limit)) explorationAdded += 1;
     if (explorationAdded >= explorationBudget) break;
   }
@@ -321,6 +333,17 @@ export function buildSourcePortfolio({
   for (const row of enabled) {
     if (!prohibitedSourceUrl(row.source_url)) addUnique(active, seen, row.source_url, limit);
     if (active.length >= desired) break;
+  }
+  if (active.length < desired) {
+    for (const url of [...seedUrls, ...derivedQueries, ...safeQueryUrls()]) {
+      const family = sourceYieldKey(url);
+      if (!disabledUrls.has(family)
+        && !prohibitedSourceUrl(url)
+        && !evidenceUrls.has(family)) {
+        addUnique(active, seen, url, limit);
+      }
+      if (active.length >= desired) break;
+    }
   }
   return {
     generated_at: new Date().toISOString(),

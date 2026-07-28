@@ -93,3 +93,36 @@ test("portfolio disables prohibited, rejected, and ambiguous dry sources without
   assert.equal(portfolio.active_urls.includes(rejected), false);
   assert.equal(portfolio.active_urls.includes(dry), false);
 });
+
+test("portfolio fills dispatch families with fresh strict-title searches instead of page and sorting duplicates", () => {
+  const strictSeller = "https://www.ozon.ru/seller/verified-toys/";
+  const yieldRows = Array.from({ length: 6 }, (_, index) => ({
+    sku: `strict-${index}`,
+    source_url: index % 2
+      ? `${strictSeller}?page=${index + 1}`
+      : `${strictSeller}?sorting=rating&page=${index + 1}`,
+    seller_url: strictSeller,
+    title: `Деревянный конструктор космическая станция ${index}`,
+    status: "published",
+  }));
+  const portfolio = buildSourcePortfolio({
+    yieldRows,
+    seedUrls: [
+      "https://www.ozon.ru/search/?text=статический+источник&is_global=true&sorting=rating",
+      "https://www.ozon.ru/search/?text=статический+источник&is_global=true&sorting=discount&page=2",
+    ],
+    minimumActiveSources: 8,
+  });
+  const dispatchFamily = (value) => {
+    const url = new URL(value);
+    url.searchParams.delete("sorting");
+    url.searchParams.delete("page");
+    return url.toString();
+  };
+  const families = portfolio.active_urls.map(dispatchFamily);
+
+  assert.equal(new Set(families).size, families.length);
+  assert.ok(portfolio.active_urls.some((value) => (
+    new URL(value).searchParams.get("text")?.includes("деревянный конструктор")
+  )));
+});
