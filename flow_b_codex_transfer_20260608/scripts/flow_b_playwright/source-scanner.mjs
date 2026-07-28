@@ -2018,8 +2018,16 @@ export function orderRowsBySourceYield(rows, yieldRows = []) {
     .map(({ row }) => row);
 }
 
-export function shouldYieldAfterRetained({ retainedLinks, retainedAttempted = retainedLinks, pendingSources }) {
-  return Number(retainedLinks) > 0 && Number(retainedAttempted) > 0 && Number(pendingSources) > 0;
+export function shouldYieldAfterRetained({
+  retainedLinks,
+  retainedAttempted = retainedLinks,
+  retainedFavorited = 0,
+  pendingSources,
+}) {
+  return Number(retainedLinks) > 0
+    && Number(retainedAttempted) > 0
+    && Number(retainedFavorited) > 0
+    && Number(pendingSources) > 0;
 }
 
 export function shouldYieldForSourceFeedback({ completedBatches, maximumBatches, pendingSources }) {
@@ -3403,6 +3411,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       );
       emit(`collecting favorites from ${retainedLinks.length} retained product links`);
       let retainedAttempted = 0;
+      let retainedFavorited = 0;
       favoriteBefore = await collectWithCandidateQueue({
         context,
         maozi,
@@ -3418,11 +3427,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         workerPagePool: favoriteWorkerPagePool,
         onResult: (result) => {
           if (result.sku) retainedAttempted += 1;
+          if (result.status === "favorited") retainedFavorited += 1;
         },
       });
       if (shouldYieldAfterRetained({
         retainedLinks: retainedLinks.length,
         retainedAttempted,
+        retainedFavorited,
         pendingSources: pending.length,
       })) {
         return {
@@ -3430,6 +3441,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           records: records.length,
           pending: pending.length,
           retained_attempted: retainedLinks.length,
+          retained_favorited: retainedFavorited,
           activity_count: scanActivityCount,
         };
       }

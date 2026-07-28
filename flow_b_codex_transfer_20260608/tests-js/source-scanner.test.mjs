@@ -2164,8 +2164,19 @@ test("equal-yield retained variants prefer the higher price floor", () => {
   assert.deepEqual(orderRowsBySourceYield([low, high], []).map((row) => row.source_url), [high.source_url, low.source_url]);
 });
 
-test("retained collection yields to the producer loop for fresh source feedback", () => {
-  assert.equal(shouldYieldAfterRetained({ retainedLinks: 60, retainedAttempted: 60, pendingSources: 400 }), true);
+test("retained collection yields only when it creates fresh favorite feedback", () => {
+  assert.equal(shouldYieldAfterRetained({
+    retainedLinks: 60,
+    retainedAttempted: 60,
+    retainedFavorited: 0,
+    pendingSources: 400,
+  }), false);
+  assert.equal(shouldYieldAfterRetained({
+    retainedLinks: 60,
+    retainedAttempted: 60,
+    retainedFavorited: 1,
+    pendingSources: 400,
+  }), true);
   assert.equal(shouldYieldAfterRetained({ retainedLinks: 3, retainedAttempted: 0, pendingSources: 400 }), false);
   assert.equal(shouldYieldAfterRetained({ retainedLinks: 0, retainedAttempted: 0, pendingSources: 400 }), false);
 });
