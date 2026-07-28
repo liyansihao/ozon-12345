@@ -16,6 +16,7 @@ import {
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
   runFinalArtifacts,
+  stopOwnedWorker,
   supervisorShouldHonorSafeStop,
   workerEnvironment,
 } from "../scripts/ozon_24h_supervisor.mjs";
@@ -207,6 +208,27 @@ test("launchd honors an intentional safe stop across computer restart", () => {
   assert.equal(supervisorShouldHonorSafeStop({ status: "STOPPED" }), true);
   assert.equal(supervisorShouldHonorSafeStop({ status: "RUNNING" }), false);
   assert.equal(supervisorShouldHonorSafeStop({ status: "RECOVERING" }), false);
+});
+
+test("safe stop retains the worker identity while its exit handler clears the owner slot", async () => {
+  const signals = [];
+  let owner = {
+    pid: 4242,
+    kill(signal) {
+      signals.push(signal);
+      owner = null;
+    },
+  };
+  const activeWorker = owner;
+  const alive = [true, false, false];
+
+  await stopOwnedWorker(activeWorker, {
+    pidAliveFn: () => alive.shift() ?? false,
+    delayFn: async () => {},
+  });
+
+  assert.equal(owner, null);
+  assert.deepEqual(signals, ["SIGTERM"]);
 });
 
 test("browser and CDP failures recover the same run with bounded backoff", () => {

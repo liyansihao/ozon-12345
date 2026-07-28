@@ -228,6 +228,21 @@ function pidAlive(pid) {
   }
 }
 
+export async function stopOwnedWorker(activeWorker, {
+  pidAliveFn = pidAlive,
+  delayFn = delay,
+  graceMs = 15_000,
+} = {}) {
+  if (!activeWorker) return false;
+  const workerPid = Number(activeWorker.pid);
+  if (!pidAliveFn(workerPid)) return false;
+  activeWorker.kill("SIGTERM");
+  const deadline = Date.now() + Math.max(0, Number(graceMs) || 0);
+  while (pidAliveFn(workerPid) && Date.now() < deadline) await delayFn(100);
+  if (pidAliveFn(workerPid)) activeWorker.kill("SIGKILL");
+  return true;
+}
+
 async function acquireSupervisorLock(stateRoot) {
   const lockDir = path.join(stateRoot, "supervisor.lock");
   await fsp.mkdir(stateRoot, { recursive: true });
@@ -679,12 +694,8 @@ export async function supervise(configPath) {
   let sourceRefreshTimer = null;
   let shuttingDown = false;
   const stopWorker = async () => {
-    if (worker && pidAlive(worker.pid)) {
-      worker.kill("SIGTERM");
-      const deadline = Date.now() + 15_000;
-      while (pidAlive(worker.pid) && Date.now() < deadline) await delay(100);
-      if (pidAlive(worker.pid)) worker.kill("SIGKILL");
-    }
+    const activeWorker = worker;
+    await stopOwnedWorker(activeWorker);
   };
   const onSignal = () => {
     shuttingDown = true;
