@@ -179,7 +179,6 @@
     "FLOW_B_PUBLISH_FEEDBACK_SEED_FILES": "${STATE_ROOT}/history/source_yield_history.jsonl",
     "FLOW_B_SOURCE_ALLOWLIST_FILE": "${STATE_ROOT}/sources/active_urls.txt",
     "FLOW_B_SOURCE_ALLOWLIST_MATCH": "family",
-    "FLOW_B_SOURCE_DISPATCH_MATCH": "page",
     "FLOW_B_1688_SHARED_CACHE": "${STATE_ROOT}/cache/1688_cache.json",
     "FLOW_B_PYTHON": "python3",
     "FLOW_B_1688_SCRIPT": "${APP_ROOT}/scripts/flow_b_1688_sync.py",

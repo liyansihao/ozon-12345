@@ -533,23 +533,6 @@ test("source dispatch and checkpoint completion share one page/sorting family", 
   ]);
 });
 
-test("page-aware source dispatch advances proven sources without rescanning sorting variants", () => {
-  const seller = "https://www.ozon.ru/seller/fluff-joy/?currency_price=500.000%3B";
-  const page2Rating = `${seller}&sorting=rating&page=2`;
-  const page2Discount = `${seller}&sorting=discount&page=2`;
-  const page3Rating = `${seller}&sorting=rating&page=3`;
-  const urls = [page2Rating, page2Discount, page3Rating];
-  const pageAware = { match: "page" };
-
-  assert.deepEqual(deduplicateSourceDispatchFamilies(urls, pageAware), [
-    page2Rating,
-    page3Rating,
-  ]);
-  assert.deepEqual(excludeCompletedSourceFamilies(urls, [page2Discount], pageAware), [
-    page3Rating,
-  ]);
-});
-
 test("exact allowlist dispatch preserves explicit page and sorting variants", () => {
   const seller = "https://www.ozon.ru/seller/fluff-joy/";
   const page3 = `${seller}?page=3`;

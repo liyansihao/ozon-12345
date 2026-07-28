@@ -965,20 +965,6 @@ function exactSourceUrlKey(value) {
   }
 }
 
-function pageSourceUrlKey(value) {
-  try {
-    const url = new URL(String(value));
-    url.hash = "";
-    url.searchParams.delete("sorting");
-    url.searchParams.sort();
-    return url.toString();
-  } catch {
-    return String(value || "")
-      .replace(/([?&])sorting=[^&]*&?/gi, "$1")
-      .replace(/[?&]$/, "");
-  }
-}
-
 export function filterSourceUrlsByAllowlist(urls = [], allowlistUrls = [], { match = "family" } = {}) {
   if (!allowlistUrls.length) return [...urls];
   const key = match === "exact" ? exactSourceUrlKey : sourceUrlKey;
@@ -1093,9 +1079,7 @@ export function deduplicateSearchSourceVariants(urls = []) {
 }
 
 export function sourceDispatchFamilyKey(value, { match = "family" } = {}) {
-  if (match === "exact") return exactSourceUrlKey(value);
-  if (match === "page") return pageSourceUrlKey(value);
-  return sourceYieldKey(value);
+  return match === "exact" ? exactSourceUrlKey(value) : sourceYieldKey(value);
 }
 
 export function deduplicateSourceDispatchFamilies(urls = [], options = {}) {
@@ -3179,9 +3163,6 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const allowlistOptions = {
     match: String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "family").toLowerCase(),
   };
-  const dispatchOptions = {
-    match: String(env.FLOW_B_SOURCE_DISPATCH_MATCH || "family").toLowerCase(),
-  };
   let records = filterSourceRowsByAllowlist(
     await readJsonArrayCached(outputPath),
     allowlistUrls,
@@ -3194,7 +3175,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const prioritizedPending = prioritizeSourceUrls(excludeCompletedSourceFamilies(
     urls,
     done,
-    dispatchOptions,
+    allowlistOptions,
   ), {
     highYieldSources,
     yieldRows,
@@ -3226,7 +3207,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   });
   const pending = interleaveSourcePortfolio(deduplicateSourceDispatchFamilies(
     prioritizedPending,
-    dispatchOptions,
+    allowlistOptions,
   ), yieldRows, {
     strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
     fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
