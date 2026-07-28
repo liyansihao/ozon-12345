@@ -105,6 +105,7 @@ function noCandidateStreak(scans) {
 function cleanProductiveSubmitYield(row) {
   return row.prohibited_count === 0
     && row.failures.online_product_rejected === 0
+    && ratio(row.funnel.pure_fbs, row.fbs_checked) >= 0.2
     && row.funnel.submitted > 0
     && ratio(row.funnel.submitted, row.funnel.scanned) >= 0.1;
 }
