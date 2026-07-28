@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { shouldResumeCurrentRun } from "../scripts/ozon_24h_control.mjs";
+import { resumeMode, shouldResumeCurrentRun } from "../scripts/ozon_24h_control.mjs";
 
 const current = {
   run_id: "20260727_223532_ozon_24h_production",
@@ -27,4 +27,11 @@ test("daily start never silently resumes fatal or completed state", () => {
   assert.equal(shouldResumeCurrentRun({ status: "WINDOW_COMPLETE" }, current), false);
   assert.equal(shouldResumeCurrentRun({ status: "TARGET_NOT_MET" }, current), false);
   assert.equal(shouldResumeCurrentRun({ status: "STOPPED" }, { run_id: "partial" }), false);
+});
+
+test("resume restarts the same checkpoint after an intentional safe stop", () => {
+  assert.equal(resumeMode({ status: "STOPPED" }, current), "restart-current-run");
+  assert.equal(resumeMode({ status: "WAITING_FOR_VERIFICATION" }, current), "verification");
+  assert.equal(resumeMode({ status: "RUNNING" }, current), "wake-supervisor");
+  assert.equal(resumeMode({ status: "STOPPED" }, { run_id: "partial" }), "wake-supervisor");
 });

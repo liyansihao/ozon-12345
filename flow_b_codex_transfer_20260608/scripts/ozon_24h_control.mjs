@@ -31,6 +31,14 @@ export function shouldResumeCurrentRun(status, current) {
   return RESUMABLE_STATUSES.has(String(status?.status || ""));
 }
 
+export function resumeMode(status, current) {
+  if (String(status?.status || "") === "STOPPED" && shouldResumeCurrentRun(status, current)) {
+    return "restart-current-run";
+  }
+  if (String(status?.status || "") === "WAITING_FOR_VERIFICATION") return "verification";
+  return "wake-supervisor";
+}
+
 function expandHome(value) {
   return String(value || "").replaceAll("${HOME}", process.env.HOME || "/Users/mac");
 }
@@ -402,6 +410,9 @@ async function stop(config) {
 
 async function resume(config) {
   const paths = deploymentPaths(config);
+  const status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
+  const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
+  if (resumeMode(status, current) === "restart-current-run") return start(config);
   await fsp.writeFile(path.join(paths.stateRoot, "resume.request"), `${new Date().toISOString()}\n`, "utf8");
   await kickstart(config);
   return { ok: true, resume_requested: true };
