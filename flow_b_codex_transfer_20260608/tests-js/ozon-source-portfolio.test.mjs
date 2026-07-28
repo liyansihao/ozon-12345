@@ -32,6 +32,9 @@ test("production seeds include explicit China highlight sources for standardized
     [...chinaCategoryIds].sort(),
     ["13506", "13517", "13523", "13812"],
   );
+  assert.ok(seedUrls
+    .filter((value) => new URL(value).pathname.includes("/highlight/tovary-iz-kitaya-"))
+    .every((value) => !["50.000;", "120.000;"].includes(new URL(value).searchParams.get("currency_price"))));
 });
 
 test("portfolio reads the run-authoritative configured scan checkpoint", () => {
