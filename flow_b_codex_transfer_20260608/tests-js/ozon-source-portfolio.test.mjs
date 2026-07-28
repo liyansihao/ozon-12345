@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   aggregateSourceEvidence,
@@ -17,6 +19,7 @@ const good = "https://www.ozon.ru/seller/safe-toys/";
 const rejected = "https://www.ozon.ru/seller/rejected-source/";
 const prohibited = "https://www.ozon.ru/seller/underwear-source/";
 const dry = "https://www.ozon.ru/seller/ambiguous-source/";
+const execFileAsync = promisify(execFile);
 
 test("current authoritative publication upgrades only its matching source-yield row", () => {
   const source = "https://www.ozon.ru/seller/current-strict/";
@@ -77,6 +80,34 @@ test("production seeds include explicit China highlight sources for standardized
   assert.ok(seedUrls
     .filter((value) => new URL(value).pathname.includes("/highlight/tovary-iz-kitaya-"))
     .every((value) => !["50.000;", "120.000;"].includes(new URL(value).searchParams.get("currency_price"))));
+});
+
+test("source portfolio CLI refresh runs through the production app symlink", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-source-portfolio-symlink-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "state");
+  const seedFile = path.join(root, "seed.txt");
+  const linkedScript = path.join(root, "ozon_source_portfolio.mjs");
+  await fs.mkdir(stateRoot, { recursive: true });
+  await fs.writeFile(seedFile, `${good}\n`);
+  await fs.symlink(
+    path.resolve(import.meta.dirname, "../scripts/ozon_source_portfolio.mjs"),
+    linkedScript,
+  );
+
+  const result = await execFileAsync(process.execPath, [
+    linkedScript,
+    "refresh",
+    stateRoot,
+    "-",
+    seedFile,
+  ]);
+
+  assert.match(result.stdout, /"ok":true/u);
+  assert.match(
+    await fs.readFile(path.join(stateRoot, "sources", "active_urls.txt"), "utf8"),
+    /safe-toys/u,
+  );
 });
 
 test("portfolio excludes an encoded Russian underwear search before scanning", () => {

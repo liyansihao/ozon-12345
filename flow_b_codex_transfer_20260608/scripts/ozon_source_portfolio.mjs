@@ -696,8 +696,17 @@ async function main(argv = process.argv.slice(2)) {
   process.stdout.write(`${JSON.stringify({ ok: true, counts: portfolio.counts })}\n`);
 }
 
-const invoked = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);
-if (invoked) {
+async function invokedAsMain(argv1 = process.argv[1]) {
+  if (!argv1) return false;
+  const modulePath = fileURLToPath(import.meta.url);
+  try {
+    return await fsp.realpath(path.resolve(argv1)) === await fsp.realpath(modulePath);
+  } catch {
+    return path.resolve(argv1) === path.resolve(modulePath);
+  }
+}
+
+if (await invokedAsMain()) {
   main().catch((error) => {
     process.stderr.write(`${JSON.stringify({ ok: false, error: String(error?.message || error) })}\n`);
     process.exitCode = 1;

@@ -1,11 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { exportSelectedStoreSkus } from "../scripts/export_selected_store_skus.mjs";
 import { exportConfirmedStoreSkus } from "../scripts/export_confirmed_store_skus.mjs";
+
+const execFileAsync = promisify(execFile);
 
 test("selected export deduplicates assignments and always writes all five store files", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-selected-export-"));
@@ -67,4 +71,33 @@ test("SKU exporters reject a missing source without overwriting prior output", a
   );
   assert.equal(await fs.readFile(path.join(selectedOut, "selected_all_stores.csv"), "utf8"), "keep-selected\n");
   assert.equal(await fs.readFile(path.join(confirmedOut, "confirmed_all_stores.csv"), "utf8"), "keep-confirmed\n");
+});
+
+test("confirmed exporter CLI runs when invoked through the production app symlink", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-confirmed-export-symlink-"));
+  const run = path.join(root, "run");
+  const out = path.join(root, "out");
+  const linkedScript = path.join(root, "export_confirmed_store_skus.mjs");
+  await fs.mkdir(run);
+  await fs.writeFile(path.join(run, "published.jsonl"), `${JSON.stringify({
+    status: "published",
+    sku: "103",
+    data: {
+      store_id: 106637,
+      profit_rate: 31,
+      online_status: "selling",
+      stock: 1,
+      published_at: "2026-07-28T01:00:00.000Z",
+    },
+  })}\n`);
+  await fs.symlink(
+    path.resolve(import.meta.dirname, "../scripts/export_confirmed_store_skus.mjs"),
+    linkedScript,
+  );
+
+  await execFileAsync(process.execPath, [linkedScript, run, out]);
+
+  const aggregate = await fs.readFile(path.join(out, "confirmed_all_stores.csv"), "utf8");
+  assert.match(aggregate, /106637,丽丽二号,103/u);
+  await fs.rm(root, { recursive: true, force: true });
 });

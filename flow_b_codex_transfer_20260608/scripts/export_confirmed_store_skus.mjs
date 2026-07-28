@@ -2,6 +2,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const STORES = [
   { id: 104965, name: "丽丽1号" },
@@ -100,7 +101,17 @@ export async function exportConfirmedStoreSkus({ runsRoot, outputDir }) {
   return summary;
 }
 
-if (import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+async function invokedAsMain(argv1 = process.argv[1]) {
+  if (!argv1) return false;
+  const modulePath = fileURLToPath(import.meta.url);
+  try {
+    return await fs.realpath(path.resolve(argv1)) === await fs.realpath(modulePath);
+  } catch {
+    return path.resolve(argv1) === path.resolve(modulePath);
+  }
+}
+
+if (await invokedAsMain()) {
   const root = path.resolve(import.meta.dirname, "..");
   const runsRoot = path.resolve(process.argv[2] || path.join(root, "runs/flow_b"));
   const outputDir = path.resolve(process.argv[3] || path.join(root, "../exports/confirmed_store_skus"));
