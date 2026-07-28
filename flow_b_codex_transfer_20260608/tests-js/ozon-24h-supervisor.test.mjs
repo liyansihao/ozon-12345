@@ -11,6 +11,7 @@ import {
   capacityPreflightDecision,
   checkpointEnvironment,
   classifyWorkerFailure,
+  cleanupBrowserProfileCaches,
   currentRunDisposition,
   nextRestartDelaySeconds,
   pendingPrewarmDue,
@@ -228,6 +229,44 @@ test("window cleanup closes exact browser profile owners without deleting persis
 
   assert.deepEqual(result, [101, 202]);
   assert.deepEqual(stopped, [101, 202]);
+});
+
+test("window cleanup removes only rebuildable browser caches and preserves login state", async () => {
+  const profile = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-browser-profile-"));
+  const cacheFiles = [
+    "Default/Cache/data.bin",
+    "Default/Code Cache/js/code.bin",
+    "Default/GPUCache/gpu.bin",
+    "GraphiteDawnCache/graphite.bin",
+  ];
+  const protectedFiles = [
+    "Default/Cookies",
+    "Default/Local Storage/leveldb/state",
+    "Default/IndexedDB/session/state",
+    "Default/Local Extension Settings/plugin/token",
+    "Local State",
+  ];
+  for (const relative of [...cacheFiles, ...protectedFiles]) {
+    const filename = path.join(profile, relative);
+    await fs.mkdir(path.dirname(filename), { recursive: true });
+    await fs.writeFile(filename, relative);
+  }
+
+  const cleaned = await cleanupBrowserProfileCaches(profile);
+
+  assert.deepEqual(cleaned.sort(), [
+    "Default/Cache",
+    "Default/Code Cache",
+    "Default/GPUCache",
+    "GraphiteDawnCache",
+  ]);
+  for (const relative of cacheFiles) {
+    await assert.rejects(fs.access(path.join(profile, relative)), { code: "ENOENT" });
+  }
+  for (const relative of protectedFiles) {
+    assert.equal(await fs.readFile(path.join(profile, relative), "utf8"), relative);
+  }
+  await fs.rm(profile, { recursive: true, force: true });
 });
 
 test("safe stop retains the worker identity while its exit handler clears the owner slot", async () => {

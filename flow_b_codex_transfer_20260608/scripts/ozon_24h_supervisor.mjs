@@ -396,6 +396,38 @@ export async function stopBrowserProfileOwners(profileDir, {
   return stopped;
 }
 
+const REBUILDABLE_BROWSER_CACHE_PATHS = [
+  "Default/Cache",
+  "Default/Code Cache",
+  "Default/GPUCache",
+  "Default/Media Cache",
+  "Default/DawnGraphiteCache",
+  "Default/DawnWebGPUCache",
+  "ShaderCache",
+  "GrShaderCache",
+  "GraphiteDawnCache",
+  "component_crx_cache",
+];
+
+export async function cleanupBrowserProfileCaches(profileDir, {
+  removeFn = (filename) => fsp.rm(filename, { recursive: true, force: true }),
+} = {}) {
+  const root = absolute(profileDir);
+  const cleaned = [];
+  for (const relative of REBUILDABLE_BROWSER_CACHE_PATHS) {
+    const filename = path.join(root, ...relative.split("/"));
+    try {
+      await fsp.lstat(filename);
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    await removeFn(filename);
+    cleaned.push(relative);
+  }
+  return cleaned;
+}
+
 function chromeArguments(browser) {
   const args = [
     `--remote-debugging-port=${endpointPort(browser.cdp_endpoint)}`,
@@ -980,11 +1012,20 @@ export async function supervise(configPath) {
         await stopOwnedWorker(worker);
         worker = null;
         const stoppedBrowserPids = await stopBrowserProfileOwners(config.browser.profile_dir);
+        let cleanedBrowserCaches = [];
+        let browserCacheCleanupError = null;
+        try {
+          cleanedBrowserCaches = await cleanupBrowserProfileCaches(config.browser.profile_dir);
+        } catch (error) {
+          browserCacheCleanupError = String(error?.message || error);
+        }
         await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
           at: new Date().toISOString(),
           run_dir: runDir,
           action: "window-complete-owner-cleanup",
           stopped_browser_pids: stoppedBrowserPids,
+          cleaned_browser_caches: cleanedBrowserCaches,
+          browser_cache_cleanup_error: browserCacheCleanupError,
           preserved: ["browser-profile", "checkpoint", "dedupe", "run-evidence", "exports"],
         });
         await updateOperationalState(stateRoot, currentRun, {
@@ -995,6 +1036,8 @@ export async function supervise(configPath) {
           owner_cleanup: {
             worker_stopped: true,
             stopped_browser_pids: stoppedBrowserPids,
+            cleaned_browser_caches: cleanedBrowserCaches,
+            browser_cache_cleanup_error: browserCacheCleanupError,
             persisted_state_preserved: true,
           },
         });
