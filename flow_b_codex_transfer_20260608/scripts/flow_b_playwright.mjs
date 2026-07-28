@@ -493,6 +493,7 @@ async function runAcceptance(context, options, env) {
     ended_at: endedAt.toISOString(),
     acceptance_target: acceptanceTarget,
     acceptance_target_policy: env.FLOW_B_ACCEPTANCE_TARGET_POLICY || "fixed",
+    minimum_average_per_hour_exclusive: minimumAveragePerHourExclusive,
   }, null, 2)}\n`);
   const shared = { targetConfigCache: {}, persistent: true, session: null };
   const lowTokenController = createLowTokenInterventionController({

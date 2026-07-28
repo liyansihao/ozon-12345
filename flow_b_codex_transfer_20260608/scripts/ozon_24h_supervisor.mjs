@@ -570,6 +570,7 @@ async function activateFormalWindow({
     ended_at: endedAt.toISOString(),
     acceptance_target: frozenTarget,
     acceptance_target_policy: targetPolicy,
+    minimum_average_per_hour_exclusive: config.acceptance.minimum_average_per_hour_exclusive,
   });
   await writeJsonAtomic(path.join(runDir, "frozen_manifest.json"), {
     run_id: currentRun.run_id,

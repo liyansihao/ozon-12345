@@ -358,6 +358,11 @@ export async function snapshotRun(runDir, observedAt = new Date().toISOString())
       ...config,
       window_started_at: window.started_at || config.window_started_at,
       window_ended_at: window.ended_at || config.window_ended_at,
+      acceptance_target: window.acceptance_target ?? config.acceptance_target,
+      acceptance_target_policy: window.acceptance_target_policy ?? config.acceptance_target_policy,
+      minimum_average_per_hour_exclusive: window.minimum_average_per_hour_exclusive
+        ?? config.minimum_average_per_hour_exclusive
+        ?? null,
     },
     published: await readJsonLines(path.join(root, "published.jsonl")),
     selected: await readJsonLines(path.join(root, "selected.jsonl")),

@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
-import { buildStatusSnapshot, compactStatusSnapshot } from "../scripts/flow_b_status_snapshot.mjs";
+import { buildStatusSnapshot, compactStatusSnapshot, snapshotRun } from "../scripts/flow_b_status_snapshot.mjs";
 
 test("compact status reports strict per-store progress and rolling speed", () => {
   const snapshot = buildStatusSnapshot({
@@ -114,6 +117,20 @@ test("ERP-capacity completion is not rejected because a sub-481 daily cap cannot
   assert.equal(snapshot.strict.total, 1);
   assert.equal(snapshot.strict.per_hour, 0.04);
   assert.equal(snapshot.strict.passed, true);
+});
+
+test("first checkpoint uses the frozen window target before worker source config exists", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-frozen-window-"));
+  await fs.writeFile(path.join(runDir, "acceptance_window.json"), JSON.stringify({
+    started_at: "2026-07-17T00:00:00.000Z",
+    ended_at: "2026-07-18T00:00:00.000Z",
+    acceptance_target: 469,
+    acceptance_target_policy: "erp_remaining_capacity",
+    minimum_average_per_hour_exclusive: null,
+  }));
+
+  const snapshot = await snapshotRun(runDir, "2026-07-17T00:00:01.000Z");
+  assert.equal(snapshot.strict.target, 469);
 });
 
 test("token-light status keeps acceptance blockers without verbose store metadata", () => {
