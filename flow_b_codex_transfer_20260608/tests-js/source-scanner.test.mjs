@@ -210,6 +210,17 @@ test("two pure-FBS favorites promote their seller into bounded source variants b
   assert.ok(variants.some((url) => url.includes("page=3")));
 });
 
+test("production may explicitly explore a seller after one observed pure-FBS favorite", () => {
+  const seller = "https://www.ozon.ru/seller/single-pure-fbs-seed/";
+  const rows = [
+    { at: "2026-07-18T10:00:00.000Z", status: "favorited", sku: "1", seller_url: seller },
+  ];
+
+  assert.deepEqual(pureFbsSellerSourceUrls(rows), []);
+  assert.deepEqual(pureFbsSellerSourceUrls(rows, 1), [seller]);
+  assert.ok(pureFbsSellerSourceVariants(rows, 1).some((url) => url.includes("page=2")));
+});
+
 test("JSONL seed reads reuse unchanged files and only parse appended bytes", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-jsonl-cache-"));
   const filename = path.join(dir, "seed.jsonl");

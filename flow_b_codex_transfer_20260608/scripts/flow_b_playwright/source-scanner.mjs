@@ -1473,7 +1473,7 @@ export function verifiedSellerSourceUrls(yieldRows, minimumPublishedSkus = 2) {
 }
 
 export function pureFbsSellerSourceUrls(yieldRows, minimumFavoritedSkus = 2, limit = 50) {
-  const minimum = Math.max(2, Number(minimumFavoritedSkus) || 2);
+  const minimum = Math.max(1, Number(minimumFavoritedSkus) || 2);
   const maximum = Math.max(0, Number(limit) || 0);
   if (maximum === 0) return [];
   const sellers = new Map();
