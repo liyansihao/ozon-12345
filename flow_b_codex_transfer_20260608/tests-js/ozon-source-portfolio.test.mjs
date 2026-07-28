@@ -144,6 +144,30 @@ test("portfolio disables a low pure-FBS search family across unobserved price ba
   )), false);
 });
 
+test("portfolio keeps a promoted seed price band when an older enabled band has evidence", () => {
+  const oldBand = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=13523&currency_price=500.000%3B";
+  const promotedBand = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=13523&currency_price=1000.000%3B";
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      sku: "old-band-profit-fail",
+      source_url: oldBand,
+      status: "skipped",
+      reason: "profit-upper-bound<=30",
+    }],
+    fbsRows: [{
+      sku: "old-band-profit-fail",
+      source_url: oldBand,
+      status: "favorited",
+      shipping_mode: "FBS",
+    }],
+    seedUrls: [promotedBand],
+    minimumActiveSources: 10,
+    maximumActiveSources: 10,
+  });
+
+  assert.ok(portfolio.active_urls.includes(promotedBand));
+});
+
 test("portfolio preserves a strict-confirmed search variant while disabling its dry price band", () => {
   const strict150 = "https://www.ozon.ru/search/?text=силиконовая+подставка&is_global=true&currency_price=150.000%3B";
   const dry500 = "https://www.ozon.ru/search/?text=силиконовая+подставка&is_global=true&currency_price=500.000%3B&sorting=rating";

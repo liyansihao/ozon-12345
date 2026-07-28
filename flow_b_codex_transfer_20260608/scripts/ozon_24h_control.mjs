@@ -160,6 +160,44 @@ async function copyInitialState(sourceRoot, stateRoot) {
   }
 }
 
+export async function refreshCurrentRunSources({
+  appRoot,
+  stateRoot,
+  current,
+  seedFile = path.join(appRoot, "config", "ozon_source_seed.txt"),
+} = {}) {
+  const absoluteStateRoot = path.resolve(stateRoot);
+  const urlsFile = path.resolve(String(current?.urls_file || ""));
+  const runDir = path.resolve(String(current?.run_dir || ""));
+  if (urlsFile !== path.join(absoluteStateRoot, "sources", "active_urls.txt")) {
+    throw new Error("current run source path is outside the production source state");
+  }
+  if (path.dirname(runDir) !== path.join(absoluteStateRoot, "runs")) {
+    throw new Error("current run directory is outside the production run state");
+  }
+  const sourceRefresh = await run(process.execPath, [
+    path.join(appRoot, "scripts", "ozon_source_portfolio.mjs"),
+    "refresh",
+    absoluteStateRoot,
+    runDir,
+    seedFile,
+  ], { cwd: appRoot });
+  if (!sourceRefresh.ok) {
+    throw new Error(`same-run source portfolio refresh failed: ${sourceRefresh.stderr || sourceRefresh.error}`);
+  }
+  const sourceText = await fsp.readFile(urlsFile, "utf8");
+  if (!sourceText.split(/\r?\n/u).some((line) => /^https:\/\//u.test(line.trim()))) {
+    throw new Error("refreshed same-run source pool has no usable URLs");
+  }
+  const refreshed = {
+    ...current,
+    source_sha256: sha256(sourceText),
+    source_refreshed_at: new Date().toISOString(),
+  };
+  await writeJsonAtomic(path.join(absoluteStateRoot, "current_run.json"), refreshed);
+  return refreshed;
+}
+
 async function installCandidate({ sourceRoot, config, configSource }) {
   const paths = deploymentPaths(config);
   await fsp.mkdir(paths.releases, { recursive: true });
@@ -339,17 +377,31 @@ async function start(config) {
   const status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   if (shouldResumeCurrentRun(status, current)) {
+    const mode = resumeMode(status, current);
+    const resumedCurrent = mode === "restart-current-run"
+      ? await refreshCurrentRunSources({
+        appRoot: paths.appLink,
+        stateRoot: paths.stateRoot,
+        current,
+      })
+      : current;
     await fsp.unlink(path.join(paths.stateRoot, "stop.request")).catch(() => {});
     await writeJsonAtomic(path.join(paths.stateRoot, "operational_status.json"), {
       ...status,
       status: "STARTING",
       reason: "user requested same-run resume",
       observed_at: new Date().toISOString(),
-      run_id: current.run_id,
-      run_dir: current.run_dir,
+      run_id: resumedCurrent.run_id,
+      run_dir: resumedCurrent.run_dir,
     });
     await kickstart(config);
-    return { ok: true, resumed: true, run_id: current.run_id, run_dir: current.run_dir };
+    return {
+      ok: true,
+      resumed: true,
+      run_id: resumedCurrent.run_id,
+      run_dir: resumedCurrent.run_dir,
+      source_sha256: resumedCurrent.source_sha256,
+    };
   }
   const sourceRefresh = await run(process.execPath, [
     path.join(paths.appLink, "scripts", "ozon_source_portfolio.mjs"),

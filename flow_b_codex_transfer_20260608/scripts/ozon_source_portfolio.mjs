@@ -399,8 +399,18 @@ export function buildSourcePortfolio({
     .filter(Boolean));
   const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
   const evidenceFamilies = new Set(evidence.map((row) => row.family_key).filter(Boolean));
-  const explorationFamilies = new Set();
-  const freshExplorationUrls = [...seedUrls, ...explorationUrls(safeQueryUrls(), derivedQueries)];
+  const configuredSeedFamilies = new Set();
+  for (const url of seedUrls) {
+    const family = sourceYieldKey(url);
+    const dispatchFamily = sourceDispatchFamily(url);
+    if (disabledUrls.has(family)
+      || disabledFamilies.has(dispatchFamily)
+      || prohibitedSourceUrl(url)) continue;
+    addUnique(active, seen, url, limit);
+    if (seen.has(family)) configuredSeedFamilies.add(dispatchFamily);
+  }
+  const explorationFamilies = new Set(configuredSeedFamilies);
+  const freshExplorationUrls = explorationUrls(safeQueryUrls(), derivedQueries);
   for (const url of freshExplorationUrls) {
     const family = sourceYieldKey(url);
     const dispatchFamily = sourceDispatchFamily(url);
