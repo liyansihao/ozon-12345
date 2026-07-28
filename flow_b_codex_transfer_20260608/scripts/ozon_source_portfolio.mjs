@@ -115,7 +115,9 @@ function disableReason(row) {
     && ratio(row.failures.no_reliable_1688_match, row.funnel.scanned) >= 0.75) {
     return "1688-identity-ambiguity";
   }
-  if (row.fbs_checked >= 4 && ratio(row.funnel.pure_fbs, row.fbs_checked) < 0.2) {
+  if (row.funnel.final_confirmed === 0
+    && row.fbs_checked >= 4
+    && ratio(row.funnel.pure_fbs, row.fbs_checked) < 0.2) {
     return "low-pure-fbs-rate";
   }
   if (row.no_new_candidate_streak >= 2) return "source-exhausted-no-new-candidates";

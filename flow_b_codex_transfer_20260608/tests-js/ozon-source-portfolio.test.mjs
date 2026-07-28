@@ -170,6 +170,47 @@ test("portfolio refresh disables candidate sources with repeated low pure-FBS ou
   assert.equal(portfolio.active_urls.includes(dry), false);
 });
 
+test("portfolio keeps a strictly confirmed source active despite a low pure-FBS sample rate", () => {
+  const strictLowFbs = "https://www.ozon.ru/seller/strict-low-fbs/";
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      sku: "strict-success",
+      source_url: strictLowFbs,
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 31,
+      shipping_mode: "FBS",
+    }],
+    fbsRows: [
+      {
+        sku: "strict-success",
+        source_url: strictLowFbs,
+        status: "favorited",
+        shipping_mode: "FBS",
+      },
+      ...Array.from({ length: 7 }, (_, index) => ({
+        sku: `non-fbs-${index}`,
+        source_url: strictLowFbs,
+        status: "rejected",
+        reason: "non-pure-fbs",
+      })),
+    ],
+    minimumActiveSources: 1,
+  });
+
+  assert.equal(
+    portfolio.metrics.find((row) => row.source_url === strictLowFbs)?.funnel.final_confirmed,
+    1,
+  );
+  assert.equal(
+    portfolio.disabled.find((row) => row.source_url === strictLowFbs)?.disabled_reason,
+    undefined,
+  );
+  assert.equal(portfolio.active_urls[0], strictLowFbs);
+});
+
 test("portfolio disables a low pure-FBS search family across unobserved price bands", () => {
   const search150 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=150.000%3B";
   const search500 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=500.000%3B&sorting=rating";
