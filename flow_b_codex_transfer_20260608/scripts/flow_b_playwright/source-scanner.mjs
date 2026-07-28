@@ -916,8 +916,9 @@ function sourceUrlPriority(value) {
   try { decoded = decodeURIComponent(raw); } catch {}
   const proven = isProvenSellerSource(raw) ? 1000 : 0;
   const global = /(?:ozon-global|tovary-iz-kitaya|tovary-so-vsego-mira|is_global=true)/i.test(decoded) ? 500 : 0;
+  const explicitChinaCollection = /\/highlight\/tovary-iz-kitaya-[^/?]+/i.test(decoded) ? 400 : 0;
   const targetFamily = /(?:детск|detsk|ребен|odezhd|aksess|accessor|одежд|обув|трус|кепк|панам|носк|заколк|брелок|ремешок|бижутер)/i.test(decoded) ? 250 : 0;
-  return proven + global + targetFamily;
+  return proven + global + explicitChinaCollection + targetFamily;
 }
 
 function observedSearchFamilyPriority(value, familyScores = {}) {

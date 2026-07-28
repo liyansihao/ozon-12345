@@ -821,6 +821,13 @@ test("source scan prioritizes proven sellers, Global China, and target families 
   assert.deepEqual(prioritizeSourceUrls([ordinary, apparel, global, proven]), [proven, global, apparel, ordinary]);
 });
 
+test("an explicit China highlight is sampled before an unverified is_global keyword result", () => {
+  const keyword = "https://www.ozon.ru/search/?text=аксессуар+бижутерии&is_global=true";
+  const china = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=13506";
+
+  assert.deepEqual(prioritizeSourceUrls([keyword, china]), [china, keyword]);
+});
+
 test("fresh seller files are verified discovery while keyword files remain exploration", () => {
   const seller = "https://www.ozon.ru/seller/new-store/";
   const search = "https://www.ozon.ru/search/?text=kids&is_global=true";
