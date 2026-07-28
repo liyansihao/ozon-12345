@@ -12,6 +12,7 @@ import {
   checkpointEnvironment,
   classifyWorkerFailure,
   cleanupBrowserProfileCaches,
+  cleanupProfileCachesForConfig,
   currentRunDisposition,
   nextRestartDelaySeconds,
   pendingPrewarmDue,
@@ -266,6 +267,39 @@ test("window cleanup removes only rebuildable browser caches and preserves login
   for (const relative of protectedFiles) {
     assert.equal(await fs.readFile(path.join(profile, relative), "utf8"), relative);
   }
+  await fs.rm(profile, { recursive: true, force: true });
+});
+
+test("standalone profile cleanup refuses a live owner and reuses the cache whitelist", async () => {
+  await assert.rejects(
+    cleanupProfileCachesForConfig({ browser: {} }),
+    /browser profile_dir is required/,
+  );
+
+  const profile = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-browser-profile-cli-"));
+  const cacheFile = path.join(profile, "Default", "Cache", "data.bin");
+  const cookieFile = path.join(profile, "Default", "Cookies");
+  await fs.mkdir(path.dirname(cacheFile), { recursive: true });
+  await fs.writeFile(cacheFile, "cache");
+  await fs.writeFile(cookieFile, "login");
+
+  await assert.rejects(
+    cleanupProfileCachesForConfig({ browser: { profile_dir: profile } }, {
+      profileOwnersFn: async () => [{ pid: 4242 }],
+    }),
+    (error) => error?.code === "OZON_PROFILE_IN_USE",
+  );
+  assert.equal(await fs.readFile(cacheFile, "utf8"), "cache");
+
+  const result = await cleanupProfileCachesForConfig({ browser: { profile_dir: profile } }, {
+    profileOwnersFn: async (profileDir) => {
+      assert.equal(profileDir, profile);
+      return [];
+    },
+  });
+  assert.deepEqual(result.cleaned_browser_caches, ["Default/Cache"]);
+  assert.equal(await fs.readFile(cookieFile, "utf8"), "login");
+  await assert.rejects(fs.access(cacheFile), { code: "ENOENT" });
   await fs.rm(profile, { recursive: true, force: true });
 });
 

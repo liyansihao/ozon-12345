@@ -428,6 +428,40 @@ export async function cleanupBrowserProfileCaches(profileDir, {
   return cleaned;
 }
 
+export async function cleanupProfileCachesForConfig(config, {
+  profileOwnersFn = profileOwners,
+  cleanupFn = cleanupBrowserProfileCaches,
+} = {}) {
+  const resolvedConfig = expandedConfig(config);
+  const configuredProfileDir = String(resolvedConfig.browser?.profile_dir || "").trim();
+  if (!configuredProfileDir) throw new Error("browser profile_dir is required");
+  const profileDir = absolute(configuredProfileDir);
+  const owners = await profileOwnersFn(profileDir);
+  if (owners.length > 0) {
+    const error = new Error(
+      `refusing browser cache cleanup while profile owner is active: ${owners.map((row) => row.pid).join(",")}`,
+    );
+    error.code = "OZON_PROFILE_IN_USE";
+    throw error;
+  }
+  const cleanedBrowserCaches = await cleanupFn(profileDir);
+  return {
+    profile_dir: profileDir,
+    cleaned_browser_caches: cleanedBrowserCaches,
+    preserved: [
+      "cookies",
+      "local-storage",
+      "indexeddb",
+      "extension-login-state",
+      "local-state",
+      "checkpoint",
+      "dedupe",
+      "run-evidence",
+      "exports",
+    ],
+  };
+}
+
 function chromeArguments(browser) {
   const args = [
     `--remote-debugging-port=${endpointPort(browser.cdp_endpoint)}`,
@@ -1220,7 +1254,16 @@ async function main(argv = process.argv.slice(2)) {
     process.stdout.write(`${JSON.stringify(owner)}\n`);
     return 0;
   }
-  throw new Error("usage: ozon_24h_supervisor.mjs plist | supervise CONFIG_PATH | probe-browser CONFIG_PATH");
+  if (command === "cleanup-profile-caches") {
+    if (!configPath) throw new Error("config path is required");
+    const result = await cleanupProfileCachesForConfig(await readJson(configPath));
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return 0;
+  }
+  throw new Error(
+    "usage: ozon_24h_supervisor.mjs plist | supervise CONFIG_PATH | probe-browser CONFIG_PATH"
+      + " | cleanup-profile-caches CONFIG_PATH",
+  );
 }
 
 const invoked = process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]);

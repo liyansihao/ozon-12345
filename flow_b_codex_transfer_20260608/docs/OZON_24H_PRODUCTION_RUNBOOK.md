@@ -71,6 +71,14 @@
 
 窗口结束后，supervisor 先完成最终 checkpoint、五店 CSV 和 `24h_report.json`，确认工件成功落盘后再停止 worker，并关闭唯一生产 Chrome owner 以释放窗口和内存。Chrome 退出后只清理固定白名单内的 HTTP、Code、GPU 和 Graphite 可重建缓存；Cookie、Local Storage、IndexedDB、扩展登录和 `Local State` 一律保留。清理不会删除浏览器登录 profile、checkpoint、候选队列、跨窗口去重集合、run 证据或导出文件；无论窗口达标还是 `TARGET_NOT_MET`，电脑重启都不会重复执行已完成窗口。手工 `stop` 属于可恢复暂停，不执行终点缓存清理；验证码状态也会保留原 Chrome 窗口。
 
+若需要为旧 release 的已完成窗口补做同样的安全清理，可在确认 `status` 中 browser profile owner 为 0 后运行：
+
+```bash
+scripts/ozon_24h_production.sh cleanup-profile-caches
+```
+
+命令检测到任何 profile owner 时会拒绝执行，不会在 Chrome 仍使用 profile 时删除缓存。
+
 ## 发布候选与回滚
 
 日常生产只使用 stable：
