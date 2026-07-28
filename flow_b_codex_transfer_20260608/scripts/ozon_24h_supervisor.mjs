@@ -12,7 +12,7 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_LABEL = "com.codex.ozon.24h-production";
 const DEFAULT_INSTALL_ROOT = path.join(process.env.HOME || "/Users/mac", ".ozon-24h-production");
 const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|安全检查|验证码/i;
-const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|net::err_/i;
+const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
 
 function absolute(value, fallback) {
   return path.resolve(String(value || fallback || ""));
@@ -81,6 +81,12 @@ export function classifyWorkerFailure({ message = "", profileOwnerCount = 0 } = 
     return { action: "restart-browser-and-worker", reason: "browser-or-network-recoverable" };
   }
   return { action: "restart-worker", reason: "ordinary-worker-recoverable" };
+}
+
+export function browserOwnerPidsForRecovery(decision, owners = []) {
+  if (decision?.action !== "restart-browser-and-worker" || owners.length !== 1) return [];
+  const pid = Number(owners[0]?.pid);
+  return Number.isInteger(pid) && pid > 0 ? [pid] : [];
 }
 
 export function currentRunDisposition(currentRun) {
@@ -984,6 +990,16 @@ export async function supervise(configPath) {
         });
         restartAttempt = 0;
         continue;
+      }
+      for (const pid of browserOwnerPidsForRecovery(decision, owners)) {
+        await stopExactOwner(pid);
+        await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+          at: new Date().toISOString(),
+          run_dir: runDir,
+          action: "recycled-unresponsive-profile-owner",
+          pid,
+          reason: decision.reason,
+        });
       }
       if (Date.now() - startedAt >= 10 * 60_000) restartAttempt = 0;
       const seconds = nextRestartDelaySeconds(restartAttempt++, config.restart_delays_seconds);

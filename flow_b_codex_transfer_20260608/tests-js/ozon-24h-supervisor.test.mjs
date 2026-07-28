@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  browserOwnerPidsForRecovery,
   buildLaunchdPlist,
   capacityPreflightDecision,
   checkpointEnvironment,
@@ -246,6 +247,23 @@ test("browser and CDP failures recover the same run with bounded backoff", () =>
   assert.deepEqual(
     [0, 1, 2, 3, 20].map((attempt) => nextRestartDelaySeconds(attempt)),
     [30, 60, 120, 120, 120],
+  );
+
+  const pageCreateDecision = classifyWorkerFailure({
+    message: "favorite worker page creation timed out after 10000ms",
+    profileOwnerCount: 1,
+  });
+  assert.deepEqual(pageCreateDecision, {
+    action: "restart-browser-and-worker",
+    reason: "browser-or-network-recoverable",
+  });
+  assert.deepEqual(
+    browserOwnerPidsForRecovery(pageCreateDecision, [{ pid: 92462 }]),
+    [92462],
+  );
+  assert.deepEqual(
+    browserOwnerPidsForRecovery({ action: "restart-worker" }, [{ pid: 92462 }]),
+    [],
   );
 });
 

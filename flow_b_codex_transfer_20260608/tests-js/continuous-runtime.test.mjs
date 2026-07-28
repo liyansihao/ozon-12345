@@ -326,6 +326,7 @@ test("producer loop uses 30/60/120 second quiet backoff when source activity is 
 test("closed Playwright contexts are fatal while individual page timeouts are recoverable", () => {
   assert.equal(isFatalBrowserError(new Error("Target page, context or browser has been closed")), true);
   assert.equal(isFatalBrowserError(new Error("browserContext.newPage: Target page has been closed")), true);
+  assert.equal(isFatalBrowserError(new Error("favorite worker page creation timed out after 10000ms")), true);
   const stopped = new Error("Ozon access stopped after soft block");
   stopped.code = "FLOW_B_OZON_ACCESS_STOPPED";
   assert.equal(isFatalBrowserError(stopped), true);
