@@ -383,6 +383,27 @@ async function readJsonArray(filename) {
   }
 }
 
+async function readJsonObject(filename) {
+  try {
+    const value = JSON.parse(await fsp.readFile(filename, "utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  } catch (error) {
+    if (error.code === "ENOENT" || error instanceof SyntaxError) return {};
+    throw error;
+  }
+}
+
+export function sourceScanCheckpointPath(runDir, sourceConfig = {}) {
+  const root = path.resolve(runDir);
+  const fallback = path.join(root, "source_deep_scan.json");
+  const configured = String(sourceConfig?.scan_output || "").trim();
+  if (!configured) return fallback;
+  const candidate = path.resolve(root, configured);
+  return path.dirname(candidate) === root && path.extname(candidate) === ".json"
+    ? candidate
+    : fallback;
+}
+
 async function readUrls(filename) {
   try {
     return (await fsp.readFile(filename, "utf8"))
@@ -417,7 +438,12 @@ export async function refreshSourcePortfolio({
     ...await readJsonLines(path.join(historyDir, "fbs_source_history.jsonl")),
     ...(runDir ? await readJsonLines(path.join(runDir, "favorite_collection.jsonl")) : []),
   ];
-  const scanRows = runDir ? await readJsonArray(path.join(runDir, "source_deep_scan.json")) : [];
+  const sourceConfig = runDir
+    ? await readJsonObject(path.join(runDir, "source_config.json"))
+    : {};
+  const scanRows = runDir
+    ? await readJsonArray(sourceScanCheckpointPath(runDir, sourceConfig))
+    : [];
   const seedUrls = await readUrls(seedFile);
   const portfolio = buildSourcePortfolio({
     yieldRows,

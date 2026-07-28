@@ -1,15 +1,66 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
   aggregateSourceEvidence,
   buildSourcePortfolio,
+  refreshSourcePortfolio,
+  sourceScanCheckpointPath,
 } from "../scripts/ozon_source_portfolio.mjs";
 
 const good = "https://www.ozon.ru/seller/safe-toys/";
 const rejected = "https://www.ozon.ru/seller/rejected-source/";
 const prohibited = "https://www.ozon.ru/seller/underwear-source/";
 const dry = "https://www.ozon.ru/seller/ambiguous-source/";
+
+test("portfolio reads the run-authoritative configured scan checkpoint", () => {
+  const runDir = "/state/runs/daily-run";
+
+  assert.equal(
+    sourceScanCheckpointPath(runDir, {
+      scan_output: "/state/runs/daily-run/source_deep_scan_detail_verified.json",
+    }),
+    "/state/runs/daily-run/source_deep_scan_detail_verified.json",
+  );
+  assert.equal(
+    sourceScanCheckpointPath(runDir, {
+      scan_output: "/state/another-run/foreign.json",
+    }),
+    "/state/runs/daily-run/source_deep_scan.json",
+  );
+});
+
+test("portfolio refresh consumes configured scan exhaustion evidence", async (t) => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-source-portfolio-"));
+  t.after(() => fs.rm(stateRoot, { recursive: true, force: true }));
+  const runDir = path.join(stateRoot, "runs", "daily-run");
+  const historyDir = path.join(stateRoot, "history");
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.mkdir(historyDir, { recursive: true });
+  const scanOutput = path.join(runDir, "source_deep_scan_detail_verified.json");
+  await fs.writeFile(path.join(runDir, "source_config.json"), JSON.stringify({ scan_output: scanOutput }));
+  await fs.writeFile(scanOutput, JSON.stringify([
+    { source_url: dry, eligible_link_count_before_collection: 0 },
+    { source_url: dry, eligible_link_count_before_collection: 0 },
+  ]));
+  const seedFile = path.join(stateRoot, "seed.txt");
+  await fs.writeFile(seedFile, `${good}\n`);
+
+  const portfolio = await refreshSourcePortfolio({
+    stateRoot,
+    runDir,
+    seedFile,
+    minimumActiveSources: 1,
+  });
+
+  assert.equal(
+    portfolio.disabled.find((row) => row.source_url === dry)?.disabled_reason,
+    "source-exhausted-no-new-candidates",
+  );
+});
 
 test("source evidence records the complete candidate-to-final funnel per source", () => {
   const yieldRows = [
