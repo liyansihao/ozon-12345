@@ -243,6 +243,48 @@ test("portfolio keeps a clean high-submit source active despite a low pure-FBS s
   assert.equal(portfolio.active_urls[0], productiveLowFbs);
 });
 
+test("portfolio keeps only the clean productive seller variant when its family has low pure-FBS yield", () => {
+  const productiveBand = "https://www.ozon.ru/seller/productive-family/?currency_price=150.000%3B&sorting=rating";
+  const dryBand = "https://www.ozon.ru/seller/productive-family/?currency_price=500.000%3B&sorting=rating";
+  const productiveRows = Array.from({ length: 8 }, (_, index) => ({
+    sku: `productive-family-${index}`,
+    source_url: productiveBand,
+    status: index === 0 ? "favorited" : "rejected",
+    shipping_mode: index === 0 ? "FBS" : undefined,
+    reason: index === 0 ? undefined : "non-pure-fbs",
+  }));
+  const dryRows = Array.from({ length: 8 }, (_, index) => ({
+    sku: `dry-family-${index}`,
+    source_url: dryBand,
+    status: "rejected",
+    reason: "non-pure-fbs",
+  }));
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      sku: "productive-family-0",
+      source_url: productiveBand,
+      status: "submitted",
+      reason: "publish-final-status-timeout",
+      profit_rate: 40,
+      shipping_mode: "FBS",
+    }],
+    fbsRows: [...productiveRows, ...dryRows],
+    seedUrls: [good],
+    minimumActiveSources: 1,
+  });
+
+  const productive = portfolio.metrics.find((row) => row.source_url === productiveBand);
+  const dry = portfolio.metrics.find((row) => row.source_url === dryBand);
+  assert.equal(productive?.rates.pure_fbs, 0.125);
+  assert.equal(productive?.rates.submit, 0.125);
+  assert.equal(productive?.family_disabled_reason, null);
+  assert.equal(productive?.disabled_reason, null);
+  assert.equal(dry?.family_disabled_reason, "low-pure-fbs-rate");
+  assert.equal(dry?.disabled_reason, "low-pure-fbs-rate");
+  assert.ok(portfolio.active_urls.includes(productiveBand));
+  assert.equal(portfolio.active_urls.includes(dryBand), false);
+});
+
 test("portfolio disables a low pure-FBS search family across unobserved price bands", () => {
   const search150 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=150.000%3B";
   const search500 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=500.000%3B&sorting=rating";

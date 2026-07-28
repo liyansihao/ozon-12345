@@ -102,6 +102,13 @@ function noCandidateStreak(scans) {
   return streak;
 }
 
+function cleanProductiveSubmitYield(row) {
+  return row.prohibited_count === 0
+    && row.failures.online_product_rejected === 0
+    && row.funnel.submitted > 0
+    && ratio(row.funnel.submitted, row.funnel.scanned) >= 0.1;
+}
+
 function disableReason(row) {
   if (row.source_url_prohibited
     || (row.prohibited_count >= 2 && ratio(row.prohibited_count, row.funnel.scanned) >= 0.3)) {
@@ -115,12 +122,8 @@ function disableReason(row) {
     && ratio(row.failures.no_reliable_1688_match, row.funnel.scanned) >= 0.75) {
     return "1688-identity-ambiguity";
   }
-  const cleanProductiveSubmitYield = row.prohibited_count === 0
-    && row.failures.online_product_rejected === 0
-    && row.funnel.submitted > 0
-    && ratio(row.funnel.submitted, row.funnel.scanned) >= 0.1;
   if (row.funnel.final_confirmed === 0
-    && !cleanProductiveSubmitYield
+    && !cleanProductiveSubmitYield(row)
     && row.fbs_checked >= 4
     && ratio(row.funnel.pure_fbs, row.fbs_checked) < 0.2) {
     return "low-pure-fbs-rate";
@@ -277,9 +280,12 @@ export function aggregateSourceEvidence({
     const familyReason = aggregate ? disableReason(aggregate) : null;
     const preserveStrictSource = familyReason === "low-pure-fbs-rate"
       && row.funnel.final_confirmed > 0;
+    const preserveProductiveSource = familyReason === "low-pure-fbs-rate"
+      && cleanProductiveSubmitYield(row);
+    const preserveSource = preserveStrictSource || preserveProductiveSource;
     row.family_key = family;
-    row.family_disabled_reason = preserveStrictSource ? null : familyReason;
-    if (!row.disabled_reason && familyReason && !preserveStrictSource) {
+    row.family_disabled_reason = preserveSource ? null : familyReason;
+    if (!row.disabled_reason && familyReason && !preserveSource) {
       row.disabled_reason = `${aggregate.family_kind}-family-${familyReason}`;
     }
   }
