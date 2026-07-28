@@ -46,6 +46,20 @@ test("24-hour acceptance preflight accepts the verified five-store contract", ()
   assert.equal(result.target, 481);
 });
 
+test("24-hour acceptance preflight accepts one frozen live ERP capacity target", () => {
+  const env = {
+    ...validEnv(),
+    FLOW_B_ACCEPTANCE_TARGET_POLICY: "erp_remaining_capacity",
+    FLOW_B_ACCEPTANCE_TARGET: "469",
+    FLOW_B_TARGET_PUBLISH_COUNT: "469",
+    FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE: "",
+  };
+  const result = validate24hAcceptanceEnv(env);
+  assert.equal(result.target, 469);
+  assert.equal(result.target_policy, "erp_remaining_capacity");
+  assert.equal(result.minimum_average_per_hour_exclusive, null);
+});
+
 test("24-hour acceptance preflight rejects a relaxed or implicit profit threshold", () => {
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_PROFIT_THRESHOLD: "29.99" }),

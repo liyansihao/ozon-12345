@@ -356,6 +356,12 @@ export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) 
   const published = publishedEvents.map((row) => ({ ...row, ...(row.data || {}) }));
   let sourceConfig = {};
   try { sourceConfig = JSON.parse(await fs.readFile(path.join(runDir, "source_config.json"), "utf8")); } catch {}
+  const minimumAveragePerHourExclusive = Object.prototype.hasOwnProperty.call(
+    sourceConfig,
+    "minimum_average_per_hour_exclusive",
+  )
+    ? sourceConfig.minimum_average_per_hour_exclusive
+    : 20;
   const acceptance = acceptanceSummary({
     rows: published,
     startedAt,
@@ -363,7 +369,7 @@ export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) 
     target,
     storeIds: (sourceConfig.store_targets || []).map((entry) => entry?.id),
     perStoreTarget: sourceConfig.per_store_target ?? null,
-    minimumAveragePerHourExclusive: 20,
+    minimumAveragePerHourExclusive,
     requireZeroDuplicates: true,
   });
   const windowStart = Date.parse(startedAt);
@@ -423,6 +429,12 @@ export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) 
 async function runAcceptance(context, options, env) {
   const durationMs = Math.max(1_000, Number(env.FLOW_B_ACCEPTANCE_SECONDS || 7200) * 1000);
   const acceptanceTarget = Math.max(1, Number(env.FLOW_B_ACCEPTANCE_TARGET || 50));
+  const minimumAverageRaw = env.FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE;
+  const minimumAveragePerHourExclusive = minimumAverageRaw === undefined
+    ? 20
+    : String(minimumAverageRaw).trim() === ""
+      ? null
+      : Number(minimumAverageRaw);
   const authPage = await openMaoziPage(context, { forceNew: true, settleMs: 1500 });
   try {
     await ensureMaoziLogin(authPage, { continueDeviceLogin: true, timeout: 60000 });
@@ -464,7 +476,8 @@ async function runAcceptance(context, options, env) {
     window_ended_at: endedAt.toISOString(),
     publish_target: options.target,
     acceptance_target: acceptanceTarget,
-    minimum_average_per_hour_exclusive: 20,
+    acceptance_target_policy: env.FLOW_B_ACCEPTANCE_TARGET_POLICY || "fixed",
+    minimum_average_per_hour_exclusive: minimumAveragePerHourExclusive,
     per_store_target: perStoreAcceptanceTarget(env),
     store_id: Number(env.FLOW_B_STORE_ID || 104965),
     store_targets: storeTargets,
@@ -475,7 +488,12 @@ async function runAcceptance(context, options, env) {
     initial_concurrency: Number(env.FLOW_B_PUBLISH_WORKERS || 8),
     max_concurrency: Number(env.FLOW_B_MAX_PUBLISH_WORKERS || 12),
   });
-  await fs.writeFile(windowPath, `${JSON.stringify({ started_at: startedAt.toISOString(), ended_at: endedAt.toISOString() }, null, 2)}\n`);
+  await fs.writeFile(windowPath, `${JSON.stringify({
+    started_at: startedAt.toISOString(),
+    ended_at: endedAt.toISOString(),
+    acceptance_target: acceptanceTarget,
+    acceptance_target_policy: env.FLOW_B_ACCEPTANCE_TARGET_POLICY || "fixed",
+  }, null, 2)}\n`);
   const shared = { targetConfigCache: {}, persistent: true, session: null };
   const lowTokenController = createLowTokenInterventionController({
     runDir: options.runDir,

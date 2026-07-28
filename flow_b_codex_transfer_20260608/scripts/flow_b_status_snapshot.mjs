@@ -216,6 +216,13 @@ export function buildStatusSnapshot({
   }
   const complete = observedMs >= endedMs;
   const storesPassed = !requirePerStore || Object.values(remainingByStore).every((remaining) => remaining === 0);
+  const configuredMinimumAverage = config.minimum_average_per_hour_exclusive;
+  const hasMinimumAverage = configuredMinimumAverage !== null
+    && configuredMinimumAverage !== undefined
+    && String(configuredMinimumAverage).trim() !== ""
+    && Number.isFinite(Number(configuredMinimumAverage));
+  const speedPassed = !hasMinimumAverage
+    || strict.length / Math.max(elapsedHours, Number.EPSILON) > Number(configuredMinimumAverage);
   const paceDeadlineMs = startedMs + (totalTarget / 35) * 3_600_000;
   const paceCounts = Object.fromEntries(storeIds.map((id) => [String(id), 0]));
   let targetReachedMs = null;
@@ -258,7 +265,7 @@ export function buildStatusSnapshot({
       passed: complete
         && strict.length >= totalTarget
         && storesPassed
-        && strict.length / Math.max(elapsedHours, Number.EPSILON) > 20,
+        && speedPassed,
     },
     pace_35: {
       deadline_at: new Date(paceDeadlineMs).toISOString(),

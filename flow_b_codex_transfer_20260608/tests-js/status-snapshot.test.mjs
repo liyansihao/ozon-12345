@@ -90,6 +90,32 @@ test("35 per hour pace uses time to complete every store quota, not the idle 24 
   assert.equal(snapshot.pace_35.passed, true);
 });
 
+test("ERP-capacity completion is not rejected because a sub-481 daily cap cannot average 20 over 24 hours", () => {
+  const snapshot = buildStatusSnapshot({
+    config: {
+      window_started_at: "2026-07-17T00:00:00.000Z",
+      window_ended_at: "2026-07-18T00:00:00.000Z",
+      acceptance_target: 1,
+      minimum_average_per_hour_exclusive: null,
+      per_store_target: null,
+      store_targets: [{ id: 2, needle: "丽丽二号" }],
+    },
+    published: [{
+      sku: "capacity-final",
+      store_id: 2,
+      profit_rate: 31,
+      online_status: "selling",
+      stock: 1,
+      published_at: "2026-07-17T23:59:00.000Z",
+    }],
+    observedAt: "2026-07-18T00:00:00.000Z",
+  });
+
+  assert.equal(snapshot.strict.total, 1);
+  assert.equal(snapshot.strict.per_hour, 0.04);
+  assert.equal(snapshot.strict.passed, true);
+});
+
 test("token-light status keeps acceptance blockers without verbose store metadata", () => {
   const compact = compactStatusSnapshot({
     observed_at: "2026-07-17T02:00:00.000Z",

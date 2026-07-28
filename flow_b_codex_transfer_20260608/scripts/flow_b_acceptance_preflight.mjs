@@ -49,9 +49,28 @@ function parseTargets(env) {
 
 export function validate24hAcceptanceEnv(env = process.env) {
   requireNumber(env, "FLOW_B_ACCEPTANCE_SECONDS", 86400);
-  requireNumber(env, "FLOW_B_ACCEPTANCE_TARGET", 481);
+  const targetPolicy = String(env.FLOW_B_ACCEPTANCE_TARGET_POLICY || "fixed");
+  let target;
+  let minimumAveragePerHourExclusive = 20;
+  if (targetPolicy === "erp_remaining_capacity") {
+    target = Number(env.FLOW_B_ACCEPTANCE_TARGET);
+    if (!Number.isInteger(target) || target < 1 || target > EXPECTED_STORE_IDS.length * 100) {
+      throw new Error("FLOW_B_ACCEPTANCE_TARGET must be a frozen live ERP capacity between 1 and 500");
+    }
+    if (Number(env.FLOW_B_TARGET_PUBLISH_COUNT) !== target) {
+      throw new Error("FLOW_B_TARGET_PUBLISH_COUNT must equal the frozen live ERP capacity");
+    }
+    if (String(env.FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE ?? "").trim() !== "") {
+      throw new Error("dynamic ERP-capacity runs must not use a fixed hourly completion threshold");
+    }
+    minimumAveragePerHourExclusive = null;
+  } else if (targetPolicy === "fixed") {
+    target = requireNumber(env, "FLOW_B_ACCEPTANCE_TARGET", 481);
+    requireNumber(env, "FLOW_B_TARGET_PUBLISH_COUNT", 481);
+  } else {
+    throw new Error("FLOW_B_ACCEPTANCE_TARGET_POLICY must equal fixed or erp_remaining_capacity");
+  }
   requireNumber(env, "FLOW_B_STORE_ACCEPTANCE_TARGET", 100);
-  requireNumber(env, "FLOW_B_TARGET_PUBLISH_COUNT", 481);
   requireNumber(env, "FLOW_B_DAILY_STORE_LIMIT", 100);
   requireNumber(env, "FLOW_B_STORE_TOTAL_LIMIT", 100);
   if (String(env.FLOW_B_DAILY_STORE_TIMEZONE || "") !== "Asia/Shanghai") {
@@ -97,7 +116,9 @@ export function validate24hAcceptanceEnv(env = process.env) {
   return {
     ok: true,
     duration_seconds: 86400,
-    target: 481,
+    target,
+    target_policy: targetPolicy,
+    minimum_average_per_hour_exclusive: minimumAveragePerHourExclusive,
     per_store_target: null,
     store_ids: storeIds,
     strict_profit_rule: "profit_rate > 30",

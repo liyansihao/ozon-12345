@@ -93,11 +93,26 @@ export function supervisorShouldHonorSafeStop(operationalStatus) {
   return String(operationalStatus?.status || "") === "STOPPED";
 }
 
-export function capacityPreflightDecision(snapshot, requiredCapacity = 481) {
+export function capacityPreflightDecision(snapshot, requiredCapacity = 481, targetPolicy = "fixed") {
   if (snapshot?.all_stores_found !== true
     || snapshot?.all_warehouses_verified !== true
     || snapshot?.all_quotas_verified !== true) {
     return { action: "fatal-stop", reason: "capacity-or-warehouse-verification-failed" };
+  }
+  if (targetPolicy === "erp_remaining_capacity") {
+    const effectiveTarget = Number(snapshot?.total_remaining_capacity);
+    if (Number.isInteger(effectiveTarget) && effectiveTarget > 0) {
+      return {
+        action: "start-formal-window",
+        reason: null,
+        effective_target: effectiveTarget,
+      };
+    }
+    return {
+      action: "wait-for-quota-reset",
+      reason: "no-current-day-capacity",
+      next_reset_at: snapshot?.next_reset_at || null,
+    };
   }
   if (Number(snapshot?.total_remaining_capacity) < Number(requiredCapacity)) {
     return {
@@ -371,7 +386,7 @@ function expandedConfig(config) {
   return cloned;
 }
 
-function workerEnvironment(config, currentRun) {
+export function workerEnvironment(config, currentRun) {
   const environment = { ...process.env };
   for (const [key, value] of Object.entries(config.flow_env || {})) {
     if (value === null || value === undefined) continue;
@@ -387,6 +402,15 @@ function workerEnvironment(config, currentRun) {
   environment.FLOW_B_CAPACITY_STORES = JSON.stringify(config.stores || []);
   environment.FLOW_B_FROZEN_COMMIT = String(config.frozen_commit || "");
   environment.FLOW_B_FROZEN_CONFIG_HASH = String(config.frozen_config_hash || "");
+  if (Number.isInteger(Number(currentRun.acceptance_target)) && Number(currentRun.acceptance_target) > 0) {
+    environment.FLOW_B_ACCEPTANCE_TARGET = String(currentRun.acceptance_target);
+    environment.FLOW_B_TARGET_PUBLISH_COUNT = String(currentRun.acceptance_target);
+  }
+  environment.FLOW_B_ACCEPTANCE_TARGET_POLICY = String(
+    currentRun.acceptance_target_policy
+      || config.acceptance?.target_policy
+      || "fixed",
+  );
   return environment;
 }
 
@@ -525,9 +549,18 @@ function spawnPendingPrewarm(config, appRoot, runDir, urlsFile, currentRun, rese
   return child;
 }
 
-async function activateFormalWindow({ config, stateRoot, currentRun, runDir, appRoot }) {
+async function activateFormalWindow({
+  config,
+  stateRoot,
+  currentRun,
+  runDir,
+  appRoot,
+  acceptanceTarget,
+}) {
   const startedAt = new Date();
   const endedAt = new Date(startedAt.getTime() + Number(config.acceptance.duration_seconds) * 1000);
+  const frozenTarget = Number(acceptanceTarget || config.acceptance.strict_target);
+  const targetPolicy = String(config.acceptance.target_policy || "fixed");
   const preflight = await readJson(path.join(stateRoot, "capacity_preflight.json"));
   const configText = await fsp.readFile(path.join(appRoot, "config", "ozon_24h_production.json"), "utf8");
   const crypto = await import("node:crypto");
@@ -535,6 +568,8 @@ async function activateFormalWindow({ config, stateRoot, currentRun, runDir, app
   await writeJsonAtomic(path.join(runDir, "acceptance_window.json"), {
     started_at: startedAt.toISOString(),
     ended_at: endedAt.toISOString(),
+    acceptance_target: frozenTarget,
+    acceptance_target_policy: targetPolicy,
   });
   await writeJsonAtomic(path.join(runDir, "frozen_manifest.json"), {
     run_id: currentRun.run_id,
@@ -544,6 +579,8 @@ async function activateFormalWindow({ config, stateRoot, currentRun, runDir, app
     config_sha256: configHash,
     source_sha256: currentRun.source_sha256 || null,
     capacity_preflight: preflight,
+    acceptance_target: frozenTarget,
+    acceptance_target_policy: targetPolicy,
     current_window_only: true,
   });
   Object.assign(currentRun, {
@@ -551,6 +588,8 @@ async function activateFormalWindow({ config, stateRoot, currentRun, runDir, app
     started_at: startedAt.toISOString(),
     ended_at: endedAt.toISOString(),
     config_sha256: configHash,
+    acceptance_target: frozenTarget,
+    acceptance_target_policy: targetPolicy,
   });
   await writeJsonAtomic(path.join(stateRoot, "current_run.json"), currentRun);
 }
@@ -661,7 +700,11 @@ export async function supervise(configPath) {
         const result = await runCapacityPreflight(config, appRoot, stateRoot, currentRun);
         if (result.code !== 0) throw result.error || new Error(`capacity preflight exited ${result.code}`);
         const snapshot = await readJson(path.join(stateRoot, "capacity_preflight.json"));
-        const decision = capacityPreflightDecision(snapshot, config.acceptance.strict_target);
+        const decision = capacityPreflightDecision(
+          snapshot,
+          config.acceptance.strict_target,
+          config.acceptance.target_policy,
+        );
         if (decision.action === "fatal-stop") {
           await updateOperationalState(stateRoot, currentRun, {
             status: "FATAL_STOP",
@@ -671,7 +714,14 @@ export async function supervise(configPath) {
           return 0;
         }
         if (decision.action === "start-formal-window") {
-          await activateFormalWindow({ config, stateRoot, currentRun, runDir, appRoot });
+          await activateFormalWindow({
+            config,
+            stateRoot,
+            currentRun,
+            runDir,
+            appRoot,
+            acceptanceTarget: decision.effective_target,
+          });
           break;
         }
         if (pendingPrewarmDue({
@@ -737,7 +787,9 @@ export async function supervise(configPath) {
           status: "WAITING_FOR_QUOTA_RESET",
           reason: decision.reason,
           total_remaining_capacity: snapshot.total_remaining_capacity,
-          required_capacity: config.acceptance.strict_target,
+          required_capacity: config.acceptance.target_policy === "erp_remaining_capacity"
+            ? "maximum-live-erp-capacity"
+            : config.acceptance.strict_target,
           next_reset_at: decision.next_reset_at,
         });
         const resetAt = Date.parse(decision.next_reset_at || "");

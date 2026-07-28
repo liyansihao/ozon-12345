@@ -16,6 +16,7 @@ import {
   resolveSupervisorAppRoot,
   runFinalArtifacts,
   supervisorShouldHonorSafeStop,
+  workerEnvironment,
 } from "../scripts/ozon_24h_supervisor.mjs";
 
 test("production layout is installed outside a disposable git worktree", () => {
@@ -104,6 +105,52 @@ test("capacity preflight waits for reset and never opens an under-capacity windo
     all_quotas_verified: true,
     total_remaining_capacity: 500,
   }).action, "fatal-stop");
+});
+
+test("ERP-capacity policy freezes the verified remaining capacity as today's target", () => {
+  assert.deepEqual(capacityPreflightDecision({
+    all_stores_found: true,
+    all_warehouses_verified: true,
+    all_quotas_verified: true,
+    total_remaining_capacity: 469,
+  }, 481, "erp_remaining_capacity"), {
+    action: "start-formal-window",
+    reason: null,
+    effective_target: 469,
+  });
+  assert.equal(capacityPreflightDecision({
+    all_stores_found: true,
+    all_warehouses_verified: true,
+    all_quotas_verified: true,
+    total_remaining_capacity: 0,
+    next_reset_at: "2026-07-28T16:00:00.000Z",
+  }, 481, "erp_remaining_capacity").action, "wait-for-quota-reset");
+});
+
+test("worker inherits the one frozen ERP target instead of the static fallback", () => {
+  const environment = workerEnvironment({
+    browser: {
+      cdp_endpoint: "http://127.0.0.1:9223",
+      profile_dir: "/tmp/profile",
+      extension_dir: "/tmp/extension",
+      executable: "/tmp/chrome",
+    },
+    state_root: "/tmp/state",
+    stores: [],
+    acceptance: { target_policy: "erp_remaining_capacity" },
+    flow_env: {
+      FLOW_B_ACCEPTANCE_TARGET: "481",
+      FLOW_B_TARGET_PUBLISH_COUNT: "481",
+    },
+  }, {
+    run_id: "daily-run",
+    acceptance_target: 469,
+    acceptance_target_policy: "erp_remaining_capacity",
+  });
+
+  assert.equal(environment.FLOW_B_ACCEPTANCE_TARGET, "469");
+  assert.equal(environment.FLOW_B_TARGET_PUBLISH_COUNT, "469");
+  assert.equal(environment.FLOW_B_ACCEPTANCE_TARGET_POLICY, "erp_remaining_capacity");
 });
 
 test("launchd restarts abnormal exits without busy-looping a completed window", () => {

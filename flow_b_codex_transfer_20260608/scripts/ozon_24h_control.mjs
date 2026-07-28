@@ -67,9 +67,18 @@ function sha256(value) {
 function validateConfig(config) {
   if (config?.frozen !== true) throw new Error("production config must be frozen");
   if (Number(config?.acceptance?.duration_seconds) !== 86400) throw new Error("acceptance duration must be 86400 seconds");
-  if (Number(config?.acceptance?.strict_target) < 481) throw new Error("strict target must be at least 481");
-  if (Number(config?.acceptance?.minimum_average_per_hour_exclusive) !== 20) {
-    throw new Error("minimum strict rate threshold must be exclusively greater than 20/hour");
+  const targetPolicy = String(config?.acceptance?.target_policy || "fixed");
+  if (targetPolicy === "erp_remaining_capacity") {
+    if (config?.acceptance?.minimum_average_per_hour_exclusive !== null) {
+      throw new Error("dynamic ERP-capacity runs must not use a fixed hourly completion threshold");
+    }
+  } else if (targetPolicy === "fixed") {
+    if (Number(config?.acceptance?.strict_target) < 481) throw new Error("strict target must be at least 481");
+    if (Number(config?.acceptance?.minimum_average_per_hour_exclusive) !== 20) {
+      throw new Error("minimum strict rate threshold must be exclusively greater than 20/hour");
+    }
+  } else {
+    throw new Error("acceptance target policy must equal fixed or erp_remaining_capacity");
   }
   if (Number(config?.acceptance?.minimum_profit_rate_exclusive) !== 30) {
     throw new Error("profit rate must be exclusively greater than 30");
