@@ -40,6 +40,37 @@ const DEFAULT_SAFE_QUERIES = [
   "линейка школьная",
 ];
 
+const STRICT_NEIGHBOR_QUERY_FAMILIES = [
+  {
+    matches: [/чехол/u, /мебел/u],
+    queries: [
+      "чехол для кресла универсальный",
+      "чехол для дивана универсальный",
+      "чехол для стула универсальный",
+      "чехол для табурета",
+      "чехол на угловой диван",
+      "чехол на подлокотник дивана",
+      "чехол для офисного кресла",
+      "чехол для компьютерного кресла",
+      "чехол для садовой мебели",
+      "чехол для складного стула",
+      "чехол для пуфа",
+      "защитный чехол для мебели",
+    ],
+  },
+  {
+    matches: [/трость/u, /сиден/u],
+    queries: [
+      "трость телескопическая с сиденьем",
+      "трость складной стул",
+      "стул трость складной",
+      "трость опорная складная",
+      "трость четырехопорная",
+      "трость для ходьбы складная",
+    ],
+  },
+];
+
 function sourceUrl(row) {
   return String(row?.source_url || row?.seller_url || "").trim();
 }
@@ -376,6 +407,26 @@ function safeQueryUrls() {
   )));
 }
 
+function strictNeighborQueryUrls(strictRows = []) {
+  const queries = [];
+  for (const row of strictRows) {
+    let text = "";
+    try {
+      const url = new URL(row.source_url);
+      if (url.pathname !== "/search/") continue;
+      text = String(url.searchParams.get("text") || "").toLocaleLowerCase("ru-RU");
+    } catch {
+      continue;
+    }
+    for (const family of STRICT_NEIGHBOR_QUERY_FAMILIES) {
+      if (family.matches.every((pattern) => pattern.test(text))) queries.push(...family.queries);
+    }
+  }
+  return distinctDispatchUrls(queries.map((query) => (
+    `https://www.ozon.ru/search/?text=${encodeURIComponent(query)}&is_global=true&currency_price=150.000%3B&sorting=rating`
+  )));
+}
+
 function distinctDispatchUrls(urls = []) {
   const seen = new Set();
   return urls.filter((url) => {
@@ -479,7 +530,10 @@ export function buildSourcePortfolio({
       && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
     if (explorationFamilies.size >= explorationBudget) break;
   }
-  const freshExplorationUrls = explorationUrls(safeQueryUrls(), derivedQueries);
+  const freshExplorationUrls = distinctDispatchUrls([
+    ...strictNeighborQueryUrls(strict),
+    ...explorationUrls(safeQueryUrls(), derivedQueries),
+  ]);
   for (const url of freshExplorationUrls) {
     const family = sourceYieldKey(url);
     const dispatchFamily = sourceDispatchFamily(url);
