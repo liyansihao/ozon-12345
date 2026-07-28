@@ -302,6 +302,34 @@ function sellerRoot(value) {
   }
 }
 
+function pureFbsSellerEvidenceUrls(fbsRows = []) {
+  const latestFirst = fbsRows
+    .map((row, index) => ({
+      row,
+      index,
+      at: Date.parse(String(row?.at || row?.timestamp || "")),
+    }))
+    .sort((left, right) => (
+      (Number.isFinite(right.at) ? right.at : 0) - (Number.isFinite(left.at) ? left.at : 0)
+      || right.index - left.index
+    ));
+  const resolvedSkus = new Set();
+  const seenSellers = new Set();
+  const sellers = [];
+  for (const { row } of latestFirst) {
+    const sku = skuOf(row);
+    if (sku && resolvedSkus.has(sku)) continue;
+    if (sku) resolvedSkus.add(sku);
+    if (row?.status !== "favorited"
+      || String(row?.shipping_mode || row?.preflight_mode || "").toUpperCase() !== "FBS") continue;
+    const root = sellerRoot(row?.seller_url);
+    if (!root || seenSellers.has(root)) continue;
+    seenSellers.add(root);
+    sellers.push(root);
+  }
+  return sellers;
+}
+
 function sourceDispatchFamily(value) {
   try {
     const url = new URL(String(value || ""));
@@ -438,6 +466,18 @@ export function buildSourcePortfolio({
     if (addUnique(active, seen, url, limit) && !evidenceFamilies.has(dispatchFamily)) {
       explorationFamilies.add(dispatchFamily);
     }
+  }
+  for (const url of pureFbsSellerEvidenceUrls(fbsRows)) {
+    const family = sourceYieldKey(url);
+    const dispatchFamily = sourceDispatchFamily(url);
+    if (!disabledUrls.has(family)
+      && !disabledFamilies.has(dispatchFamily)
+      && !prohibitedSourceUrl(url)
+      && !evidenceFamilies.has(dispatchFamily)
+      && !explorationFamilies.has(dispatchFamily)
+      && !evidenceUrls.has(family)
+      && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
+    if (explorationFamilies.size >= explorationBudget) break;
   }
   const freshExplorationUrls = explorationUrls(safeQueryUrls(), derivedQueries);
   for (const url of freshExplorationUrls) {

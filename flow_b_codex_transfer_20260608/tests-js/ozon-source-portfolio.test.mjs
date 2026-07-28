@@ -566,6 +566,63 @@ test("portfolio reallocates an empty FBS budget to distinct new exploration fami
   assert.equal(portfolio.counts.exploration_sources, 3);
 });
 
+test("portfolio explores a recent pure-FBS seller before arbitrary fresh searches", () => {
+  const observedSearch = "https://www.ozon.ru/search/?text=observed-fbs-product&is_global=true";
+  const provenSeller = "https://www.ozon.ru/seller/one-pure-fbs-proof/";
+  const portfolio = buildSourcePortfolio({
+    fbsRows: [{
+      at: "2026-07-28T10:00:00.000Z",
+      sku: "one-pure-fbs-proof",
+      source_url: observedSearch,
+      seller_url: provenSeller,
+      status: "favorited",
+      shipping_mode: "FBS",
+    }],
+    minimumActiveSources: 3,
+    maximumActiveSources: 3,
+  });
+
+  assert.ok(portfolio.active_urls.includes(provenSeller));
+  const firstUnobservedSearchIndex = portfolio.active_urls.findIndex((value) => (
+    new URL(value).pathname === "/search/" && value !== observedSearch
+  ));
+  assert.ok(firstUnobservedSearchIndex > portfolio.active_urls.indexOf(provenSeller));
+});
+
+test("portfolio rotates exhausted pure-FBS seller families to the next recent proof", () => {
+  const exhaustedSeller = "https://www.ozon.ru/seller/exhausted-one-proof/";
+  const freshSeller = "https://www.ozon.ru/seller/fresh-one-proof/";
+  const portfolio = buildSourcePortfolio({
+    fbsRows: [
+      {
+        at: "2026-07-28T09:00:00.000Z",
+        sku: "exhausted-one-proof",
+        source_url: "https://www.ozon.ru/search/?text=old-proof&is_global=true",
+        seller_url: exhaustedSeller,
+        status: "favorited",
+        shipping_mode: "FBS",
+      },
+      {
+        at: "2026-07-28T10:00:00.000Z",
+        sku: "fresh-one-proof",
+        source_url: "https://www.ozon.ru/search/?text=fresh-proof&is_global=true",
+        seller_url: freshSeller,
+        status: "favorited",
+        shipping_mode: "FBS",
+      },
+    ],
+    scanRows: [
+      { source_url: exhaustedSeller, eligible_link_count_before_collection: 0 },
+      { source_url: exhaustedSeller, eligible_link_count_before_collection: 0 },
+    ],
+    minimumActiveSources: 4,
+    maximumActiveSources: 4,
+  });
+
+  assert.ok(portfolio.active_urls.includes(freshSeller));
+  assert.equal(portfolio.active_urls.includes(exhaustedSeller), false);
+});
+
 test("portfolio reserves new exploration slots when configured seeds already have evidence", () => {
   const strictRows = Array.from({ length: 2 }, (_, index) => ({
     sku: `strict-reserve-${index}`,
