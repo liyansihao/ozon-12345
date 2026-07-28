@@ -18,6 +18,7 @@ import {
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
   runFinalArtifacts,
+  stopBrowserProfileOwners,
   stopOwnedWorker,
   supervisorShouldHonorSafeStop,
   waitForWorkerOrBrowserFailure,
@@ -209,8 +210,24 @@ test("launchd supervisor exits successfully when no daily run is active", () => 
 
 test("launchd honors an intentional safe stop across computer restart", () => {
   assert.equal(supervisorShouldHonorSafeStop({ status: "STOPPED" }), true);
+  assert.equal(supervisorShouldHonorSafeStop({ status: "WINDOW_COMPLETE" }), true);
+  assert.equal(supervisorShouldHonorSafeStop({ status: "TARGET_NOT_MET" }), true);
   assert.equal(supervisorShouldHonorSafeStop({ status: "RUNNING" }), false);
   assert.equal(supervisorShouldHonorSafeStop({ status: "RECOVERING" }), false);
+});
+
+test("window cleanup closes exact browser profile owners without deleting persisted state", async () => {
+  const stopped = [];
+  const result = await stopBrowserProfileOwners("/Users/operator/.ozon-production/profile", {
+    profileOwnersFn: async (profileDir) => {
+      assert.equal(profileDir, "/Users/operator/.ozon-production/profile");
+      return [{ pid: 101 }, { pid: 202 }];
+    },
+    stopOwnerFn: async (pid) => stopped.push(pid),
+  });
+
+  assert.deepEqual(result, [101, 202]);
+  assert.deepEqual(stopped, [101, 202]);
 });
 
 test("safe stop retains the worker identity while its exit handler clears the owner slot", async () => {

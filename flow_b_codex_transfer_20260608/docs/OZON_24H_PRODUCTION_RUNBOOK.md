@@ -69,6 +69,8 @@
 
 输出目录为 `~/.ozon-24h-production/state/exports/<run_id>/`，包含五个 `confirmed_store_<store_id>.csv`、`confirmed_all_stores.csv`、`summary.json`，以及窗口结束后的 `24h_report.json`。只导出当前 run 内 `profit_rate > 30`、ERP/Ozon `online_status=selling` 且 `stock>0` 的唯一 SKU。
 
+窗口结束后，supervisor 先完成最终 checkpoint、五店 CSV 和 `24h_report.json`，确认工件成功落盘后再停止 worker，并关闭唯一生产 Chrome owner 以释放窗口和内存。清理不会删除浏览器登录 profile、checkpoint、候选队列、跨窗口去重集合、run 证据或导出文件；无论窗口达标还是 `TARGET_NOT_MET`，电脑重启都不会重复执行已完成窗口。
+
 ## 发布候选与回滚
 
 日常生产只使用 stable：

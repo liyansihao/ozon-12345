@@ -96,7 +96,8 @@ export function currentRunDisposition(currentRun) {
 }
 
 export function supervisorShouldHonorSafeStop(operationalStatus) {
-  return String(operationalStatus?.status || "") === "STOPPED";
+  return new Set(["STOPPED", "WINDOW_COMPLETE", "TARGET_NOT_MET"])
+    .has(String(operationalStatus?.status || ""));
 }
 
 export function capacityPreflightDecision(snapshot, requiredCapacity = 481, targetPolicy = "fixed") {
@@ -378,6 +379,21 @@ async function stopExactOwner(pid, waitMs = 10_000) {
   const deadline = Date.now() + waitMs;
   while (pidAlive(pid) && Date.now() < deadline) await delay(100);
   if (pidAlive(pid)) process.kill(pid, "SIGKILL");
+}
+
+export async function stopBrowserProfileOwners(profileDir, {
+  profileOwnersFn = profileOwners,
+  stopOwnerFn = stopExactOwner,
+} = {}) {
+  const owners = await profileOwnersFn(absolute(profileDir));
+  const stopped = [];
+  for (const owner of owners) {
+    const pid = Number(owner?.pid);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    await stopOwnerFn(pid);
+    stopped.push(pid);
+  }
+  return stopped;
 }
 
 function chromeArguments(browser) {
@@ -699,15 +715,21 @@ async function waitForVerification({
   await runCheckpoint(appRoot, runDir, "verification-wait", checkpointEnv);
 }
 
-async function writeProcessOwners({ stateRoot, currentRun, browserPid, workerPid = null }) {
+async function writeProcessOwners({
+  stateRoot,
+  currentRun,
+  browserPid,
+  workerPid = null,
+  supervisorPid = process.pid,
+}) {
   await writeJsonAtomic(path.join(stateRoot, "process_owners.json"), {
     observed_at: new Date().toISOString(),
     run_id: currentRun.run_id,
-    supervisor_pid: process.pid,
+    supervisor_pid: supervisorPid,
     worker_pid: workerPid,
     profile_owner_pid: browserPid,
     counts: {
-      supervisor: 1,
+      supervisor: supervisorPid ? 1 : 0,
       worker: workerPid ? 1 : 0,
       profile_owner: browserPid ? 1 : 0,
     },
@@ -940,6 +962,7 @@ export async function supervise(configPath) {
     }, Math.max(60_000, Number(config.source_refresh_seconds || 900) * 1000));
     sourceRefreshTimer.unref();
     let restartAttempt = 0;
+    let windowFinalized = false;
     while (!shuttingDown) {
       if (fs.existsSync(stopFile)) {
         await updateOperationalState(stateRoot, currentRun, { status: "STOPPED", reason: "safe stop requested" });
@@ -954,12 +977,28 @@ export async function supervise(configPath) {
           checkpointEnvironment(config, currentRun),
         );
         const artifacts = await runFinalArtifacts(appRoot, stateRoot, currentRun, runDir);
+        await stopOwnedWorker(worker);
+        worker = null;
+        const stoppedBrowserPids = await stopBrowserProfileOwners(config.browser.profile_dir);
+        await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+          at: new Date().toISOString(),
+          run_dir: runDir,
+          action: "window-complete-owner-cleanup",
+          stopped_browser_pids: stoppedBrowserPids,
+          preserved: ["browser-profile", "checkpoint", "dedupe", "run-evidence", "exports"],
+        });
         await updateOperationalState(stateRoot, currentRun, {
           status: artifacts.report?.passed === true ? "WINDOW_COMPLETE" : "TARGET_NOT_MET",
           reason: artifacts.report?.passed === true ? null : "strict 24-hour acceptance criteria not met",
           artifacts_dir: artifacts.output,
           strict_result: artifacts.report || null,
+          owner_cleanup: {
+            worker_stopped: true,
+            stopped_browser_pids: stoppedBrowserPids,
+            persisted_state_preserved: true,
+          },
         });
+        windowFinalized = true;
         break;
       }
 
@@ -1093,6 +1132,15 @@ export async function supervise(configPath) {
       "supervisor-stop",
       checkpointEnvironment(config, currentRun),
     );
+    if (windowFinalized) {
+      await writeProcessOwners({
+        stateRoot,
+        currentRun,
+        browserPid: null,
+        workerPid: null,
+        supervisorPid: null,
+      });
+    }
     return 0;
   } finally {
     if (checkpointTimer) clearInterval(checkpointTimer);
