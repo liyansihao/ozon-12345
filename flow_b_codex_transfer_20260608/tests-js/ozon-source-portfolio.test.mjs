@@ -16,6 +16,24 @@ const rejected = "https://www.ozon.ru/seller/rejected-source/";
 const prohibited = "https://www.ozon.ru/seller/underwear-source/";
 const dry = "https://www.ozon.ru/seller/ambiguous-source/";
 
+test("production seeds include explicit China highlight sources for standardized safe goods", async () => {
+  const seedText = await fs.readFile(
+    path.resolve(import.meta.dirname, "../config/ozon_source_seed.txt"),
+    "utf8",
+  );
+  const seedUrls = seedText.split(/\r?\n/u).map((value) => value.trim()).filter(Boolean);
+  const chinaCategoryIds = new Set(seedUrls.flatMap((value) => {
+    const url = new URL(value);
+    if (!url.pathname.includes("/highlight/tovary-iz-kitaya-")) return [];
+    return [url.searchParams.get("category")];
+  }));
+
+  assert.deepEqual(
+    [...chinaCategoryIds].sort(),
+    ["13506", "13517", "13523", "13812"],
+  );
+});
+
 test("portfolio reads the run-authoritative configured scan checkpoint", () => {
   const runDir = "/state/runs/daily-run";
 
