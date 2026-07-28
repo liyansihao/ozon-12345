@@ -44,6 +44,10 @@ test("preflight rejects prohibited categories", () => {
     "Балетки женские",
     "Кепка летняя",
     "Футболка оверсайз",
+    "Бикини брифы женские",
+    "Берет шерстяной",
+    "Платок Zara",
+    "Бомбер демисезонный",
   ]) {
     assert.equal(preflightSkipReason({ mode: "FBS", title, category: "" }), "prohibited-category");
   }

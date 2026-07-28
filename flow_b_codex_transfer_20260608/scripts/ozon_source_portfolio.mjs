@@ -330,6 +330,36 @@ function pureFbsSellerEvidenceUrls(fbsRows = []) {
   return sellers;
 }
 
+function pureFbsQueryEvidenceRows(fbsRows = []) {
+  const latestFirst = fbsRows
+    .map((row, index) => ({
+      row,
+      index,
+      at: Date.parse(String(row?.at || row?.timestamp || "")),
+    }))
+    .sort((left, right) => (
+      (Number.isFinite(right.at) ? right.at : 0) - (Number.isFinite(left.at) ? left.at : 0)
+      || right.index - left.index
+    ));
+  const resolvedSkus = new Set();
+  const rows = [];
+  for (const { row } of latestFirst) {
+    const sku = skuOf(row);
+    if (sku && resolvedSkus.has(sku)) continue;
+    if (sku) resolvedSkus.add(sku);
+    if (row?.status !== "favorited"
+      || String(row?.shipping_mode || row?.preflight_mode || "").toUpperCase() !== "FBS"
+      || !String(row?.title || "").trim()
+      || !sourceUrl(row)) continue;
+    rows.push({
+      ...row,
+      status: "submitted",
+      evidence_quality: "pure-fbs-source-discovery",
+    });
+  }
+  return rows;
+}
+
 function sourceDispatchFamily(value) {
   try {
     const url = new URL(String(value || ""));
@@ -428,7 +458,7 @@ export function buildSourcePortfolio({
   const desired = Math.max(1, Number(minimumActiveSources) || 60);
   const limit = Math.max(desired, Number(maximumActiveSources) || 120);
   const derivedQueries = deriveSearchSourceUrls(
-    yieldRows,
+    [...yieldRows, ...pureFbsQueryEvidenceRows(fbsRows)],
     sourcePortfolioDerivedQueryLimit(desired),
     ["150.000;", "500.000;"],
     [1],

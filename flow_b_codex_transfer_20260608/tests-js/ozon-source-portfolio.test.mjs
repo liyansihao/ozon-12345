@@ -735,3 +735,56 @@ test("portfolio shares additional exploration slots with proven non-prohibited t
   assert.equal(searchTexts[0], "деревянный конструктор");
   assert.match(searchTexts[1], /проверенный органайзер настольный/u);
 });
+
+test("portfolio derives fresh search families from repeated pure-FBS product evidence after curated sources are exhausted", () => {
+  const curated = buildSourcePortfolio({
+    minimumActiveSources: 1_000,
+    maximumActiveSources: 1_000,
+  }).active_urls;
+  const observedFbsSource = "https://www.ozon.ru/highlight/repeated-pure-fbs-proof-123/";
+  const exhausted = [...curated, observedFbsSource].flatMap((source_url) => [
+    { source_url, eligible_link_count_before_collection: 0 },
+    { source_url, eligible_link_count_before_collection: 0 },
+  ]);
+
+  const portfolio = buildSourcePortfolio({
+    fbsRows: [
+      {
+        at: "2026-07-28T10:00:00.000Z",
+        sku: "pure-fbs-query-proof-1",
+        source_url: observedFbsSource,
+        title: "Зажимы для пакетов пластиковые 12 штук",
+        status: "favorited",
+        shipping_mode: "FBS",
+      },
+      {
+        at: "2026-07-28T10:01:00.000Z",
+        sku: "pure-fbs-query-proof-2",
+        source_url: observedFbsSource,
+        title: "Контейнер для мелочей пластиковый 6 секций",
+        status: "favorited",
+        shipping_mode: "FBS",
+      },
+      {
+        at: "2026-07-28T10:02:00.000Z",
+        sku: "pure-fbs-query-proof-3",
+        source_url: observedFbsSource,
+        title: "Крючки самоклеящиеся прозрачные 20 штук",
+        status: "favorited",
+        shipping_mode: "FBS",
+      },
+    ],
+    scanRows: exhausted,
+    minimumActiveSources: 10,
+    maximumActiveSources: 10,
+  });
+  const searchTexts = portfolio.active_urls.flatMap((value) => {
+    const url = new URL(value);
+    return url.pathname === "/search/" ? [url.searchParams.get("text")] : [];
+  });
+
+  assert.equal(portfolio.active_urls.length, 10);
+  assert.equal(portfolio.counts.exploration_sources, 10);
+  assert.ok(searchTexts.some((text) => /зажимы пакетов пластиковые/u.test(String(text))));
+  assert.ok(searchTexts.some((text) => /контейнер мелочей пластиковый/u.test(String(text))));
+});
