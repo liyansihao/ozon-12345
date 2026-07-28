@@ -910,13 +910,17 @@ export function isProvenSellerSource(value) {
   return /\/seller\/(?:nuanniu|miaowu|yishao|alisa-3673390|vash-vybor-3332584|xiangyu01|kshunby|xzx-a02|fabrika-ulichnogo-stilya|linkworld-2709304|dretd)(?:[/?]|$)/i.test(String(value || ""));
 }
 
+function isExplicitChinaCollectionSource(value) {
+  return /\/highlight\/tovary-iz-kitaya-[^/?]+/i.test(String(value || ""));
+}
+
 function sourceUrlPriority(value) {
   const raw = String(value || "");
   let decoded = raw;
   try { decoded = decodeURIComponent(raw); } catch {}
   const proven = isProvenSellerSource(raw) ? 1000 : 0;
   const global = /(?:ozon-global|tovary-iz-kitaya|tovary-so-vsego-mira|is_global=true)/i.test(decoded) ? 500 : 0;
-  const explicitChinaCollection = /\/highlight\/tovary-iz-kitaya-[^/?]+/i.test(decoded) ? 400 : 0;
+  const explicitChinaCollection = isExplicitChinaCollectionSource(decoded) ? 400 : 0;
   const targetFamily = /(?:детск|detsk|ребен|odezhd|aksess|accessor|одежд|обув|трус|кепк|панам|носк|заколк|брелок|ремешок|бижутер)/i.test(decoded) ? 250 : 0;
   return proven + global + explicitChinaCollection + targetFamily;
 }
@@ -1899,6 +1903,8 @@ export function prioritizeSourceUrls(urls, {
       ? yieldKey
       : boundedDeepProtected ? `bounded-deep:${familyKey}` : familyKey;
     const yieldPriority = funnelScores.has(yieldKey) ? funnelScores.get(yieldKey) : (successfulCounts.get(yieldKey) || 0) * 2000;
+    const curatedExploration = yieldPriority <= 0
+      && (isProvenSellerSource(url) || isExplicitChinaCollectionSource(url));
     const familyPenalty = familyPenalties.get(isPriceBandedSource(url) ? yieldKey : familyKey) || 0;
     const sellerFamilyPenalty = sellerFamilyPenalties.get(canonicalSellerUrl(url)) || 0;
     const effectiveFamilyPenalty = Math.min(familyPenalty, sellerFamilyPenalty);
@@ -1913,7 +1919,7 @@ export function prioritizeSourceUrls(urls, {
       : repeatedStrictGlobal ? 3
       : qualifiedFreshKeys.has(familyKey)
         ? 3
-        : verifiedFreshKeys.has(familyKey) ? 2 : freshKeys.has(familyKey) ? 1 : 0;
+        : verifiedFreshKeys.has(familyKey) ? 2 : (freshKeys.has(familyKey) || curatedExploration) ? 1 : 0;
     let tier = sellerFamilyPenalty < 0
       ? 0
       : familyPenalty < 0
@@ -1921,7 +1927,7 @@ export function prioritizeSourceUrls(urls, {
       : baseTier;
     if (scanPenalty < 0 && !boundedDeepProtected) tier = 0;
     const priority = sourceUrlPriority(url) + observedSearchFamilyPriority(url, familyScores) + yieldPriority
-      + (freshKeys.has(familyKey) ? 200_000 : 0)
+      + (freshKeys.has(familyKey) || curatedExploration ? 200_000 : 0)
       + (qualifiedFreshKeys.has(familyKey) ? 300_000 : 0)
       + (verifiedFreshKeys.has(familyKey) ? 400_000 : 0)
       + effectiveFamilyPenalty

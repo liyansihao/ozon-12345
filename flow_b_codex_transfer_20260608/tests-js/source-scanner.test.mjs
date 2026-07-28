@@ -825,7 +825,9 @@ test("an explicit China highlight is sampled before an unverified is_global keyw
   const keyword = "https://www.ozon.ru/search/?text=аксессуар+бижутерии&is_global=true";
   const china = "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=13506";
 
-  assert.deepEqual(prioritizeSourceUrls([keyword, china]), [china, keyword]);
+  assert.deepEqual(prioritizeSourceUrls([keyword, china], {
+    freshSourceUrls: [keyword],
+  }), [china, keyword]);
 });
 
 test("fresh seller files are verified discovery while keyword files remain exploration", () => {
