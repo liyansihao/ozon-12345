@@ -62,6 +62,40 @@ test("portfolio refresh consumes configured scan exhaustion evidence", async (t)
   );
 });
 
+test("portfolio refresh disables candidate sources with repeated low pure-FBS outcomes", async (t) => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-source-low-fbs-"));
+  t.after(() => fs.rm(stateRoot, { recursive: true, force: true }));
+  const runDir = path.join(stateRoot, "runs", "daily-run");
+  await fs.mkdir(path.join(stateRoot, "history"), { recursive: true });
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.writeFile(path.join(runDir, "candidate_queue.jsonl"), [
+    "low-fbs-1",
+    "low-fbs-2",
+    "low-fbs-3",
+    "low-fbs-4",
+  ].map((sku) => JSON.stringify({
+    sku,
+    source_url: dry,
+    status: "deferred",
+    reason: `source deferred after low pure-FBS yield: ${dry}`,
+  })).join("\n"));
+  const seedFile = path.join(stateRoot, "seed.txt");
+  await fs.writeFile(seedFile, `${good}\n`);
+
+  const portfolio = await refreshSourcePortfolio({
+    stateRoot,
+    runDir,
+    seedFile,
+    minimumActiveSources: 1,
+  });
+
+  assert.equal(
+    portfolio.disabled.find((row) => row.source_url === dry)?.disabled_reason,
+    "low-pure-fbs-rate",
+  );
+  assert.equal(portfolio.active_urls.includes(dry), false);
+});
+
 test("source evidence records the complete candidate-to-final funnel per source", () => {
   const yieldRows = [
     { sku: "1", source_url: good, title: "Деревянный конструктор", status: "published" },

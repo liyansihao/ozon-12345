@@ -430,6 +430,11 @@ export async function refreshSourcePortfolio({
   minimumActiveSources = 60,
 } = {}) {
   const historyDir = path.join(stateRoot, "history");
+  const candidateFbsRows = runDir
+    ? (await readJsonLines(path.join(runDir, "candidate_queue.jsonl"))).filter((row) => (
+      /source deferred after low pure-FBS yield/i.test(String(row?.reason || ""))
+    ))
+    : [];
   const yieldRows = [
     ...await readJsonLines(path.join(historyDir, "source_yield_history.jsonl")),
     ...(runDir ? await readJsonLines(path.join(runDir, "source_yield.jsonl")) : []),
@@ -437,6 +442,7 @@ export async function refreshSourcePortfolio({
   const fbsRows = [
     ...await readJsonLines(path.join(historyDir, "fbs_source_history.jsonl")),
     ...(runDir ? await readJsonLines(path.join(runDir, "favorite_collection.jsonl")) : []),
+    ...candidateFbsRows,
   ];
   const sourceConfig = runDir
     ? await readJsonObject(path.join(runDir, "source_config.json"))
