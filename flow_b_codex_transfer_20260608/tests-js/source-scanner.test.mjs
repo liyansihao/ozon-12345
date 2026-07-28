@@ -73,6 +73,7 @@ import {
   collectionDetailCooldownState,
   sourceBatchCooldownState,
   candidateQueueTransitionForCollectionResult,
+  selectRecoveredCandidateTranche,
   sourceCollectionBlockKey,
   collectionRuntimeState,
   persistCollectionRuntimeState,
@@ -535,6 +536,28 @@ test("candidate queue keeps transient collection work retryable and terminal out
     data: { reason: "soft blocked", retry_at: "2026-07-17T12:01:00.000Z" },
   });
   assert.equal(candidateQueueTransitionForCollectionResult({ status: "ignored", sku: "4" }), null);
+});
+
+test("low pure-FBS deferred backlog cannot starve fresh source scanning", () => {
+  const lowYield = Array.from({ length: 18 }, (_, index) => ({
+    sku: `low-${index}`,
+    status: "deferred",
+    reason: "source deferred after low pure-FBS yield: seller-family",
+  }));
+  const ordinary = Array.from({ length: 6 }, (_, index) => ({
+    sku: `ordinary-${index}`,
+    status: "deferred",
+    reason: "temporary network error",
+  }));
+  const selected = selectRecoveredCandidateTranche([...lowYield, ...ordinary], {
+    limit: 10,
+    lowYieldLimit: 4,
+  });
+
+  assert.deepEqual(selected.map((row) => row.sku), [
+    "low-0", "low-1", "low-2", "low-3",
+    "ordinary-0", "ordinary-1", "ordinary-2", "ordinary-3", "ordinary-4", "ordinary-5",
+  ]);
 });
 
 test("listing enrichment wait exits early once enough product cards are ready", async () => {

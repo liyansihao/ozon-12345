@@ -36,6 +36,27 @@ export function candidateQueueTransitionForCollectionResult(result, {
   return null;
 }
 
+export function selectRecoveredCandidateTranche(rows = [], {
+  limit = 48,
+  lowYieldLimit = 4,
+} = {}) {
+  const maximum = Math.max(0, Math.floor(Number(limit) || 0));
+  const maximumLowYield = Math.max(0, Math.floor(Number(lowYieldLimit) || 0));
+  if (maximum === 0) return [];
+  const selected = [];
+  let lowYieldCount = 0;
+  for (const row of rows || []) {
+    const lowYieldDeferred = /source deferred after low pure-FBS yield/i.test(String(row?.reason || ""));
+    if (lowYieldDeferred) {
+      if (lowYieldCount >= maximumLowYield) continue;
+      lowYieldCount += 1;
+    }
+    selected.push(row);
+    if (selected.length >= maximum) break;
+  }
+  return selected;
+}
+
 function parseJsonLinesChunk(text) {
   const source = String(text || "");
   const complete = /\r?\n$/.test(source);
@@ -3180,10 +3201,15 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       + Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
     priorityTier: (row) => Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
   };
-  const recoveredCandidates = filterListingFbsEvidenceLinks(candidateQueue.pending({
-    ...pendingCandidateOptions,
-    limit: candidateDrainLimit,
-  }), env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1");
+  const recoveredCandidates = filterListingFbsEvidenceLinks(selectRecoveredCandidateTranche(
+    candidateQueue.pending({
+      ...pendingCandidateOptions,
+    }),
+    {
+      limit: candidateDrainLimit,
+      lowYieldLimit: envNumber(env, "FLOW_B_LOW_YIELD_DEFERRED_DRAIN_LIMIT", 4),
+    },
+  ), env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1");
   if (!pending.length && !recoveredCandidates.length) {
     return { outFile: outputPath, records: records.length, pending: 0, activity_count: 0 };
   }
