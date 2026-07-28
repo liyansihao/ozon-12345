@@ -886,6 +886,7 @@ export function createScannerLogger(log = console.log, level = "summary") {
   if (String(level).toLowerCase() === "verbose") return log;
   return (message) => {
     const text = String(message || "").split(/\r?\n/, 1)[0].slice(0, 300);
+    if (/^favorite collection summary attempted=0 favorited=0 rejected=0 failed=0$/iu.test(text)) return;
     if (/^(?:favorite count telemetry unavailable|favorite SKU telemetry unavailable|Ozon detail pacing interval=|source soft block cooldown|yielding source tranche|favorite collection summary|favorite capacity reached)/i.test(text)) log(text);
   };
 }
@@ -2501,6 +2502,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
       image_url: typeof link === "object" ? link?.image_url : "",
     });
   }
+  if (!queue.length) return currentTotal;
   const workerCount = Math.max(1, envNumber(env, "FLOW_B_FAVORITE_WORKERS", envNumber(env, "FLOW_B_TAB_WORKERS", 4)));
   const timeout = envNumber(env, "FLOW_B_FAVORITE_DETAIL_TIMEOUT", 15000);
   let cursor = 0;
@@ -2788,7 +2790,9 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   });
   await Promise.all(workers);
   await writeChain;
-  log(`favorite collection summary attempted=${collection.attempted} favorited=${collection.favorited} rejected=${collection.rejected} failed=${collection.failed}`);
+  if (Object.values(collection).some((value) => value > 0)) {
+    log(`favorite collection summary attempted=${collection.attempted} favorited=${collection.favorited} rejected=${collection.rejected} failed=${collection.failed}`);
+  }
   return total;
 }
 

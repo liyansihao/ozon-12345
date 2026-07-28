@@ -2959,6 +2959,7 @@ test("summary scanner logging suppresses repetitive batch telemetry but retains 
   log("batch 1-8 / 120 concurrency=8");
   log("Ozon detail pacing interval=4000ms event=soft-block");
   log("source non-pure-FBS sample deferred after 7 checks: https://www.ozon.ru/seller/dry/?sorting=rating");
+  log("favorite collection summary attempted=0 favorited=0 rejected=0 failed=0");
   log("favorite collection summary attempted=24 favorited=6 rejected=12 failed=6");
   assert.deepEqual(messages, [
     "Ozon detail pacing interval=4000ms event=soft-block",
