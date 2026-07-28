@@ -328,6 +328,28 @@ function safeQueryUrls() {
   )));
 }
 
+function distinctDispatchUrls(urls = []) {
+  const seen = new Set();
+  return urls.filter((url) => {
+    const family = sourceDispatchFamily(url);
+    if (!family || seen.has(family)) return false;
+    seen.add(family);
+    return true;
+  });
+}
+
+function explorationUrls(safeUrls = [], derivedUrls = []) {
+  const safe = distinctDispatchUrls(safeUrls);
+  const derived = distinctDispatchUrls(derivedUrls);
+  const urls = [];
+  const rounds = Math.max(safe.length, derived.length);
+  for (let index = 0; index < rounds; index += 1) {
+    if (safe[index]) urls.push(safe[index]);
+    if (derived[index]) urls.push(derived[index]);
+  }
+  return urls;
+}
+
 function addUnique(target, seen, value, limit) {
   const normalized = String(value || "").trim();
   const family = sourceYieldKey(normalized);
@@ -378,7 +400,8 @@ export function buildSourcePortfolio({
   const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
   const evidenceFamilies = new Set(evidence.map((row) => row.family_key).filter(Boolean));
   const explorationFamilies = new Set();
-  for (const url of [...seedUrls, ...safeQueryUrls(), ...derivedQueries]) {
+  const freshExplorationUrls = [...seedUrls, ...explorationUrls(safeQueryUrls(), derivedQueries)];
+  for (const url of freshExplorationUrls) {
     const family = sourceYieldKey(url);
     const dispatchFamily = sourceDispatchFamily(url);
     if (!disabledUrls.has(family)
@@ -401,7 +424,7 @@ export function buildSourcePortfolio({
     if (active.length >= desired) break;
   }
   if (active.length < desired) {
-    for (const url of [...seedUrls, ...safeQueryUrls(), ...derivedQueries]) {
+    for (const url of freshExplorationUrls) {
       const family = sourceYieldKey(url);
       if (!disabledUrls.has(family)
         && !disabledFamilies.has(sourceDispatchFamily(url))

@@ -352,3 +352,24 @@ test("portfolio explores curated safe queries before arbitrary historical title 
   assert.ok(searchTexts.includes("деревянный конструктор"));
   assert.equal(searchTexts.includes(historicalTitle.toLowerCase()), false);
 });
+
+test("portfolio shares additional exploration slots with proven non-prohibited title queries", () => {
+  const yieldRows = Array.from({ length: 7 }, (_, index) => ({
+    sku: `strict-mix-${index}`,
+    source_url: `https://www.ozon.ru/seller/strict-mix-${index}/`,
+    title: "Проверенный органайзер настольный модель",
+    status: "published",
+  }));
+  const portfolio = buildSourcePortfolio({
+    yieldRows,
+    minimumActiveSources: 10,
+    maximumActiveSources: 10,
+  });
+  const searchTexts = portfolio.active_urls.flatMap((value) => {
+    const url = new URL(value);
+    return url.pathname === "/search/" ? [url.searchParams.get("text")] : [];
+  });
+
+  assert.equal(searchTexts[0], "деревянный конструктор");
+  assert.match(searchTexts[1], /проверенный органайзер настольный/u);
+});
