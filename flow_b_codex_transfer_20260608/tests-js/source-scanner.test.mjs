@@ -60,6 +60,7 @@ import {
   createScannerLogger,
   favoriteFailureDisposition,
   adaptiveNonFbsSampleLimit,
+  isFbsMissReason,
   shouldDeferSourceAfterNonFbsSample,
   nextSourceSampleStats,
   sourceSampleStatsFromEvents,
@@ -319,6 +320,16 @@ test("source samples count completed outcomes but not deferred queued work", () 
   stats = nextSourceSampleStats(stats, { status: "favorited" });
   assert.deepEqual(stats, { attempted: 3, nonPureFbs: 1, favorited: 1 });
   assert.deepEqual(nextSourceSampleStats(stats, { status: "deferred" }), stats);
+});
+
+test("missing shipping telemetry fast-defers the same zero-FBS source as an explicit non-FBS result", () => {
+  let stats;
+  for (let index = 0; index < 3; index += 1) {
+    stats = nextSourceSampleStats(stats, { status: "rejected", reason: "missing-shipping-mode" });
+  }
+  assert.equal(isFbsMissReason("missing-shipping-mode"), true);
+  assert.deepEqual(stats, { attempted: 3, nonPureFbs: 3, favorited: 0 });
+  assert.equal(shouldDeferSourceAfterNonFbsSample(stats, 3), true);
 });
 
 test("favorite evidence is mirrored to durable cross-run history with one timestamp", async () => {

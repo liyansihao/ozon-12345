@@ -683,6 +683,10 @@ export function adaptiveNonFbsSampleLimit(limit, productive = false) {
   return configured - 1;
 }
 
+export function isFbsMissReason(reason) {
+  return ["non-pure-fbs", "missing-shipping-mode"].includes(String(reason || ""));
+}
+
 export function nextSourceSampleStats(stats = {}, outcome = {}) {
   const next = {
     attempted: Math.max(0, Number(stats?.attempted) || 0),
@@ -692,7 +696,7 @@ export function nextSourceSampleStats(stats = {}, outcome = {}) {
   if (!["favorited", "rejected", "failed"].includes(String(outcome?.status || ""))) return next;
   next.attempted += 1;
   if (outcome.status === "favorited") next.favorited += 1;
-  if (outcome.reason === "non-pure-fbs") next.nonPureFbs += 1;
+  if (isFbsMissReason(outcome.reason)) next.nonPureFbs += 1;
   return next;
 }
 
@@ -2803,7 +2807,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           } else if (favoriteFailureDisposition(error).status === "rejected") {
             const { reason } = favoriteFailureDisposition(error);
             const sourceStats = recordSourceOutcome(nonFbsSampleKey, { status: "rejected", reason });
-            if (sourceStats && reason === "non-pure-fbs") {
+            if (sourceStats && isFbsMissReason(reason)) {
               const sourceSampleLimit = adaptiveNonFbsSampleLimit(
                 nonFbsSampleLimit,
                 productiveSourceSampleKeys.has(nonFbsSampleKey),
