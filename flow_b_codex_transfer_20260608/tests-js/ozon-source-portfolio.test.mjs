@@ -211,6 +211,38 @@ test("portfolio keeps a strictly confirmed source active despite a low pure-FBS 
   assert.equal(portfolio.active_urls[0], strictLowFbs);
 });
 
+test("portfolio keeps a clean high-submit source active despite a low pure-FBS sample rate", () => {
+  const productiveLowFbs = "https://www.ozon.ru/seller/productive-low-fbs/";
+  const fbsRows = Array.from({ length: 10 }, (_, index) => ({
+    sku: `candidate-${index}`,
+    source_url: productiveLowFbs,
+    status: index === 0 ? "favorited" : "rejected",
+    shipping_mode: index === 0 ? "FBS" : undefined,
+    reason: index === 0 ? undefined : "non-pure-fbs",
+  }));
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [0, 1].map((index) => ({
+      sku: `candidate-${index}`,
+      source_url: productiveLowFbs,
+      status: "submitted",
+      reason: "publish-final-status-timeout",
+      profit_rate: 40,
+      shipping_mode: "FBS",
+    })),
+    fbsRows,
+    minimumActiveSources: 1,
+  });
+
+  const metric = portfolio.metrics.find((row) => row.source_url === productiveLowFbs);
+  assert.equal(metric?.funnel.final_confirmed, 0);
+  assert.equal(metric?.rates.pure_fbs, 0.1);
+  assert.equal(metric?.rates.submit, 0.2);
+  assert.equal(metric?.failures.online_product_rejected, 0);
+  assert.equal(metric?.prohibited_count, 0);
+  assert.equal(metric?.disabled_reason, null);
+  assert.equal(portfolio.active_urls[0], productiveLowFbs);
+});
+
 test("portfolio disables a low pure-FBS search family across unobserved price bands", () => {
   const search150 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=150.000%3B";
   const search500 = "https://www.ozon.ru/search/?text=плюшевая+игрушка&is_global=true&currency_price=500.000%3B&sorting=rating";

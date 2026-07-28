@@ -115,7 +115,12 @@ function disableReason(row) {
     && ratio(row.failures.no_reliable_1688_match, row.funnel.scanned) >= 0.75) {
     return "1688-identity-ambiguity";
   }
+  const cleanProductiveSubmitYield = row.prohibited_count === 0
+    && row.failures.online_product_rejected === 0
+    && row.funnel.submitted > 0
+    && ratio(row.funnel.submitted, row.funnel.scanned) >= 0.1;
   if (row.funnel.final_confirmed === 0
+    && !cleanProductiveSubmitYield
     && row.fbs_checked >= 4
     && ratio(row.funnel.pure_fbs, row.fbs_checked) < 0.2) {
     return "low-pure-fbs-rate";
