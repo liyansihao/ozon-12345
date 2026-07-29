@@ -411,6 +411,91 @@ test("1688 health collapse defers the favorite without consuming it and retries 
   }
 });
 
+test("Ozon detail soft blocks use durable 30-second backoff instead of retrying every consumer round", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-detail-defer-"));
+  try {
+    let current = new Date("2026-07-29T10:00:00.000Z");
+    let detailCalls = 0;
+    const state = fakeState();
+    const client = clientFor([{ id: 3632757227, sku: "3632757227" }], {
+      getProductDetail: async (sku) => {
+        detailCalls += 1;
+        if (detailCalls === 1) throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
+        return {
+          sku,
+          mode: "FBS",
+          title: "standard safe product",
+          current_price: 100,
+          follow_min: 90,
+        };
+      },
+    });
+    const runner = createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+      state,
+      target: 1,
+      runDir,
+      now: () => current,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    });
+
+    const deferred = await runner.run();
+    assert.equal(deferred.published, 0);
+    assert.equal(detailCalls, 1);
+    assert.equal(state.entries()[0].status, "failed");
+    assert.equal(state.entries()[0].data.reason, "ozon-detail-soft-block-deferred");
+    assert.equal(state.entries()[0].data.retry_at, "2026-07-29T10:00:30.000Z");
+
+    current = new Date("2026-07-29T10:00:20.000Z");
+    await runner.run();
+    assert.equal(detailCalls, 1);
+
+    current = new Date("2026-07-29T10:00:31.000Z");
+    const recovered = await runner.run();
+    assert.equal(detailCalls, 3);
+    assert.equal(recovered.published, 1);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("repeated Ozon detail soft blocks escalate durable backoff through 30, 60, and 120 seconds", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-detail-backoff-"));
+  try {
+    let current = new Date("2026-07-29T10:00:00.000Z");
+    let detailCalls = 0;
+    const state = fakeState();
+    const client = clientFor([{ id: 3632757227, sku: "3632757227" }], {
+      getProductDetail: async (sku) => {
+        detailCalls += 1;
+        throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
+      },
+    });
+    const runner = createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+      state,
+      target: 1,
+      runDir,
+      now: () => current,
+    });
+
+    await runner.run();
+    assert.equal(state.entries()[0].data.retry_at, "2026-07-29T10:00:30.000Z");
+    current = new Date("2026-07-29T10:00:31.000Z");
+    await runner.run();
+    assert.equal(state.entries()[0].data.retry_at, "2026-07-29T10:01:31.000Z");
+    current = new Date("2026-07-29T10:01:32.000Z");
+    await runner.run();
+    assert.equal(state.entries()[0].data.retry_at, "2026-07-29T10:03:32.000Z");
+    assert.equal(detailCalls, 3);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 function clientFor(items, overrides = {}) {
   return {
     resolvePublishTarget: async () => ({ store: { id: 7, name: "丽丽1号" }, watermark: { id: 8, name: "lysh" } }),

@@ -16,6 +16,7 @@ import {
   sourceYieldKey,
 } from "./source-scanner.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError, loadCandidateFacts, loadPreflightPureSkus, mergeCandidateFacts } from "./continuous-runtime.mjs";
+import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -60,6 +61,19 @@ function deterministicProfitFailureReason(error) {
     return "missing-shipping-mode";
   }
   return null;
+}
+
+function transientCandidateBackoffMs(attempts) {
+  const delays = [30_000, 60_000, 120_000];
+  const index = Math.min(delays.length - 1, Math.max(0, Number(attempts) - 1));
+  return delays[index];
+}
+
+function isDeferredCandidateReason(reason) {
+  return [
+    "1688-health-deferred",
+    "ozon-detail-soft-block-deferred",
+  ].includes(String(reason || ""));
 }
 
 function asSku(item) {
@@ -980,6 +994,28 @@ export function createPublishRunner({
       if (deterministicReason) {
         return skip(item, deterministicReason, { error: String(error?.message || error) });
       }
+      if (isOzonSoftBlockError(error)) {
+        const transientAttempts = Math.max(0, Number(item?.transient_attempts) || 0) + 1;
+        const retryAt = new Date(
+          now().getTime() + transientCandidateBackoffMs(transientAttempts),
+        ).toISOString();
+        await state.transition(sku, "failed", {
+          ...item,
+          reason: "ozon-detail-soft-block-deferred",
+          error: String(error?.message || error),
+          retry_at: retryAt,
+          transient_attempts: transientAttempts,
+          submitted: false,
+          submission_pending: false,
+        }).catch(() => {});
+        return {
+          status: "deferred",
+          sku,
+          source_url: item.source_url ?? null,
+          reason: "ozon-detail-soft-block-deferred",
+          retry_at: retryAt,
+        };
+      }
       await state.transition(sku, "failed", { reason: "exception", error: String(error?.message || error) }).catch(() => {});
       return { status: "failed", sku, source_url: item.source_url ?? null, reason: "exception", error };
     }
@@ -1539,12 +1575,18 @@ export function createPublishRunner({
         });
         return { status: "failed", sku, source_url: item.source_url ?? null, reason: "fbs-evidence-missing" };
       }
-      const costHealthDeferred = item?.reason === "1688-health-deferred";
-      const costHealthRetryAt = Date.parse(item?.retry_at || "");
-      if (costHealthDeferred
-        && Number.isFinite(costHealthRetryAt)
-        && costHealthRetryAt > now().getTime()) {
-        return { status: "ignored", sku, reason: "1688-health-backoff" };
+      const deferredCandidate = isDeferredCandidateReason(item?.reason);
+      const deferredRetryAt = Date.parse(item?.retry_at || "");
+      if (deferredCandidate
+        && Number.isFinite(deferredRetryAt)
+        && deferredRetryAt > now().getTime()) {
+        return {
+          status: "ignored",
+          sku,
+          reason: item?.reason === "1688-health-deferred"
+            ? "1688-health-backoff"
+            : "ozon-detail-soft-block-backoff",
+        };
       }
       if (restoredStatus === "failed" && isTerminalSubmittedFailure(restoredEntry)) {
         return { status: "ignored", sku, reason: "terminal-submission-failure" };
@@ -1571,7 +1613,7 @@ export function createPublishRunner({
           };
         }
       }
-      if ((restoredStatus === "processing" || restoredStatus === "failed") && !costHealthDeferred) {
+      if ((restoredStatus === "processing" || restoredStatus === "failed") && !deferredCandidate) {
         let reconciliationTarget = targetConfig;
         const restoredStoreId = Number(item.store_id || 0);
         if (restoredStoreId > 0 && restoredStoreId !== Number(targetConfig.store.id)) {
