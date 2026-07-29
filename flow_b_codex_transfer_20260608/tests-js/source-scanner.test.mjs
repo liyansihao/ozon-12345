@@ -395,6 +395,37 @@ test("source portfolio schedules strict, pure-FBS, and exploration sources at 70
   assert.deepEqual(new Set(ordered), new Set([...strict, ...pureFbs, ...explore]));
 });
 
+test("strict product recommendation pages lead the exploration tranche", () => {
+  const strict = Array.from({ length: 7 }, (_, index) => `https://www.ozon.ru/seller/strict-${index}/`);
+  const pureFbs = Array.from({ length: 2 }, (_, index) => `https://www.ozon.ru/seller/fbs-${index}/`);
+  const generic = Array.from(
+    { length: 12 },
+    (_, index) => `https://www.ozon.ru/search/?text=generic-${index}&is_global=true`,
+  );
+  const recommendation = "https://www.ozon.ru/product/strict-proof-recommendations-3700152074/";
+  const rows = [
+    ...strict.map((source_url, index) => ({
+      source_url,
+      sku: `strict-${index}`,
+      status: "published",
+    })),
+    ...pureFbs.flatMap((source_url, sourceIndex) => Array.from({ length: 4 }, (_, index) => ({
+      source_url,
+      sku: `fbs-${sourceIndex}-${index}`,
+      status: index < 2 ? "favorited" : "rejected",
+      reason: index < 2 ? null : "non-pure-fbs",
+    }))),
+  ];
+
+  const prioritized = prioritizeSourceUrls(
+    [...strict, ...pureFbs, ...generic, recommendation],
+    { yieldRows: rows, productDiscoverySourceUrls: [recommendation] },
+  );
+  const scheduled = interleaveSourcePortfolio(prioritized, rows);
+
+  assert.equal(scheduled[9], recommendation);
+});
+
 test("source portfolio does not re-promote a strict seller after two zero-eligible pages", () => {
   const strict = "https://www.ozon.ru/seller/strict-but-dry/";
   const exploreA = "https://www.ozon.ru/seller/untried-a/";

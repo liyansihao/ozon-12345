@@ -1913,6 +1913,7 @@ export function prioritizeSourceUrls(urls, {
   freshSourceUrls = [],
   qualifiedFreshSourceUrls = [],
   verifiedFreshSourceUrls = [],
+  productDiscoverySourceUrls = [],
   boundedDeepFreshSourceUrls = [],
 } = {}) {
   const successfulCounts = new Map();
@@ -1938,6 +1939,7 @@ export function prioritizeSourceUrls(urls, {
   const freshKeys = new Set(freshSourceUrls.map(sourceUrlKey));
   const qualifiedFreshKeys = new Set(qualifiedFreshSourceUrls.map(sourceUrlKey));
   const verifiedFreshKeys = new Set(verifiedFreshSourceUrls.map(sourceUrlKey));
+  const productDiscoveryKeys = new Set(productDiscoverySourceUrls.map(sourceUrlKey));
   const boundedDeepFreshKeys = new Set(boundedDeepFreshSourceUrls.map(sourceNonFbsSampleKey).filter(Boolean));
   const verifiedSellerKeys = new Set(verifiedFreshSourceUrls
     .filter((url) => canonicalSellerUrl(url))
@@ -1960,6 +1962,7 @@ export function prioritizeSourceUrls(urls, {
     const sellerFamilyPenalty = sellerFamilyPenalties.get(canonicalSellerUrl(url)) || 0;
     const effectiveFamilyPenalty = Math.min(familyPenalty, sellerFamilyPenalty);
     const scanPenalty = exhaustedScanFamilies.has(scanFamilyKey) ? -600_000 : 0;
+    const productDiscovery = productDiscoveryKeys.has(familyKey);
     const repeatedStrictGlobal = /(?:[?&]is_global=true(?:&|$)|ozon-global|tovary-iz-kitaya)/i.test(String(url))
       && (strictSuccessSkusBySource.get(yieldKey)?.size || 0) >= 2
       && yieldPriority > 0
@@ -1970,7 +1973,9 @@ export function prioritizeSourceUrls(urls, {
       : repeatedStrictGlobal ? 3
       : qualifiedFreshKeys.has(familyKey)
         ? 3
-        : verifiedFreshKeys.has(familyKey) ? 2 : (freshKeys.has(familyKey) || curatedExploration) ? 1 : 0;
+        : (verifiedFreshKeys.has(familyKey) || productDiscovery)
+          ? 2
+          : (freshKeys.has(familyKey) || curatedExploration) ? 1 : 0;
     let tier = sellerFamilyPenalty < 0
       ? 0
       : familyPenalty < 0
@@ -1981,6 +1986,7 @@ export function prioritizeSourceUrls(urls, {
       + (freshKeys.has(familyKey) || curatedExploration ? 200_000 : 0)
       + (qualifiedFreshKeys.has(familyKey) ? 300_000 : 0)
       + (verifiedFreshKeys.has(familyKey) ? 400_000 : 0)
+      + (productDiscovery ? 450_000 : 0)
       + effectiveFamilyPenalty
       + scanPenalty;
     const group = groups.get(key) || { index, priority, tier, urls: [] };
@@ -3244,6 +3250,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
       derivedPriorityLimit,
     }),
+    productDiscoverySourceUrls: inputUrls.filter((url) => skuFromProductUrl(url)),
     boundedDeepFreshSourceUrls: boundedEvidenceSources,
     verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
       verifiedFreshUrls: [
