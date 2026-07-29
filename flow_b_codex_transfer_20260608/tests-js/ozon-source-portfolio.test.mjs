@@ -243,7 +243,7 @@ test("portfolio keeps a strictly confirmed source active despite a low pure-FBS 
   assert.equal(portfolio.active_urls[0], strictLowFbs);
 });
 
-test("portfolio keeps a clean high-submit source active despite a low pure-FBS sample rate", () => {
+test("portfolio disables legacy high-submit evidence when the strict pure-FBS sample rate is low", () => {
   const productiveLowFbs = "https://www.ozon.ru/seller/productive-low-fbs/";
   const fbsRows = Array.from({ length: 10 }, (_, index) => ({
     sku: `candidate-${index}`,
@@ -271,11 +271,15 @@ test("portfolio keeps a clean high-submit source active despite a low pure-FBS s
   assert.equal(metric?.rates.submit, 0.2);
   assert.equal(metric?.failures.online_product_rejected, 0);
   assert.equal(metric?.prohibited_count, 0);
-  assert.equal(metric?.disabled_reason, null);
-  assert.equal(portfolio.active_urls[0], productiveLowFbs);
+  assert.equal(metric?.disabled_reason, "low-pure-fbs-rate");
+  assert.equal(
+    portfolio.disabled.find((row) => row.source_url === productiveLowFbs)?.disabled_reason,
+    "low-pure-fbs-rate",
+  );
+  assert.equal(portfolio.active_urls.includes(productiveLowFbs), false);
 });
 
-test("portfolio keeps only the clean productive seller variant when its family has low pure-FBS yield", () => {
+test("portfolio disables every seller variant when the family has low strict pure-FBS yield", () => {
   const productiveBand = "https://www.ozon.ru/seller/productive-family/?currency_price=150.000%3B&sorting=rating";
   const dryBand = "https://www.ozon.ru/seller/productive-family/?currency_price=500.000%3B&sorting=rating";
   const productiveRows = Array.from({ length: 8 }, (_, index) => ({
@@ -309,11 +313,11 @@ test("portfolio keeps only the clean productive seller variant when its family h
   const dry = portfolio.metrics.find((row) => row.source_url === dryBand);
   assert.equal(productive?.rates.pure_fbs, 0.125);
   assert.equal(productive?.rates.submit, 0.125);
-  assert.equal(productive?.family_disabled_reason, null);
-  assert.equal(productive?.disabled_reason, null);
+  assert.equal(productive?.family_disabled_reason, "low-pure-fbs-rate");
+  assert.equal(productive?.disabled_reason, "low-pure-fbs-rate");
   assert.equal(dry?.family_disabled_reason, "low-pure-fbs-rate");
   assert.equal(dry?.disabled_reason, "low-pure-fbs-rate");
-  assert.ok(portfolio.active_urls.includes(productiveBand));
+  assert.equal(portfolio.active_urls.includes(productiveBand), false);
   assert.equal(portfolio.active_urls.includes(dryBand), false);
 });
 
@@ -401,6 +405,51 @@ test("portfolio preserves a strict-confirmed search variant while disabling its 
     portfolio.metrics.find((row) => row.source_url === strict150)?.family_disabled_reason,
     null,
   );
+});
+
+test("portfolio does not expand a strict seller into variants with known low pure-FBS evidence", () => {
+  const strictBand = "https://www.ozon.ru/seller/strict-with-dry-variants/?currency_price=150.000%3B&sorting=rating";
+  const dryRoot = "https://www.ozon.ru/seller/strict-with-dry-variants/";
+  const dryBand = "https://www.ozon.ru/seller/strict-with-dry-variants/?currency_price=500.000%3B&sorting=rating";
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      sku: "strict-seller-band",
+      source_url: strictBand,
+      title: "Деревянный конструктор",
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 31,
+      shipping_mode: "FBS",
+    }],
+    fbsRows: [
+      {
+        sku: "strict-seller-band",
+        source_url: strictBand,
+        status: "favorited",
+        shipping_mode: "FBS",
+      },
+      ...Array.from({ length: 4 }, (_, index) => ({
+        sku: `dry-root-${index}`,
+        source_url: dryRoot,
+        status: "rejected",
+        reason: "non-pure-fbs",
+      })),
+      ...Array.from({ length: 4 }, (_, index) => ({
+        sku: `dry-band-${index}`,
+        source_url: dryBand,
+        status: "rejected",
+        reason: "non-pure-fbs",
+      })),
+    ],
+    minimumActiveSources: 5,
+    maximumActiveSources: 120,
+  });
+
+  assert.ok(portfolio.active_urls.includes(strictBand));
+  assert.equal(portfolio.active_urls.includes(dryRoot), false);
+  assert.equal(portfolio.active_urls.includes(dryBand), false);
 });
 
 test("current strict FBS failure overrides stale listing-FBS source evidence", async (t) => {
