@@ -50,6 +50,8 @@ import {
   waitForListingEnrichment,
   shouldYieldAfterRetained,
   shouldYieldForSourceFeedback,
+  strictSourceFeedbackKeys,
+  hasNewStrictSourceFeedback,
   terminalSkusFromJsonl,
   limitLinksPerSource,
   cachedExactFbsFallbackLinks,
@@ -2932,9 +2934,44 @@ test("source scanning yields after a bounded tranche so new publish feedback can
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 8, maximumBatches: 8, pendingSources: 100 }), true);
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 8, maximumBatches: 8, pendingSources: 0 }), false);
   assert.equal(shouldYieldForSourceFeedback({ completedBatches: 80, maximumBatches: 0, pendingSources: 100 }), false);
+  assert.equal(shouldYieldForSourceFeedback({
+    completedBatches: 1,
+    maximumBatches: 8,
+    pendingSources: 100,
+    strictFeedbackChanged: true,
+  }), true);
+  assert.equal(shouldYieldForSourceFeedback({
+    completedBatches: 1,
+    maximumBatches: 8,
+    pendingSources: 0,
+    strictFeedbackChanged: true,
+  }), false);
+});
+
+test("strict source feedback detects only new final publications with source evidence", () => {
+  const baseline = strictSourceFeedbackKeys([
+    { status: "published", sku: "1", source_url: "https://www.ozon.ru/seller/a/" },
+    { status: "submitted", sku: "2", source_url: "https://www.ozon.ru/seller/b/" },
+  ]);
+  assert.equal(hasNewStrictSourceFeedback(baseline, [
+    { status: "published", sku: "1", source_url: "https://www.ozon.ru/seller/a/" },
+    { status: "submitted", sku: "2", source_url: "https://www.ozon.ru/seller/b/" },
+    { status: "published", sku: "3", source_url: "" },
+  ]), false);
+  assert.equal(hasNewStrictSourceFeedback(baseline, [
+    { status: "published", sku: "2", source_url: "https://www.ozon.ru/seller/b/" },
+  ]), true);
 });
 
 test("source lookahead stays one batch ahead only while the tranche can continue", () => {
+  assert.equal(sourceBatchPrefetchAllowed({
+    sourceBlocked: false,
+    deadlineReached: false,
+    completedBatches: 1,
+    maximumBatches: 8,
+    remainingSources: 12,
+    strictFeedbackChanged: true,
+  }), false);
   assert.equal(sourceBatchPrefetchAllowed({
     sourceBlocked: false,
     deadlineReached: false,

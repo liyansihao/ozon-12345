@@ -2042,7 +2042,29 @@ export function shouldYieldAfterRetained({
     && Number(pendingSources) > 0;
 }
 
-export function shouldYieldForSourceFeedback({ completedBatches, maximumBatches, pendingSources }) {
+export function strictSourceFeedbackKeys(rows = []) {
+  return new Set((rows || [])
+    .filter((row) => String(row?.status || "") === "published"
+      && String(row?.sku || "").trim()
+      && String(row?.source_url || "").trim())
+    .map((row) => `${String(row.sku).trim()}\0${String(row.source_url).trim()}`));
+}
+
+export function hasNewStrictSourceFeedback(baselineKeys = new Set(), rows = []) {
+  for (const key of strictSourceFeedbackKeys(rows)) {
+    if (!baselineKeys.has(key)) return true;
+  }
+  return false;
+}
+
+export function shouldYieldForSourceFeedback({
+  completedBatches,
+  maximumBatches,
+  pendingSources,
+  strictFeedbackChanged = false,
+}) {
+  if (!(Number(pendingSources) > 0)) return false;
+  if (strictFeedbackChanged) return true;
   const maximum = Math.max(0, Number(maximumBatches) || 0);
   return maximum > 0
     && Number(completedBatches) >= maximum
@@ -2055,8 +2077,9 @@ export function sourceBatchPrefetchAllowed({
   completedBatches,
   maximumBatches,
   remainingSources,
+  strictFeedbackChanged = false,
 }) {
-  if (sourceBlocked || deadlineReached || !(Number(remainingSources) > 0)) return false;
+  if (sourceBlocked || deadlineReached || strictFeedbackChanged || !(Number(remainingSources) > 0)) return false;
   return !(Number(maximumBatches) > 0 && Number(completedBatches) >= Number(maximumBatches));
 }
 
@@ -3053,6 +3076,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   for (const yieldFile of yieldFiles) {
     yieldRows.push(...normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(yieldFile)));
   }
+  const liveYieldFile = path.join(path.dirname(outputPath), "source_yield.jsonl");
+  const strictFeedbackBaseline = strictSourceFeedbackKeys(normalizeRuntimeSourceYieldRows(
+    await readJsonLinesIncremental(liveYieldFile),
+  ));
   const productiveSourceSampleKeys = new Set(yieldRows
     .filter((row) => ["favorited", "submitted", "published"].includes(String(row?.status || "")))
     .map((row) => sourceNonFbsSampleKey(row?.source_url))
@@ -3544,12 +3571,17 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           adaptiveWorkers.recordSuccess();
         }
       }
+      const strictFeedbackChangedBeforeCollection = hasNewStrictSourceFeedback(
+        strictFeedbackBaseline,
+        normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(liveYieldFile)),
+      );
       if (sourceBatchPrefetchAllowed({
         sourceBlocked: sourceCooldown.blocked,
         deadlineReached: isCollectionDeadlineReached(env),
         completedBatches: completedSourceBatches,
         maximumBatches: maximumSourceBatches,
         remainingSources: pending.length - start,
+        strictFeedbackChanged: strictFeedbackChangedBeforeCollection,
       })) {
         prefetchedBatch = startSourceBatch(start);
         start = prefetchedBatch.nextStart;
@@ -3656,12 +3688,20 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       if (sourceCooldown.blocked) break;
       if (favoriteAfter !== null && favoriteAfter >= targetFavorites) break;
       if (lowDeltaBatchLimit > 0 && lowDeltaBatches >= lowDeltaBatchLimit) break;
+      const strictFeedbackChanged = strictFeedbackChangedBeforeCollection
+        || hasNewStrictSourceFeedback(
+          strictFeedbackBaseline,
+          normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(liveYieldFile)),
+        );
       if (shouldYieldForSourceFeedback({
         completedBatches: completedSourceBatches,
         maximumBatches: maximumSourceBatches,
         pendingSources: pending.length - start,
+        strictFeedbackChanged,
       })) {
-        emit(`yielding source tranche after ${completedSourceBatches} batches for fresh publish feedback`);
+        emit(strictFeedbackChanged
+          ? `yielding source tranche after ${completedSourceBatches} batches for new strict publish feedback`
+          : `yielding source tranche after ${completedSourceBatches} batches for fresh publish feedback`);
         break;
       }
     }
