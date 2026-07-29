@@ -1461,12 +1461,16 @@ export function createPublishRunner({
         await maybeSyncOnlineShop({ store: { id: delayedStoreId } }, { pendingCount });
       }
     }
+    const nonTerminalFavorites = favorites.filter((item) => {
+      const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
+      return !(restored?.status === "failed" && isTerminalSubmittedFailure(restored));
+    });
     const runnableFavorites = reconciliationOnly || freshSubmissionsPaused
-      ? favorites.filter((item) => {
+      ? nonTerminalFavorites.filter((item) => {
         const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
         return restored?.data?.submitted === true || restored?.data?.submission_pending === true;
       })
-      : favorites;
+      : nonTerminalFavorites;
     const preflightPureSkus = await loadPreflightPureSkus(runDir, candidateFactSeedFiles);
     const { familyScores, sourceScores } = await loadObservedPublishFeedback(runDir, publishFeedbackSeedFiles);
     const isReconciliationCandidate = (item) => item?.reconcile_only === true

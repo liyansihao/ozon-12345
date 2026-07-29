@@ -315,17 +315,18 @@ test("restored submitted rows without durable FBS proof are quarantined without 
         },
       },
     });
-    const client = clientFor([], {
+    const client = clientFor([{ sku: "unsafe", title: "missing proof" }], {
       findImportLog: async () => { importChecks += 1; return null; },
     });
-    const result = await createPublishRunner({
+    const runner = createPublishRunner({
       client,
       costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
       state,
       target: 1,
       runDir,
       now: () => new Date("2026-07-27T05:00:00.000Z"),
-    }).run();
+    });
+    const result = await runner.run();
 
     assert.equal(importChecks, 0);
     assert.equal(result.published, 0);
@@ -334,6 +335,13 @@ test("restored submitted rows without durable FBS proof are quarantined without 
     assert.equal(quarantined.data.reason, "fbs-evidence-missing");
     assert.equal(quarantined.data.submitted, true);
     assert.equal(quarantined.data.submission_pending, false);
+
+    const repeated = await runner.run();
+    assert.equal(repeated.failed, 0);
+    const yieldRows = (await fs.readFile(path.join(runDir, "source_yield.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.equal(yieldRows.length, 1);
+    assert.equal(yieldRows[0].reason, "fbs-evidence-missing");
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }
