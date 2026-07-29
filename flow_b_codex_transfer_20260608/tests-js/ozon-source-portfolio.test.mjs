@@ -782,6 +782,41 @@ test("portfolio replenishes eight rotations of sixty unseen safe exploration fam
   assert.equal(seenQueries.size, 480);
 });
 
+test("each replenished tranche rotates across every curated safe product family", () => {
+  const initial = buildSourcePortfolio({
+    minimumActiveSources: 120,
+    maximumActiveSources: 120,
+  });
+  const exhausted = initial.active_urls.flatMap((source_url) => [
+    { source_url, eligible_link_count_before_collection: 0 },
+    { source_url, eligible_link_count_before_collection: 0 },
+  ]);
+  const replenished = buildSourcePortfolio({
+    scanRows: exhausted,
+    minimumActiveSources: 60,
+    maximumActiveSources: 60,
+  });
+  const queries = replenished.active_urls.map((value) => (
+    String(new URL(value).searchParams.get("text") || "")
+  ));
+  const expectedFamilies = [
+    /органайзер|контейнер для мелочей|корзина для хранения|лоток для документов|подставка для ручек|короб для проводов|разделитель для ящика|банка для специй|держатель для книг/u,
+    /кухонн|овощечистка|пресс для чеснока|открывалка для бутылок|подставка под горячее/u,
+    /щетка|ершик|скребок|водосгон|совок|салфетка микрофибра|губка|ролик для чистки/u,
+    /кабел|провод|стяжка|термоусадоч|скотч|крючок самоклеящийся/u,
+    /канцеляр|школьн|закладка для книг|папка для документов/u,
+    /отвертк|шестигранник|рулетка|плоскогубцы|кусачки|набор бит|малярн|шпатель|строительн|мебельная ручка/u,
+    /для творчества|синельная проволока|палочка для поделок|глазки для игрушек|бусина деревянная|трафарет|штамп детский|наклейка декоративная|кисть художественная|мозаика детская/u,
+    /кубик деревянный|пазл деревянный|сортер деревянный|лабиринт деревянный|головоломка деревянная|шнуровка|счетная палочка|доска для рисования|блок для конструктора|мозаика развивающая/u,
+    /дозатор для мыла|стоппер дверной|накладка мебельная|зажим для скатерти|прищепка|защита углов|заглушка мебельная|держатель для губки|крючок дверной|коврик силиконовый/u,
+  ];
+
+  assert.equal(replenished.active_urls.length, 60);
+  for (const pattern of expectedFamilies) {
+    assert.ok(queries.some((query) => pattern.test(query)), `missing family ${pattern}`);
+  }
+});
+
 test("portfolio explores curated safe queries before arbitrary historical title derivations", () => {
   const historicalTitle = "Редкий исторический прибор ультра";
   const portfolio = buildSourcePortfolio({

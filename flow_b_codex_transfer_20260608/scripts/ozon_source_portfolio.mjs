@@ -342,11 +342,21 @@ const SAFE_QUERY_FAMILIES = [
 
 function sustainableSafeQueries() {
   const seen = new Set();
+  const generated = [];
+  const productCount = Math.max(...SAFE_QUERY_FAMILIES.map(({ products }) => products.length));
+  const modifierCount = Math.max(...SAFE_QUERY_FAMILIES.map(({ modifiers }) => modifiers.length));
+  for (let modifierIndex = 0; modifierIndex < modifierCount; modifierIndex += 1) {
+    for (let productIndex = 0; productIndex < productCount; productIndex += 1) {
+      for (const { products, modifiers } of SAFE_QUERY_FAMILIES) {
+        const product = products[productIndex];
+        const modifier = modifiers[modifierIndex];
+        if (product && modifier) generated.push(`${product} ${modifier}`);
+      }
+    }
+  }
   return [
     ...DEFAULT_SAFE_QUERIES,
-    ...SAFE_QUERY_FAMILIES.flatMap(({ products, modifiers }) => (
-      products.flatMap((product) => modifiers.map((modifier) => `${product} ${modifier}`))
-    )),
+    ...generated,
   ].filter((query) => {
     const normalized = String(query || "").trim().toLowerCase();
     if (!normalized || seen.has(normalized)) return false;
