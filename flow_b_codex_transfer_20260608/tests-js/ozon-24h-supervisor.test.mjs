@@ -17,6 +17,7 @@ import {
   currentRunDisposition,
   nextRestartDelaySeconds,
   pendingPrewarmDue,
+  readAppendedTail,
   resolveProductionLayout,
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
@@ -358,6 +359,36 @@ test("browser and CDP failures recover the same run with bounded backoff", () =>
     browserOwnerPidsForRecovery({ action: "restart-worker" }, [{ pid: 92462 }]),
     [],
   );
+});
+
+test("worker recovery ignores browser errors left by an earlier worker generation", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-worker-evidence-"));
+  const errors = path.join(root, "runtime_errors.jsonl");
+  const historical = "browserContext.newPage: Target page, context or browser has been closed\n";
+  await fs.writeFile(errors, historical);
+  const generationOffset = Buffer.byteLength(historical);
+  await fs.appendFile(errors, "ordinary worker exit\n");
+
+  const currentEvidence = await readAppendedTail(errors, generationOffset);
+  assert.equal(currentEvidence, "ordinary worker exit\n");
+  assert.deepEqual(classifyWorkerFailure({
+    message: currentEvidence,
+    profileOwnerCount: 1,
+  }), {
+    action: "restart-worker",
+    reason: "ordinary-worker-recoverable",
+  });
+
+  const nextOffset = generationOffset + Buffer.byteLength("ordinary worker exit\n");
+  await fs.appendFile(errors, "page.goto: Target page, context or browser has been closed\n");
+  assert.deepEqual(classifyWorkerFailure({
+    message: await readAppendedTail(errors, nextOffset),
+    profileOwnerCount: 1,
+  }), {
+    action: "restart-browser-and-worker",
+    reason: "browser-or-network-recoverable",
+  });
+  await fs.rm(root, { recursive: true, force: true });
 });
 
 test("supervisor detects an unresponsive CDP while the worker is still running", async () => {

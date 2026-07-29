@@ -605,6 +605,35 @@ async function readTail(filename, maxBytes = 64 * 1024) {
   }
 }
 
+async function fileSize(filename) {
+  try {
+    return (await fsp.stat(filename)).size;
+  } catch (error) {
+    if (error.code === "ENOENT") return 0;
+    throw error;
+  }
+}
+
+export async function readAppendedTail(filename, offset = 0, maxBytes = 64 * 1024) {
+  try {
+    const stat = await fsp.stat(filename);
+    const normalizedOffset = Math.max(0, Math.trunc(Number(offset) || 0));
+    const generationStart = stat.size >= normalizedOffset ? normalizedOffset : 0;
+    const start = Math.max(generationStart, stat.size - Math.max(1, Number(maxBytes) || 64 * 1024));
+    const handle = await fsp.open(filename, "r");
+    try {
+      const buffer = Buffer.alloc(stat.size - start);
+      await handle.read(buffer, 0, buffer.length, start);
+      return buffer.toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
 async function updateOperationalState(stateRoot, currentRun, patch) {
   await writeJsonAtomic(path.join(stateRoot, "operational_status.json"), {
     run_id: currentRun.run_id,
@@ -1118,8 +1147,14 @@ export async function supervise(configPath) {
         continue;
       }
 
+      const runtimeErrorsFile = path.join(runDir, "runtime_errors.jsonl");
+      const stderrFile = path.join(runDir, "stderr.log");
+      const evidenceOffsets = {
+        runtimeErrors: await fileSize(runtimeErrorsFile),
+        stderr: await fileSize(stderrFile),
+      };
       const stdoutFd = fs.openSync(path.join(runDir, "console.log"), "a");
-      const stderrFd = fs.openSync(path.join(runDir, "stderr.log"), "a");
+      const stderrFd = fs.openSync(stderrFile, "a");
       const startedAt = Date.now();
       worker = spawn(process.execPath, [
         path.join(appRoot, "scripts", "flow_b_playwright.mjs"),
@@ -1155,8 +1190,8 @@ export async function supervise(configPath) {
       const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
       const evidence = [
         result.error?.message || "",
-        await readTail(path.join(runDir, "runtime_errors.jsonl")),
-        await readTail(path.join(runDir, "stderr.log")),
+        await readAppendedTail(runtimeErrorsFile, evidenceOffsets.runtimeErrors),
+        await readAppendedTail(stderrFile, evidenceOffsets.stderr),
       ].join("\n");
       const decision = classifyWorkerFailure({ message: evidence, profileOwnerCount: owners.length });
       if (decision.action === "fatal-stop") {
