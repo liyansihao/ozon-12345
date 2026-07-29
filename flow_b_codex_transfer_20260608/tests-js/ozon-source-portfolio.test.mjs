@@ -24,6 +24,7 @@ const execFileAsync = promisify(execFile);
 
 test("current authoritative publication upgrades only its matching source-yield row", () => {
   const source = "https://www.ozon.ru/seller/current-strict/";
+  const productUrl = "https://www.ozon.ru/product/current-strict-product-1234567890/";
   const rows = enrichCurrentRunStrictSourceYieldRows([
     { sku: "strict-current", source_url: source, status: "published" },
     { sku: "legacy-other", source_url: source, status: "published" },
@@ -33,11 +34,15 @@ test("current authoritative publication upgrades only its matching source-yield 
     stock: 1,
     profit_rate: 31,
     shipping_mode: "FBS",
+    fbs_evidence: {
+      observations: [{ detail_url: `${productUrl}?sh=current-proof` }],
+    },
   }]);
 
   assert.equal(rows[0].strict_confirmed, true);
   assert.equal(rows[0].online_status, "selling");
   assert.equal(rows[0].profit_rate, 31);
+  assert.equal(rows[0].product_url, productUrl);
   assert.equal(rows[1].strict_confirmed, undefined);
 });
 
@@ -705,6 +710,36 @@ test("portfolio explores a recent pure-FBS seller before unobserved strict-title
   });
   assert.ok(firstStrictTitleSearchIndex >= 0);
   assert.ok(portfolio.active_urls.indexOf(provenSeller) < firstStrictTitleSearchIndex);
+});
+
+test("portfolio probes strict product recommendation pages before generic exploration", () => {
+  const strictSource = "https://www.ozon.ru/seller/strict-product-proof/";
+  const productUrl = "https://www.ozon.ru/product/strict-product-proof-1234567890/";
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      at: "2026-07-29T05:00:00.000Z",
+      sku: "1234567890",
+      source_url: strictSource,
+      seller_url: strictSource,
+      product_url: productUrl,
+      title: "Строгий товар с точной рекомендацией",
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 42,
+      shipping_mode: "FBS",
+    }],
+    minimumActiveSources: 8,
+    maximumActiveSources: 8,
+  });
+
+  assert.ok(portfolio.active_urls.includes(productUrl));
+  const firstGenericSearch = portfolio.active_urls.findIndex((value) => (
+    new URL(value).pathname === "/search/"
+    && !/строгий товар/iu.test(String(new URL(value).searchParams.get("text") || ""))
+  ));
+  assert.ok(firstGenericSearch < 0 || portfolio.active_urls.indexOf(productUrl) < firstGenericSearch);
 });
 
 test("portfolio rotates exhausted pure-FBS seller families to the next recent proof", () => {

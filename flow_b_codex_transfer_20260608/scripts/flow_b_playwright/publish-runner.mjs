@@ -28,18 +28,31 @@ export function strictSourceYieldEvidence({
   onlineProduct,
   profitRate,
   shippingMode,
+  productUrl,
 } = {}) {
   const onlineStatus = String(onlineProduct?.online_status || "").toLowerCase();
   const stock = Number(onlineProduct?.stock);
   const profit = Number(profitRate);
   const mode = String(shippingMode || "").toUpperCase();
   if (onlineStatus !== "selling" || !(stock > 0) || !(profit > 30) || mode !== "FBS") return {};
+  let normalizedProductUrl = null;
+  try {
+    const url = new URL(String(productUrl || ""));
+    if (/(?:^|\.)ozon\.ru$/iu.test(url.hostname)
+      && /^\/product\/[^/]*\d+\/?$/iu.test(url.pathname)) {
+      url.hash = "";
+      url.search = "";
+      if (!url.pathname.endsWith("/")) url.pathname = `${url.pathname}/`;
+      normalizedProductUrl = url.toString();
+    }
+  } catch {}
   return {
     strict_confirmed: true,
     online_status: onlineStatus,
     stock,
     profit_rate: profit,
     shipping_mode: "FBS",
+    ...(normalizedProductUrl ? { product_url: normalizedProductUrl } : {}),
   };
 }
 
@@ -986,6 +999,7 @@ export function createPublishRunner({
           onlineProduct,
           profitRate: profit.profit_rate,
           shippingMode: "FBS",
+          productUrl: item.detail_url || item.link || item.href || canonicalProductUrl(sku),
         }),
       };
     } catch (error) {
@@ -1715,6 +1729,7 @@ export function createPublishRunner({
                 onlineProduct: existing,
                 profitRate: item.profit_rate,
                 shippingMode: item.shipping_mode || item.preflight_mode || item.mode,
+                productUrl: item.detail_url || item.link || item.href || canonicalProductUrl(sku),
               }),
             };
           }
@@ -1771,6 +1786,7 @@ export function createPublishRunner({
                   onlineProduct: existing,
                   profitRate: item.profit_rate,
                   shippingMode: item.shipping_mode || item.preflight_mode || item.mode,
+                  productUrl: item.detail_url || item.link || item.href || canonicalProductUrl(sku),
                 }),
               };
             }

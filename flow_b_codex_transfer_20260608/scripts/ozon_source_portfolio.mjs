@@ -627,6 +627,43 @@ function sellerRoot(value) {
   }
 }
 
+function normalizedOzonProductUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (!/(?:^|\.)ozon\.ru$/iu.test(url.hostname)
+      || !/^\/product\/[^/]*\d+\/?$/iu.test(url.pathname)) return null;
+    url.hash = "";
+    url.search = "";
+    if (!url.pathname.endsWith("/")) url.pathname = `${url.pathname}/`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function strictProductDiscoveryUrls(yieldRows = [], limit = 0) {
+  const maximum = Math.max(0, Math.floor(Number(limit) || 0));
+  if (maximum === 0) return [];
+  const latestBySku = new Map();
+  (yieldRows || []).forEach((row, order) => {
+    if (!isStrictSourceYieldRow(row)) return;
+    const sku = String(row?.sku || "").trim();
+    const productUrl = normalizedOzonProductUrl(
+      row?.product_url || row?.detail_url || row?.href || row?.link,
+    );
+    const time = Date.parse(String(row?.at || row?.timestamp || "")) || 0;
+    if (!sku || sku === "2815247918" || !productUrl) return;
+    const previous = latestBySku.get(sku);
+    if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
+      latestBySku.set(sku, { productUrl, time, order });
+    }
+  });
+  return [...latestBySku.values()]
+    .sort((left, right) => right.time - left.time || right.order - left.order)
+    .slice(0, maximum)
+    .map((row) => row.productUrl);
+}
+
 const RECENT_SELLER_QUALITY_FAILURE = /non-pure-fbs|fbs-confirmation-inconsistent|1688-no-reliable-match|online-product-rejected|prohibited|profit(?:_|-)?(?:rate|upper)|identity|spec|model|quantity|same-item/iu;
 
 function recentSellerQualityCooldowns(yieldRows = [], {
@@ -902,6 +939,10 @@ export function buildSourcePortfolio({
     ["150.000;", "500.000;"],
     [1],
   ));
+  const strictProductUrls = strictProductDiscoveryUrls(
+    yieldRows,
+    Math.max(1, Math.ceil(desired * 0.15)),
+  );
   const active = [];
   const seen = new Set();
   const strictBudget = Math.max(1, Math.ceil(desired * 0.7));
@@ -974,6 +1015,18 @@ export function buildSourcePortfolio({
         || explorationFamilies.size >= remainingExplorationBudget
         || active.length >= limit) break;
     }
+  }
+  for (const url of strictProductUrls) {
+    const family = sourceYieldKey(url);
+    const dispatchFamily = sourceDispatchFamily(url);
+    if (!disabledUrls.has(family)
+      && !disabledFamilies.has(dispatchFamily)
+      && !prohibitedSourceUrl(url)
+      && !evidenceFamilies.has(dispatchFamily)
+      && !explorationFamilies.has(dispatchFamily)
+      && !evidenceUrls.has(family)
+      && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
+    if (explorationFamilies.size >= remainingExplorationBudget || active.length >= limit) break;
   }
   const unseenConfiguredSeeds = distinctDispatchUrls(seedUrls).filter((url) => {
     const family = sourceYieldKey(url);
@@ -1118,6 +1171,12 @@ export function enrichCurrentRunStrictSourceYieldRows(yieldRows = [], publishedR
       stock: row.stock,
       profit_rate: row.profit_rate,
       shipping_mode: row.shipping_mode || row.preflight_mode || row.mode,
+      product_url: normalizedOzonProductUrl(
+        row?.fbs_evidence?.observations?.find((observation) => observation?.detail_url)?.detail_url
+          || row?.detail_url
+          || row?.href
+          || row?.link,
+      ) || undefined,
     };
     if (isStrictSourceYieldRow({ status: "published", ...evidence })) strictBySku.set(sku, evidence);
   }

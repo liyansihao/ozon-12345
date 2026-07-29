@@ -23,12 +23,14 @@ test("source-yield strict proof requires selling stock profit and pure FBS", () 
     onlineProduct: { online_status: "selling", stock: 1 },
     profitRate: 30.01,
     shippingMode: "FBS",
+    productUrl: "https://www.ozon.ru/product/strict-proof-1234567890/?sh=proof",
   }), {
     strict_confirmed: true,
     online_status: "selling",
     stock: 1,
     profit_rate: 30.01,
     shipping_mode: "FBS",
+    product_url: "https://www.ozon.ru/product/strict-proof-1234567890/",
   });
   assert.deepEqual(strictSourceYieldEvidence({
     onlineProduct: { online_status: "selling", stock: 0 },
