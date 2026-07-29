@@ -750,6 +750,38 @@ test("portfolio can bootstrap sixty distinct safe exploration families without h
   }));
 });
 
+test("portfolio replenishes eight rotations of sixty unseen safe exploration families", () => {
+  const exhausted = [];
+  const seenQueries = new Set();
+  for (let round = 0; round < 8; round += 1) {
+    const portfolio = buildSourcePortfolio({
+      scanRows: exhausted,
+      minimumActiveSources: 60,
+      maximumActiveSources: 60,
+    });
+
+    assert.equal(portfolio.active_urls.length, 60, `rotation ${round + 1}`);
+    assert.equal(portfolio.counts.exploration_sources, 60, `rotation ${round + 1}`);
+    for (const value of portfolio.active_urls) {
+      const url = new URL(value);
+      const query = String(url.searchParams.get("text") || "");
+      assert.equal(url.pathname, "/search/");
+      assert.equal(url.searchParams.get("is_global"), "true");
+      assert.equal(
+        prohibitedCategorySkipReason({ source_url: value, title: query }),
+        null,
+      );
+      assert.equal(seenQueries.has(query), false, `reused query: ${query}`);
+      seenQueries.add(query);
+      exhausted.push(
+        { source_url: value, eligible_link_count_before_collection: 0 },
+        { source_url: value, eligible_link_count_before_collection: 0 },
+      );
+    }
+  }
+  assert.equal(seenQueries.size, 480);
+});
+
 test("portfolio explores curated safe queries before arbitrary historical title derivations", () => {
   const historicalTitle = "Редкий исторический прибор ультра";
   const portfolio = buildSourcePortfolio({

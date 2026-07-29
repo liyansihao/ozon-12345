@@ -744,40 +744,6 @@ export function sourceSampleStatsFromEvents(events = []) {
   return stats;
 }
 
-export function sellerFamilyNonFbsDeferredKeys(sourceStats = new Map(), {
-  productiveSourceSampleKeys = new Set(),
-  sampleLimit = 6,
-  minimumDryVariants = 2,
-} = {}) {
-  const minimumVariants = Math.max(2, Math.floor(Number(minimumDryVariants) || 0));
-  const families = new Map();
-  for (const [sourceSampleKey, stats] of sourceStats || []) {
-    if (productiveSourceSampleKeys.has(sourceSampleKey)) continue;
-    const familyKey = canonicalSellerUrl(sourceSampleKey);
-    if (!familyKey) continue;
-    const sourceSampleLimit = adaptiveNonFbsSampleLimit(sampleLimit, false);
-    if (!shouldDeferSourceAfterNonFbsSample(stats, sourceSampleLimit)) continue;
-    const variants = families.get(familyKey) || new Set();
-    variants.add(sourceSampleKey);
-    families.set(familyKey, variants);
-  }
-  return new Set([...families]
-    .filter(([, variants]) => variants.size >= minimumVariants)
-    .map(([familyKey]) => familyKey));
-}
-
-export function isSourceDeferredAfterNonFbsEvidence(sourceUrl, {
-  deferredSourceKeys = new Set(),
-  deferredSellerFamilyKeys = new Set(),
-  productiveSourceSampleKeys = new Set(),
-} = {}) {
-  const sourceSampleKey = sourceNonFbsSampleKey(sourceUrl);
-  if (!sourceSampleKey || productiveSourceSampleKeys.has(sourceSampleKey)) return false;
-  if (deferredSourceKeys.has(sourceSampleKey)) return true;
-  const familyKey = canonicalSellerUrl(sourceUrl);
-  return Boolean(familyKey && deferredSellerFamilyKeys.has(familyKey));
-}
-
 export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
   const currency = String(productInfo?.price_info?.currency || "").toUpperCase();
   if (currency === "CNY" && Number(productInfo?.price_info?.sell_price) > Math.max(0, Number(maxPrice) || 0)) {
@@ -2659,35 +2625,11 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
       nonFbsDeferredSources.add(sourceSampleKey);
     }
   }
-  const nonFbsDeferredSellerFamilies = sellerFamilyNonFbsDeferredKeys(sourceOutcomeStats, {
-    productiveSourceSampleKeys,
-    sampleLimit: nonFbsSampleLimit,
-  });
   const recordSourceOutcome = (sourceSampleKey, outcome) => {
     if (!sourceSampleKey) return null;
     const next = nextSourceSampleStats(sourceOutcomeStats.get(sourceSampleKey), outcome);
     sourceOutcomeStats.set(sourceSampleKey, next);
     return next;
-  };
-  const lowFbsDeferralKey = (sourceUrl) => {
-    if (!isSourceDeferredAfterNonFbsEvidence(sourceUrl, {
-      deferredSourceKeys: nonFbsDeferredSources,
-      deferredSellerFamilyKeys: nonFbsDeferredSellerFamilies,
-      productiveSourceSampleKeys,
-    })) return null;
-    return canonicalSellerUrl(sourceUrl) || sourceNonFbsSampleKey(sourceUrl);
-  };
-  const refreshSellerFamilyDeferrals = () => {
-    const next = sellerFamilyNonFbsDeferredKeys(sourceOutcomeStats, {
-      productiveSourceSampleKeys,
-      sampleLimit: nonFbsSampleLimit,
-    });
-    for (const familyKey of next) {
-      if (!nonFbsDeferredSellerFamilies.has(familyKey)) {
-        nonFbsDeferredSellerFamilies.add(familyKey);
-        log(`seller family non-pure-FBS sample deferred: ${familyKey}`);
-      }
-    }
   };
   const apiInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_INTERVAL_MS", 750));
   const maxRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_RETRIES", 5));
@@ -2735,14 +2677,14 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const loadProduct = async (page, item) => {
     for (let attempt = 0; ; attempt += 1) {
       const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
-      const lowFbsKey = lowFbsDeferralKey(item.source_url);
+      const nonFbsSampleKey = sourceNonFbsSampleKey(item.source_url);
       if (sourceBlockKey && softBlockedSources.has(sourceBlockKey)) {
         const error = new Error(`source deferred after Ozon detail soft block: ${sourceBlockKey}`);
         error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
         throw error;
       }
-      if (lowFbsKey) {
-        const error = new Error(`source deferred after low pure-FBS yield: ${lowFbsKey}`);
+      if (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey)) {
+        const error = new Error(`source deferred after low pure-FBS yield: ${nonFbsSampleKey}`);
         error.code = "FLOW_B_SOURCE_LOW_FBS_YIELD";
         throw error;
       }
@@ -2752,9 +2694,8 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
         throw error;
       }
-      const reservedLowFbsKey = lowFbsDeferralKey(item.source_url);
-      if (reservedLowFbsKey) {
-        const error = new Error(`source deferred after low pure-FBS yield: ${reservedLowFbsKey}`);
+      if (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey)) {
+        const error = new Error(`source deferred after low pure-FBS yield: ${nonFbsSampleKey}`);
         error.code = "FLOW_B_SOURCE_LOW_FBS_YIELD";
         throw error;
       }
@@ -2846,16 +2787,15 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         if (!item) break;
         const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
         const nonFbsSampleKey = sourceNonFbsSampleKey(item.source_url);
-        const lowFbsKey = lowFbsDeferralKey(item.source_url);
         if ((sourceBlockKey && softBlockedSources.has(sourceBlockKey))
-          || lowFbsKey) {
+          || (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey))) {
           attempted.delete(item.sku);
           onResult({
             status: "deferred",
             sku: item.sku,
             reason: sourceBlockKey && softBlockedSources.has(sourceBlockKey)
               ? `source deferred after Ozon detail soft block: ${sourceBlockKey}`
-              : `source deferred after low pure-FBS yield: ${lowFbsKey}`,
+              : `source deferred after low pure-FBS yield: ${nonFbsSampleKey}`,
           });
           continue;
         }
@@ -2895,7 +2835,6 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             total: observedTotal,
           });
           onResult({ status: "favorited", sku: productInfo.sku });
-          productiveSourceSampleKeys.add(nonFbsSampleKey);
           recordSourceOutcome(nonFbsSampleKey, { status: "favorited" });
           collection.favorited += 1;
           log(`favorite SKU ${productInfo.sku} total=${observedTotal}/${target}`);
@@ -2926,7 +2865,6 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
                 nonFbsDeferredSources.add(nonFbsSampleKey);
                 log(`source non-pure-FBS sample deferred after ${sourceStats.attempted} checks: ${nonFbsSampleKey}`);
               }
-              refreshSellerFamilyDeferrals();
             }
             await record({ status: "rejected", reason, sku: item.sku, url: item.href, source_url: item.source_url || null });
             onResult({ status: "rejected", reason, sku: item.sku });

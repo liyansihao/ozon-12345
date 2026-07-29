@@ -67,8 +67,6 @@ import {
   nextSourceSampleStats,
   sourceSampleStatsFromEvents,
   sourceNonFbsSampleKey,
-  sellerFamilyNonFbsDeferredKeys,
-  isSourceDeferredAfterNonFbsEvidence,
   deduplicateSearchSourceVariants,
   deduplicateSourceDispatchFamilies,
   excludeCompletedSourceFamilies,
@@ -471,47 +469,6 @@ test("non-pure-FBS sampling isolates seller page and sorting variants", () => {
   assert.notEqual(sourceNonFbsSampleKey(base), sourceNonFbsSampleKey(`${base}&sorting=rating`));
   assert.notEqual(sourceNonFbsSampleKey(base), sourceNonFbsSampleKey(`${base}&page=2`));
   assert.equal(sourceNonFbsSampleKey(`${base}#products`), sourceNonFbsSampleKey(base));
-});
-
-test("two independently dry seller variants quarantine the remaining family without hiding a productive variant", () => {
-  const root = "https://www.ozon.ru/seller/dry-family/";
-  const productive = `${root}?page=2`;
-  const dryRating = `${root}?currency_price=500.000%3B&sorting=rating`;
-  const dryDiscount = `${root}?currency_price=500.000%3B&sorting=discount`;
-  const unseen = `${root}?page=9`;
-  const dryStats = new Map([
-    [sourceNonFbsSampleKey(dryRating), { attempted: 4, nonPureFbs: 4, favorited: 0 }],
-    [sourceNonFbsSampleKey(dryDiscount), { attempted: 4, nonPureFbs: 4, favorited: 0 }],
-  ]);
-  const productiveKeys = new Set([sourceNonFbsSampleKey(productive)]);
-  const deferredFamilies = sellerFamilyNonFbsDeferredKeys(dryStats, {
-    productiveSourceSampleKeys: productiveKeys,
-    sampleLimit: 4,
-  });
-
-  assert.equal(deferredFamilies.has(root), true);
-  assert.equal(isSourceDeferredAfterNonFbsEvidence(productive, {
-    deferredSourceKeys: new Set(),
-    deferredSellerFamilyKeys: deferredFamilies,
-    productiveSourceSampleKeys: productiveKeys,
-  }), false);
-  assert.equal(isSourceDeferredAfterNonFbsEvidence(unseen, {
-    deferredSourceKeys: new Set(),
-    deferredSellerFamilyKeys: deferredFamilies,
-    productiveSourceSampleKeys: productiveKeys,
-  }), true);
-});
-
-test("one dry seller variant cannot quarantine unobserved family variants", () => {
-  const root = "https://www.ozon.ru/seller/one-dry-variant/";
-  const dryStats = new Map([[
-    sourceNonFbsSampleKey(`${root}?page=2`),
-    { attempted: 8, nonPureFbs: 8, favorited: 0 },
-  ]]);
-
-  assert.deepEqual([...sellerFamilyNonFbsDeferredKeys(dryStats, {
-    sampleLimit: 4,
-  })], []);
 });
 
 test("non-pure-FBS sampling shares one failure streak across search pages and sorting variants", () => {
