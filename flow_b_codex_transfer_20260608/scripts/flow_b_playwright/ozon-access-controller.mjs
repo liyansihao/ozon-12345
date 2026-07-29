@@ -68,7 +68,6 @@ export function createOzonAccessController({
   stateFile = null,
   logFile = null,
   minIntervalMs = 15_000,
-  maxConcurrent = 1,
   captchaReopenDelayMs = 600_000,
   now = () => Date.now(),
   sleep = defaultSleep,
@@ -76,14 +75,9 @@ export function createOzonAccessController({
   const filename = stateFile ? path.resolve(stateFile) : null;
   const timelineFilename = logFile ? path.resolve(logFile) : null;
   const minimumInterval = interval(minIntervalMs);
-  const maximumConcurrent = Math.max(1, Math.floor(Number(maxConcurrent) || 1));
   const captchaReopenDelay = interval(captchaReopenDelayMs, 600_000);
   let state = null;
-  let startChain = Promise.resolve();
-  let stateChain = Promise.resolve();
-  let active = 0;
-  const slotWaiters = [];
-  let captchaPause = null;
+  let chain = Promise.resolve();
 
   const load = async () => {
     if (state) return state;
@@ -103,27 +97,18 @@ export function createOzonAccessController({
     return state;
   };
   const persist = async () => writeState(filename, state || {});
-  const mutateState = (mutator) => {
-    const task = stateChain.then(async () => {
-      await load();
-      const next = await mutator(state || {});
-      if (next && typeof next === "object") state = next;
-      await persist();
-      return state;
-    });
-    stateChain = task.catch(() => {});
-    return task;
-  };
   const settle = async () => {
     const settledAt = now();
-    await mutateState((current) => ({
-      ...current,
+    state = {
+      ...state,
       updated_at: new Date(settledAt).toISOString(),
       last_completed_at: new Date(settledAt).toISOString(),
-      next_allowed_at_ms: maximumConcurrent === 1
-        ? Math.max(Number(current?.next_allowed_at_ms) || 0, settledAt + minimumInterval)
-        : Number(current?.next_allowed_at_ms) || 0,
-    }));
+      next_allowed_at_ms: Math.max(
+        Number(state?.next_allowed_at_ms) || 0,
+        settledAt + minimumInterval,
+      ),
+    };
+    await persist();
   };
   const record = async (event, metadata = {}, details = {}) => {
     if (!timelineFilename) return;
@@ -137,85 +122,49 @@ export function createOzonAccessController({
     })}\n`, "utf8");
   };
   const stop = async (reason, metadata = {}) => {
+    await load();
     const at = new Date(now()).toISOString();
-    const stoppedState = await mutateState((current) => ({
-      ...current,
+    state = {
+      ...state,
       version: 1,
       updated_at: at,
-      stopped_at: current.stopped_at || at,
+      stopped_at: state.stopped_at || at,
       requires_manual_clear: true,
       reason: String(reason || "Ozon soft block"),
-      last_kind: metadata.kind || current.last_kind || null,
-      last_url: metadata.url || current.last_url || null,
-    }));
-    await record("stopped", metadata, { reason: stoppedState.reason });
-    return stoppedError(stoppedState.reason, stoppedState);
-  };
-  const acquireSlot = () => new Promise((resolve) => {
-    if (active < maximumConcurrent) {
-      active += 1;
-      resolve();
-      return;
-    }
-    slotWaiters.push(resolve);
-  });
-  const releaseSlot = () => {
-    const next = slotWaiters.shift();
-    if (next) next();
-    else active = Math.max(0, active - 1);
-  };
-  const createCaptchaPause = () => {
-    let resolve;
-    let reject;
-    const promise = new Promise((resolvePromise, rejectPromise) => {
-      resolve = resolvePromise;
-      reject = rejectPromise;
-    });
-    promise.catch(() => {});
-    return { promise, resolve, reject };
+      last_kind: metadata.kind || state.last_kind || null,
+      last_url: metadata.url || state.last_url || null,
+    };
+    await persist();
+    await record("stopped", metadata, { reason: state.reason });
+    return stoppedError(state.reason, state);
   };
 
   return {
     stateFile: filename,
     minIntervalMs: minimumInterval,
-    maxConcurrent: maximumConcurrent,
-    async snapshot() {
-      await stateChain;
-      return { ...(await load()) };
-    },
+    async snapshot() { return { ...(await load()) }; },
     async stop(reason, metadata = {}) { throw await stop(reason, metadata); },
     run(metadata = {}, operation) {
       if (typeof operation !== "function") throw new TypeError("Ozon access operation is required");
-      const started = startChain.then(async () => {
-        await acquireSlot();
-        try {
-          if (captchaPause) await captchaPause.promise;
-          await load();
-          if (state.requires_manual_clear) throw stoppedError(state.reason, state);
-          const waitMs = Math.max(0, Number(state.next_allowed_at_ms) - now());
-          if (waitMs > 0) await sleep(waitMs);
-          if (captchaPause) await captchaPause.promise;
-          if (state.requires_manual_clear) throw stoppedError(state.reason, state);
-          const startedAt = now();
-          const startedState = await mutateState((current) => ({
-            ...current,
-            version: 1,
-            updated_at: new Date(startedAt).toISOString(),
-            last_started_at: new Date(startedAt).toISOString(),
-            next_allowed_at_ms: startedAt + minimumInterval,
-            last_kind: metadata.kind || null,
-            last_url: metadata.url || null,
-            requires_manual_clear: false,
-          }));
-          await record("started", metadata, { next_allowed_at_ms: startedState.next_allowed_at_ms });
-        } catch (error) {
-          releaseSlot();
-          throw error;
-        }
-      });
-      startChain = started.catch(() => {});
-      return started.then(async () => {
+      const task = chain.then(async () => {
         await load();
+        if (state.requires_manual_clear) throw stoppedError(state.reason, state);
+        const waitMs = Math.max(0, Number(state.next_allowed_at_ms) - now());
+        if (waitMs > 0) await sleep(waitMs);
+        if (state.requires_manual_clear) throw stoppedError(state.reason, state);
+        const startedAt = now();
+        state = {
+          ...state,
+          version: 1,
+          updated_at: new Date(startedAt).toISOString(),
+          last_started_at: new Date(startedAt).toISOString(),
+          next_allowed_at_ms: startedAt + minimumInterval,
+          last_kind: metadata.kind || null,
+          last_url: metadata.url || null,
+          requires_manual_clear: false,
+        };
+        await persist();
+        await record("started", metadata, { next_allowed_at_ms: state.next_allowed_at_ms });
         try {
           const result = await operation();
           await settle();
@@ -224,67 +173,43 @@ export function createOzonAccessController({
         } catch (error) {
           let failure = error;
           if (isOzonCaptchaError(failure)) {
-            const ownsPause = !captchaPause;
-            const pause = captchaPause || createCaptchaPause();
-            if (ownsPause) {
-              captchaPause = pause;
-              const detectedAt = now();
-              const retryAt = detectedAt + captchaReopenDelay;
-              const waitingState = await mutateState((current) => ({
-                ...current,
-                version: 1,
-                updated_at: new Date(detectedAt).toISOString(),
-                requires_manual_clear: true,
-                captcha_retry_pending: true,
-                captcha_retry_at: new Date(retryAt).toISOString(),
-                captcha_retry_count: Math.max(0, Number(current?.captcha_retry_count) || 0) + 1,
-                reason: String(failure?.message || failure),
-              }));
-              await record("captcha_wait", metadata, { retry_at: waitingState.captcha_retry_at, delay_ms: captchaReopenDelay });
-              await sleep(captchaReopenDelay);
-              const reopenedAt = now();
-              const reopenedState = await mutateState((current) => ({
-                ...current,
-                updated_at: new Date(reopenedAt).toISOString(),
-                last_started_at: new Date(reopenedAt).toISOString(),
-                next_allowed_at_ms: reopenedAt + minimumInterval,
-                requires_manual_clear: false,
-                captcha_retry_pending: false,
-                captcha_reopened_at: new Date(reopenedAt).toISOString(),
-                reason: null,
-              }));
-              await record("captcha_reopened", metadata, { next_allowed_at_ms: reopenedState.next_allowed_at_ms });
-            } else {
-              try {
-                await pause.promise;
-              } catch (pauseError) {
-                failure = pauseError;
-              }
-            }
+            const detectedAt = now();
+            const retryAt = detectedAt + captchaReopenDelay;
+            state = {
+              ...state,
+              version: 1,
+              updated_at: new Date(detectedAt).toISOString(),
+              requires_manual_clear: true,
+              captcha_retry_pending: true,
+              captcha_retry_at: new Date(retryAt).toISOString(),
+              captcha_retry_count: Math.max(0, Number(state?.captcha_retry_count) || 0) + 1,
+              reason: String(failure?.message || failure),
+            };
+            await persist();
+            await record("captcha_wait", metadata, { retry_at: state.captcha_retry_at, delay_ms: captchaReopenDelay });
+            await sleep(captchaReopenDelay);
+            const reopenedAt = now();
+            state = {
+              ...state,
+              updated_at: new Date(reopenedAt).toISOString(),
+              last_started_at: new Date(reopenedAt).toISOString(),
+              next_allowed_at_ms: reopenedAt + minimumInterval,
+              requires_manual_clear: false,
+              captcha_retry_pending: false,
+              captcha_reopened_at: new Date(reopenedAt).toISOString(),
+              reason: null,
+            };
+            await persist();
+            await record("captcha_reopened", metadata, { next_allowed_at_ms: state.next_allowed_at_ms });
             try {
-              if (!isOzonAccessStoppedError(failure)) {
-                const result = await operation();
-                await settle();
-                await record("succeeded", metadata, { after_captcha_reopen: true });
-                if (ownsPause) {
-                  pause.resolve();
-                  captchaPause = null;
-                }
-                return result;
-              }
+              const result = await operation();
+              await settle();
+              await record("succeeded", metadata, { after_captcha_reopen: true });
+              return result;
             } catch (retryError) {
               failure = retryError;
-              await mutateState((current) => ({ ...current, captcha_retry_pending: false }));
-            }
-            if (ownsPause && isOzonCaptchaError(failure)) {
-              const stopped = await stop(failure?.message || failure, metadata);
-              pause.reject(stopped);
-              captchaPause = null;
-              throw stopped;
-            }
-            if (ownsPause) {
-              pause.resolve();
-              captchaPause = null;
+              state = { ...state, captcha_retry_pending: false };
+              await persist();
             }
           }
           if (isOzonCaptchaError(failure)) throw await stop(failure?.message || failure, metadata);
@@ -300,10 +225,10 @@ export function createOzonAccessController({
           await settle();
           await record("failed", metadata, { reason: String(failure?.message || failure) });
           throw failure;
-        } finally {
-          releaseSlot();
         }
       });
+      chain = task.catch(() => {});
+      return task;
     },
   };
 }
@@ -320,12 +245,6 @@ export function ozonAccessControllerFor(context, env = process.env) {
     minIntervalMs: interval(
       env.FLOW_B_OZON_GLOBAL_INTERVAL_MS,
       interval(env.FLOW_B_FAVORITE_DETAIL_INTERVAL_MS, 15_000),
-    ),
-    maxConcurrent: Math.max(
-      1,
-      Number(env.FLOW_B_OZON_ACCESS_CONCURRENCY)
-        || Number(env.FLOW_B_TAB_WORKERS)
-        || 1,
     ),
     captchaReopenDelayMs: interval(env.FLOW_B_OZON_CAPTCHA_REOPEN_DELAY_MS, 600_000),
   });
