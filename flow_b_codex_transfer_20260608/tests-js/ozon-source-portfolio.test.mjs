@@ -14,6 +14,7 @@ import {
   sourceScanCheckpointPath,
   sourcePortfolioDerivedQueryLimit,
 } from "../scripts/ozon_source_portfolio.mjs";
+import { prohibitedCategorySkipReason } from "../scripts/flow_b_playwright/publish-policy.mjs";
 
 const good = "https://www.ozon.ru/seller/safe-toys/";
 const rejected = "https://www.ozon.ru/seller/rejected-source/";
@@ -243,7 +244,7 @@ test("portfolio keeps a strictly confirmed source active despite a low pure-FBS 
   assert.equal(portfolio.active_urls[0], strictLowFbs);
 });
 
-test("portfolio disables legacy high-submit evidence when the strict pure-FBS sample rate is low", () => {
+test("portfolio keeps a clean high-submit source active despite a low pure-FBS sample rate", () => {
   const productiveLowFbs = "https://www.ozon.ru/seller/productive-low-fbs/";
   const fbsRows = Array.from({ length: 10 }, (_, index) => ({
     sku: `candidate-${index}`,
@@ -271,15 +272,11 @@ test("portfolio disables legacy high-submit evidence when the strict pure-FBS sa
   assert.equal(metric?.rates.submit, 0.2);
   assert.equal(metric?.failures.online_product_rejected, 0);
   assert.equal(metric?.prohibited_count, 0);
-  assert.equal(metric?.disabled_reason, "low-pure-fbs-rate");
-  assert.equal(
-    portfolio.disabled.find((row) => row.source_url === productiveLowFbs)?.disabled_reason,
-    "low-pure-fbs-rate",
-  );
-  assert.equal(portfolio.active_urls.includes(productiveLowFbs), false);
+  assert.equal(metric?.disabled_reason, null);
+  assert.equal(portfolio.active_urls[0], productiveLowFbs);
 });
 
-test("portfolio disables every seller variant when the family has low strict pure-FBS yield", () => {
+test("portfolio keeps only the clean productive seller variant when its family has low pure-FBS yield", () => {
   const productiveBand = "https://www.ozon.ru/seller/productive-family/?currency_price=150.000%3B&sorting=rating";
   const dryBand = "https://www.ozon.ru/seller/productive-family/?currency_price=500.000%3B&sorting=rating";
   const productiveRows = Array.from({ length: 8 }, (_, index) => ({
@@ -313,11 +310,11 @@ test("portfolio disables every seller variant when the family has low strict pur
   const dry = portfolio.metrics.find((row) => row.source_url === dryBand);
   assert.equal(productive?.rates.pure_fbs, 0.125);
   assert.equal(productive?.rates.submit, 0.125);
-  assert.equal(productive?.family_disabled_reason, "low-pure-fbs-rate");
-  assert.equal(productive?.disabled_reason, "low-pure-fbs-rate");
+  assert.equal(productive?.family_disabled_reason, null);
+  assert.equal(productive?.disabled_reason, null);
   assert.equal(dry?.family_disabled_reason, "low-pure-fbs-rate");
   assert.equal(dry?.disabled_reason, "low-pure-fbs-rate");
-  assert.equal(portfolio.active_urls.includes(productiveBand), false);
+  assert.ok(portfolio.active_urls.includes(productiveBand));
   assert.equal(portfolio.active_urls.includes(dryBand), false);
 });
 
@@ -405,51 +402,6 @@ test("portfolio preserves a strict-confirmed search variant while disabling its 
     portfolio.metrics.find((row) => row.source_url === strict150)?.family_disabled_reason,
     null,
   );
-});
-
-test("portfolio does not expand a strict seller into variants with known low pure-FBS evidence", () => {
-  const strictBand = "https://www.ozon.ru/seller/strict-with-dry-variants/?currency_price=150.000%3B&sorting=rating";
-  const dryRoot = "https://www.ozon.ru/seller/strict-with-dry-variants/";
-  const dryBand = "https://www.ozon.ru/seller/strict-with-dry-variants/?currency_price=500.000%3B&sorting=rating";
-  const portfolio = buildSourcePortfolio({
-    yieldRows: [{
-      sku: "strict-seller-band",
-      source_url: strictBand,
-      title: "Деревянный конструктор",
-      status: "published",
-      strict_confirmed: true,
-      online_status: "selling",
-      stock: 1,
-      profit_rate: 31,
-      shipping_mode: "FBS",
-    }],
-    fbsRows: [
-      {
-        sku: "strict-seller-band",
-        source_url: strictBand,
-        status: "favorited",
-        shipping_mode: "FBS",
-      },
-      ...Array.from({ length: 4 }, (_, index) => ({
-        sku: `dry-root-${index}`,
-        source_url: dryRoot,
-        status: "rejected",
-        reason: "non-pure-fbs",
-      })),
-      ...Array.from({ length: 4 }, (_, index) => ({
-        sku: `dry-band-${index}`,
-        source_url: dryBand,
-        status: "rejected",
-        reason: "non-pure-fbs",
-      })),
-    ],
-    minimumActiveSources: 5,
-    maximumActiveSources: 120,
-  });
-
-  assert.ok(portfolio.active_urls.includes(strictBand));
-  assert.equal(portfolio.active_urls.includes(dryRoot), false);
-  assert.equal(portfolio.active_urls.includes(dryBand), false);
 });
 
 test("current strict FBS failure overrides stale listing-FBS source evidence", async (t) => {
@@ -743,6 +695,22 @@ test("portfolio derives a deep enough query pool to replace exhausted production
   assert.equal(sourcePortfolioDerivedQueryLimit(120), 1200);
 });
 
+test("portfolio can bootstrap sixty distinct safe exploration families without historical evidence", () => {
+  const portfolio = buildSourcePortfolio({
+    minimumActiveSources: 60,
+    maximumActiveSources: 60,
+  });
+
+  assert.equal(portfolio.active_urls.length, 60);
+  assert.equal(portfolio.counts.exploration_sources, 60);
+  assert.ok(portfolio.active_urls.every((value) => {
+    const url = new URL(value);
+    return url.pathname === "/search/"
+      && url.searchParams.get("is_global") === "true"
+      && !prohibitedCategorySkipReason({ source_url: value, title: url.searchParams.get("text") });
+  }));
+});
+
 test("portfolio explores curated safe queries before arbitrary historical title derivations", () => {
   const historicalTitle = "Редкий исторический прибор ультра";
   const portfolio = buildSourcePortfolio({
@@ -785,7 +753,61 @@ test("portfolio shares additional exploration slots with proven non-prohibited t
   assert.match(searchTexts[1], /проверенный органайзер настольный/u);
 });
 
-test("portfolio derives fresh search families from repeated pure-FBS product evidence after curated sources are exhausted", () => {
+test("portfolio derives new query families only from final publication evidence", () => {
+  const legacySource = "https://www.ozon.ru/seller/legacy-unverified-seed/";
+  const listingFbsSource = "https://www.ozon.ru/seller/listing-only-fbs-seed/";
+  const submittedSource = "https://www.ozon.ru/seller/gate-passed-submit-seed/";
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [
+      {
+        sku: "strict-query-seed",
+        source_url: "https://www.ozon.ru/seller/strict-query-seed/",
+        title: "Органайзер настольный деревянный модель",
+        status: "published",
+        strict_confirmed: true,
+        online_status: "selling",
+        stock: 1,
+        profit_rate: 31,
+        shipping_mode: "FBS",
+      },
+      ...["legacy-seed-1", "legacy-seed-2"].map((sku) => ({
+        sku,
+        source_url: legacySource,
+        title: "Электромобиль мощный детский внедорожник",
+        status: "submitted",
+        original_status: "published",
+        evidence_quality: "legacy-unverified-final",
+      })),
+      ...["submitted-seed-1", "submitted-seed-2"].map((sku) => ({
+        sku,
+        source_url: submittedSource,
+        title: "Термометр кухонный цифровой складной",
+        status: "submitted",
+        reason: "publish-final-status-timeout",
+      })),
+    ],
+    fbsRows: ["listing-fbs-1", "listing-fbs-2"].map((sku) => ({
+      sku,
+      source_url: listingFbsSource,
+      title: "Аппарат маникюра электрический портативный",
+      status: "favorited",
+      shipping_mode: "FBS",
+    })),
+    minimumActiveSources: 30,
+    maximumActiveSources: 30,
+  });
+  const searchTexts = portfolio.active_urls.flatMap((value) => {
+    const url = new URL(value);
+    return url.pathname === "/search/" ? [String(url.searchParams.get("text") || "")] : [];
+  });
+
+  assert.ok(searchTexts.some((text) => /органайзер настольный деревянный/u.test(text)));
+  assert.equal(searchTexts.some((text) => /термометр кухонный цифровой/u.test(text)), false);
+  assert.equal(searchTexts.some((text) => /электромобиль мощный/u.test(text)), false);
+  assert.equal(searchTexts.some((text) => /аппарат маникюра/u.test(text)), false);
+});
+
+test("portfolio does not derive query families from listing-only FBS evidence after curated sources are exhausted", () => {
   const curated = buildSourcePortfolio({
     minimumActiveSources: 1_000,
     maximumActiveSources: 1_000,
@@ -832,8 +854,8 @@ test("portfolio derives fresh search families from repeated pure-FBS product evi
     return url.pathname === "/search/" ? [url.searchParams.get("text")] : [];
   });
 
-  assert.equal(portfolio.active_urls.length, 10);
-  assert.equal(portfolio.counts.exploration_sources, 10);
-  assert.ok(searchTexts.some((text) => /зажимы пакетов пластиковые/u.test(String(text))));
-  assert.ok(searchTexts.some((text) => /контейнер мелочей пластиковый/u.test(String(text))));
+  assert.equal(portfolio.active_urls.length, 0);
+  assert.equal(portfolio.counts.exploration_sources, 0);
+  assert.equal(searchTexts.some((text) => /зажимы пакетов пластиковые/u.test(String(text))), false);
+  assert.equal(searchTexts.some((text) => /контейнер мелочей пластиковый/u.test(String(text))), false);
 });

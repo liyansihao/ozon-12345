@@ -1064,7 +1064,7 @@ test("strict publications derive fresh Global search sources from useful title t
   assert.ok(urls.every((url) => !decodeURIComponent(url).includes("бесполезный")));
 });
 
-test("repeated strict submissions receive a bounded derived-search leading slot", () => {
+test("repeated submissions do not become new query seeds before final confirmation", () => {
   const repeated = "https://www.ozon.ru/search/?text=winner&currency_price=500.000%3B";
   const singleton = "https://www.ozon.ru/search/?text=singleton&currency_price=500.000%3B";
   const urls = deriveSearchSourceUrls([
@@ -1073,8 +1073,41 @@ test("repeated strict submissions receive a bounded derived-search leading slot"
     { status: "submitted", sku: "single-1", source_url: singleton, title: "Одиночный случай источник" },
   ], 4, ["500.000;"], [1]);
   const texts = urls.map((url) => new URL(url).searchParams.get("text"));
-  assert.ok(texts.some((text) => text.includes("трус")));
+  assert.equal(texts.some((text) => text.includes("трус")), false);
   assert.ok(texts.every((text) => !text.includes("одиночный")));
+});
+
+test("derived searches accept final publications but reject submitted evidence", () => {
+  const trusted = "https://www.ozon.ru/search/?text=trusted&currency_price=500.000%3B";
+  const legacy = "https://www.ozon.ru/search/?text=legacy&currency_price=500.000%3B";
+  const listing = "https://www.ozon.ru/search/?text=listing&currency_price=500.000%3B";
+  const urls = deriveSearchSourceUrls([
+    ...["trusted-1", "trusted-2"].map((sku) => ({
+      status: "published",
+      sku,
+      source_url: trusted,
+      title: "Термометр кухонный цифровой складной",
+    })),
+    ...["legacy-1", "legacy-2"].map((sku) => ({
+      status: "submitted",
+      sku,
+      source_url: legacy,
+      title: "Электромобиль мощный детский внедорожник",
+      evidence_quality: "legacy-unverified-final",
+    })),
+    ...["listing-1", "listing-2"].map((sku) => ({
+      status: "submitted",
+      sku,
+      source_url: listing,
+      title: "Аппарат маникюра электрический портативный",
+      evidence_quality: "pure-fbs-source-discovery",
+    })),
+  ], 10, ["500.000;"], [1]);
+  const texts = urls.map((url) => new URL(url).searchParams.get("text"));
+
+  assert.ok(texts.some((text) => /термометр кухонный цифровой/u.test(String(text))));
+  assert.equal(texts.some((text) => /электромобиль мощный/u.test(String(text))), false);
+  assert.equal(texts.some((text) => /аппарат маникюра/u.test(String(text))), false);
 });
 
 test("derived search budget uses the most recent strict publications first", () => {

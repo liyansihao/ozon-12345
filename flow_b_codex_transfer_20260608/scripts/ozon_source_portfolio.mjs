@@ -38,6 +38,87 @@ const DEFAULT_SAFE_QUERIES = [
   "скотч двусторонний",
   "точилка канцелярская",
   "линейка школьная",
+  "лопатка кухонная силиконовая",
+  "венчик кухонный ручной",
+  "щипцы кухонные силиконовые",
+  "кисть кулинарная силиконовая",
+  "коврик для выпечки силиконовый",
+  "воронка кухонная пластиковая",
+  "сито кухонное металлическое",
+  "дуршлаг складной силиконовый",
+  "овощечистка ручная",
+  "пресс для чеснока ручной",
+  "открывалка для бутылок ручная",
+  "доска разделочная пластиковая",
+  "подставка под горячее силиконовая",
+  "держатель для губки кухонный",
+  "ершик для бутылок",
+  "салфетки микрофибра для уборки",
+  "скребок для стекла ручной",
+  "водосгон для окон ручной",
+  "совок и щетка настольные",
+  "щетка для клавиатуры",
+  "органайзер для кабелей",
+  "держатель для проводов",
+  "клипсы для кабеля",
+  "короб для проводов",
+  "подставка для телефона настольная",
+  "подставка для книг",
+  "держатель для книг",
+  "лоток для документов",
+  "подставка для ручек",
+  "закладки для книг клейкие",
+  "зажимы канцелярские",
+  "скрепки канцелярские",
+  "кнопки канцелярские",
+  "ластик школьный",
+  "транспортир школьный",
+  "циркуль школьный",
+  "пенал пластиковый",
+  "папка для документов пластиковая",
+  "кармашки для документов",
+  "органайзер для ящика",
+  "разделители для ящика",
+  "корзина для хранения пластиковая",
+  "контейнер пищевой пластиковый",
+  "банка для специй пластиковая",
+  "дозатор для мыла механический",
+  "крючок дверной металлический",
+  "стоппер дверной силиконовый",
+  "накладки мебельные фетровые",
+  "зажим для скатерти",
+  "прищепки пластиковые",
+  "набор шестигранников ручных",
+  "рулетка измерительная ручная",
+  "плоскогубцы ручные",
+  "кусачки ручные",
+  "набор бит для отвертки",
+  "магнитный держатель инструмента",
+  "кисть малярная ручная",
+  "шпатель пластиковый",
+  "карандаш строительный",
+  "стяжки многоразовые",
+  "термоусадочные трубки набор",
+  "уплотнительная лента",
+  "мебельные заглушки пластиковые",
+  "ручки мебельные",
+  "защита углов мебели",
+  "блоки деревянные детские",
+  "сортер деревянный детский",
+  "лабиринт деревянный детский",
+  "доска для рисования магнитная",
+  "кубики деревянные",
+  "головоломка деревянная",
+  "шнуровка развивающая деревянная",
+  "счетные палочки деревянные",
+  "трафареты для рисования",
+  "штампы детские пластиковые",
+  "наклейки декоративные набор",
+  "помпоны для творчества",
+  "синельная проволока для творчества",
+  "палочки для поделок деревянные",
+  "глазки для игрушек пластиковые",
+  "бусины деревянные для творчества",
 ];
 
 function sourceUrl(row) {
@@ -102,6 +183,13 @@ function noCandidateStreak(scans) {
   return streak;
 }
 
+function cleanProductiveSubmitYield(row) {
+  return row.prohibited_count === 0
+    && row.failures.online_product_rejected === 0
+    && row.funnel.submitted > 0
+    && ratio(row.funnel.submitted, row.funnel.scanned) >= 0.1;
+}
+
 function disableReason(row) {
   if (row.source_url_prohibited
     || (row.prohibited_count >= 2 && ratio(row.prohibited_count, row.funnel.scanned) >= 0.3)) {
@@ -116,6 +204,7 @@ function disableReason(row) {
     return "1688-identity-ambiguity";
   }
   if (row.funnel.final_confirmed === 0
+    && !cleanProductiveSubmitYield(row)
     && row.fbs_checked >= 4
     && ratio(row.funnel.pure_fbs, row.fbs_checked) < 0.2) {
     return "low-pure-fbs-rate";
@@ -272,7 +361,9 @@ export function aggregateSourceEvidence({
     const familyReason = aggregate ? disableReason(aggregate) : null;
     const preserveStrictSource = familyReason === "low-pure-fbs-rate"
       && row.funnel.final_confirmed > 0;
-    const preserveSource = preserveStrictSource;
+    const preserveProductiveSource = familyReason === "low-pure-fbs-rate"
+      && cleanProductiveSubmitYield(row);
+    const preserveSource = preserveStrictSource || preserveProductiveSource;
     row.family_key = family;
     row.family_disabled_reason = preserveSource ? null : familyReason;
     if (!row.disabled_reason && familyReason && !preserveSource) {
@@ -523,8 +614,7 @@ export function buildSourcePortfolio({
   }
   for (const row of strict) {
     for (const variant of nextSellerVariants(row)) {
-      if (!disabledUrls.has(sourceYieldKey(variant))
-        && !prohibitedSourceUrl(variant)) addUnique(active, seen, variant, limit);
+      if (!prohibitedSourceUrl(variant)) addUnique(active, seen, variant, limit);
     }
     if (active.length >= desired) break;
   }

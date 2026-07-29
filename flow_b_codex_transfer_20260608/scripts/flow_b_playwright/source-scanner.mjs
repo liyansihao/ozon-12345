@@ -1283,6 +1283,13 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
   const pages = [...new Set((resultPages || []).map(Number).filter((value) => Number.isInteger(value) && value > 0))];
   const maximum = Math.max(0, Number(limit) || 0);
   if (maximum === 0 || bands.length === 0 || pages.length === 0) return queries;
+  const trustedEvidenceRows = (yieldRows || []).filter((row) => ![
+    "legacy-unverified-final",
+    "pure-fbs-source-discovery",
+  ].includes(String(row?.evidence_quality || "")));
+  const trustedYieldRows = trustedEvidenceRows.filter(
+    (row) => String(row?.status || "") === "published",
+  );
   const isGenericQueryWord = (word) => /^(?:набор[а-яё]*|детск[а-яё]*|девоч[а-яё]*|мальчик[а-яё]*|женск[а-яё]*|мужск[а-яё]*)$/i.test(String(word || ""));
   const isLowInformationQuery = (candidate) => {
     const concreteCount = candidate.filter((word) => !isGenericQueryWord(word)).length;
@@ -1315,23 +1322,9 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
       .map((candidate) => candidate.join(" "));
     return candidates.length > 0 ? [...new Set(candidates)] : null;
   };
-  const submittedSkusBySource = new Map();
-  for (const row of yieldRows || []) {
-    if (row?.status !== "submitted") continue;
-    const key = sourceYieldKey(row?.source_url);
-    const sku = String(row?.sku || "").trim();
-    if (!key || !sku) continue;
-    const skus = submittedSkusBySource.get(key) || new Set();
-    skus.add(sku);
-    submittedSkusBySource.set(key, skus);
-  }
-  const repeatedSubmittedSources = new Set([...submittedSkusBySource]
-    .filter(([, skus]) => skus.size >= 2)
-    .map(([key]) => key));
   const publishedGroups = [];
-  const submittedGroups = [];
-  const sourceScores = fullFunnelSourceScores(yieldRows);
-  const scoredRows = [...(yieldRows || [])]
+  const sourceScores = fullFunnelSourceScores(trustedEvidenceRows);
+  const scoredRows = [...trustedYieldRows]
     .map((row, order) => ({
       row,
       order,
@@ -1348,7 +1341,6 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     .map(({ row }) => row);
   const seenEvidence = new Set();
   const seenPublishedGroups = new Set();
-  const seenSubmittedGroups = new Set();
   for (const row of recencyOrderedRows) {
     const group = queryGroupForRow(row);
     if (!group) continue;
@@ -1357,20 +1349,12 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
       || String(row?.title || "").trim().toLowerCase();
     const evidenceKey = `${status}\0${evidenceId}`;
     if (!evidenceId || seenEvidence.has(evidenceKey)) continue;
-    if (status === "published") {
-      seenEvidence.add(evidenceKey);
-      const groupKey = group.join("\0");
-      if (!seenPublishedGroups.has(groupKey)) {
-        seenPublishedGroups.add(groupKey);
-        publishedGroups.push(group);
-      }
-    } else if (status === "submitted" && repeatedSubmittedSources.has(sourceYieldKey(row?.source_url))) {
-      seenEvidence.add(evidenceKey);
-      const groupKey = group.join("\0");
-      if (!seenSubmittedGroups.has(groupKey)) {
-        seenSubmittedGroups.add(groupKey);
-        submittedGroups.push(group);
-      }
+    if (status !== "published") continue;
+    seenEvidence.add(evidenceKey);
+    const groupKey = group.join("\0");
+    if (!seenPublishedGroups.has(groupKey)) {
+      seenPublishedGroups.add(groupKey);
+      publishedGroups.push(group);
     }
   }
   const newestPublishedGroups = [];
@@ -1387,14 +1371,7 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     newestPublishedGroups.push(group);
   }
   const recentGroupLimit = Math.max(2, Math.ceil(maximum / (bands.length * pages.length * 2)));
-  const leadingSubmittedLimit = Math.max(1, Math.floor(recentGroupLimit / 4));
-  let submittedSlots = Math.min(submittedGroups.length, leadingSubmittedLimit);
-  let publishedSlots = Math.min(publishedGroups.length, recentGroupLimit - submittedSlots);
-  let remainingSlots = recentGroupLimit - publishedSlots - submittedSlots;
-  const extraPublished = Math.min(remainingSlots, publishedGroups.length - publishedSlots);
-  publishedSlots += extraPublished;
-  remainingSlots -= extraPublished;
-  submittedSlots += Math.min(remainingSlots, submittedGroups.length - submittedSlots);
+  const publishedSlots = Math.min(publishedGroups.length, recentGroupLimit);
   const selectedPublishedGroups = [];
   const selectedPublishedKeys = new Set();
   const addPublishedGroups = (groups, count) => {
@@ -1414,7 +1391,7 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     addPublishedGroups(newestPublishedGroups, newestReserve);
   }
   addPublishedGroups(publishedGroups, publishedSlots);
-  queryGroups.push(...selectedPublishedGroups, ...submittedGroups.slice(0, submittedSlots));
+  queryGroups.push(...selectedPublishedGroups);
   const rounds = Math.max(0, ...queryGroups.map((group) => group.length));
   for (let round = 0; round < rounds; round += 1) {
     for (const group of queryGroups) {
