@@ -621,6 +621,45 @@ test("portfolio explores a recent pure-FBS seller before arbitrary fresh searche
   assert.ok(firstUnobservedSearchIndex > portfolio.active_urls.indexOf(provenSeller));
 });
 
+test("portfolio explores a recent pure-FBS seller before unobserved strict-title searches", () => {
+  const strictSource = "https://www.ozon.ru/seller/strict-title-proof/";
+  const observedSearch = "https://www.ozon.ru/search/?text=observed-fbs-product&is_global=true";
+  const provenSeller = "https://www.ozon.ru/seller/recent-pure-fbs-proof/";
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      at: "2026-07-29T05:00:00.000Z",
+      sku: "strict-title-proof",
+      source_url: strictSource,
+      seller_url: strictSource,
+      title: "WELLY машинка металлическая коллекционная модель",
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 42,
+      shipping_mode: "FBS",
+    }],
+    fbsRows: [{
+      at: "2026-07-29T05:01:00.000Z",
+      sku: "recent-pure-fbs-proof",
+      source_url: observedSearch,
+      seller_url: provenSeller,
+      status: "favorited",
+      shipping_mode: "FBS",
+    }],
+    minimumActiveSources: 8,
+    maximumActiveSources: 8,
+  });
+
+  const firstStrictTitleSearchIndex = portfolio.active_urls.findIndex((value) => {
+    const url = new URL(value);
+    return url.pathname === "/search/"
+      && /welly/iu.test(String(url.searchParams.get("text") || ""));
+  });
+  assert.ok(firstStrictTitleSearchIndex >= 0);
+  assert.ok(portfolio.active_urls.indexOf(provenSeller) < firstStrictTitleSearchIndex);
+});
+
 test("portfolio rotates exhausted pure-FBS seller families to the next recent proof", () => {
   const exhaustedSeller = "https://www.ozon.ru/seller/exhausted-one-proof/";
   const freshSeller = "https://www.ozon.ru/seller/fresh-one-proof/";

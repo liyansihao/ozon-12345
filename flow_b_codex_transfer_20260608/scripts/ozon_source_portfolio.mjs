@@ -573,7 +573,21 @@ export function buildSourcePortfolio({
   const strictDerivedBudget = explorationBudget > 3
     ? Math.min(Math.ceil(desired * 0.2), explorationBudget - 3)
     : 0;
+  const pureFbsSellerBudget = Math.max(0, explorationBudget - strictDerivedBudget);
+  for (const url of pureFbsSellerEvidenceUrls(fbsRows)) {
+    const family = sourceYieldKey(url);
+    const dispatchFamily = sourceDispatchFamily(url);
+    if (!disabledUrls.has(family)
+      && !disabledFamilies.has(dispatchFamily)
+      && !prohibitedSourceUrl(url)
+      && !evidenceFamilies.has(dispatchFamily)
+      && !explorationFamilies.has(dispatchFamily)
+      && !evidenceUrls.has(family)
+      && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
+    if (explorationFamilies.size >= pureFbsSellerBudget) break;
+  }
   if (strictDerivedBudget > 0) {
+    let strictDerivedAdded = 0;
     for (const url of strictDerivedQueries) {
       const family = sourceYieldKey(url);
       const dispatchFamily = sourceDispatchFamily(url);
@@ -583,8 +597,13 @@ export function buildSourcePortfolio({
         && !evidenceFamilies.has(dispatchFamily)
         && !explorationFamilies.has(dispatchFamily)
         && !evidenceUrls.has(family)
-        && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
-      if (explorationFamilies.size >= strictDerivedBudget || active.length >= limit) break;
+        && addUnique(active, seen, url, limit)) {
+        explorationFamilies.add(dispatchFamily);
+        strictDerivedAdded += 1;
+      }
+      if (strictDerivedAdded >= strictDerivedBudget
+        || explorationFamilies.size >= explorationBudget
+        || active.length >= limit) break;
     }
   }
   const unseenConfiguredSeeds = distinctDispatchUrls(seedUrls).filter((url) => {
@@ -600,18 +619,6 @@ export function buildSourcePortfolio({
     if (addUnique(active, seen, url, limit) && !evidenceFamilies.has(dispatchFamily)) {
       explorationFamilies.add(dispatchFamily);
     }
-  }
-  for (const url of pureFbsSellerEvidenceUrls(fbsRows)) {
-    const family = sourceYieldKey(url);
-    const dispatchFamily = sourceDispatchFamily(url);
-    if (!disabledUrls.has(family)
-      && !disabledFamilies.has(dispatchFamily)
-      && !prohibitedSourceUrl(url)
-      && !evidenceFamilies.has(dispatchFamily)
-      && !explorationFamilies.has(dispatchFamily)
-      && !evidenceUrls.has(family)
-      && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
-    if (explorationFamilies.size >= explorationBudget) break;
   }
   const freshExplorationUrls = explorationUrls(safeQueryUrls(), derivedQueries);
   for (const url of freshExplorationUrls) {
