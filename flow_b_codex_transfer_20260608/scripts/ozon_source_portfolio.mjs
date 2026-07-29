@@ -627,6 +627,60 @@ function sellerRoot(value) {
   }
 }
 
+const RECENT_SELLER_QUALITY_FAILURE = /non-pure-fbs|fbs-confirmation-inconsistent|1688-no-reliable-match|online-product-rejected|prohibited|profit(?:_|-)?(?:rate|upper)|identity|spec|model|quantity|same-item/iu;
+
+function recentSellerQualityCooldowns(yieldRows = [], {
+  now = Date.now(),
+  failureThreshold = 4,
+  cooldownMs = 6 * 60 * 60_000,
+} = {}) {
+  const currentTime = Number(now);
+  const threshold = Math.max(1, Math.floor(Number(failureThreshold) || 4));
+  const duration = Math.max(0, Number(cooldownMs) || 0);
+  const sellers = new Map();
+  (yieldRows || []).forEach((row, order) => {
+    const seller = sellerRoot(row?.seller_url) || sellerRoot(row?.source_url);
+    const sku = String(row?.sku || "").trim();
+    const time = Date.parse(String(row?.at || row?.timestamp || ""));
+    const status = String(row?.status || "");
+    const strict = isStrictSourceYieldRow(row);
+    const productive = strict || status === "submitted";
+    const qualityFailure = ["skipped", "rejected", "failed"].includes(status)
+      && RECENT_SELLER_QUALITY_FAILURE.test(String(row?.reason || ""));
+    if (!seller || !sku || !Number.isFinite(time) || (!productive && !qualityFailure)) return;
+    const outcomes = sellers.get(seller) || new Map();
+    const previous = outcomes.get(sku);
+    if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
+      outcomes.set(sku, {
+        strict,
+        productive,
+        qualityFailure,
+        time,
+        order,
+      });
+    }
+    sellers.set(seller, outcomes);
+  });
+  return new Map([...sellers].flatMap(([seller, outcomes]) => {
+    const recent = [...outcomes.values()]
+      .sort((left, right) => right.time - left.time || right.order - left.order);
+    let streak = 0;
+    for (const outcome of recent) {
+      if (!outcome.qualityFailure) break;
+      streak += 1;
+    }
+    if (streak < threshold || !recent[0]) return [];
+    const cooldownUntil = recent[0].time + duration;
+    if (!Number.isFinite(currentTime)
+      || currentTime < recent[0].time
+      || currentTime >= cooldownUntil) return [];
+    return [[seller, {
+      recent_quality_failure_streak: streak,
+      cooldown_until: new Date(cooldownUntil).toISOString(),
+    }]];
+  }));
+}
+
 function pureFbsSellerEvidenceUrls(fbsRows = []) {
   const latestFirst = fbsRows
     .map((row, index) => ({
@@ -818,8 +872,18 @@ export function buildSourcePortfolio({
   seedUrls = [],
   minimumActiveSources = 60,
   maximumActiveSources = 120,
+  now = Date.now(),
 } = {}) {
   const evidence = aggregateSourceEvidence({ yieldRows, fbsRows, scanRows });
+  const sellerCooldowns = recentSellerQualityCooldowns(yieldRows, { now });
+  for (const row of evidence) {
+    const cooldown = sellerCooldowns.get(sellerRoot(row.source_url));
+    if (!cooldown) continue;
+    row.disabled_reason = "seller-family-recent-quality-failure-streak";
+    row.family_disabled_reason = "recent-quality-failure-streak";
+    row.recent_quality_failure_streak = cooldown.recent_quality_failure_streak;
+    row.cooldown_until = cooldown.cooldown_until;
+  }
   const enabled = evidence.filter((row) => !row.disabled_reason);
   const disabled = evidence.filter((row) => row.disabled_reason);
   const strict = enabled.filter((row) => row.funnel.final_confirmed > 0);

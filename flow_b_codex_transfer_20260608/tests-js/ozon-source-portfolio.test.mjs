@@ -244,6 +244,53 @@ test("portfolio keeps a strictly confirmed source active despite a low pure-FBS 
   assert.equal(portfolio.active_urls[0], strictLowFbs);
 });
 
+test("portfolio temporarily cools a previously strict seller after four recent quality-gate failures", () => {
+  const strictSeller = "https://www.ozon.ru/seller/recently-exhausted/";
+  const strict = {
+    at: "2026-07-29T09:00:00.000Z",
+    sku: "strict-before-streak",
+    source_url: strictSeller,
+    seller_url: strictSeller,
+    status: "published",
+    strict_confirmed: true,
+    online_status: "selling",
+    stock: 1,
+    profit_rate: 31,
+    shipping_mode: "FBS",
+  };
+  const failures = Array.from({ length: 4 }, (_, index) => ({
+    at: `2026-07-29T09:${10 + index}:00.000Z`,
+    sku: `quality-failure-${index}`,
+    source_url: `${strictSeller}?page=7`,
+    seller_url: strictSeller,
+    status: "skipped",
+    reason: index % 2 === 0 ? "non-pure-fbs" : "1688-no-reliable-match",
+  }));
+
+  const cooling = buildSourcePortfolio({
+    yieldRows: [strict, ...failures],
+    seedUrls: [good],
+    minimumActiveSources: 1,
+    maximumActiveSources: 1,
+    now: Date.parse("2026-07-29T10:00:00.000Z"),
+  });
+  assert.equal(cooling.active_urls.includes(strictSeller), false);
+  assert.equal(cooling.active_urls[0], good);
+  assert.equal(
+    cooling.disabled.find((row) => row.source_url === strictSeller)?.disabled_reason,
+    "seller-family-recent-quality-failure-streak",
+  );
+
+  const recovered = buildSourcePortfolio({
+    yieldRows: [strict, ...failures],
+    seedUrls: [good],
+    minimumActiveSources: 1,
+    maximumActiveSources: 1,
+    now: Date.parse("2026-07-29T16:00:00.001Z"),
+  });
+  assert.equal(recovered.active_urls[0], strictSeller);
+});
+
 test("portfolio keeps a clean high-submit source active despite a low pure-FBS sample rate", () => {
   const productiveLowFbs = "https://www.ozon.ru/seller/productive-low-fbs/";
   const fbsRows = Array.from({ length: 10 }, (_, index) => ({
