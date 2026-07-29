@@ -2078,9 +2078,10 @@ export function shouldYieldForSourceFeedback({
   maximumBatches,
   pendingSources,
   strictFeedbackChanged = false,
+  sourceInputChanged = false,
 }) {
   if (!(Number(pendingSources) > 0)) return false;
-  if (strictFeedbackChanged) return true;
+  if (strictFeedbackChanged || sourceInputChanged) return true;
   const maximum = Math.max(0, Number(maximumBatches) || 0);
   return maximum > 0
     && Number(completedBatches) >= maximum
@@ -3060,6 +3061,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const emit = createScannerLogger(log, env.FLOW_B_LOG_LEVEL || "verbose");
   const inputPath = path.resolve(urlsFile);
   const outputPath = path.resolve(outFile);
+  const inputRevision = await fs.stat(inputPath).then((stat) => (
+    `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
+  ));
   const freshSourceFiles = String(env.FLOW_B_FRESH_SOURCE_FILES || "").split(path.delimiter).filter(Boolean);
   const freshInputUrls = [];
   for (const sourceFile of freshSourceFiles) {
@@ -3709,15 +3713,21 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           strictFeedbackBaseline,
           normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(liveYieldFile)),
         );
+      const sourceInputChanged = await fs.stat(inputPath).then((stat) => (
+        `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}` !== inputRevision
+      ));
       if (shouldYieldForSourceFeedback({
         completedBatches: completedSourceBatches,
         maximumBatches: maximumSourceBatches,
         pendingSources: pending.length - start,
         strictFeedbackChanged,
+        sourceInputChanged,
       })) {
-        emit(strictFeedbackChanged
-          ? `yielding source tranche after ${completedSourceBatches} batches for new strict publish feedback`
-          : `yielding source tranche after ${completedSourceBatches} batches for fresh publish feedback`);
+        emit(sourceInputChanged
+          ? `yielding source tranche after ${completedSourceBatches} batches for refreshed source input`
+          : strictFeedbackChanged
+            ? `yielding source tranche after ${completedSourceBatches} batches for new strict publish feedback`
+            : `yielding source tranche after ${completedSourceBatches} batches for fresh publish feedback`);
         break;
       }
     }

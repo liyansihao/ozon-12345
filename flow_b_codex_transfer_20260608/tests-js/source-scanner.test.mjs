@@ -2947,6 +2947,12 @@ test("source scanning yields after a bounded tranche so new publish feedback can
   assert.equal(shouldYieldForSourceFeedback({
     completedBatches: 1,
     maximumBatches: 8,
+    pendingSources: 100,
+    sourceInputChanged: true,
+  }), true);
+  assert.equal(shouldYieldForSourceFeedback({
+    completedBatches: 1,
+    maximumBatches: 8,
     pendingSources: 0,
     strictFeedbackChanged: true,
   }), false);
