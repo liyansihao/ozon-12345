@@ -694,6 +694,39 @@ test("portfolio rotates exhausted pure-FBS seller families to the next recent pr
   assert.equal(portfolio.active_urls.includes(exhaustedSeller), false);
 });
 
+test("portfolio advances a strict seller to its next unscanned page before generic exploration", () => {
+  const strictSeller = "https://www.ozon.ru/seller/proven-deep-catalog/";
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      at: "2026-07-29T08:45:15.871Z",
+      sku: "strict-deep-catalog",
+      source_url: strictSeller,
+      seller_url: strictSeller,
+      title: "Проверенный стандартный товар",
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 42,
+      shipping_mode: "FBS",
+    }],
+    scanRows: [1, 2, 3].map((page) => ({
+      source_url: page === 1 ? strictSeller : `${strictSeller}?page=${page}`,
+      scanned_at: `2026-07-29T0${page}:00:00.000Z`,
+      eligible_link_count_before_collection: 5,
+    })),
+    minimumActiveSources: 4,
+    maximumActiveSources: 4,
+  });
+
+  const nextPage = `${strictSeller}?page=4`;
+  assert.ok(portfolio.active_urls.includes(nextPage));
+  const firstGenericSearch = portfolio.active_urls.findIndex((value) => (
+    new URL(value).pathname === "/search/"
+  ));
+  assert.ok(portfolio.active_urls.indexOf(nextPage) < firstGenericSearch);
+});
+
 test("portfolio reserves new exploration slots when configured seeds already have evidence", () => {
   const strictRows = Array.from({ length: 2 }, (_, index) => ({
     sku: `strict-reserve-${index}`,

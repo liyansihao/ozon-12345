@@ -725,6 +725,50 @@ function nextSellerVariants(row) {
   ];
 }
 
+function sellerPageNumber(value) {
+  try {
+    return Math.max(1, Number(new URL(String(value || "")).searchParams.get("page")) || 1);
+  } catch {
+    return 1;
+  }
+}
+
+function strictSellerContinuationUrls(strictRows = [], scanRows = [], limit = 0) {
+  const maximum = Math.max(0, Math.floor(Number(limit) || 0));
+  if (maximum === 0) return [];
+  const scansBySeller = new Map();
+  for (const row of scanRows) {
+    const root = sellerRoot(row?.source_url);
+    if (!root) continue;
+    const page = sellerPageNumber(row.source_url);
+    const pages = scansBySeller.get(root) || new Map();
+    const eligible = Number(row?.eligible_link_count_before_collection);
+    if (Number.isFinite(eligible)) {
+      pages.set(page, Math.max(Number(pages.get(page)) || 0, eligible));
+    } else if (!pages.has(page)) {
+      pages.set(page, null);
+    }
+    scansBySeller.set(root, pages);
+  }
+  const seen = new Set();
+  const continuations = [];
+  for (const row of strictRows) {
+    const root = sellerRoot(row?.source_url) || sellerRoot(row?.seller_url);
+    if (!root || seen.has(root)) continue;
+    seen.add(root);
+    const pages = scansBySeller.get(root) || new Map();
+    if (pages.size === 0) continue;
+    const scannedPages = [...pages.keys()].sort((left, right) => right - left);
+    const recent = scannedPages.slice(0, 2);
+    if (recent.length >= 2 && recent.every((page) => pages.get(page) === 0)) continue;
+    const nextPage = Math.max(1, ...scannedPages, sellerPageNumber(row?.source_url)) + 1;
+    if (nextPage > 40) continue;
+    continuations.push(`${root}?page=${nextPage}`);
+    if (continuations.length >= maximum) break;
+  }
+  return continuations;
+}
+
 function safeQueryUrls() {
   return sustainableSafeQueries().flatMap((query) => [500, 1000].map((ceiling) => (
     `https://www.ozon.ru/search/?text=${encodeURIComponent(query)}&is_global=true&currency_price=${ceiling}.000%3B&sorting=rating`
@@ -806,6 +850,23 @@ export function buildSourcePortfolio({
   );
   for (const row of strict.slice(0, strictBudget)) addUnique(active, seen, row.source_url, limit);
   for (const row of fbs.slice(0, fbsBudget)) addUnique(active, seen, row.source_url, limit);
+  const continuationBudget = Math.min(
+    explorationBudget,
+    Math.max(1, Math.ceil(explorationBudget * 0.5)),
+  );
+  const strictContinuations = strictSellerContinuationUrls(
+    strict,
+    scanRows,
+    continuationBudget,
+  );
+  for (const url of strictContinuations) {
+    if (active.length >= limit || active.includes(url)) break;
+    active.push(url);
+  }
+  const remainingExplorationBudget = Math.max(
+    0,
+    explorationBudget - strictContinuations.length,
+  );
   const disabledUrls = new Set(disabled.map((row) => sourceYieldKey(row.source_url)));
   const disabledFamilies = new Set(evidence
     .filter((row) => row.family_disabled_reason)
@@ -814,10 +875,10 @@ export function buildSourcePortfolio({
   const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
   const evidenceFamilies = new Set(evidence.map((row) => row.family_key).filter(Boolean));
   const explorationFamilies = new Set();
-  const strictDerivedBudget = explorationBudget > 3
-    ? Math.min(Math.ceil(desired * 0.2), explorationBudget - 3)
+  const strictDerivedBudget = remainingExplorationBudget > 3
+    ? Math.min(Math.ceil(desired * 0.2), remainingExplorationBudget - 3)
     : 0;
-  const pureFbsSellerBudget = Math.max(0, explorationBudget - strictDerivedBudget);
+  const pureFbsSellerBudget = Math.max(0, remainingExplorationBudget - strictDerivedBudget);
   for (const url of pureFbsSellerEvidenceUrls(fbsRows)) {
     const family = sourceYieldKey(url);
     const dispatchFamily = sourceDispatchFamily(url);
@@ -846,7 +907,7 @@ export function buildSourcePortfolio({
         strictDerivedAdded += 1;
       }
       if (strictDerivedAdded >= strictDerivedBudget
-        || explorationFamilies.size >= explorationBudget
+        || explorationFamilies.size >= remainingExplorationBudget
         || active.length >= limit) break;
     }
   }
@@ -875,7 +936,7 @@ export function buildSourcePortfolio({
       && !explorationFamilies.has(dispatchFamily)
       && !evidenceUrls.has(family)
       && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
-    if (explorationFamilies.size >= explorationBudget) break;
+    if (explorationFamilies.size >= remainingExplorationBudget) break;
   }
   for (const url of seedUrls) {
     if (active.length >= desired) break;
