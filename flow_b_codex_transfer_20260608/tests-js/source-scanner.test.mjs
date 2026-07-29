@@ -67,6 +67,8 @@ import {
   nextSourceSampleStats,
   sourceSampleStatsFromEvents,
   sourceNonFbsSampleKey,
+  sellerFamilyNonFbsDeferredKeys,
+  isSourceDeferredAfterNonFbsEvidence,
   deduplicateSearchSourceVariants,
   deduplicateSourceDispatchFamilies,
   excludeCompletedSourceFamilies,
@@ -78,6 +80,8 @@ import {
   sourceBatchCooldownState,
   candidateQueueTransitionForCollectionResult,
   selectRecoveredCandidateTranche,
+  sourceInterleavedCandidateDrainLimit,
+  sourceInterleavedRetainedReplayLimit,
   sourceCollectionBlockKey,
   collectionRuntimeState,
   persistCollectionRuntimeState,
@@ -469,6 +473,47 @@ test("non-pure-FBS sampling isolates seller page and sorting variants", () => {
   assert.equal(sourceNonFbsSampleKey(`${base}#products`), sourceNonFbsSampleKey(base));
 });
 
+test("two independently dry seller variants quarantine the remaining family without hiding a productive variant", () => {
+  const root = "https://www.ozon.ru/seller/dry-family/";
+  const productive = `${root}?page=2`;
+  const dryRating = `${root}?currency_price=500.000%3B&sorting=rating`;
+  const dryDiscount = `${root}?currency_price=500.000%3B&sorting=discount`;
+  const unseen = `${root}?page=9`;
+  const dryStats = new Map([
+    [sourceNonFbsSampleKey(dryRating), { attempted: 4, nonPureFbs: 4, favorited: 0 }],
+    [sourceNonFbsSampleKey(dryDiscount), { attempted: 4, nonPureFbs: 4, favorited: 0 }],
+  ]);
+  const productiveKeys = new Set([sourceNonFbsSampleKey(productive)]);
+  const deferredFamilies = sellerFamilyNonFbsDeferredKeys(dryStats, {
+    productiveSourceSampleKeys: productiveKeys,
+    sampleLimit: 4,
+  });
+
+  assert.equal(deferredFamilies.has(root), true);
+  assert.equal(isSourceDeferredAfterNonFbsEvidence(productive, {
+    deferredSourceKeys: new Set(),
+    deferredSellerFamilyKeys: deferredFamilies,
+    productiveSourceSampleKeys: productiveKeys,
+  }), false);
+  assert.equal(isSourceDeferredAfterNonFbsEvidence(unseen, {
+    deferredSourceKeys: new Set(),
+    deferredSellerFamilyKeys: deferredFamilies,
+    productiveSourceSampleKeys: productiveKeys,
+  }), true);
+});
+
+test("one dry seller variant cannot quarantine unobserved family variants", () => {
+  const root = "https://www.ozon.ru/seller/one-dry-variant/";
+  const dryStats = new Map([[
+    sourceNonFbsSampleKey(`${root}?page=2`),
+    { attempted: 8, nonPureFbs: 8, favorited: 0 },
+  ]]);
+
+  assert.deepEqual([...sellerFamilyNonFbsDeferredKeys(dryStats, {
+    sampleLimit: 4,
+  })], []);
+});
+
 test("non-pure-FBS sampling shares one failure streak across search pages and sorting variants", () => {
   const base = "https://www.ozon.ru/search/?text=metal+model&is_global=true&currency_price=150.000%3B";
   assert.equal(
@@ -611,6 +656,55 @@ test("low pure-FBS deferred backlog cannot starve fresh source scanning", () => 
     "low-0", "low-1", "low-2", "low-3",
     "ordinary-0", "ordinary-1", "ordinary-2", "ordinary-3", "ordinary-4", "ordinary-5",
   ]);
+});
+
+test("ready sources bound recovered queue work to two worker waves", () => {
+  assert.equal(sourceInterleavedCandidateDrainLimit({
+    configuredLimit: 48,
+    pendingSourceCount: 12,
+    workers: 3,
+  }), 6);
+  assert.equal(sourceInterleavedCandidateDrainLimit({
+    configuredLimit: 4,
+    pendingSourceCount: 12,
+    workers: 3,
+  }), 4);
+  assert.equal(sourceInterleavedCandidateDrainLimit({
+    configuredLimit: 48,
+    pendingSourceCount: 0,
+    workers: 3,
+  }), 48);
+});
+
+test("retained fallback shares the same pre-source budget as recovered candidates", () => {
+  assert.equal(sourceInterleavedRetainedReplayLimit({
+    configuredRetainedLimit: 12,
+    cachedFallbackLimit: 24,
+    recoveredCount: 6,
+    pendingSourceCount: 12,
+    candidateDrainLimit: 6,
+  }), 0);
+  assert.equal(sourceInterleavedRetainedReplayLimit({
+    configuredRetainedLimit: 12,
+    cachedFallbackLimit: 24,
+    recoveredCount: 4,
+    pendingSourceCount: 12,
+    candidateDrainLimit: 6,
+  }), 2);
+  assert.equal(sourceInterleavedRetainedReplayLimit({
+    configuredRetainedLimit: 12,
+    cachedFallbackLimit: 24,
+    recoveredCount: 6,
+    pendingSourceCount: 0,
+    candidateDrainLimit: 48,
+  }), 24);
+  assert.equal(sourceInterleavedRetainedReplayLimit({
+    configuredRetainedLimit: 0,
+    cachedFallbackLimit: 24,
+    recoveredCount: 0,
+    pendingSourceCount: 0,
+    candidateDrainLimit: 48,
+  }), 0);
 });
 
 test("retained replay does not bypass a durable candidate retry cooldown", () => {

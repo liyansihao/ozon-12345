@@ -57,6 +57,36 @@ export function selectRecoveredCandidateTranche(rows = [], {
   return selected;
 }
 
+export function sourceInterleavedCandidateDrainLimit({
+  configuredLimit = 48,
+  pendingSourceCount = 0,
+  workers = 1,
+} = {}) {
+  const maximum = Math.max(1, Math.floor(Number(configuredLimit) || 0));
+  if (!(Number(pendingSourceCount) > 0)) return maximum;
+  const workerWaves = Math.max(1, Math.floor(Number(workers) || 0)) * 2;
+  return Math.min(maximum, workerWaves);
+}
+
+export function sourceInterleavedRetainedReplayLimit({
+  configuredRetainedLimit = 12,
+  cachedFallbackLimit = 24,
+  recoveredCount = 0,
+  pendingSourceCount = 0,
+  candidateDrainLimit = 48,
+} = {}) {
+  const retainedMaximum = Math.max(0, Math.floor(Number(configuredRetainedLimit) || 0));
+  if (retainedMaximum === 0) return 0;
+  const fallbackMaximum = Math.max(0, Math.floor(Number(cachedFallbackLimit) || 0));
+  const totalMaximum = Math.max(retainedMaximum, fallbackMaximum);
+  if (!(Number(pendingSourceCount) > 0)) return totalMaximum;
+  const remaining = Math.max(
+    0,
+    Math.floor(Number(candidateDrainLimit) || 0) - Math.max(0, Math.floor(Number(recoveredCount) || 0)),
+  );
+  return Math.min(totalMaximum, remaining);
+}
+
 function parseJsonLinesChunk(text) {
   const source = String(text || "");
   const complete = /\r?\n$/.test(source);
@@ -712,6 +742,40 @@ export function sourceSampleStatsFromEvents(events = []) {
     stats.set(key, nextSourceSampleStats(stats.get(key), event));
   }
   return stats;
+}
+
+export function sellerFamilyNonFbsDeferredKeys(sourceStats = new Map(), {
+  productiveSourceSampleKeys = new Set(),
+  sampleLimit = 6,
+  minimumDryVariants = 2,
+} = {}) {
+  const minimumVariants = Math.max(2, Math.floor(Number(minimumDryVariants) || 0));
+  const families = new Map();
+  for (const [sourceSampleKey, stats] of sourceStats || []) {
+    if (productiveSourceSampleKeys.has(sourceSampleKey)) continue;
+    const familyKey = canonicalSellerUrl(sourceSampleKey);
+    if (!familyKey) continue;
+    const sourceSampleLimit = adaptiveNonFbsSampleLimit(sampleLimit, false);
+    if (!shouldDeferSourceAfterNonFbsSample(stats, sourceSampleLimit)) continue;
+    const variants = families.get(familyKey) || new Set();
+    variants.add(sourceSampleKey);
+    families.set(familyKey, variants);
+  }
+  return new Set([...families]
+    .filter(([, variants]) => variants.size >= minimumVariants)
+    .map(([familyKey]) => familyKey));
+}
+
+export function isSourceDeferredAfterNonFbsEvidence(sourceUrl, {
+  deferredSourceKeys = new Set(),
+  deferredSellerFamilyKeys = new Set(),
+  productiveSourceSampleKeys = new Set(),
+} = {}) {
+  const sourceSampleKey = sourceNonFbsSampleKey(sourceUrl);
+  if (!sourceSampleKey || productiveSourceSampleKeys.has(sourceSampleKey)) return false;
+  if (deferredSourceKeys.has(sourceSampleKey)) return true;
+  const familyKey = canonicalSellerUrl(sourceUrl);
+  return Boolean(familyKey && deferredSellerFamilyKeys.has(familyKey));
 }
 
 export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
@@ -2595,11 +2659,35 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
       nonFbsDeferredSources.add(sourceSampleKey);
     }
   }
+  const nonFbsDeferredSellerFamilies = sellerFamilyNonFbsDeferredKeys(sourceOutcomeStats, {
+    productiveSourceSampleKeys,
+    sampleLimit: nonFbsSampleLimit,
+  });
   const recordSourceOutcome = (sourceSampleKey, outcome) => {
     if (!sourceSampleKey) return null;
     const next = nextSourceSampleStats(sourceOutcomeStats.get(sourceSampleKey), outcome);
     sourceOutcomeStats.set(sourceSampleKey, next);
     return next;
+  };
+  const lowFbsDeferralKey = (sourceUrl) => {
+    if (!isSourceDeferredAfterNonFbsEvidence(sourceUrl, {
+      deferredSourceKeys: nonFbsDeferredSources,
+      deferredSellerFamilyKeys: nonFbsDeferredSellerFamilies,
+      productiveSourceSampleKeys,
+    })) return null;
+    return canonicalSellerUrl(sourceUrl) || sourceNonFbsSampleKey(sourceUrl);
+  };
+  const refreshSellerFamilyDeferrals = () => {
+    const next = sellerFamilyNonFbsDeferredKeys(sourceOutcomeStats, {
+      productiveSourceSampleKeys,
+      sampleLimit: nonFbsSampleLimit,
+    });
+    for (const familyKey of next) {
+      if (!nonFbsDeferredSellerFamilies.has(familyKey)) {
+        nonFbsDeferredSellerFamilies.add(familyKey);
+        log(`seller family non-pure-FBS sample deferred: ${familyKey}`);
+      }
+    }
   };
   const apiInterval = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_INTERVAL_MS", 750));
   const maxRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_API_RETRIES", 5));
@@ -2647,14 +2735,14 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const loadProduct = async (page, item) => {
     for (let attempt = 0; ; attempt += 1) {
       const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
-      const nonFbsSampleKey = sourceNonFbsSampleKey(item.source_url);
+      const lowFbsKey = lowFbsDeferralKey(item.source_url);
       if (sourceBlockKey && softBlockedSources.has(sourceBlockKey)) {
         const error = new Error(`source deferred after Ozon detail soft block: ${sourceBlockKey}`);
         error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
         throw error;
       }
-      if (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey)) {
-        const error = new Error(`source deferred after low pure-FBS yield: ${nonFbsSampleKey}`);
+      if (lowFbsKey) {
+        const error = new Error(`source deferred after low pure-FBS yield: ${lowFbsKey}`);
         error.code = "FLOW_B_SOURCE_LOW_FBS_YIELD";
         throw error;
       }
@@ -2664,8 +2752,9 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         error.code = "FLOW_B_SOURCE_SOFT_BLOCKED";
         throw error;
       }
-      if (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey)) {
-        const error = new Error(`source deferred after low pure-FBS yield: ${nonFbsSampleKey}`);
+      const reservedLowFbsKey = lowFbsDeferralKey(item.source_url);
+      if (reservedLowFbsKey) {
+        const error = new Error(`source deferred after low pure-FBS yield: ${reservedLowFbsKey}`);
         error.code = "FLOW_B_SOURCE_LOW_FBS_YIELD";
         throw error;
       }
@@ -2757,15 +2846,16 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         if (!item) break;
         const sourceBlockKey = sourceCollectionBlockKey(item.source_url);
         const nonFbsSampleKey = sourceNonFbsSampleKey(item.source_url);
+        const lowFbsKey = lowFbsDeferralKey(item.source_url);
         if ((sourceBlockKey && softBlockedSources.has(sourceBlockKey))
-          || (nonFbsSampleKey && nonFbsDeferredSources.has(nonFbsSampleKey))) {
+          || lowFbsKey) {
           attempted.delete(item.sku);
           onResult({
             status: "deferred",
             sku: item.sku,
             reason: sourceBlockKey && softBlockedSources.has(sourceBlockKey)
               ? `source deferred after Ozon detail soft block: ${sourceBlockKey}`
-              : `source deferred after low pure-FBS yield: ${nonFbsSampleKey}`,
+              : `source deferred after low pure-FBS yield: ${lowFbsKey}`,
           });
           continue;
         }
@@ -2805,6 +2895,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
             total: observedTotal,
           });
           onResult({ status: "favorited", sku: productInfo.sku });
+          productiveSourceSampleKeys.add(nonFbsSampleKey);
           recordSourceOutcome(nonFbsSampleKey, { status: "favorited" });
           collection.favorited += 1;
           log(`favorite SKU ${productInfo.sku} total=${observedTotal}/${target}`);
@@ -2835,6 +2926,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
                 nonFbsDeferredSources.add(nonFbsSampleKey);
                 log(`source non-pure-FBS sample deferred after ${sourceStats.attempted} checks: ${nonFbsSampleKey}`);
               }
+              refreshSellerFamilyDeferrals();
             }
             await record({ status: "rejected", reason, sku: item.sku, url: item.href, source_url: item.source_url || null });
             onResult({ status: "rejected", reason, sku: item.sku });
@@ -3265,7 +3357,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const candidateQueue = createCandidateQueue(path.join(path.dirname(outputPath), "candidate_queue.jsonl"));
   await candidateQueue.load();
   let scanActivityCount = 0;
-  const candidateDrainLimit = Math.max(1, envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48));
+  const candidateDrainLimit = sourceInterleavedCandidateDrainLimit({
+    configuredLimit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48),
+    pendingSourceCount: pending.length,
+    workers,
+  });
   const candidatePerSourceDrain = Math.max(1, envNumber(env, "FLOW_B_CANDIDATE_QUEUE_PER_SOURCE_DRAIN", 6));
   const candidateBacklogTarget = Math.max(1, Math.min(
     candidateDrainLimit,
@@ -3443,24 +3539,32 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       );
       const retainedLinks = [];
       const retainedSkus = new Set();
-      const retainedLimit = retainedReplayLimit(env);
-      if (retainedLimit > 0) {
+      const configuredRetainedLimit = retainedReplayLimit(env);
+      const cachedFallbackLimit = envNumber(env, "FLOW_B_CACHED_FBS_FALLBACK_LINKS", 24);
+      const retainedTotalLimit = sourceInterleavedRetainedReplayLimit({
+        configuredRetainedLimit,
+        cachedFallbackLimit,
+        recoveredCount: recoveredCandidates.length,
+        pendingSourceCount: pending.length,
+        candidateDrainLimit,
+      });
+      const retainedPrimaryLimit = Math.min(configuredRetainedLimit, retainedTotalLimit);
+      if (retainedPrimaryLimit > 0) {
         for (const link of retainedCandidates) {
           const sku = skuFromProductUrl(link?.href);
           if (!sku || attempted.has(sku) || retainedSkus.has(sku)) continue;
           retainedSkus.add(sku);
           retainedLinks.push(link);
-          if (retainedLinks.length >= retainedLimit) break;
+          if (retainedLinks.length >= retainedPrimaryLimit) break;
         }
       }
-      const fallbackLimit = envNumber(env, "FLOW_B_CACHED_FBS_FALLBACK_LINKS", 24);
-      if (retainedLinks.length < fallbackLimit) {
+      if (retainedLinks.length < retainedTotalLimit) {
         const filled = fillRetainedFallbackLinks(retainedLinks, cachedExactFbsFallbackLinks(records, {
           attempted,
-          limit: fallbackLimit,
+          limit: retainedTotalLimit,
           familyScores: titleFamilyScores,
           yieldRows,
-        }), fallbackLimit);
+        }), retainedTotalLimit);
         retainedLinks.splice(0, retainedLinks.length, ...filled);
       }
       retainedLinks.splice(
