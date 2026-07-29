@@ -88,6 +88,37 @@ test("candidate facts reuse an unchanged favorite history and parse only appende
   await fs.rm(seedDir, { recursive: true, force: true });
 });
 
+test("candidate facts retain source attribution before the favorite audit row wins the producer race", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-source-race-"));
+  clearCandidateFactsCache();
+  await fs.writeFile(path.join(runDir, "candidate_queue.jsonl"), `${JSON.stringify({
+    at: "2026-07-29T11:38:29.714Z",
+    status: "discovered",
+    sku: "1637483286",
+    href: "https://www.ozon.ru/product/1637483286/",
+    source_url: "https://www.ozon.ru/seller/kids-wheels/?page=7",
+    text: "Детский электромобиль",
+    image_url: "https://img.example/1637483286.jpg",
+  })}\n`);
+
+  const facts = await loadCandidateFacts(runDir);
+  assert.deepEqual(facts.get("1637483286"), {
+    sku: "1637483286",
+    title: "Детский электромобиль",
+    sell_price: null,
+    sale_price: null,
+    cover_image: "https://img.example/1637483286.jpg",
+    mode: null,
+    shipping_mode: null,
+    source_currency: null,
+    source_url: "https://www.ozon.ru/seller/kids-wheels/?page=7",
+    seller_url: null,
+    link: "https://www.ozon.ru/product/1637483286/",
+  });
+  assert.equal((await loadPreflightPureSkus(runDir)).has("1637483286"), false);
+  await fs.rm(runDir, { recursive: true, force: true });
+});
+
 test("collection error rate reports failed preflight requests separately", () => {
   assert.deepEqual(collectionErrorSummary([
     { status: "favorited" },

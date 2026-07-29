@@ -66,9 +66,14 @@ function applyCandidateHistoryLines(text, facts, preflightPureSkus) {
   const applyLine = (line) => {
     try {
       const row = JSON.parse(line);
-      if (row?.status !== "favorited" || !row?.sku) return false;
+      if (!["discovered", "favorited"].includes(String(row?.status || "")) || !row?.sku) return false;
       const sku = String(row.sku);
-      facts.set(sku, mergeCandidateFacts({}, row));
+      facts.set(sku, mergeCandidateFacts({}, {
+        ...row,
+        title: row?.title || row?.text,
+        cover_image: row?.cover_image || row?.image_url,
+        link: row?.link || row?.href,
+      }));
       if (row?.preflight_mode === "FBS") preflightPureSkus.add(sku);
       return true;
     } catch {
@@ -172,6 +177,7 @@ async function loadCandidateHistoryFile(filename) {
 async function loadCandidateHistory(runDir, seedFiles = []) {
   const filenames = [...new Set([
     ...(Array.isArray(seedFiles) ? seedFiles : []),
+    path.resolve(runDir, "candidate_queue.jsonl"),
     path.resolve(runDir, "favorite_collection.jsonl"),
   ].map((filename) => path.resolve(filename)))];
   const histories = await Promise.all(filenames.map(loadCandidateHistoryFile));
