@@ -1311,13 +1311,14 @@ export function deriveSearchSourceUrls(yieldRows, limit = 200, priceBands = ["15
     return concreteCount === 0 || (candidate.length >= 3 && concreteCount < 2);
   };
   const queryGroupForRow = (row) => {
-    const words = String(row?.title || "").toLowerCase().match(/[а-яё]{4,}/gi) || [];
+    const words = String(row?.title || "").toLowerCase()
+      .match(/[\p{L}\p{N}][\p{L}\p{N}-]{2,}/gu) || [];
     const terms = words.filter((word) => !stopWords.has(word)).slice(0, 6);
     if (terms.length < 2) return null;
     let observedQuery = null;
     try {
       const queryWords = String(new URL(String(row?.source_url || "")).searchParams.get("text") || "")
-        .toLowerCase().match(/[а-яё]{4,}/gi) || [];
+        .toLowerCase().match(/[\p{L}\p{N}][\p{L}\p{N}-]{2,}/gu) || [];
       const queryTerms = queryWords.filter((word) => !stopWords.has(word)).slice(0, 5);
       if (queryTerms.length >= 2) observedQuery = queryTerms.join(" ");
     } catch {}

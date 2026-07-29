@@ -753,6 +753,39 @@ test("portfolio shares additional exploration slots with proven non-prohibited t
   assert.match(searchTexts[1], /проверенный органайзер настольный/u);
 });
 
+test("portfolio reserves active slots for current strict-title searches before unseen static seeds", () => {
+  const strictSource = "https://www.ozon.ru/seller/current-strict-title/";
+  const seedUrls = Array.from({ length: 30 }, (_, index) => (
+    `https://www.ozon.ru/search/?text=static-safe-seed-${index}&is_global=true&currency_price=500.000%3B`
+  ));
+  const portfolio = buildSourcePortfolio({
+    yieldRows: [{
+      at: "2026-07-29T02:26:12.977Z",
+      sku: "current-strict-title",
+      source_url: strictSource,
+      seller_url: strictSource,
+      title: "Багги YHK4406 полный привод, EVA, пульт",
+      status: "published",
+      strict_confirmed: true,
+      online_status: "selling",
+      stock: 1,
+      profit_rate: 44.38,
+      shipping_mode: "FBS",
+    }],
+    seedUrls,
+    minimumActiveSources: 20,
+    maximumActiveSources: 20,
+  });
+  const searchTexts = portfolio.active_urls.flatMap((value) => {
+    const url = new URL(value);
+    return url.pathname === "/search/" ? [String(url.searchParams.get("text") || "")] : [];
+  });
+
+  assert.equal(portfolio.active_urls.length, 20);
+  assert.ok(searchTexts.some((text) => /yhk4406/u.test(text)));
+  assert.ok(seedUrls.some((url) => !portfolio.active_urls.includes(url)));
+});
+
 test("portfolio derives new query families only from final publication evidence", () => {
   const legacySource = "https://www.ozon.ru/seller/legacy-unverified-seed/";
   const listingFbsSource = "https://www.ozon.ru/seller/listing-only-fbs-seed/";

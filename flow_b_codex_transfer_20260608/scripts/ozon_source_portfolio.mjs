@@ -544,6 +544,12 @@ export function buildSourcePortfolio({
     ["150.000;", "500.000;"],
     [1],
   );
+  const strictDerivedQueries = distinctDispatchUrls(deriveSearchSourceUrls(
+    yieldRows.filter((row) => isStrictSourceYieldRow(row)),
+    sourcePortfolioDerivedQueryLimit(desired),
+    ["150.000;", "500.000;"],
+    [1],
+  ));
   const active = [];
   const seen = new Set();
   const strictBudget = Math.max(1, Math.ceil(desired * 0.7));
@@ -564,6 +570,23 @@ export function buildSourcePortfolio({
   const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
   const evidenceFamilies = new Set(evidence.map((row) => row.family_key).filter(Boolean));
   const explorationFamilies = new Set();
+  const strictDerivedBudget = explorationBudget > 3
+    ? Math.min(Math.ceil(desired * 0.2), explorationBudget - 3)
+    : 0;
+  if (strictDerivedBudget > 0) {
+    for (const url of strictDerivedQueries) {
+      const family = sourceYieldKey(url);
+      const dispatchFamily = sourceDispatchFamily(url);
+      if (!disabledUrls.has(family)
+        && !disabledFamilies.has(dispatchFamily)
+        && !prohibitedSourceUrl(url)
+        && !evidenceFamilies.has(dispatchFamily)
+        && !explorationFamilies.has(dispatchFamily)
+        && !evidenceUrls.has(family)
+        && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
+      if (explorationFamilies.size >= strictDerivedBudget || active.length >= limit) break;
+    }
+  }
   const unseenConfiguredSeeds = distinctDispatchUrls(seedUrls).filter((url) => {
     const family = sourceYieldKey(url);
     const dispatchFamily = sourceDispatchFamily(url);
