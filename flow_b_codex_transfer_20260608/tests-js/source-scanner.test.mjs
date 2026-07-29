@@ -506,7 +506,7 @@ test("source dispatch scans one representative per search text and price band", 
   ]);
 });
 
-test("source dispatch and checkpoint completion share one page/sorting family", () => {
+test("source dispatch collapses sorting variants but keeps productive result pages distinct", () => {
   const search = "https://www.ozon.ru/search/?text=metal+model&is_global=true&currency_price=150.000%3B";
   const seller500 = "https://www.ozon.ru/seller/fluff-joy/?currency_price=500.000%3B";
   const seller150 = "https://www.ozon.ru/seller/fluff-joy/?currency_price=150.000%3B";
@@ -522,14 +522,18 @@ test("source dispatch and checkpoint completion share one page/sorting family", 
 
   assert.deepEqual(deduplicateSourceDispatchFamilies(urls), [
     urls[0],
+    urls[1],
     urls[2],
+    urls[3],
     seller150,
     otherSeller,
   ]);
   assert.deepEqual(excludeCompletedSourceFamilies(urls, [
-    `${search}&sorting=rating`,
-    `${seller500}&page=3`,
+    `${search}&sorting=rating&page=3`,
+    `${seller500}&sorting=discount&page=2`,
   ]), [
+    urls[1],
+    urls[2],
     seller150,
     otherSeller,
   ]);

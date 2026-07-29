@@ -1079,7 +1079,22 @@ export function deduplicateSearchSourceVariants(urls = []) {
 }
 
 export function sourceDispatchFamilyKey(value, { match = "family" } = {}) {
-  return match === "exact" ? exactSourceUrlKey(value) : sourceYieldKey(value);
+  if (match === "exact") return exactSourceUrlKey(value);
+  try {
+    const url = new URL(String(value));
+    url.hash = "";
+    const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
+    url.searchParams.delete("sorting");
+    if (page > 1) url.searchParams.set("page", String(page));
+    else url.searchParams.delete("page");
+    url.searchParams.sort();
+    return url.toString();
+  } catch {
+    return String(value || "")
+      .replace(/([?&])sorting=[^&]*&?/gi, "$1")
+      .replace(/([?&])page=1(?:&|$)/gi, "$1")
+      .replace(/[?&]$/, "");
+  }
 }
 
 export function deduplicateSourceDispatchFamilies(urls = [], options = {}) {
