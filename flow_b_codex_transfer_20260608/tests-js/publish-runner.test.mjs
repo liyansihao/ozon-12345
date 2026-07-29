@@ -769,6 +769,96 @@ test("runner does not count an accepted task that later hits the daily product l
   assert.ok(state.transitions.some((event) => event.status === "failed" && event.data.reason === "daily-product-limit"));
 });
 
+test("runner retries one transient ERP 502 import result without resubmitting", async () => {
+  const state = fakeState();
+  let publishCalls = 0;
+  let importChecks = 0;
+  const client = clientFor([{ id: 92, sku: 3465406112 }], {
+    publish: async () => {
+      publishCalls += 1;
+      return { ok: true, response: { code: 1 } };
+    },
+    findImportLog: async ({ sku, offerId }) => {
+      importChecks += 1;
+      if (importChecks === 1) {
+        return {
+          sku,
+          offer_id: offerId,
+          import_status: "all_failed",
+          error_msg: { code: 0, msg: "502:API请求失败", data: null },
+        };
+      }
+      return { sku, offer_id: offerId, import_status: "all_imported" };
+    },
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    confirmationAttempts: 2,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 1);
+  assert.equal(publishCalls, 1);
+  assert.equal(importChecks, 2);
+});
+
+test("reconciliation keeps an ERP 502 all-failed log retryable without resubmitting", async () => {
+  const state = fakeState({
+    delayed: {
+      status: "failed",
+      data: {
+        store_id: 7,
+        submitted: true,
+        submission_pending: true,
+        offer_id: "mz-290726-delayed",
+        profit_rate: 43.45,
+        reconcile_attempts: 0,
+        reason: "import-failed",
+        import_log: {
+          import_status: "all_failed",
+          error_msg: { code: 0, msg: "502:API请求失败", data: null },
+        },
+      },
+    },
+  });
+  let publishCalls = 0;
+  const client = clientFor([], {
+    publish: async () => {
+      publishCalls += 1;
+      return { ok: true, response: { code: 1 } };
+    },
+    findImportLog: async ({ sku, offerId }) => ({
+      sku,
+      offer_id: offerId,
+      import_status: "all_failed",
+      error_msg: { code: 0, msg: "502:API请求失败", data: null },
+      skus: [{ offer_id: offerId, import_status: "failed", error_msg: "502:API请求失败" }],
+    }),
+  });
+
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    now: () => new Date("2026-07-29T13:00:00.000Z"),
+    confirmationAttempts: 1,
+    confirmationIntervalMs: 0,
+  }).run();
+
+  assert.equal(result.published, 0);
+  assert.equal(publishCalls, 0);
+  const retry = state.transitions.at(-1);
+  assert.equal(retry.status, "processing");
+  assert.equal(retry.data.reason, "import-transient-error");
+  assert.equal(retry.data.reconcile_attempts, 1);
+  assert.equal(retry.data.next_reconcile_at, "2026-07-29T13:00:15.000Z");
+});
+
 test("runner rotates to the next verified store after a daily creation limit", async () => {
   const state = fakeState();
   const shopIds = [];

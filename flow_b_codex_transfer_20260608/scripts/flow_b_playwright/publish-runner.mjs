@@ -196,7 +196,7 @@ function rounded(value) {
 function importErrorMessages(log) {
   const messages = [];
   for (const value of [log?.error_msg, ...(Array.isArray(log?.skus) ? log.skus.map((row) => row?.error_msg) : [])]) {
-    const message = typeof value === "string" ? value : value?.message;
+    const message = typeof value === "string" ? value : value?.message || value?.msg || value?.error;
     if (String(message || "").trim()) messages.push(String(message).trim());
   }
   return messages;
@@ -206,6 +206,9 @@ function importFailureReason(log) {
   const evidence = importErrorMessages(log).join(" | ");
   if (/суточн(?:ый|ого)\s+лимит|исчерпал\S*\s+суточн|daily\s+(?:product\s+)?limit/i.test(evidence)) {
     return "daily-product-limit";
+  }
+  if (/(?:^|\D)(?:408|425|429|5\d\d)(?:\D|$)|API\s*请求失败|request\s+failed|network|timeout|temporar|gateway|connection|ECONN(?:RESET|REFUSED)/i.test(evidence)) {
+    return "import-transient-error";
   }
   return "import-failed";
 }
@@ -252,6 +255,7 @@ function hasWarehouseStatusRejection(stockUpdate) {
 function isTerminalSubmittedFailure(entry) {
   const data = entry?.data || entry || {};
   const reason = String(data.reason || "");
+  if (reason === "import-failed" && importFailureReason(data.import_log) === "import-transient-error") return false;
   if (["daily-product-limit", "import-failed", "reconciliation-store-not-configured", "stock-activation-terminal-rejected", "fbs-evidence-missing"].includes(reason)) return true;
   if (reason === "stock-activation-rejected"
     && hasTerminalStockActivationRejection(data?.final_result?.stock_update || data?.stock_update)) return true;
@@ -576,7 +580,10 @@ export function createPublishRunner({
       lastImportLog = importLog || lastImportLog;
       const status = normalizedImportStatus(importLog);
       if (["all_failed", "failed"].includes(status)) {
-        return { ok: false, reason: importFailureReason(importLog), import_log: importLog };
+        const reason = importFailureReason(importLog);
+        if (reason !== "import-transient-error") {
+          return { ok: false, reason, import_log: importLog };
+        }
       }
       if (["all_imported", "imported", "nested_imported"].includes(status)) {
         const confirmedOfferId = String(importLog?.offer_id || offerId);
@@ -634,6 +641,9 @@ export function createPublishRunner({
         online_product: lastOnlineProduct,
         stock_update: lastStockUpdate,
       };
+    }
+    if (lastImportLog && importFailureReason(lastImportLog) === "import-transient-error") {
+      return { ok: false, reason: "import-transient-error", import_log: lastImportLog };
     }
     return { ok: false, reason: "publish-final-status-timeout" };
   }
@@ -939,6 +949,7 @@ export function createPublishRunner({
         const submitted = Boolean(finalResult?.publish_result?.ok && !finalResult?.publish_result?.not_submitted);
         const retryablePending = submitted && [
           "publish-final-status-timeout",
+          "import-transient-error",
           "online-product-not-selling",
           "stock-activation-failed",
           "stock-activation-rejected",
@@ -1656,6 +1667,22 @@ export function createPublishRunner({
           const importStatus = normalizedImportStatus(importLog);
           if (["all_failed", "failed"].includes(importStatus)) {
             const reason = importFailureReason(importLog);
+            if (reason === "import-transient-error") {
+              const reconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0) + 1;
+              await state.transition(sku, "processing", {
+                ...item,
+                store_id: reconciliationTarget.store.id,
+                store_name: reconciliationTarget.store.name ?? reconciliationTarget.store.title ?? item.store_name ?? "",
+                reason,
+                import_log: importLog,
+                submitted: true,
+                submission_pending: true,
+                reconcile_only: true,
+                reconcile_attempts: reconcileAttempts,
+                next_reconcile_at: new Date(now().getTime() + reconciliationBackoffMs(reconcileAttempts)).toISOString(),
+              });
+              return { status: "ignored", sku, source_url: item.source_url ?? null, reason };
+            }
             if (reason === "daily-product-limit") {
               const exhaustedStoreId = Number(reconciliationTarget.store.id);
               const exhaustedStoreLimit = Number(storeDailyLimits.get(exhaustedStoreId) || configuredDailyStoreLimit);
@@ -1685,6 +1712,7 @@ export function createPublishRunner({
               const reason = confirmed.reason || "reconciliation-online-product-missing";
               const retryablePending = [
                 "publish-final-status-timeout",
+                "import-transient-error",
                 "online-product-not-selling",
                 "reconciliation-online-product-missing",
                 "stock-activation-failed",
