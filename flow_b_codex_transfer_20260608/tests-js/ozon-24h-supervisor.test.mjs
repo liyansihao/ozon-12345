@@ -10,6 +10,7 @@ import {
   buildLaunchdPlist,
   capacityPreflightDecision,
   checkpointEnvironment,
+  chromeArguments,
   classifyWorkerFailure,
   clearStaleVerificationResumeRequest,
   cleanupBrowserProfileCaches,
@@ -183,6 +184,17 @@ test("checkpoint subprocess inherits the frozen release evidence and exact brows
   assert.equal(environment.FLOW_B_FROZEN_CONFIG_HASH, "config-sha256");
   assert.equal(environment.FLOW_B_PRODUCTION_STATE_ROOT, "/tmp/production-state");
   assert.equal(environment.FLOW_B_PRODUCTION_RUN_ID, "daily-run");
+});
+
+test("supervised Chrome disables GPU acceleration after repeated SkSurface resource failures", () => {
+  const args = chromeArguments({
+    cdp_endpoint: "http://127.0.0.1:9223",
+    profile_dir: "/tmp/profile",
+    extension_dir: "/tmp/extension",
+  });
+
+  assert.equal(args.includes("--disable-gpu"), true);
+  assert.equal(args.includes("--disable-software-rasterizer"), false);
 });
 
 test("launchd restarts abnormal exits without busy-looping a completed window", () => {

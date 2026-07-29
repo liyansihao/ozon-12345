@@ -462,13 +462,14 @@ export async function cleanupProfileCachesForConfig(config, {
   };
 }
 
-function chromeArguments(browser) {
+export function chromeArguments(browser) {
   const args = [
     `--remote-debugging-port=${endpointPort(browser.cdp_endpoint)}`,
     `--user-data-dir=${absolute(browser.profile_dir)}`,
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-blink-features=AutomationControlled",
+    "--disable-gpu",
     `--disable-extensions-except=${absolute(browser.extension_dir)}`,
     `--load-extension=${absolute(browser.extension_dir)}`,
     `--disk-cache-size=${Number(browser.disk_cache_size_bytes) || 104857600}`,
