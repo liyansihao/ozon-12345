@@ -6,6 +6,7 @@ import {
   acceptanceRoundPlan,
   parseCli,
   parseDailyStoreUsageSeed,
+  publishAttemptLimit,
   parseStoreTargets,
   parseStoreTotalUsageSeed,
   publishedCsvPath,
@@ -59,6 +60,19 @@ test("publish CLI uses strict production defaults", () => {
   assert.equal(parsed.target, 500);
   assert.equal(parsed.storeNeedle, "丽丽1号");
   assert.equal(parsed.watermarkNeedle, "lysh");
+});
+
+test("direct production speed trial has an explicit bounded candidate-attempt budget", () => {
+  assert.equal(publishAttemptLimit({}), 0);
+  assert.equal(publishAttemptLimit({ FLOW_B_PUBLISH_ATTEMPT_LIMIT: "3" }), 3);
+  assert.throws(
+    () => publishAttemptLimit({ FLOW_B_PUBLISH_ATTEMPT_LIMIT: "0" }),
+    /positive integer/u,
+  );
+  assert.throws(
+    () => publishAttemptLimit({ FLOW_B_PUBLISH_ATTEMPT_LIMIT: "3.5" }),
+    /positive integer/u,
+  );
 });
 
 test("CLI accepts setup, scan, and run shapes", () => {

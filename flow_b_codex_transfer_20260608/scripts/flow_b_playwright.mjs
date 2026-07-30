@@ -149,6 +149,16 @@ export function acceptanceRoundPlan(env = process.env) {
   };
 }
 
+export function publishAttemptLimit(env = process.env) {
+  const raw = String(env.FLOW_B_PUBLISH_ATTEMPT_LIMIT ?? "").trim();
+  if (!raw) return 0;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("FLOW_B_PUBLISH_ATTEMPT_LIMIT must be a positive integer");
+  }
+  return value;
+}
+
 export function parseCli(argv, env = process.env) {
   const args = [...argv];
   if (!args.length || args.includes("--help") || args.includes("-h")) return { command: "help" };
@@ -682,7 +692,13 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     return withContext(env, (context) => scanSources({ context, urlsFile: options.urlsFile, outFile: options.outFile, env }));
   }
   if (options.command === "publish") {
-    return withContext(env, (context) => publishWithContext(context, options, env));
+    return withContext(env, (context) => publishWithContext(
+      context,
+      options,
+      env,
+      {},
+      { attemptLimit: publishAttemptLimit(env) },
+    ));
   }
   if (options.command === "run") {
     return withContext(env, async (context) => {
