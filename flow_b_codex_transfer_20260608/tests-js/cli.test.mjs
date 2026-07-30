@@ -75,6 +75,16 @@ test("direct production speed trial has an explicit bounded candidate-attempt bu
   );
 });
 
+test("the direct run command accepts the same bounded candidate-attempt budget", () => {
+  const parsed = parseCli(["run", "runs/speed", "urls.txt"], {
+    FLOW_B_TARGET_PUBLISH_COUNT: "3",
+    FLOW_B_PUBLISH_ATTEMPT_LIMIT: "3",
+  });
+  assert.equal(parsed.command, "run");
+  assert.equal(parsed.target, 3);
+  assert.equal(publishAttemptLimit({ FLOW_B_PUBLISH_ATTEMPT_LIMIT: "3" }), 3);
+});
+
 test("CLI accepts setup, scan, and run shapes", () => {
   assert.equal(parseCli(["setup"], {}).command, "setup");
   assert.equal(parseCli(["verify"], {}).command, "verify");

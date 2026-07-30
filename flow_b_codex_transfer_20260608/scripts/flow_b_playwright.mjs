@@ -711,7 +711,13 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         publish_target: options.target,
       });
       const scan = await scanSources({ context, urlsFile: options.urlsFile, outFile: options.outFile, env });
-      const publish = await publishWithContext(context, options, env);
+      const publish = await publishWithContext(
+        context,
+        options,
+        env,
+        {},
+        { attemptLimit: publishAttemptLimit(env) },
+      );
       return { scan, publish };
     });
   }
