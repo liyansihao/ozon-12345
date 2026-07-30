@@ -13,12 +13,105 @@ import {
   observedPublishFeedbackCacheStats,
   offerIdForSku,
   onlineSyncRetryAfterMs,
+  preSubmitContentQuality,
   prioritizePublishCandidates,
   restoredDailyStoreUsage,
   strictSourceYieldEvidence,
   verifiedWarehouseCandidates,
 } from "../scripts/flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "../scripts/flow_b_playwright/publish-state.mjs";
+
+test("pre-submit content quality requires title, HTTP image, category, and safe taxonomy", () => {
+  const valid = {
+    item: { title: "Детская настольная игра" },
+    detail: { cover_image: "https://img.example/safe.jpg" },
+    categoryData: { cate: [11, 22, "1,12.00"] },
+    category: { mapped: [11, 22, "1,12.00"], labels: ["Игрушки", "Настольные игры"] },
+    commissionTree: [{
+      cate_id: 11,
+      label: "Игрушки",
+      children: [{
+        cate_id: 22,
+        label: "Настольные игры",
+        children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }],
+      }],
+    }],
+  };
+  assert.deepEqual(preSubmitContentQuality(valid), {
+    ok: true,
+    reason: null,
+    checks: {
+      prohibited_category: true,
+      title: true,
+      image: true,
+      category: true,
+    },
+    title: "Детская настольная игра",
+    image: "https://img.example/safe.jpg",
+    evidence: {
+      title: {
+        source: "favorite-snapshot",
+        value: "Детская настольная игра",
+      },
+      image: {
+        source: "ozon-detail",
+        url: "https://img.example/safe.jpg",
+      },
+      category: {
+        raw: [11, 22, "1,12.00"],
+        mapped: [11, 22, "1,12.00"],
+        labels: ["Игрушки", "Настольные игры"],
+        commission_tree_match: true,
+        commission_tier_match: true,
+        hierarchy_labels: ["Игрушки", "Настольные игры"],
+      },
+    },
+  });
+  assert.equal(preSubmitContentQuality({
+    ...valid,
+    item: { title: " " },
+  }).reason, "missing-title");
+  assert.equal(preSubmitContentQuality({
+    ...valid,
+    detail: { cover_image: "cover.jpg" },
+  }).reason, "invalid-cover-image-url");
+  assert.equal(preSubmitContentQuality({
+    ...valid,
+    categoryData: { cate: [11] },
+  }).reason, "category-data-missing");
+  assert.equal(preSubmitContentQuality({
+    ...valid,
+    commissionTree: [{ cate_id: 99, children: [{ cate_id: 22 }] }],
+  }).reason, "category-mapping-unavailable");
+  assert.equal(preSubmitContentQuality({
+    ...valid,
+    commissionTree: [{
+      cate_id: 11,
+      label: "Одежда",
+      children: [{
+        cate_id: 22,
+        label: "Платья",
+        children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }],
+      }],
+    }],
+  }).reason, "prohibited-category");
+
+  const productionShape = preSubmitContentQuality({
+    ...valid,
+    item: {
+      title: "Набор для настольной игры",
+      cover_image: "https://ir-20.ozonstatic.cn/s3/multimedia/c600/example.jpg",
+    },
+    detail: {
+      mode: "FBS",
+      detail_title: "Ozon product document title",
+      current_price: 100,
+    },
+  });
+  assert.equal(productionShape.ok, true);
+  assert.equal(productionShape.evidence.title.source, "favorite-snapshot");
+  assert.equal(productionShape.evidence.image.source, "favorite-snapshot");
+});
 
 test("source-yield strict proof requires selling stock profit and pure FBS", () => {
   assert.deepEqual(strictSourceYieldEvidence({
@@ -332,7 +425,14 @@ test("validation-only is read-only for imported, historical, restored, deferred,
     getProductDetail: async (sku) => {
       if (sku === "soft-error") throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
       if (sku === "generic-error") throw new Error("validation detail failure");
-      return { sku, mode: "FBS", title: `safe item ${sku}`, current_price: 100, follow_min: 90 };
+      return {
+        sku,
+        mode: "FBS",
+        title: `safe item ${sku}`,
+        cover_image: "https://img.example/safe.jpg",
+        current_price: 100,
+        follow_min: 90,
+      };
     },
   });
   const result = await createPublishRunner({
@@ -456,7 +556,14 @@ test("validation-only ledger bounds poison retries and lets later candidates ref
         return { sku, mode: "FBO", title: "not FBS", current_price: 100 };
       }
       if (sku === "transient-poison") throw new Error("temporary validation detail failure");
-      return { sku, mode: "FBS", title: `safe item ${sku}`, current_price: 100, follow_min: 90 };
+      return {
+        sku,
+        mode: "FBS",
+        title: `safe item ${sku}`,
+        cover_image: "https://img.example/safe.jpg",
+        current_price: 100,
+        follow_min: 90,
+      };
     },
   });
   const runner = createPublishRunner({
@@ -825,6 +932,7 @@ test("Ozon detail soft blocks use durable 30-second backoff instead of retrying 
           sku,
           mode: "FBS",
           title: "standard safe product",
+          cover_image: "https://img.example/safe.jpg",
           current_price: 100,
           follow_min: 90,
         };
@@ -907,8 +1015,24 @@ function clientFor(items, overrides = {}) {
     resolvePublishTarget: async () => ({ store: { id: 7, name: "丽丽1号" }, watermark: { id: 8, name: "lysh" } }),
     listFavorites: async () => items,
     listAllFavorites: async () => [],
-    getProductDetail: async (sku) => ({ sku, mode: "FBS", title: "safe item", current_price: 100, follow_min: 90 }),
+    getProductDetail: async (sku) => ({
+      sku,
+      mode: "FBS",
+      title: "safe item",
+      cover_image: "https://img.example/safe.jpg",
+      current_price: 100,
+      follow_min: 90,
+    }),
     getCategoryBySku: async () => ({ cate: [11, 22, "1,12.00"], product_info: { weight: 100, depth: 20, width: 10, height: 5 } }),
+    listCategoryCommissions: async () => [{
+      cate_id: 11,
+      label: "Игрушки",
+      children: [{
+        cate_id: 22,
+        label: "Настольные игры",
+        children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }],
+      }],
+    }],
     calculateProfit: async () => economy(),
     publish: async () => ({ ok: true, response: { code: 1 } }),
     findImportLog: async ({ sku }) => ({ sku, offer_id: `mz-test-${sku}`, import_status: "all_imported" }),
@@ -918,6 +1042,123 @@ function clientFor(items, overrides = {}) {
     ...overrides,
   };
 }
+
+test("runner rejects incomplete favorite content before 1688 or publish work", async () => {
+  const state = fakeState();
+  let costCalls = 0;
+  let publishCalls = 0;
+  const client = clientFor([
+    { sku: "missing-title", cover_image: "https://ir-20.ozonstatic.cn/s3/multimedia/c600/title.jpg" },
+    { sku: "missing-image", title: "Безопасный товар" },
+  ], {
+    getProductDetail: async (sku) => ({
+      sku,
+      mode: "FBS",
+      detail_title: `Ozon ${sku}`,
+      current_price: 100,
+      follow_min: 90,
+    }),
+    publish: async () => {
+      publishCalls += 1;
+      return { ok: true };
+    },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: {
+      estimate: async () => {
+        costCalls += 1;
+        return { ok: true, cost: 20 };
+      },
+    },
+    state,
+    target: 1,
+    runDir: "/tmp/run",
+  }).run();
+
+  assert.equal(result.published, 0);
+  assert.equal(costCalls, 0);
+  assert.equal(publishCalls, 0);
+  assert.ok(state.transitions.some(
+    (event) => event.sku === "missing-title" && event.data.reason === "missing-title",
+  ));
+  assert.ok(state.transitions.some(
+    (event) => event.sku === "missing-image" && event.data.reason === "missing-cover-image",
+  ));
+});
+
+test("category mapping deferral never enters submission reconciliation", async () => {
+  let current = new Date("2026-07-30T04:00:00.000Z");
+  const state = fakeState();
+  let detailCalls = 0;
+  let importLogCalls = 0;
+  let costCalls = 0;
+  let publishCalls = 0;
+  let favoriteDeletes = 0;
+  const client = clientFor([{
+    sku: "category-drift",
+    title: "Безопасная настольная игра",
+    cover_image: "https://ir-20.ozonstatic.cn/s3/multimedia/c600/category.jpg",
+  }], {
+    getProductDetail: async (sku) => {
+      detailCalls += 1;
+      return { sku, mode: "FBS", current_price: 100, follow_min: 90 };
+    },
+    listCategoryCommissions: async () => [{
+      cate_id: 99,
+      label: "Несовпадающий раздел",
+      children: [{
+        cate_id: 22,
+        label: "Настольные игры",
+        children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }],
+      }],
+    }],
+    findImportLog: async ({ sku }) => {
+      importLogCalls += 1;
+      return { sku, offer_id: `historical-${sku}`, import_status: "all_imported" };
+    },
+    deleteFavorite: async () => {
+      favoriteDeletes += 1;
+      return true;
+    },
+    publish: async () => {
+      publishCalls += 1;
+      return { ok: true };
+    },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: {
+      estimate: async () => {
+        costCalls += 1;
+        return { ok: true, cost: 20 };
+      },
+    },
+    state,
+    target: 1,
+    runDir: "/tmp/run",
+    now: () => new Date(current),
+  });
+
+  await runner.run();
+  assert.equal(state.entryOf("category-drift").data.reason, "category-mapping-unavailable");
+  await runner.run();
+  assert.equal(detailCalls, 2);
+  current = new Date(current.getTime() + 300_001);
+  await runner.run();
+  assert.equal(detailCalls, 4);
+  current = new Date(current.getTime() + 300_001);
+  await runner.run();
+  assert.equal(state.entryOf("category-drift").data.reason, "transient-retry-limit-exhausted");
+  const terminalDetailCalls = detailCalls;
+  await runner.run();
+  assert.equal(detailCalls, terminalDetailCalls);
+  assert.equal(importLogCalls, 0);
+  assert.equal(costCalls, 0);
+  assert.equal(publishCalls, 0);
+  assert.equal(favoriteDeletes, 0);
+  assert.equal(state.records.length, 0);
+});
 
 test("runner skips an exact long-title duplicate before Ozon detail and 1688", async () => {
   const title = "Плюшевый коврик-пазл из десяти частей для малышей";
@@ -957,7 +1198,14 @@ test("same-store exact-title variants remain eligible", async () => {
     { sku: "first", title },
     { sku: "second", title },
   ], {
-    getProductDetail: async (sku) => ({ sku, mode: "FBS", title, current_price: 100, follow_min: 90 }),
+    getProductDetail: async (sku) => ({
+      sku,
+      mode: "FBS",
+      title,
+      cover_image: "https://img.example/safe.jpg",
+      current_price: 100,
+      follow_min: 90,
+    }),
     publish: async () => { publishCalls += 1; return { ok: true, response: { code: 1 } }; },
   });
   const result = await createPublishRunner({
@@ -2535,7 +2783,14 @@ test("runner records a failed SKU and continues until confirmed success target",
   const client = clientFor(items, {
     getProductDetail: async (sku) => {
       detailCalls.push(String(sku));
-      return { sku, mode: "FBS", title: "safe", current_price: 100, follow_min: 90 };
+      return {
+        sku,
+        mode: "FBS",
+        title: "safe",
+        cover_image: "https://img.example/safe.jpg",
+        current_price: 100,
+        follow_min: 90,
+      };
     },
     publish: async (payload) => payload.rows[0].sku === "1" ? { ok: false, response: { code: 0 } } : { ok: true, response: { code: 1 } },
   });
@@ -2601,6 +2856,28 @@ test("runner rejects profit rate exactly 30 and never publishes it", async () =>
   assert.equal(result.published, 0);
   assert.equal(publishCalls, 0);
   assert.ok(state.transitions.some((event) => event.status === "skipped" && event.data.reason === "profit-upper-bound<=30"));
+});
+
+test("runner keeps the absolute profit floor above 30 when configuration is relaxed", async () => {
+  const state = fakeState();
+  let publishCalls = 0;
+  const client = clientFor([{ id: 31, sku: 31 }], {
+    calculateProfit: async () => economy(25),
+    publish: async () => { publishCalls += 1; return { ok: true }; },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    threshold: 20,
+    runDir: "/tmp/run",
+  }).run();
+  assert.equal(result.published, 0);
+  assert.equal(publishCalls, 0);
+  assert.ok(state.transitions.some(
+    (event) => event.status === "skipped" && event.data.reason === "profit_rate<=30",
+  ));
 });
 
 test("runner reconciles restored failed SKU without resubmitting", async () => {
@@ -3797,7 +4074,15 @@ test("runner builds the exact one-row payload and stops at target", async () => 
   const items = [{ id: 71, sku: 700001, title: "source title", cover_image: "cover.jpg", link: "https://www.ozon.ru/product/700001" }, { id: 72, sku: 700002 }];
   const client = clientFor(items, {
     getCategoryBySku: async () => ({ cate: [11, 22, 999], product_info: { weight: 100 } }),
-    listCategoryCommissions: async () => [{ cate_id: 11, children: [{ cate_id: 22, children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }] }] }],
+    listCategoryCommissions: async () => [{
+      cate_id: 11,
+      label: "Игрушки",
+      children: [{
+        cate_id: 22,
+        label: "Настольные игры",
+        children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }],
+      }],
+    }],
     calculateProfit: async (input) => { calculatedCate = input.cate; return economy(); },
     publish: async (payload) => { payloads.push(payload); return { ok: true, response: { code: 1 } }; },
   });
@@ -3829,7 +4114,7 @@ test("runner builds the exact one-row payload and stops at target", async () => 
       id: 71,
       sku: "700001",
       title: "safe item",
-      cover_image: "cover.jpg",
+      cover_image: "https://img.example/safe.jpg",
       link: "https://www.ozon.ru/product/700001",
       sell_price: 90,
       price: 90,
@@ -3902,7 +4187,14 @@ test("resumed skipped candidates are terminal and are not recalculated", async (
     deleteFavorite: async (item) => { deleted.push(String(item.sku)); return true; },
     getProductDetail: async (sku) => {
       detailCalls += 1;
-      return { sku, mode: "FBS", title: "safe", current_price: 100, follow_min: 90 };
+      return {
+        sku,
+        mode: "FBS",
+        title: "safe",
+        cover_image: "https://img.example/safe.jpg",
+        current_price: 100,
+        follow_min: 90,
+      };
     },
   });
   const result = await createPublishRunner({
@@ -3934,7 +4226,14 @@ test("parallel preflight serializes publishing and never exceeds the exact targe
       maxActiveDetails = Math.max(maxActiveDetails, activeDetails);
       await new Promise((resolve) => setTimeout(resolve, 2));
       activeDetails -= 1;
-      return { sku, mode: "FBS", title: "safe", current_price: 100, follow_min: 90 };
+      return {
+        sku,
+        mode: "FBS",
+        title: "safe",
+        cover_image: "https://img.example/safe.jpg",
+        current_price: 100,
+        follow_min: 90,
+      };
     },
     publish: async () => {
       activePublishes += 1;
@@ -4394,7 +4693,14 @@ test("validation-only reload excludes latest validated SKUs and grows the buffer
       ], {
         getProductDetail: async (sku) => {
           detailSkus.push(String(sku));
-          return { sku, mode: "FBS", title: `safe ${sku}`, current_price: 100, follow_min: 90 };
+          return {
+            sku,
+            mode: "FBS",
+            title: `safe ${sku}`,
+            cover_image: "https://img.example/safe.jpg",
+            current_price: 100,
+            follow_min: 90,
+          };
         },
       }),
       costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
@@ -4416,7 +4722,14 @@ test("validation-only reload excludes latest validated SKUs and grows the buffer
       ], {
         getProductDetail: async (sku) => {
           detailSkus.push(String(sku));
-          return { sku, mode: "FBS", title: `safe ${sku}`, current_price: 100, follow_min: 90 };
+          return {
+            sku,
+            mode: "FBS",
+            title: `safe ${sku}`,
+            cover_image: "https://img.example/safe.jpg",
+            current_price: 100,
+            follow_min: 90,
+          };
         },
       }),
       costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },

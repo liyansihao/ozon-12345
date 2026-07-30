@@ -171,6 +171,115 @@ export function duplicateTitleKey(value) {
   return normalized.length >= 24 ? normalized : null;
 }
 
+function normalizedContentText(value) {
+  return String(value ?? "").replace(/[\u200B-\u200D\u2060\uFEFF]/gu, "").trim();
+}
+
+function firstContentValue(detailValue, itemValue) {
+  const detail = normalizedContentText(detailValue);
+  if (detail) return { value: detail, source: "ozon-detail" };
+  const item = normalizedContentText(itemValue);
+  return { value: item, source: item ? "favorite-snapshot" : null };
+}
+
+function validHttpImageUrl(value) {
+  try {
+    const url = new URL(normalizedContentText(value));
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function validCategoryParts(value) {
+  return (Array.isArray(value) ? value : []).filter((part) => {
+    if (typeof part === "number") return Number.isFinite(part) && part > 0;
+    return typeof part === "string" && part.trim().length > 0;
+  });
+}
+
+function commissionCategoryEvidence(rawCategory, mappedCategory, commissionTree) {
+  const top = (Array.isArray(commissionTree) ? commissionTree : [])
+    .find((row) => String(row?.cate_id ?? row?.value) === String(rawCategory[0]));
+  const second = top?.children?.find(
+    (row) => String(row?.cate_id ?? row?.value) === String(rawCategory[1]),
+  );
+  const tier = second?.children?.find(
+    (row) => String(row?.value ?? row?.cate_id) === String(mappedCategory[2]),
+  );
+  const hierarchyLabels = [top?.label, second?.label].map(normalizedContentText).filter(Boolean);
+  return {
+    hierarchy_match: Boolean(top && second),
+    tier_match: Boolean(tier),
+    hierarchy_labels: hierarchyLabels,
+  };
+}
+
+export function preSubmitContentQuality({
+  item = {},
+  detail = {},
+  categoryData = {},
+  category = {},
+  commissionTree = [],
+} = {}) {
+  const titleValue = firstContentValue(detail?.title, item?.title);
+  const imageValue = firstContentValue(detail?.cover_image, item?.cover_image);
+  const title = titleValue.value;
+  const image = imageValue.value;
+  const rawCategory = validCategoryParts(categoryData?.cate);
+  const mappedCategory = validCategoryParts(category?.mapped);
+  const categoryEvidence = commissionCategoryEvidence(rawCategory, mappedCategory, commissionTree);
+  const categoryText = [
+    title,
+    detail?.category,
+    detail?.category_name,
+    detail?.cate_name,
+    item?.category,
+    item?.category_name,
+    item?.cate_name,
+    ...categoryEvidence.hierarchy_labels,
+  ].filter(Boolean).join(" ");
+  const prohibitedReason = defaultPolicy.prohibitedCategorySkipReason(categoryText);
+  const checks = {
+    prohibited_category: prohibitedReason === null,
+    title: /[\p{L}\p{N}]/u.test(title),
+    image: validHttpImageUrl(image),
+    category: rawCategory.length >= 2
+      && mappedCategory.length >= 3
+      && categoryEvidence.hierarchy_match
+      && categoryEvidence.tier_match
+      && categoryEvidence.hierarchy_labels.length === 2,
+  };
+  const categoryReason = rawCategory.length < 2
+    ? "category-data-missing"
+    : (!checks.category ? "category-mapping-unavailable" : null);
+  let reason = prohibitedReason;
+  if (!title) reason = "missing-title";
+  else if (!checks.title) reason = "invalid-title";
+  else if (!image) reason = "missing-cover-image";
+  else if (!checks.image) reason = "invalid-cover-image-url";
+  else if (categoryReason) reason = categoryReason;
+  return {
+    ok: reason === null,
+    reason,
+    checks,
+    title,
+    image,
+    evidence: {
+      title: { source: titleValue.source, value: title || null },
+      image: { source: imageValue.source, url: image || null },
+      category: {
+        raw: rawCategory,
+        mapped: mappedCategory,
+        labels: (Array.isArray(category?.labels) ? category.labels : []).map(normalizedContentText).filter(Boolean),
+        commission_tree_match: categoryEvidence.hierarchy_match,
+        commission_tier_match: categoryEvidence.tier_match,
+        hierarchy_labels: categoryEvidence.hierarchy_labels,
+      },
+    },
+  };
+}
+
 export function normalizeCostFailureReason(cost = {}) {
   const evidence = `${cost?.reason || ""} ${cost?.error?.code || ""} ${cost?.error?.message || ""}`.trim();
   if (/timed?\s*out|timeout/i.test(evidence)) return "1688-timeout";
@@ -217,6 +326,8 @@ function isDeferredCandidateReason(reason) {
   return [
     "1688-health-deferred",
     "ozon-detail-soft-block-deferred",
+    "category-data-missing",
+    "category-mapping-unavailable",
   ].includes(String(reason || ""));
 }
 
@@ -472,6 +583,8 @@ export async function loadObservedPublishFeedback(runDir, seedFiles = []) {
 function buildPayload(item, detail, economy, targetConfig, now) {
   const sku = asSku(item);
   const price = rounded(economy.price_list.sell_price);
+  const title = firstContentValue(detail?.title, item?.title).value;
+  const coverImage = firstContentValue(detail?.cover_image, item?.cover_image).value;
   return {
     scene: "erp",
     shop_ids: [targetConfig.store.id],
@@ -482,8 +595,8 @@ function buildPayload(item, detail, economy, targetConfig, now) {
     rows: [{
       id: item.id ?? item.favorite_id ?? detail.id ?? detail.favorite_id,
       sku,
-      title: detail.title ?? item.title ?? "",
-      cover_image: detail.cover_image ?? item.cover_image ?? null,
+      title,
+      cover_image: coverImage || null,
       link: detail.link ?? detail.detail_url ?? item.link ?? item.detail_url ?? canonicalProductUrl(sku),
       sell_price: price,
       price,
@@ -1202,6 +1315,47 @@ export function createPublishRunner({
         salePrice,
         cnyRubRate,
       );
+      const contentQuality = preSubmitContentQuality({
+        item,
+        detail: { ...(detailResult || {}), ...(confirmationResult || {}) },
+        categoryData,
+        category,
+        commissionTree: targetConfig.commissionTree,
+      });
+      if (!contentQuality.ok) {
+        if (["category-data-missing", "category-mapping-unavailable"].includes(contentQuality.reason)) {
+          const retry = boundedTransientFailure({
+            reason: contentQuality.reason,
+            now: now(),
+            previousAttempts: activeValidationOnly ? 0 : item?.transient_attempts,
+            previousDay: activeValidationOnly ? null : item?.retry_day,
+            backoffMs: 300_000,
+          });
+          if (!activeValidationOnly) {
+            await state.transition(sku, "failed", {
+              ...item,
+              ...retry,
+              submitted: false,
+              submission_pending: false,
+              quality_gate_passed: false,
+              quality_checks: contentQuality.checks,
+              quality_evidence: contentQuality.evidence,
+            });
+          }
+          return {
+            status: retry.terminal ? "failed" : "deferred",
+            sku,
+            source_url: item.source_url ?? null,
+            reason: retry.reason,
+            retry_at: retry.retry_at,
+          };
+        }
+        return skip(item, contentQuality.reason, {
+          quality_gate_passed: false,
+          quality_checks: contentQuality.checks,
+          quality_evidence: contentQuality.evidence,
+        });
+      }
       let optimisticCalc = null;
       try {
         optimisticCalc = await timed(sku, "profit_upper_bound", () => client.calculateProfit(profitCalculationInput({
@@ -1311,6 +1465,9 @@ export function createPublishRunner({
       };
       const profitReason = policy.profitSkipReason(profit, profitThreshold);
       if (profitReason) return skip(item, profitReason, { profit });
+      if (!(Number(profit.profit_rate) > 30)) {
+        return skip(item, "profit_rate<=30", { profit });
+      }
 
       const payload = buildPayload(item, detail, economy, targetConfig, now);
       const preparedAt = now().toISOString();
@@ -1332,6 +1489,7 @@ export function createPublishRunner({
         shipping_mode: "FBS",
         preflight_mode: "FBS",
         fbs_evidence: fbsEvidence,
+        content_quality_evidence: contentQuality.evidence,
         ...costEvidence,
         submission_intent: true,
         submitted: false,
@@ -1349,13 +1507,13 @@ export function createPublishRunner({
       }
       submissionState.quality_gate_passed = true;
       submissionState.quality_checks = {
-        pure_fbs: true,
-        reliable_1688_cost: true,
-        profit_gt_30: true,
-        prohibited_category: true,
-        title: true,
-        image: true,
-        category: true,
+        pure_fbs: fbsEvidence.verified === true,
+        reliable_1688_cost: costEvidence.cost_verified === true,
+        profit_gt_30: Number(profit.profit_rate) > 30,
+        prohibited_category: contentQuality.checks.prohibited_category,
+        title: contentQuality.checks.title,
+        image: contentQuality.checks.image,
+        category: contentQuality.checks.category,
         historical_and_cross_store_duplicate: true,
       };
       recordMetric("validation_gate.jsonl", {
@@ -1376,6 +1534,7 @@ export function createPublishRunner({
         fbs_evidence: fbsEvidence,
         quality_gate_passed: true,
         quality_checks: submissionState.quality_checks,
+        quality_evidence: submissionState.content_quality_evidence,
         validated_at: now().toISOString(),
         validation_mode: activeValidationOnly ? "buffer" : "live-pre-submit",
       });
@@ -2386,17 +2545,24 @@ export function createPublishRunner({
           reason: "1688-cost-evidence-missing",
         };
       }
-      const deferredCandidate = isDeferredCandidateReason(item?.reason);
+      const deferredCandidate = isDeferredCandidateReason(item?.reason)
+        || isDeferredCandidateReason(item?.original_reason);
       const deferredRetryAt = Date.parse(item?.retry_at || "");
+      if (deferredCandidate && item?.terminal === true) {
+        return { status: "ignored", sku, reason: "terminal-deferred-failure" };
+      }
       if (deferredCandidate
         && Number.isFinite(deferredRetryAt)
         && deferredRetryAt > now().getTime()) {
+        const backoffReason = item?.reason === "1688-health-deferred"
+          ? "1688-health-backoff"
+          : item?.reason === "ozon-detail-soft-block-deferred"
+            ? "ozon-detail-soft-block-backoff"
+            : "category-quality-backoff";
         return {
           status: "ignored",
           sku,
-          reason: item?.reason === "1688-health-deferred"
-            ? "1688-health-backoff"
-            : "ozon-detail-soft-block-backoff",
+          reason: backoffReason,
         };
       }
       if (restoredStatus === "failed" && isTerminalSubmittedFailure(restoredEntry)) {

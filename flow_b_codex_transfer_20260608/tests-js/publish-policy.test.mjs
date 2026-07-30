@@ -53,6 +53,23 @@ test("preflight rejects prohibited categories", () => {
   }
 });
 
+test("food rules do not reject a safe title containing the letters in Победа", () => {
+  assert.equal(preflightSkipReason({
+    mode: "FBS",
+    title: "Настольная игра Победа",
+    category: "Настольные игры",
+    economy: {
+      title: "CEL Economy Small",
+      price_list: { logistics_name: "CEL", logistics_speed: "economy" },
+    },
+  }), null);
+  assert.equal(preflightSkipReason({
+    mode: "FBS",
+    title: "Набор Еда для игры",
+    category: "Игрушки",
+  }), "prohibited-category");
+});
+
 test("preflight rejects a calculation without a CEL Economy result", () => {
   const item = { mode: "FBS", title: "wooden toy", category: "toys" };
   assert.equal(preflightSkipReason(item), "missing-cel-economy");
