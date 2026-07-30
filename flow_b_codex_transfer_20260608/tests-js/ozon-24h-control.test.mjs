@@ -10,9 +10,11 @@ import {
   compactProductionStatus,
   currentRunRetirementDecision,
   deploymentIdentityValid,
+  globalFlowBWorkerPids,
   refreshCurrentRunSources,
   resumeMode,
   shouldResumeCurrentRun,
+  validateConfig,
   validateCandidateSourcePortfolio,
 } from "../scripts/ozon_24h_control.mjs";
 
@@ -83,6 +85,15 @@ test("legacy production run can only be retired after a zero-owner safe stop", (
   }).action, "reject");
 });
 
+test("control ownership precheck finds flow_b workers from every run", () => {
+  assert.deepEqual(globalFlowBWorkerPids([
+    " 101 /usr/bin/node /app/scripts/flow_b_playwright.mjs accept /state/runs/current /state/urls.txt",
+    " 202 /usr/bin/node /old/scripts/flow_b_playwright.mjs run /state/runs/old /state/urls.txt",
+    " 303 /usr/bin/node /app/scripts/flow_b_playwright.mjs scan /state/urls.txt /tmp/out.json",
+    " 404 /usr/bin/node /app/scripts/other.mjs publish",
+  ]), [101, 202]);
+});
+
 test("doctor release identity requires exact commit, config hash, source hash, and schema v3", () => {
   const configText = "{\"fixed\":true}\n";
   const valid = {
@@ -97,6 +108,42 @@ test("doctor release identity requires exact commit, config hash, source hash, a
   assert.equal(deploymentIdentityValid({ ...valid, config_sha256: "0".repeat(64) }, configText), false);
   assert.equal(deploymentIdentityValid({ ...valid, source_set_sha256: "" }, configText), false);
   assert.equal(deploymentIdentityValid({ ...valid, state_schema_version: 2 }, configText), false);
+});
+
+test("production config freezes the external 1688 Python runtime", async () => {
+  const configPath = path.resolve(
+    import.meta.dirname,
+    "../config/ozon_24h_production.json",
+  );
+  const config = JSON.parse(await fs.readFile(configPath, "utf8"));
+  assert.doesNotThrow(() => validateConfig(config));
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_PYTHON: "python3",
+      },
+    }),
+    /frozen external Python environment/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_BUFFER_REFILL_TARGET: "7",
+      },
+    }),
+    /publish\/refill tranche/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      source_refresh_seconds: 3_600,
+    }),
+    /refresh interval/u,
+  );
 });
 
 test("same-run resume refreshes the active source pool from the promoted release", async (t) => {
@@ -195,6 +242,22 @@ test("normal production status is bounded below two kilobytes", () => {
   assert.ok(Buffer.byteLength(JSON.stringify(compact)) <= 2048);
   assert.equal(compact.reason.endsWith("…"), true);
   assert.equal(compact.owners.worker, 1);
+});
+
+test("idle or retired status never reports stale persisted process owners", () => {
+  const compact = compactProductionStatus({
+    current: {},
+    operational: {
+      observed_at: "2026-07-30T00:00:00.000Z",
+      status: "RETIRED",
+    },
+    owners: { counts: { supervisor: 1, worker: 1, profile_owner: 1 } },
+  });
+  assert.deepEqual(compact.owners, {
+    supervisor: 0,
+    worker: 0,
+    profile: 0,
+  });
 });
 
 test("incident digest groups repeated errors before bounded diagnosis", () => {

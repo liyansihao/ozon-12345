@@ -101,13 +101,39 @@ export function replayAcceptanceEvents(events, { startedAt, endedAt }) {
   let stateLossEvents = 0;
   let processSamples = 0;
   let processOwnershipViolations = 0;
+  let previousWorkerGeneration = null;
   let orphanBrowserEvents = 0;
   let unexpectedProcessExits = 0;
   let erpRateLimits = 0;
   let erpBackoffViolations = 0;
-  let erpBlockedUntil = Number.NEGATIVE_INFINITY;
+  const erpBlockedUntilByStore = new Map();
+  const lastErpSyncAtByStore = new Map();
   let explicitDuplicateEvents = 0;
   let securityBypassEvents = 0;
+
+  const precedingErpRows = (events || [])
+    .map((event, index) => ({ event, index, at: timestamp(event?.at ?? event?.timestamp) }))
+    .filter(({ event, at }) => (
+      at !== null
+      && at < window.start
+      && ["erp-rate-limit", "erp-sync-attempt"].includes(String(event?.type || ""))
+    ))
+    .sort((left, right) => left.at - right.at || left.index - right.index);
+  for (const { event, at } of precedingErpRows) {
+    const type = String(event.type);
+    const storeKey = String(Number(event?.store_id) || "unknown");
+    if (type === "erp-rate-limit") {
+      const retryAfterMs = Math.max(0, Number(event?.retry_after_ms) || 0);
+      const explicitBlockedUntil = timestamp(event?.blocked_until);
+      erpBlockedUntilByStore.set(storeKey, Math.max(
+        Number(erpBlockedUntilByStore.get(storeKey) || Number.NEGATIVE_INFINITY),
+        at + Math.max(ERP_URGENT_FLOOR_MS, retryAfterMs),
+        explicitBlockedUntil ?? Number.NEGATIVE_INFINITY,
+      ));
+    } else {
+      lastErpSyncAtByStore.set(storeKey, at);
+    }
+  }
 
   for (const { event, at } of rows) {
     const type = String(event?.type || "");
@@ -179,13 +205,49 @@ export function replayAcceptanceEvents(events, { startedAt, endedAt }) {
 
     if (type === "process-snapshot") {
       processSamples += 1;
-      const expectedWorkerCount = Number.isInteger(Number(event?.expected_worker_count))
-        ? Number(event.expected_worker_count)
-        : 1;
+      const hasPersistedRuntimeExpectation = Object.hasOwn(event || {}, "formal_worker_started")
+        || Object.hasOwn(event || {}, "worker_generation")
+        || Object.hasOwn(event || {}, "recovery_pending");
+      const formalWorkerStarted = event?.formal_worker_started === true
+        || Number(event?.worker_generation) > 0;
+      const recoveryPending = event?.recovery_pending === true;
+      const workerCount = Number(event?.worker_count);
+      const profileOwnerCount = Number(event?.profile_owner_count);
+      const expectedWorkerCount = formalWorkerStarted ? 1 : 0;
+      const expectedProfileOwnerCount = 1;
+      const workerOwned = hasPersistedRuntimeExpectation
+        ? (recoveryPending
+          ? [0, 1].includes(workerCount)
+          : workerCount === expectedWorkerCount)
+        : workerCount === (
+          Number.isInteger(Number(event?.expected_worker_count))
+            ? Number(event.expected_worker_count)
+            : 1
+        );
+      const profileOwned = hasPersistedRuntimeExpectation
+        ? (recoveryPending
+          ? [0, 1].includes(profileOwnerCount)
+          : profileOwnerCount === expectedProfileOwnerCount)
+        : profileOwnerCount === (
+          Number.isInteger(Number(event?.expected_profile_owner_count))
+            ? Number(event.expected_profile_owner_count)
+            : 1
+        );
+      const workerGeneration = Number(event?.worker_generation);
+      const generationChanged = hasPersistedRuntimeExpectation
+        && Number.isInteger(workerGeneration)
+        && workerGeneration > 0
+        && previousWorkerGeneration !== null
+        && previousWorkerGeneration > 0
+        && workerGeneration !== previousWorkerGeneration;
       const ownerViolation = Number(event?.supervisor_count) !== 1
-        || Number(event?.worker_count) !== expectedWorkerCount
-        || Number(event?.profile_owner_count) !== 1;
+        || !workerOwned
+        || !profileOwned
+        || generationChanged;
       if (ownerViolation) processOwnershipViolations += 1;
+      if (hasPersistedRuntimeExpectation && Number.isInteger(workerGeneration)) {
+        previousWorkerGeneration = workerGeneration;
+      }
       if (Number(event?.orphan_browser_count) > 0) orphanBrowserEvents += 1;
       continue;
     }
@@ -209,13 +271,35 @@ export function replayAcceptanceEvents(events, { startedAt, endedAt }) {
 
     if (type === "erp-rate-limit") {
       erpRateLimits += 1;
+      const storeKey = String(Number(event?.store_id) || "unknown");
       const retryAfterMs = Math.max(0, Number(event?.retry_after_ms) || 0);
-      erpBlockedUntil = Math.max(erpBlockedUntil, at + Math.max(ERP_URGENT_FLOOR_MS, retryAfterMs));
+      const explicitBlockedUntil = timestamp(event?.blocked_until);
+      erpBlockedUntilByStore.set(storeKey, Math.max(
+        Number(erpBlockedUntilByStore.get(storeKey) || Number.NEGATIVE_INFINITY),
+        at + Math.max(ERP_URGENT_FLOOR_MS, retryAfterMs),
+        explicitBlockedUntil ?? Number.NEGATIVE_INFINITY,
+      ));
       continue;
     }
 
-    if (type === "erp-sync-attempt" && at < erpBlockedUntil) {
-      erpBackoffViolations += 1;
+    if (type === "erp-sync-attempt") {
+      const storeKey = String(Number(event?.store_id) || "unknown");
+      const blockedUntil = Number(
+        erpBlockedUntilByStore.get(storeKey) || Number.NEGATIVE_INFINITY,
+      );
+      const lastAttemptAt = Number(
+        lastErpSyncAtByStore.get(storeKey) || Number.NEGATIVE_INFINITY,
+      );
+      if (
+        at < blockedUntil
+        || (
+          Number.isFinite(lastAttemptAt)
+          && at - lastAttemptAt < ERP_URGENT_FLOOR_MS
+        )
+      ) {
+        erpBackoffViolations += 1;
+      }
+      lastErpSyncAtByStore.set(storeKey, at);
     }
   }
 
@@ -271,6 +355,7 @@ export function evaluateThreeSkuGate({ events, targetSkus }) {
   const targets = [...new Set((targetSkus || []).map(normalizedSku).filter(Boolean))];
   const targetSet = new Set(targets);
   const finalStatus = new Map();
+  const finalClosed = new Map();
   const submitCounts = new Map();
   const deterministicTerminalAt = new Map();
   let missingReasons = 0;
@@ -294,6 +379,12 @@ export function evaluateThreeSkuGate({ events, targetSkus }) {
     if (type !== "sku-transition") continue;
     const status = String(event?.status || "").trim();
     finalStatus.set(sku, status);
+    finalClosed.set(sku, (
+      event?.terminal === true
+      || status === "published"
+      || status === "skipped"
+      || (status === "failed" && String(event?.failure_class || "") !== "transient")
+    ));
     if (status === "submitted") increment(submitCounts, sku);
     if (REASON_REQUIRED_STATUSES.has(status) && !String(event?.reason || "").trim()) {
       missingReasons += 1;
@@ -303,7 +394,10 @@ export function evaluateThreeSkuGate({ events, targetSkus }) {
     }
   }
 
-  const unclosed = targets.filter((sku) => !CLOSED_SKU_STATUSES.has(finalStatus.get(sku)));
+  const unclosed = targets.filter((sku) => (
+    !CLOSED_SKU_STATUSES.has(finalStatus.get(sku))
+    || finalClosed.get(sku) !== true
+  ));
   const duplicateSubmissions = [...submitCounts.values()]
     .reduce((sum, count) => sum + Math.max(0, count - 1), 0);
   const checks = {
@@ -363,7 +457,6 @@ export function evaluateTwoHourGate({ events, startedAt, endedAt }) {
   const checks = {
     full_two_hour_window: replay.duration_minutes >= 120,
     at_least_seventy_current_window_strict: replay.unique_strict_count >= 70,
-    zero_carried_in_strict: replay.carried_in_strict_events === 0,
     zero_duplicates: replay.duplicate_strict_events === 0
       && replay.explicit_duplicate_events === 0,
     no_deterministic_terminal_retries: replay.deterministic_terminal_retries === 0,

@@ -8,6 +8,20 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import {
+  acceptedTerminalFailures,
+  buildStagedGateState,
+  evaluateLiveStagedGate,
+  evidenceSnapshotHash,
+  loadLiveAcceptanceEvidence,
+} from "./flow_b_playwright/live-acceptance-gates.mjs";
+import {
+  failSubmissionGate,
+  initializeSubmissionGate,
+  releaseSubmissionGate,
+} from "./flow_b_playwright/runtime-state.mjs";
+import { hasReliableSameItemCostEvidence } from "./flow_b_playwright/cost-evidence.mjs";
+
 const execFileAsync = promisify(execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_LABEL = "com.codex.ozon.24h-production";
@@ -320,36 +334,90 @@ export function candidateBufferDecision({
   uniqueReady = 0,
   targetHours = 2,
   minimumPerHour = 35,
+  minimumReadyCandidates = 70,
 } = {}) {
-  const requiredReady = Math.ceil(Number(targetHours) * Number(minimumPerHour));
+  const requiredReady = Math.max(
+    Math.ceil(Number(targetHours) * Number(minimumPerHour)),
+    Math.ceil(Number(minimumReadyCandidates) || 0),
+  );
   const ready = Math.max(0, Math.floor(Number(uniqueReady) || 0));
   return ready >= requiredReady
     ? { action: "ready", unique_ready: ready, required_ready: requiredReady }
     : { action: "prepare", unique_ready: ready, required_ready: requiredReady };
 }
 
-export function candidateBufferSnapshot(rows = []) {
+function isQualifiedCandidateBufferRow(row) {
+  const sku = String(row?.sku || "").trim();
+  return (
+    Boolean(sku)
+    && sku !== "2815247918"
+    && String(row?.status || "") === "validated"
+    && String(row?.validation_mode || "") === "buffer"
+    && String(row?.shipping_mode || "").toUpperCase() === "FBS"
+    && row?.fbs_evidence?.verified === true
+    && hasReliableSameItemCostEvidence(row)
+    && Number(row?.purchase_price) > 0
+    && Number(row?.profit_rate) > 30
+    && row?.quality_gate_passed === true
+  );
+}
+
+export function candidateBufferSnapshot(rows = [], { consumedSkus = [] } = {}) {
   const latest = new Map();
+  const consumed = new Set((consumedSkus || []).map((value) => String(value || "").trim()).filter(Boolean));
   for (const row of rows || []) {
     const sku = String(row?.sku || "").trim();
     if (sku) latest.set(sku, row);
   }
   const readySkus = [...latest].filter(([sku, row]) => (
-    sku !== "2815247918"
-    && String(row?.status || "") === "validated"
-    && String(row?.shipping_mode || "").toUpperCase() === "FBS"
-    && row?.fbs_evidence?.verified === true
-    && row?.cost_verified === true
-    && row?.cost?.ok === true
-    && Number(row?.cost?.cost) > 0
-    && Number(row?.purchase_price) > 0
-    && Number(row?.profit_rate) > 30
-    && row?.quality_gate_passed === true
+    !consumed.has(sku)
+    && isQualifiedCandidateBufferRow(row)
   )).map(([sku]) => sku).sort();
   return {
     unique_ready: readySkus.length,
     ready_skus: readySkus,
     rejected_or_invalid: Math.max(0, latest.size - readySkus.length),
+  };
+}
+
+export function candidateBufferInflow(rows = [], {
+  consumedSkus = [],
+  consumedBeforeSkus = [],
+  previousAt,
+  observedAt,
+} = {}) {
+  const previousMs = Date.parse(String(previousAt || ""));
+  const observedMs = Date.parse(String(observedAt || ""));
+  if (!Number.isFinite(previousMs) || !Number.isFinite(observedMs) || observedMs < previousMs) {
+    throw new TypeError("candidate buffer inflow requires an ordered evidence interval");
+  }
+  const current = candidateBufferSnapshot(rows, { consumedSkus });
+  const previous = candidateBufferSnapshot(
+    (rows || []).filter((row) => {
+      const at = qualifiedValidationTimestamp(row);
+      return Number.isFinite(at) && at <= previousMs;
+    }),
+    { consumedSkus: consumedBeforeSkus },
+  );
+  const firstQualifiedAt = new Map();
+  for (const row of rows || []) {
+    const sku = String(row?.sku || "").trim();
+    if (!sku || !isQualifiedCandidateBufferRow(row)) continue;
+    const at = qualifiedValidationTimestamp(row);
+    if (!Number.isFinite(at)) continue;
+    const prior = firstQualifiedAt.get(sku);
+    if (!Number.isFinite(prior) || at < prior) firstQualifiedAt.set(sku, at);
+  }
+  const currentReady = new Set(current.ready_skus);
+  const addedSkus = [...firstQualifiedAt]
+    .filter(([sku, at]) => currentReady.has(sku) && at > previousMs && at <= observedMs)
+    .map(([sku]) => sku)
+    .sort();
+  return {
+    current,
+    previous,
+    added_unique: addedSkus.length,
+    added_skus: addedSkus,
   };
 }
 
@@ -410,6 +478,37 @@ async function writeJsonAtomic(filename, value) {
   const temporary = `${filename}.tmp-${process.pid}`;
   await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fsp.rename(temporary, filename);
+}
+
+async function writeTextAtomic(filename, value) {
+  await fsp.mkdir(path.dirname(filename), { recursive: true });
+  const temporary = `${filename}.tmp-${process.pid}`;
+  await fsp.writeFile(temporary, String(value), "utf8");
+  await fsp.rename(temporary, filename);
+}
+
+function liveProcessStatePath(runDir) {
+  return path.join(path.resolve(runDir), "live_process_state.json");
+}
+
+async function updateLiveProcessState(runDir, update = {}) {
+  const filename = liveProcessStatePath(runDir);
+  const current = await readJson(filename, {
+    schema_version: 1,
+    formal_worker_started_at: null,
+    worker_generation: 0,
+    active_worker_pid: null,
+    recovery_pending: false,
+    recovery_started_at: null,
+  });
+  const next = {
+    ...current,
+    ...update,
+    schema_version: 1,
+    updated_at: new Date().toISOString(),
+  };
+  await writeJsonAtomic(filename, next);
+  return next;
 }
 
 async function appendJsonLine(filename, value) {
@@ -506,15 +605,6 @@ async function profileOwners(profileDir) {
   return (await processTable()).filter((row) => exactProfileOwner(row, profileDir));
 }
 
-function commandHasArgument(command, value) {
-  const target = String(value || "").trim();
-  if (!target) return false;
-  return String(command || "")
-    .split(/\s+/u)
-    .map((token) => token.replace(/^['"]|['"]$/gu, ""))
-    .includes(target);
-}
-
 export function processOwnershipSnapshot(rows = [], {
   supervisorPid = process.pid,
   runDir,
@@ -522,7 +612,6 @@ export function processOwnershipSnapshot(rows = [], {
 } = {}) {
   const supervisorPids = new Set();
   const workerPids = new Set();
-  const normalizedRunDir = absolute(runDir);
   const normalizedProfileDir = absolute(profileDir);
   const profileOwnerPids = new Set();
   for (const row of rows || []) {
@@ -537,7 +626,6 @@ export function processOwnershipSnapshot(rows = [], {
     }
     if (
       command.includes("flow_b_playwright.mjs")
-      && commandHasArgument(command, normalizedRunDir)
       && /\b(?:accept|run|publish)\b/u.test(command)
     ) {
       workerPids.add(pid);
@@ -819,6 +907,12 @@ function expandedConfig(config) {
   return cloned;
 }
 
+function runtimeStateDatabasePath(config) {
+  const configured = config?.flow_env?.FLOW_B_RUNTIME_STATE_DB;
+  if (!configured) throw new Error("FLOW_B_RUNTIME_STATE_DB is required for formal production");
+  return absolute(expandTemplate(configured, config));
+}
+
 export function checkpointEnvironment(config, currentRun, baseEnvironment = process.env) {
   const environment = { ...baseEnvironment };
   environment.FLOW_B_PW_PROFILE = absolute(config.browser.profile_dir);
@@ -851,6 +945,18 @@ export function workerEnvironment(config, currentRun) {
   environment.FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE = "1";
   environment.FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE = "35";
   environment.FLOW_B_ACCEPTANCE_TARGET_POLICY = "fixed";
+  if (currentRun.formal_started === true) {
+    environment.FLOW_B_SUBMISSION_GATE_FILE = path.join(
+      absolute(currentRun.run_dir),
+      "staged_acceptance_gates.json",
+    );
+    environment.FLOW_B_SUBMISSION_GATE_RUN_ID = String(currentRun.run_id);
+    environment.FLOW_B_SUBMISSION_GATE_RUN_DIR = absolute(currentRun.run_dir);
+  } else {
+    delete environment.FLOW_B_SUBMISSION_GATE_FILE;
+    delete environment.FLOW_B_SUBMISSION_GATE_RUN_ID;
+    delete environment.FLOW_B_SUBMISSION_GATE_RUN_DIR;
+  }
   return environment;
 }
 
@@ -910,12 +1016,14 @@ export async function readAppendedTail(filename, offset = 0, maxBytes = 64 * 102
 }
 
 async function updateOperationalState(stateRoot, currentRun, patch) {
-  await writeJsonAtomic(path.join(stateRoot, "operational_status.json"), {
+  const event = {
     run_id: currentRun.run_id,
     run_dir: currentRun.run_dir,
     observed_at: new Date().toISOString(),
     ...patch,
-  });
+  };
+  await writeJsonAtomic(path.join(stateRoot, "operational_status.json"), event);
+  await appendJsonLine(path.join(stateRoot, "operational_history.jsonl"), event);
 }
 
 async function acceptanceEnded(runDir) {
@@ -1010,6 +1118,94 @@ async function runSourceRefresh(appRoot, stateRoot, runDir) {
   });
 }
 
+export async function runFormalSourceRefresh(
+  appRoot,
+  stateRoot,
+  runDir,
+  currentRun,
+  {
+    refresh = runSourceRefresh,
+    now = () => new Date(),
+  } = {},
+) {
+  const result = await refresh(appRoot, stateRoot, runDir);
+  if (result.code !== 0) return result;
+  const sourceText = await fsp.readFile(currentRun.urls_file, "utf8");
+  if (!sourceText.split(/\r?\n/u).some((line) => /^https:\/\//u.test(line.trim()))) {
+    throw new Error("refreshed formal source set has no usable URLs");
+  }
+  const sourceSetHash = sha256(sourceText);
+  const epochRows = await readJsonLines(path.join(runDir, "source_set_epochs.jsonl"));
+  const epoch = Number(epochRows.at(-1)?.epoch || 0) + 1;
+  const observedAt = now().toISOString();
+  await appendJsonLine(path.join(runDir, "source_set_epochs.jsonl"), {
+    type: "source-set-epoch",
+    at: observedAt,
+    epoch,
+    source_set_sha256: sourceSetHash,
+    previous_source_set_sha256: epochRows.at(-1)?.source_set_sha256 || null,
+    update_interval_seconds: 7_200,
+  });
+  Object.assign(currentRun, {
+    active_source_set_sha256: sourceSetHash,
+    source_set_epoch: epoch,
+    source_refreshed_at: observedAt,
+  });
+  await writeJsonAtomic(path.join(stateRoot, "current_run.json"), currentRun);
+  return { ...result, source_set_sha256: sourceSetHash, epoch };
+}
+
+export async function runInitialSourceRefresh({
+  appRoot,
+  stateRoot,
+  runDir,
+  currentRun,
+  genericRefresh = runSourceRefresh,
+  formalRefresh = runFormalSourceRefresh,
+  now = () => new Date(),
+} = {}) {
+  if (currentRun?.formal_started === true) {
+    const sourceText = await fsp.readFile(currentRun.urls_file, "utf8");
+    const activeSourceSetHash = sha256(sourceText);
+    const sourceEpochs = await readJsonLines(path.join(runDir, "source_set_epochs.jsonl"));
+    const lastEpoch = sourceEpochs.at(-1) || null;
+    const authorizedHash = String(
+      lastEpoch?.source_set_sha256
+      || currentRun.active_source_set_sha256
+      || currentRun.source_set_sha256
+      || "",
+    );
+    if (!authorizedHash || activeSourceSetHash !== authorizedHash) {
+      const error = new Error("formal source set hash is not authorized by the last epoch or T0");
+      error.code = "OZON_SOURCE_SET_NOT_AUTHORIZED";
+      throw error;
+    }
+    const lastRefreshMs = Date.parse(String(
+      lastEpoch?.at
+      || currentRun.source_refreshed_at
+      || currentRun.source_set_frozen_at
+      || currentRun.started_at
+      || "",
+    ));
+    const nowMs = now().getTime();
+    if (
+      Number.isFinite(lastRefreshMs)
+      && Number.isFinite(nowMs)
+      && nowMs - lastRefreshMs < 7_200_000
+    ) {
+      return {
+        code: 0,
+        skipped: true,
+        reason: "formal-source-refresh-not-due",
+        source_set_sha256: activeSourceSetHash,
+        epoch: Number(lastEpoch?.epoch ?? currentRun.source_set_epoch ?? 0),
+      };
+    }
+    return formalRefresh(appRoot, stateRoot, runDir, currentRun);
+  }
+  return genericRefresh(appRoot, stateRoot, runDir);
+}
+
 async function runCapacityPreflight(config, appRoot, stateRoot, currentRun) {
   const script = path.join(appRoot, "scripts", "ozon_capacity_preflight.mjs");
   const output = path.join(stateRoot, "capacity_preflight.json");
@@ -1067,8 +1263,28 @@ async function activateFormalWindow({
   currentRun,
   runDir,
   appRoot,
+  readySkus,
 }) {
-  const startedAt = new Date();
+  const frozenReadySkus = [...new Set((readySkus || []).map((value) => String(value || "").trim()).filter(Boolean))]
+    .sort();
+  if (frozenReadySkus.length < 3) throw new Error("formal window requires at least three frozen qualified SKUs");
+  const sourceText = await fsp.readFile(currentRun.urls_file, "utf8");
+  if (!sourceText.split(/\r?\n/u).some((line) => /^https:\/\//u.test(line.trim()))) {
+    throw new Error("formal window source set has no usable URLs");
+  }
+  const sourceSetHash = sha256(sourceText);
+  const sourceSnapshotPath = path.join(runDir, "source_set_t0.txt");
+  await writeTextAtomic(sourceSnapshotPath, sourceText);
+  const proposedStartedAt = new Date();
+  const runtimeDbPath = runtimeStateDatabasePath(config);
+  const sqliteGate = initializeSubmissionGate({
+    dbPath: runtimeDbPath,
+    runId: currentRun.run_id,
+    runDir,
+    targetSkus: frozenReadySkus.slice(0, 3),
+    startedAt: proposedStartedAt.toISOString(),
+  });
+  const startedAt = new Date(sqliteGate.startedAt);
   const endedAt = new Date(startedAt.getTime() + Number(config.acceptance.duration_seconds) * 1000);
   const frozenTarget = 500;
   const targetPolicy = "fixed";
@@ -1076,6 +1292,27 @@ async function activateFormalWindow({
   const configText = await fsp.readFile(path.join(appRoot, "config", "ozon_24h_production.json"), "utf8");
   const crypto = await import("node:crypto");
   const configHash = crypto.createHash("sha256").update(configText).digest("hex");
+  const stagedGates = buildStagedGateState({
+    runId: currentRun.run_id,
+    runDir,
+    startedAt: startedAt.toISOString(),
+    endedAt: endedAt.toISOString(),
+    targetSkus: sqliteGate.targetSkus,
+    identity: {
+      commit_sha: config.frozen_commit || "",
+      config_sha256: configHash,
+      source_set_sha256: sourceSetHash,
+      state_schema_version: Number(config.state_schema_version || 3),
+    },
+  });
+  await writeJsonAtomic(path.join(runDir, "staged_acceptance_gates.json"), stagedGates);
+  await updateLiveProcessState(runDir, {
+    formal_worker_started_at: null,
+    worker_generation: 0,
+    active_worker_pid: null,
+    recovery_pending: false,
+    recovery_started_at: null,
+  });
   await writeJsonAtomic(path.join(runDir, "acceptance_window.json"), {
     started_at: startedAt.toISOString(),
     ended_at: endedAt.toISOString(),
@@ -1099,6 +1336,8 @@ async function activateFormalWindow({
     per_store_target: 100,
     require_quality_evidence: true,
     current_window_only: true,
+    source_set_sha256: sourceSetHash,
+    source_set_snapshot: sourceSnapshotPath,
     store_targets: (config.stores || []).map((store) => ({
       id: Number(store.id),
       needle: String(store.name || ""),
@@ -1114,7 +1353,8 @@ async function activateFormalWindow({
     ended_at: endedAt.toISOString(),
     commit_sha: config.frozen_commit || null,
     config_sha256: configHash,
-    source_set_sha256: currentRun.source_set_sha256 || currentRun.source_sha256 || null,
+    source_set_sha256: sourceSetHash,
+    source_set_snapshot: sourceSnapshotPath,
     state_schema_version: Number(config.state_schema_version || 3),
     capacity_preflight: preflight,
     acceptance_target: frozenTarget,
@@ -1124,11 +1364,32 @@ async function activateFormalWindow({
     minimum_strict_per_hour: 35,
     current_window_only: true,
   });
+  await appendJsonLine(path.join(runDir, "live_gate_evidence.jsonl"), {
+    type: "candidate-buffer",
+    at: startedAt.toISOString(),
+    ready_unique: frozenReadySkus.length,
+    added_unique: frozenReadySkus.length,
+    source: "formal-window-initial-qualified-buffer",
+  });
+  await appendJsonLine(path.join(runDir, "source_set_epochs.jsonl"), {
+    type: "source-set-epoch",
+    at: startedAt.toISOString(),
+    epoch: 0,
+    source_set_sha256: sourceSetHash,
+    previous_source_set_sha256: null,
+    update_interval_seconds: 7_200,
+  });
   Object.assign(currentRun, {
     formal_started: true,
     started_at: startedAt.toISOString(),
     ended_at: endedAt.toISOString(),
     config_sha256: configHash,
+    source_sha256: sourceSetHash,
+    source_set_sha256: sourceSetHash,
+    source_set_snapshot: sourceSnapshotPath,
+    source_set_frozen_at: startedAt.toISOString(),
+    active_source_set_sha256: sourceSetHash,
+    source_set_epoch: 0,
     acceptance_target: frozenTarget,
     acceptance_target_policy: targetPolicy,
   });
@@ -1187,6 +1448,340 @@ async function writeProcessOwners({
       profile_owner: browserPid ? 1 : 0,
     },
   });
+}
+
+function qualifiedValidationTimestamp(row) {
+  return Date.parse(String(row?.validated_at || row?.at || row?.timestamp || ""));
+}
+
+async function captureLiveGateEvidence({
+  config,
+  stateRoot,
+  currentRun,
+  runDir,
+}) {
+  const gateState = await readJson(path.join(runDir, "staged_acceptance_gates.json"), {});
+  if (!gateState?.formal_started_at || !gateState?.identity) {
+    throw new Error("staged acceptance gate state is missing");
+  }
+  const runtimeDbPath = runtimeStateDatabasePath(config);
+  const loaded = await loadLiveAcceptanceEvidence({
+    runDir,
+    stateRoot,
+    runtimeDbPath,
+  });
+  const evidenceFile = path.join(runDir, "live_gate_evidence.jsonl");
+  const priorEvidence = await readJsonLines(evidenceFile);
+  const liveProcessState = await readJson(liveProcessStatePath(runDir));
+  const sourceEpochs = await readJsonLines(path.join(runDir, "source_set_epochs.jsonl"));
+  const activeSourceText = await fsp.readFile(currentRun.urls_file, "utf8");
+  const activeSourceSetHash = sha256(activeSourceText);
+  const activeSourceEpoch = sourceEpochs.at(-1) || null;
+  const previousSnapshot = priorEvidence
+    .filter((event) => event?.type === "process-snapshot")
+    .at(-1) || null;
+  const previousAt = Date.parse(String(previousSnapshot?.at || gateState.formal_started_at));
+  const now = new Date();
+  const validationRows = await readJsonLines(path.join(runDir, "validation_gate.jsonl"));
+  const consumedSkus = new Set(loaded.runtimeEvents.map((row) => String(row?.sku || "").trim()).filter(Boolean));
+  const consumedBefore = new Set(loaded.runtimeEvents.filter((row) => {
+    const at = Date.parse(String(row?.occurredAt || row?.occurred_at || ""));
+    return Number.isFinite(at) && at <= previousAt;
+  }).map((row) => String(row?.sku || "").trim()).filter(Boolean));
+  const bufferInflow = candidateBufferInflow(validationRows, {
+    consumedSkus,
+    consumedBeforeSkus: consumedBefore,
+    previousAt: new Date(previousAt).toISOString(),
+    observedAt: now.toISOString(),
+  });
+  const buffer = bufferInflow.current;
+  const ownership = processOwnershipSnapshot(await processTable(), {
+    supervisorPid: process.pid,
+    runDir,
+    profileDir: config.browser.profile_dir,
+  });
+  const snapshot = {
+    type: "process-snapshot",
+    at: now.toISOString(),
+    run_id: currentRun.run_id,
+    commit_sha: gateState.identity.commit_sha,
+    config_sha256: gateState.identity.config_sha256,
+    source_set_sha256: gateState.identity.source_set_sha256,
+    active_source_set_sha256: activeSourceSetHash,
+    source_set_epoch: Number(activeSourceEpoch?.epoch || 0),
+    source_set_epoch_authorized: Boolean(
+      activeSourceEpoch
+      && String(activeSourceEpoch.source_set_sha256 || "") === activeSourceSetHash
+    ),
+    state_schema_version: Number(gateState.identity.state_schema_version),
+    supervisor_count: ownership.supervisor,
+    worker_count: ownership.worker,
+    profile_owner_count: ownership.profile_owner,
+    expected_worker_count: liveProcessState.formal_worker_started_at
+      && liveProcessState.recovery_pending !== true ? 1 : 0,
+    expected_profile_owner_count: liveProcessState.recovery_pending === true ? 0 : 1,
+    formal_worker_started: Boolean(liveProcessState.formal_worker_started_at),
+    formal_worker_started_at: liveProcessState.formal_worker_started_at,
+    worker_generation: Number(liveProcessState.worker_generation || 0),
+    active_worker_pid: Number(liveProcessState.active_worker_pid) || null,
+    recovery_pending: liveProcessState.recovery_pending === true,
+    recovery_started_at: liveProcessState.recovery_started_at || null,
+    orphan_browser_count: Math.max(0, ownership.profile_owner - 1),
+    supervisor_pids: ownership.supervisor_pids,
+    worker_pids: ownership.worker_pids,
+    profile_owner_pids: ownership.profile_owner_pids,
+    state_integrity: loaded.state.integrity,
+    state_event_count: loaded.state.event_count,
+    state_max_event_id: loaded.state.max_event_id,
+    state_strict_count: loaded.state.strict_count,
+    previous_snapshot_hash: previousSnapshot?.snapshot_hash || null,
+  };
+  snapshot.snapshot_hash = evidenceSnapshotHash(snapshot);
+  await appendJsonLine(evidenceFile, snapshot);
+  await appendJsonLine(evidenceFile, {
+    type: "candidate-buffer",
+    at: now.toISOString(),
+    ready_unique: buffer.unique_ready,
+    added_unique: bufferInflow.added_unique,
+    consumed_unique: consumedSkus.size,
+    source: "qualified-validation-buffer-net-inflow",
+  });
+  return {
+    snapshot,
+    buffer,
+    qualified_inflow: bufferInflow.added_unique,
+    live: loaded,
+    gate_state: gateState,
+  };
+}
+
+function stagedGateFailureReason(gateName) {
+  return {
+    three_sku: "three-sku-production-gate-failed",
+    thirty_minute: "thirty-minute-production-gate-failed",
+    two_hour_a: "two-hour-a-production-gate-failed",
+    two_hour_b: "two-hour-b-production-gate-failed",
+    twenty_four_hour: "twenty-four-hour-production-gate-failed",
+  }[gateName] || "production-acceptance-gate-failed";
+}
+
+export function submissionGateConvergenceDecision({
+  jsonGate,
+  sqliteGate,
+  runId,
+  runDir,
+} = {}) {
+  const jsonPhase = String(jsonGate?.phase || "");
+  const sqliteMatches = sqliteGate
+    && String(sqliteGate.run_id) === String(runId || "")
+    && String(sqliteGate.run_dir || "").trim()
+    && path.resolve(String(sqliteGate.run_dir)) === path.resolve(String(runDir || ""))
+    && Number(sqliteGate.distinct_sku_budget) === 3;
+  if (jsonPhase === "failed" || sqliteGate?.phase === "failed") {
+    return { action: "safe-stop", reason: "persisted-submission-gate-failed" };
+  }
+  if (!sqliteMatches || (jsonPhase === "released" && sqliteGate.phase !== "released")) {
+    return { action: "safe-stop", reason: "submission-gate-state-mismatch" };
+  }
+  return { action: "continue", reason: null };
+}
+
+async function failLiveStagedGate({
+  config,
+  stateRoot,
+  currentRun,
+  runDir,
+  gateState,
+  gateName,
+  result,
+  reason = stagedGateFailureReason(gateName),
+}) {
+  const failedAt = new Date().toISOString();
+  gateState.submission_gate.phase = "failed";
+  if (gateState.gates?.[gateName]) {
+    Object.assign(gateState.gates[gateName], {
+      status: "failed",
+      evaluated_at: failedAt,
+      result,
+    });
+  }
+  let sqliteFailure = null;
+  try {
+    failSubmissionGate({
+      dbPath: runtimeStateDatabasePath(config),
+      runId: currentRun.run_id,
+      failedAt,
+      result: { gate: gateName, reason, result },
+    });
+  } catch (error) {
+    sqliteFailure = String(error?.message || error);
+  }
+  await writeJsonAtomic(path.join(runDir, "staged_acceptance_gates.json"), gateState);
+  await updateOperationalState(stateRoot, currentRun, {
+    status: "STOPPED",
+    reason,
+    acceptance_gate: gateName,
+    gate_result: result,
+    evidence_preserved: true,
+    ...(sqliteFailure ? { sqlite_gate_failure: sqliteFailure } : {}),
+  });
+  return {
+    action: "safe-stop",
+    reason,
+    gate: gateName,
+    result,
+    ...(sqliteFailure ? { sqlite_gate_failure: sqliteFailure } : {}),
+  };
+}
+
+async function evaluateDueLiveGates({
+  config,
+  stateRoot,
+  currentRun,
+  runDir,
+  now = new Date(),
+}) {
+  const gateFile = path.join(runDir, "staged_acceptance_gates.json");
+  const gateState = await readJson(gateFile, {});
+  if (!gateState?.submission_gate || !gateState?.gates) {
+    throw new Error("staged acceptance gate state is missing");
+  }
+  const loaded = await loadLiveAcceptanceEvidence({
+    runDir,
+    stateRoot,
+    runtimeDbPath: runtimeStateDatabasePath(config),
+  });
+  const sqliteGate = loaded.state.submission_gate;
+  const convergence = submissionGateConvergenceDecision({
+    jsonGate: gateState.submission_gate,
+    sqliteGate,
+    runId: currentRun.run_id,
+    runDir,
+  });
+  const failedGateEntry = Object.entries(gateState.gates)
+    .find(([, value]) => value?.status === "failed");
+  if (convergence.reason === "persisted-submission-gate-failed") {
+    const [failedGateName = "three_sku", failedGate = {}] = failedGateEntry || [];
+    return failLiveStagedGate({
+      config,
+      stateRoot,
+      currentRun,
+      runDir,
+      gateState,
+      gateName: failedGateName,
+      result: failedGate.result || sqliteGate?.result || { passed: false },
+      reason: stagedGateFailureReason(failedGateName),
+    });
+  }
+  if (convergence.reason === "submission-gate-state-mismatch") {
+    return failLiveStagedGate({
+      config,
+      stateRoot,
+      currentRun,
+      runDir,
+      gateState,
+      gateName: "three_sku",
+      result: {
+        passed: false,
+        reason: "submission-gate-state-mismatch",
+        json_phase: gateState.submission_gate.phase,
+        sqlite_gate: sqliteGate,
+      },
+      reason: "submission-gate-state-mismatch",
+    });
+  }
+  const terminalFailures = acceptedTerminalFailures(loaded.runtimeEvents);
+  if (terminalFailures.length > 0) {
+    return failLiveStagedGate({
+      config,
+      stateRoot,
+      currentRun,
+      runDir,
+      gateState,
+      gateName: "three_sku",
+      result: { passed: false, accepted_terminal_failures: terminalFailures },
+      reason: "accepted-submission-cannot-reach-strict",
+    });
+  }
+  const identity = gateState.identity;
+  const targetSkus = gateState.submission_gate.target_skus;
+  const nowMs = now.getTime();
+  if (gateState.gates.three_sku.status === "pending") {
+    const three = evaluateLiveStagedGate({
+      gate: "three-sku",
+      events: loaded.events,
+      targetSkus,
+      expectedIdentity: identity,
+      requireStateEvidence: true,
+    });
+    const timeoutAt = Date.parse(gateState.formal_started_at) + 30 * 60_000;
+    if (three.unclosed_skus.length === 0 || nowMs >= timeoutAt) {
+      if (!three.passed) {
+        return failLiveStagedGate({
+          config,
+          stateRoot,
+          currentRun,
+          runDir,
+          gateState,
+          gateName: "three_sku",
+          result: three,
+        });
+      }
+      const passedAt = now.toISOString();
+      releaseSubmissionGate({
+        dbPath: runtimeStateDatabasePath(config),
+        runId: currentRun.run_id,
+        releasedAt: passedAt,
+        result: three,
+      });
+      gateState.submission_gate.phase = "released";
+      Object.assign(gateState.gates.three_sku, {
+        ended_at: passedAt,
+        status: "passed",
+        evaluated_at: passedAt,
+        result: three,
+      });
+      await writeJsonAtomic(gateFile, gateState);
+    }
+  }
+  if (gateState.gates.three_sku.status !== "passed") {
+    return { action: "continue", gate: "three_sku", status: "pending" };
+  }
+  for (const [gateName, replayGate] of [
+    ["thirty_minute", "30-minute"],
+    ["two_hour_a", "two-hour"],
+    ["two_hour_b", "two-hour"],
+  ]) {
+    const gate = gateState.gates[gateName];
+    if (gate.status !== "pending" || nowMs < Date.parse(gate.ended_at)) continue;
+    const result = evaluateLiveStagedGate({
+      gate: replayGate,
+      events: loaded.events,
+      startedAt: gate.started_at,
+      endedAt: gate.ended_at,
+      expectedIdentity: identity,
+      minimumCandidateBuffer: 70,
+      requireStateEvidence: true,
+    });
+    if (!result.passed) {
+      return failLiveStagedGate({
+        config,
+        stateRoot,
+        currentRun,
+        runDir,
+        gateState,
+        gateName,
+        result,
+      });
+    }
+    Object.assign(gate, {
+      status: "passed",
+      evaluated_at: now.toISOString(),
+      result,
+    });
+    await writeJsonAtomic(gateFile, gateState);
+  }
+  return { action: "continue", gate: null, status: "healthy" };
 }
 
 export async function supervise(configPath) {
@@ -1283,6 +1878,7 @@ export async function supervise(configPath) {
   let worker = null;
   let checkpointTimer = null;
   let sourceRefreshTimer = null;
+  let gateTimer = null;
   let shuttingDown = false;
   let forcedSafeStopReason = null;
   let browserRecoveryEvents = [];
@@ -1305,6 +1901,10 @@ export async function supervise(configPath) {
         path.resolve(String(event?.run_dir || "")) === runDir
         && event?.action === "browser-recovery-attempt"
       ));
+    if (currentRun.formal_started === true) {
+      const persistedLiveProcessState = await readJson(liveProcessStatePath(runDir));
+      browserRecoveryPending = persistedLiveProcessState.recovery_pending === true;
+    }
     const ensureOwnedBrowser = async () => {
       try {
         const owner = await ensureBrowserOwner({ config, stateRoot, runDir });
@@ -1319,6 +1919,13 @@ export async function supervise(configPath) {
           browserRecoveryEvents.push(succeeded);
           await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), succeeded);
           browserRecoveryPending = false;
+          if (currentRun.formal_started === true) {
+            await updateLiveProcessState(runDir, {
+              recovery_pending: false,
+              recovery_completed_at: succeeded.at,
+              recovery_started_at: null,
+            });
+          }
         }
         return owner;
       } catch (error) {
@@ -1332,6 +1939,13 @@ export async function supervise(configPath) {
         browserRecoveryEvents.push(failed);
         browserRecoveryPending = true;
         await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), failed);
+        if (currentRun.formal_started === true) {
+          const processState = await readJson(liveProcessStatePath(runDir));
+          await updateLiveProcessState(runDir, {
+            recovery_pending: true,
+            recovery_started_at: processState.recovery_started_at || failed.at,
+          });
+        }
         const recoveryDecision = browserRecoverySafeStopDecision(browserRecoveryEvents);
         if (recoveryDecision.action === "safe-stop") {
           const stopped = new Error(recoveryDecision.reason);
@@ -1347,7 +1961,12 @@ export async function supervise(configPath) {
       runDir,
       profileDir: config.browser.profile_dir,
     });
-    const sourceRefresh = await runSourceRefresh(appRoot, stateRoot, runDir);
+    const sourceRefresh = await runInitialSourceRefresh({
+      appRoot,
+      stateRoot,
+      runDir,
+      currentRun,
+    });
     if (sourceRefresh.code !== 0) throw new Error("initial source portfolio refresh failed");
     while (currentRun.formal_started === false && !shuttingDown) {
       if (fs.existsSync(stopFile)) {
@@ -1390,6 +2009,7 @@ export async function supervise(configPath) {
             uniqueReady: bufferBefore.unique_ready,
             targetHours: config.candidate_buffer?.minimum_hours || 2,
             minimumPerHour: config.candidate_buffer?.minimum_strict_per_hour || 35,
+            minimumReadyCandidates: config.candidate_buffer?.minimum_ready_candidates || 70,
           });
           if (bufferDecision.action === "ready") {
             await activateFormalWindow({
@@ -1398,6 +2018,7 @@ export async function supervise(configPath) {
               currentRun,
               runDir,
               appRoot,
+              readySkus: bufferBefore.ready_skus,
             });
             break;
           }
@@ -1471,6 +2092,7 @@ export async function supervise(configPath) {
               currentRun,
               runDir,
               appRoot,
+              readySkus: bufferAfter.ready_skus,
             });
             break;
           }
@@ -1551,6 +2173,71 @@ export async function supervise(configPath) {
       });
       return 0;
     }
+    let gateCheckRunning = false;
+    let sourceRefreshRunning = false;
+    const captureAndEvaluateLiveGates = async () => {
+      if (gateCheckRunning || sourceRefreshRunning || shuttingDown) return null;
+      gateCheckRunning = true;
+      try {
+        await captureLiveGateEvidence({
+          config,
+          stateRoot,
+          currentRun,
+          runDir,
+        });
+        const decision = await evaluateDueLiveGates({
+          config,
+          stateRoot,
+          currentRun,
+          runDir,
+        });
+        if (decision.action === "safe-stop") {
+          forcedSafeStopReason = decision.reason;
+          shuttingDown = true;
+          await stopWorker().catch(() => {});
+        }
+        return decision;
+      } catch (error) {
+        forcedSafeStopReason = "live-acceptance-evidence-failed";
+        shuttingDown = true;
+        const gateState = await readJson(
+          path.join(runDir, "staged_acceptance_gates.json"),
+          {},
+        ).catch(() => ({}));
+        if (gateState?.submission_gate) {
+          await failLiveStagedGate({
+            config,
+            stateRoot,
+            currentRun,
+            runDir,
+            gateState,
+            gateName: "three_sku",
+            result: {
+              passed: false,
+              evidence_error: String(error?.message || error),
+            },
+            reason: forcedSafeStopReason,
+          }).catch(() => {});
+        } else {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "STOPPED",
+            reason: forcedSafeStopReason,
+            error: String(error?.message || error),
+            evidence_preserved: true,
+          }).catch(() => {});
+        }
+        await stopWorker().catch(() => {});
+        return { action: "safe-stop", reason: forcedSafeStopReason, error };
+      } finally {
+        gateCheckRunning = false;
+      }
+    };
+    await captureAndEvaluateLiveGates();
+    if (shuttingDown) return 0;
+    gateTimer = setInterval(() => {
+      void captureAndEvaluateLiveGates();
+    }, 60_000);
+    gateTimer.unref();
     let paceCheckRunning = false;
     const enforceRollingPace = async ({ writeCheckpoint = true } = {}) => {
       if (paceCheckRunning || shuttingDown) return;
@@ -1632,8 +2319,20 @@ export async function supervise(configPath) {
     }, Math.max(60_000, Number(config.rate_check_interval_seconds || 300) * 1000));
     checkpointTimer.unref();
     sourceRefreshTimer = setInterval(() => {
-      void runSourceRefresh(appRoot, stateRoot, runDir);
-    }, Math.max(60_000, Number(config.source_refresh_seconds || 900) * 1000));
+      if (sourceRefreshRunning || shuttingDown) return;
+      sourceRefreshRunning = true;
+      void runFormalSourceRefresh(appRoot, stateRoot, runDir, currentRun)
+        .catch(async (error) => {
+          await appendJsonLine(path.join(runDir, "runtime_errors.jsonl"), {
+            at: new Date().toISOString(),
+            stage: "source-set-epoch-refresh",
+            error: String(error?.message || error),
+          }).catch(() => {});
+        })
+        .finally(() => {
+          sourceRefreshRunning = false;
+        });
+    }, Math.max(7_200_000, Number(config.source_refresh_seconds || 7_200) * 1000));
     sourceRefreshTimer.unref();
     let restartAttempt = 0;
     let windowFinalized = false;
@@ -1673,6 +2372,7 @@ export async function supervise(configPath) {
           return 0;
         }
         let artifacts;
+        let finalLiveGate;
         try {
           await reconcileStrictRuntimeAudit(appRoot, stateRoot, runDir);
           const checkpointResult = await runCheckpoint(
@@ -1688,6 +2388,57 @@ export async function supervise(configPath) {
             config_sha256: config.frozen_config_hash,
             source_commit: config.frozen_commit,
           });
+          const [gateState, acceptanceWindow, liveEvidence] = await Promise.all([
+            readJson(path.join(runDir, "staged_acceptance_gates.json"), {}),
+            readJson(path.join(runDir, "acceptance_window.json"), {}),
+            loadLiveAcceptanceEvidence({
+              runDir,
+              stateRoot,
+              runtimeDbPath: runtimeStateDatabasePath(config),
+            }),
+          ]);
+          finalLiveGate = evaluateLiveStagedGate({
+            gate: "24-hour",
+            events: liveEvidence.events,
+            startedAt: acceptanceWindow.started_at,
+            endedAt: acceptanceWindow.ended_at,
+            expectedIdentity: gateState.identity,
+            requireStateEvidence: true,
+          });
+          const prerequisiteNames = [
+            "three_sku",
+            "thirty_minute",
+            "two_hour_a",
+            "two_hour_b",
+          ];
+          const prerequisiteGatesPassed = prerequisiteNames.every(
+            (name) => gateState.gates?.[name]?.status === "passed",
+          );
+          finalLiveGate.checks.prior_staged_gates_passed = prerequisiteGatesPassed;
+          if (!prerequisiteGatesPassed) {
+            finalLiveGate.passed = false;
+            finalLiveGate.failed_checks = [
+              ...new Set([...finalLiveGate.failed_checks, "prior_staged_gates_passed"]),
+            ];
+          }
+          Object.assign(gateState.gates.twenty_four_hour, {
+            status: finalLiveGate.passed ? "passed" : "failed",
+            evaluated_at: new Date().toISOString(),
+            result: finalLiveGate,
+          });
+          if (!finalLiveGate.passed) {
+            gateState.submission_gate.phase = "failed";
+            failSubmissionGate({
+              dbPath: runtimeStateDatabasePath(config),
+              runId: currentRun.run_id,
+              result: {
+                gate: "twenty_four_hour",
+                reason: "twenty-four-hour-production-gate-failed",
+                result: finalLiveGate,
+              },
+            });
+          }
+          await writeJsonAtomic(path.join(runDir, "staged_acceptance_gates.json"), gateState);
         } catch (error) {
           await updateOperationalState(stateRoot, currentRun, {
             status: "FATAL_STOP",
@@ -1720,11 +2471,15 @@ export async function supervise(configPath) {
           browser_cache_cleanup_error: browserCacheCleanupError,
           preserved: ["browser-profile", "checkpoint", "dedupe", "run-evidence", "exports"],
         });
+        const finalPassed = artifacts.report?.passed === true && finalLiveGate?.passed === true;
         await updateOperationalState(stateRoot, currentRun, {
-          status: artifacts.report?.passed === true ? "WINDOW_COMPLETE" : "TARGET_NOT_MET",
-          reason: artifacts.report?.passed === true ? null : "strict 24-hour acceptance criteria not met",
+          status: finalPassed ? "WINDOW_COMPLETE" : "TARGET_NOT_MET",
+          reason: finalPassed ? null : "strict 24-hour acceptance criteria not met",
           artifacts_dir: artifacts.output,
-          strict_result: artifacts.report || null,
+          strict_result: {
+            artifact_report: artifacts.report || null,
+            live_acceptance_gate: finalLiveGate || null,
+          },
           owner_cleanup: {
             worker_stopped: true,
             stopped_browser_pids: stoppedBrowserPids,
@@ -1808,6 +2563,13 @@ export async function supervise(configPath) {
       });
       fs.closeSync(stdoutFd);
       fs.closeSync(stderrFd);
+      const spawnedAt = new Date().toISOString();
+      const persistedProcessState = await readJson(liveProcessStatePath(runDir));
+      await updateLiveProcessState(runDir, {
+        formal_worker_started_at: persistedProcessState.formal_worker_started_at || spawnedAt,
+        worker_generation: Number(persistedProcessState.worker_generation || 0) + 1,
+        active_worker_pid: Number(worker.pid) || null,
+      });
       if (pidAlive(worker.pid)) {
         await assertProcessOwnership({
           phase: "worker-running",
@@ -1822,12 +2584,52 @@ export async function supervise(configPath) {
         workerPid: worker.pid,
       });
       await updateOperationalState(stateRoot, currentRun, { status: "RUNNING", reason: null });
+      await captureAndEvaluateLiveGates();
+      if (shuttingDown) {
+        await stopOwnedWorker(worker);
+        worker = null;
+        break;
+      }
       const activeWorker = worker;
       const result = await waitForWorkerOrBrowserFailure(activeWorker, {
         cdpEndpoint: config.browser.cdp_endpoint,
         probeIntervalMs: config.browser.cdp_health_interval_ms,
         probeTimeoutMs: config.browser.cdp_health_timeout_ms,
         failureThreshold: config.browser.cdp_health_failure_threshold,
+      });
+      const exitedAt = new Date().toISOString();
+      const windowEnded = await acceptanceEnded(runDir);
+      if (result.browser_unhealthy) {
+        const recoveryStarted = {
+          at: exitedAt,
+          run_dir: runDir,
+          action: "browser-recovery-attempt",
+          outcome: "started",
+          reason: "cdp-health-check-failed",
+          worker_pid: activeWorker.pid,
+        };
+        browserRecoveryEvents.push(recoveryStarted);
+        browserRecoveryPending = true;
+        await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), recoveryStarted);
+        await updateLiveProcessState(runDir, {
+          active_worker_pid: null,
+          recovery_pending: true,
+          recovery_started_at: exitedAt,
+        });
+      } else {
+        await updateLiveProcessState(runDir, {
+          active_worker_pid: null,
+        });
+      }
+      await appendJsonLine(path.join(runDir, "live_gate_evidence.jsonl"), {
+        type: "process-exit",
+        at: exitedAt,
+        process: "worker",
+        pid: activeWorker.pid,
+        code: result.code,
+        signal: result.signal,
+        planned: Boolean(shuttingDown || windowEnded),
+        browser_unhealthy: result.browser_unhealthy,
       });
       if (result.browser_unhealthy) await stopOwnedWorker(activeWorker);
       worker = null;
@@ -1838,7 +2640,7 @@ export async function supervise(configPath) {
       });
       await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid });
       if (shuttingDown) break;
-      if (await acceptanceEnded(runDir)) continue;
+      if (windowEnded) continue;
       const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
       const evidence = [
         result.error?.message || "",
@@ -1922,6 +2724,7 @@ export async function supervise(configPath) {
   } finally {
     if (checkpointTimer) clearInterval(checkpointTimer);
     if (sourceRefreshTimer) clearInterval(sourceRefreshTimer);
+    if (gateTimer) clearInterval(gateTimer);
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
     process.off("SIGHUP", onSignal);

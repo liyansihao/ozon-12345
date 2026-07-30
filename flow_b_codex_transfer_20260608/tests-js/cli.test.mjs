@@ -3,13 +3,53 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import {
+  acceptanceRoundPlan,
   parseCli,
   parseDailyStoreUsageSeed,
   parseStoreTargets,
   parseStoreTotalUsageSeed,
   publishedCsvPath,
+  resumedAcceptanceWindow,
   sourceScanOutputFile,
 } from "../scripts/flow_b_playwright.mjs";
+
+test("formal accept freezes one same-worker publish/refill tranche", () => {
+  assert.deepEqual(acceptanceRoundPlan({
+    FLOW_B_PUBLISH_TRANCHE_ATTEMPTS: "8",
+    FLOW_B_BUFFER_REFILL_TARGET: "8",
+    FLOW_B_BUFFER_REFILL_ATTEMPT_LIMIT: "24",
+  }), {
+    publish_attempt_limit: 8,
+    refill_target: 8,
+    refill_attempt_limit: 24,
+  });
+  assert.throws(
+    () => acceptanceRoundPlan({ FLOW_B_BUFFER_REFILL_TARGET: "0" }),
+    /positive integer/u,
+  );
+});
+
+test("resuming a formal window preserves every fixed-500 contract field", () => {
+  const result = resumedAcceptanceWindow({
+    started_at: "2026-07-30T00:00:00.000Z",
+    ended_at: "2026-07-31T00:00:00.000Z",
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    per_store_target: 100,
+    rolling_rate_window_minutes: 120,
+    current_window_only: true,
+  }, {
+    startedAt: "2026-07-30T00:00:00.000Z",
+    endedAt: "2026-07-31T00:00:00.000Z",
+    acceptanceTarget: 500,
+    targetPolicy: "fixed",
+    minimumAveragePerHourExclusive: 35,
+  });
+  assert.equal(result.per_store_target, 100);
+  assert.equal(result.rolling_rate_window_minutes, 120);
+  assert.equal(result.current_window_only, true);
+  assert.equal(result.acceptance_target, 500);
+});
 
 test("publish CLI uses strict production defaults", () => {
   const parsed = parseCli(["publish", "/tmp/flow-run"], {});

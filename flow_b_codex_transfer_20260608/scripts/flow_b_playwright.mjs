@@ -114,6 +114,41 @@ export function sourceScanOutputFile(runDir, env = process.env) {
   return path.join(path.resolve(runDir), configured);
 }
 
+export function resumedAcceptanceWindow(existingWindow, {
+  startedAt,
+  endedAt,
+  acceptanceTarget,
+  targetPolicy,
+  minimumAveragePerHourExclusive,
+} = {}) {
+  const existing = existingWindow && typeof existingWindow === "object" && !Array.isArray(existingWindow)
+    ? existingWindow
+    : {};
+  return {
+    ...existing,
+    started_at: new Date(startedAt).toISOString(),
+    ended_at: new Date(endedAt).toISOString(),
+    acceptance_target: Number(acceptanceTarget),
+    acceptance_target_policy: String(targetPolicy || "fixed"),
+    minimum_average_per_hour_exclusive: minimumAveragePerHourExclusive,
+  };
+}
+
+export function acceptanceRoundPlan(env = process.env) {
+  const positiveInteger = (name, fallback) => {
+    const value = Number(env[name] ?? fallback);
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`${name} must be a positive integer`);
+    }
+    return value;
+  };
+  return {
+    publish_attempt_limit: positiveInteger("FLOW_B_PUBLISH_TRANCHE_ATTEMPTS", 8),
+    refill_target: positiveInteger("FLOW_B_BUFFER_REFILL_TARGET", 8),
+    refill_attempt_limit: positiveInteger("FLOW_B_BUFFER_REFILL_ATTEMPT_LIMIT", 24),
+  };
+}
+
 export function parseCli(argv, env = process.env) {
   const args = [...argv];
   if (!args.length || args.includes("--help") || args.includes("-h")) return { command: "help" };
@@ -265,6 +300,8 @@ async function createPublishingSession(context, options, env, shared) {
       pendingStoreStallCount: Math.max(1, Number(env.FLOW_B_PENDING_STORE_STALL_COUNT) || 3),
       pendingStoreRetryMs: Math.max(0, Number(env.FLOW_B_PENDING_STORE_RETRY_MS) || 300_000),
       probeInactiveStores: env.FLOW_B_PROBE_INACTIVE_STORES !== "0",
+      submissionGateFile: env.FLOW_B_SUBMISSION_GATE_FILE || null,
+      requireReliableCostContract: true,
     });
     return { maoziPage, costBridge, detailProvider, runner, state };
   } catch (error) {
@@ -274,13 +311,13 @@ async function createPublishingSession(context, options, env, shared) {
   }
 }
 
-async function publishWithContext(context, options, env, shared = {}) {
+async function publishWithContext(context, options, env, shared = {}, runOptions = {}) {
   await createRunDir(options.runDir);
   const persistent = shared.persistent === true;
   const session = shared.session || await createPublishingSession(context, options, env, shared);
   if (persistent) shared.session = session;
   try {
-    return await session.runner.run();
+    return await session.runner.run(runOptions);
   } catch (error) {
     if (persistent) shared.session = null;
     await closePublishingSession(session);
@@ -478,9 +515,10 @@ async function runAcceptance(context, options, env) {
   let startedAt = new Date();
   let endedAt = new Date(startedAt.getTime() + durationMs);
   const windowPath = path.join(options.runDir, "acceptance_window.json");
+  let existingWindow = {};
   if (env.FLOW_B_RESUME_WINDOW === "1") {
     try {
-      const existingWindow = JSON.parse(await fs.readFile(windowPath, "utf8"));
+      existingWindow = JSON.parse(await fs.readFile(windowPath, "utf8"));
       const existingStart = new Date(existingWindow.started_at);
       const existingEnd = new Date(existingWindow.ended_at);
       if (Number.isFinite(existingStart.getTime()) && Number.isFinite(existingEnd.getTime())) {
@@ -517,14 +555,15 @@ async function runAcceptance(context, options, env) {
     initial_concurrency: Number(env.FLOW_B_PUBLISH_WORKERS || 8),
     max_concurrency: Number(env.FLOW_B_MAX_PUBLISH_WORKERS || 12),
   });
-  await fs.writeFile(windowPath, `${JSON.stringify({
-    started_at: startedAt.toISOString(),
-    ended_at: endedAt.toISOString(),
-    acceptance_target: acceptanceTarget,
-    acceptance_target_policy: env.FLOW_B_ACCEPTANCE_TARGET_POLICY || "fixed",
-    minimum_average_per_hour_exclusive: minimumAveragePerHourExclusive,
-  }, null, 2)}\n`);
+  await fs.writeFile(windowPath, `${JSON.stringify(resumedAcceptanceWindow(existingWindow, {
+    startedAt,
+    endedAt,
+    acceptanceTarget,
+    targetPolicy: env.FLOW_B_ACCEPTANCE_TARGET_POLICY || "fixed",
+    minimumAveragePerHourExclusive,
+  }), null, 2)}\n`);
   const shared = { targetConfigCache: {}, persistent: true, session: null };
+  const roundPlan = acceptanceRoundPlan(env);
   const lowTokenController = createLowTokenInterventionController({
     runDir: options.runDir,
     env: runtimeEnv,
@@ -562,7 +601,40 @@ async function runAcceptance(context, options, env) {
     while (Date.now() < endedAt.getTime()) {
       if (producerFatalError) throw producerFatalError;
       try {
-        roundSummary = summarizeConsumerRound(roundSummary, await publishWithContext(context, options, runtimeEnv, shared));
+        const publishRound = await publishWithContext(
+          context,
+          options,
+          runtimeEnv,
+          shared,
+          {
+            validationOnly: false,
+            attemptLimit: roundPlan.publish_attempt_limit,
+          },
+        );
+        roundSummary = summarizeConsumerRound(roundSummary, publishRound);
+        if (Date.now() < endedAt.getTime() && !producerFatalError) {
+          const refillRound = await publishWithContext(
+            context,
+            options,
+            runtimeEnv,
+            shared,
+            {
+              validationOnly: true,
+              validationTarget: roundPlan.refill_target,
+              attemptLimit: roundPlan.refill_attempt_limit,
+            },
+          );
+          await fs.appendFile(path.join(options.runDir, "candidate_replenishment.jsonl"), `${JSON.stringify({
+            at: new Date().toISOString(),
+            mode: "same-worker-validation-only",
+            publish_attempt_limit: roundPlan.publish_attempt_limit,
+            refill_target: roundPlan.refill_target,
+            refill_attempt_limit: roundPlan.refill_attempt_limit,
+            validated: Number(refillRound?.validated || 0),
+            attempted: Number(refillRound?.attempted || 0),
+            validation_only: true,
+          })}\n`);
+        }
       } catch (error) {
         await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), stage: "consumer", error: String(error?.message || error) })}\n`);
         if (isFatalBrowserError(error)) {

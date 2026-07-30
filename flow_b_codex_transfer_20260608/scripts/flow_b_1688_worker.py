@@ -26,7 +26,13 @@ def load_module(filename: str):
 
 def format_cost_output(result: dict, recovery: dict | None = None) -> str:
     recovery = recovery or {"retry_count": 0, "retry_intervals_ms": [], "session_rebuilt": False}
+    evidence_lines = []
+    if result.get("same_item_evidence"):
+        evidence_lines.append(f"SAME_ITEM_EVIDENCE {result['same_item_evidence']}")
+    if result.get("match_evidence_key"):
+        evidence_lines.append(f"MATCH_EVIDENCE_KEY {result['match_evidence_key']}")
     return "\n".join([
+        *evidence_lines,
         f"COST_SOURCE {result.get('cost_source') or 'search_first_page_p70_similarity_filtered'}",
         f"REASON {result.get('reason') or ''}",
         "FILTERED_FIRST_PAGE_PRICES " + json.dumps(result.get("filtered_first_page_prices") or [], ensure_ascii=False),

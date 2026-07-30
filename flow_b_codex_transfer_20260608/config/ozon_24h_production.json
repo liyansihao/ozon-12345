@@ -8,11 +8,11 @@
   "state_root": "${HOME}/.ozon-24h-production/state",
   "checkpoint_interval_seconds": 7200,
   "rate_check_interval_seconds": 300,
-  "source_refresh_seconds": 900,
+  "source_refresh_seconds": 7200,
   "candidate_buffer": {
     "minimum_hours": 2,
     "minimum_strict_per_hour": 35,
-    "minimum_ready_candidates": 70,
+    "minimum_ready_candidates": 110,
     "preparation_max_run_seconds": 600
   },
   "restart_delays_seconds": [
@@ -145,6 +145,9 @@
     "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT": "48",
     "FLOW_B_CANDIDATE_QUEUE_PER_SOURCE_DRAIN": "6",
     "FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE": "8",
+    "FLOW_B_PUBLISH_TRANCHE_ATTEMPTS": "8",
+    "FLOW_B_BUFFER_REFILL_TARGET": "8",
+    "FLOW_B_BUFFER_REFILL_ATTEMPT_LIMIT": "24",
     "FLOW_B_SOURCE_STRICT_WEIGHT": "6",
     "FLOW_B_SOURCE_FBS_WEIGHT": "3",
     "FLOW_B_SOURCE_EXPLORE_WEIGHT": "1",
@@ -192,7 +195,7 @@
     "FLOW_B_SOURCE_ALLOWLIST_MATCH": "exact",
     "FLOW_B_STRICT_SOURCE_PORTFOLIO": "1",
     "FLOW_B_1688_SHARED_CACHE": "${STATE_ROOT}/cache/1688_cache.json",
-    "FLOW_B_PYTHON": "python3",
+    "FLOW_B_PYTHON": "${HOME}/.ozon-24h-production/python-1688-v1/bin/python",
     "FLOW_B_1688_SCRIPT": "${APP_ROOT}/scripts/flow_b_1688_sync.py",
     "FLOW_B_LOG_LEVEL": "summary",
     "FLOW_B_LOW_TOKEN_INTERVENTION": "0",

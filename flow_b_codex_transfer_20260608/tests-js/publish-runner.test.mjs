@@ -109,6 +109,18 @@ const VALID_FBS_EVIDENCE = Object.freeze({
   ]),
 });
 
+const RELIABLE_COST_RESULT = Object.freeze({
+  ok: true,
+  cost: 20,
+  source: "search_first_page_p70_similarity_filtered",
+  prices: Object.freeze([18, 20, 22]),
+  match_evidence_key: "e".repeat(64),
+  same_item_match: true,
+  returned_evidence_verified: true,
+  match_evidence_contract: "1688-returned-same-item-v2",
+  matched_offer_count: 3,
+});
+
 function fakeState(initial = {}, initialRunPublished = 0) {
   const statuses = new Map(Object.entries(initial).map(([sku, value]) => [sku,
     typeof value === "string" ? { status: value, data: {} } : {
@@ -200,6 +212,30 @@ test("1688 failures use bounded summary reasons while retaining raw cost evidenc
   assert.equal(normalizeCostFailureReason({ error: { code: "IMAGE_DOWNLOAD_FAILED" } }), "1688-image-fetch-failed");
 });
 
+test("production cost contract rejects a positive number without reliable same-item evidence", async () => {
+  const state = fakeState();
+  let publishCalls = 0;
+  const result = await createPublishRunner({
+    client: clientFor([{ sku: "weak-cost" }], {
+      publish: async () => {
+        publishCalls += 1;
+        return { ok: true };
+      },
+    }),
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    runDir: "/tmp/run",
+    requireReliableCostContract: true,
+  }).run();
+  assert.equal(result.published, 0);
+  assert.equal(publishCalls, 0);
+  assert.ok(state.transitions.some((row) => (
+    row.status === "skipped"
+    && row.data.reason === "1688-same-item-evidence-missing"
+  )));
+});
+
 test("validation-only stops after three fully gated candidates without submitting or mutating favorites", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-validation-only-"));
   try {
@@ -240,6 +276,300 @@ test("validation-only stops after three fully gated candidates without submittin
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }
+});
+
+test("validation-only is read-only for imported, historical, restored, deferred, and error candidates", async (t) => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-validation-read-only-"));
+  t.after(() => fs.rm(runDir, { recursive: true, force: true }));
+  const state = fakeState({
+    "sqlite-published": { status: "published", data: { title: "SQLite published item", store_id: 7 } },
+    "restored-failed": { status: "failed", data: { reason: "exception" } },
+    "restored-processing": { status: "processing", data: { reason: "processing-started" } },
+    "skip-intent": { status: "processing", data: { skip_intent: true, reason: "policy-skipped" } },
+    "submitted-intent": { status: "processing", data: { submission_intent: true, submitted: false } },
+    "restored-skipped": { status: "skipped", data: { reason: "policy-skipped" } },
+  });
+  const originalHasPublished = state.hasPublished;
+  state.hasPublished = (sku) => String(sku) === "history-published" || originalHasPublished(sku);
+  let canAttemptCalls = 0;
+  state.canAttempt = async () => {
+    canAttemptCalls += 1;
+    return { allowed: true };
+  };
+  let listAllFavoritesCalls = 0;
+  let favoriteDeletes = 0;
+  let publishCalls = 0;
+  let reconciliationCalls = 0;
+  const client = clientFor([
+    { sku: "imported", is_imported: true },
+    { sku: "history-published" },
+    { sku: "sqlite-published" },
+    { sku: "restored-failed" },
+    { sku: "restored-processing" },
+    { sku: "skip-intent" },
+    { sku: "submitted-intent" },
+    { sku: "restored-skipped" },
+    { sku: "cost-deferred" },
+    { sku: "soft-error" },
+    { sku: "generic-error" },
+  ], {
+    listAllFavorites: async () => {
+      listAllFavoritesCalls += 1;
+      return [{ sku: "imported", is_imported: true }];
+    },
+    deleteFavorite: async () => {
+      favoriteDeletes += 1;
+      return true;
+    },
+    publish: async () => {
+      publishCalls += 1;
+      return { ok: true };
+    },
+    findImportLog: async () => {
+      reconciliationCalls += 1;
+      return null;
+    },
+    getProductDetail: async (sku) => {
+      if (sku === "soft-error") throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
+      if (sku === "generic-error") throw new Error("validation detail failure");
+      return { sku, mode: "FBS", title: `safe item ${sku}`, current_price: 100, follow_min: 90 };
+    },
+  });
+  const result = await createPublishRunner({
+    client,
+    costBridge: {
+      estimate: async (item) => item.sku === "cost-deferred"
+        ? { ok: false, deferred: true, terminal: false, retry_at: "2026-07-30T12:00:00.000Z" }
+        : { ok: true, cost: 20 },
+    },
+    state,
+    target: 500,
+    runDir,
+    validationOnly: true,
+    validationTarget: 20,
+    importedFavoriteCleanupLimit: 20,
+    concurrency: 1,
+  }).run();
+
+  assert.equal(result.validated, 3);
+  assert.equal(listAllFavoritesCalls, 0);
+  assert.equal(favoriteDeletes, 0);
+  assert.equal(publishCalls, 0);
+  assert.equal(reconciliationCalls, 0);
+  assert.equal(canAttemptCalls, 6);
+  assert.equal(state.transitions.length, 0);
+  assert.equal(state.selections.length, 0);
+  assert.equal(state.records.length, 0);
+});
+
+test("normal mode retains imported and historical favorite cleanup", async (t) => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-normal-cleanup-"));
+  t.after(() => fs.rm(runDir, { recursive: true, force: true }));
+  const state = fakeState({
+    "sqlite-published": { status: "published", data: { title: "SQLite published item", store_id: 7 } },
+  });
+  const originalHasPublished = state.hasPublished;
+  state.hasPublished = (sku) => String(sku) === "history-published" || originalHasPublished(sku);
+  let listAllFavoritesCalls = 0;
+  const deleted = [];
+  const client = clientFor([
+    { sku: "history-published" },
+    { sku: "sqlite-published" },
+  ], {
+    listAllFavorites: async () => {
+      listAllFavoritesCalls += 1;
+      return [{ sku: "imported", is_imported: true }];
+    },
+    deleteFavorite: async (item) => {
+      deleted.push(String(item.sku));
+      return true;
+    },
+  });
+  await createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 1,
+    runDir,
+    importedFavoriteCleanupLimit: 20,
+    concurrency: 1,
+  }).run();
+
+  assert.equal(listAllFavoritesCalls, 1);
+  assert.deepEqual(deleted.sort(), ["history-published", "imported", "sqlite-published"]);
+});
+
+test("validation-only fails closed without synchronizing a missing warehouse", async (t) => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-validation-warehouse-"));
+  t.after(() => fs.rm(runDir, { recursive: true, force: true }));
+  let syncWarehouseCalls = 0;
+  let listFavoritesCalls = 0;
+  const client = clientFor([{ sku: "candidate" }], {
+    resolvePublishTarget: async () => ({
+      store: { id: 7, name: "丽丽1号" },
+      watermark: { id: 8, name: "lysh" },
+    }),
+    syncWarehouses: async () => {
+      syncWarehouseCalls += 1;
+    },
+    listFavorites: async () => {
+      listFavoritesCalls += 1;
+      return [{ sku: "candidate" }];
+    },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state: fakeState(),
+    target: 500,
+    runDir,
+    validationOnly: true,
+    storeTargets: [{
+      id: 7,
+      needle: "丽丽1号",
+      warehouseId: null,
+      requireWarehouse: true,
+    }],
+  });
+
+  await assert.rejects(runner.run(), /verified FBS warehouse unavailable/u);
+  assert.equal(syncWarehouseCalls, 0);
+  assert.equal(listFavoritesCalls, 0);
+});
+
+test("validation-only ledger bounds poison retries and lets later candidates refill the buffer", async (t) => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-validation-ledger-"));
+  t.after(() => fs.rm(runDir, { recursive: true, force: true }));
+  let current = new Date("2026-07-30T02:00:00.000Z");
+  const detailCalls = new Map();
+  const state = fakeState();
+  const client = clientFor([
+    { sku: "deterministic-reject" },
+    { sku: "transient-poison" },
+    { sku: "later-safe-1" },
+    { sku: "later-safe-2" },
+    { sku: "later-safe-3" },
+  ], {
+    getProductDetail: async (sku) => {
+      detailCalls.set(String(sku), Number(detailCalls.get(String(sku)) || 0) + 1);
+      if (sku === "deterministic-reject") {
+        return { sku, mode: "FBO", title: "not FBS", current_price: 100 };
+      }
+      if (sku === "transient-poison") throw new Error("temporary validation detail failure");
+      return { sku, mode: "FBS", title: `safe item ${sku}`, current_price: 100, follow_min: 90 };
+    },
+  });
+  const runner = createPublishRunner({
+    client,
+    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+    state,
+    target: 500,
+    runDir,
+    validationOnly: true,
+    validationTarget: 2,
+    concurrency: 1,
+    now: () => new Date(current),
+  });
+
+  const first = await runner.run({ validationOnly: true, validationTarget: 2, attemptLimit: 2 });
+  assert.equal(first.validated, 0);
+  assert.equal(detailCalls.get("deterministic-reject"), 1);
+  assert.equal(detailCalls.get("transient-poison"), 1);
+
+  const immediate = await runner.run({ validationOnly: true, validationTarget: 2, attemptLimit: 2 });
+  assert.equal(immediate.validated, 2);
+  assert.equal(detailCalls.get("deterministic-reject"), 1);
+  assert.equal(detailCalls.get("transient-poison"), 1);
+
+  current = new Date(current.getTime() + 31_000);
+  const secondPoisonAttempt = await runner.run({
+    validationOnly: true,
+    validationTarget: 1,
+    attemptLimit: 1,
+  });
+  assert.equal(secondPoisonAttempt.validated, 0);
+  assert.equal(detailCalls.get("transient-poison"), 2);
+
+  current = new Date(current.getTime() + 61_000);
+  const afterLimit = await runner.run({ validationOnly: true, validationTarget: 1, attemptLimit: 1 });
+  assert.equal(afterLimit.validated, 1);
+  assert.equal(detailCalls.get("transient-poison"), 2);
+  assert.equal(detailCalls.get("later-safe-3"), 2);
+
+  current = new Date("2026-07-31T02:00:00.000Z");
+  await runner.run({ validationOnly: true, validationTarget: 1, attemptLimit: 1 });
+  assert.equal(detailCalls.get("transient-poison"), 3);
+  assert.equal(state.transitions.length, 0);
+  assert.equal(state.selections.length, 0);
+  assert.equal(state.records.length, 0);
+
+  const rows = (await fs.readFile(path.join(runDir, "validation_gate.jsonl"), "utf8"))
+    .trim().split("\n").map(JSON.parse);
+  assert.equal(rows.filter((row) => row.sku === "deterministic-reject" && row.status === "rejected").length, 1);
+  assert.equal(rows.filter((row) => row.sku === "transient-poison" && row.status === "failed").length, 3);
+  assert.equal(rows.filter((row) => row.status === "validated").length, 3);
+});
+
+test("one runner alternates a bounded publish tranche and gate-safe validation refill", async (t) => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-same-worker-refill-"));
+  t.after(() => fs.rm(runDir, { recursive: true, force: true }));
+  const gateFile = path.join(runDir, "staged_acceptance_gates.json");
+  await fs.writeFile(gateFile, `${JSON.stringify({
+    submission_gate: {
+      phase: "three-sku",
+      target_skus: ["gate-1", "gate-2", "gate-3"],
+    },
+  })}\n`);
+  let publishCalls = 0;
+  const state = fakeState();
+  const runner = createPublishRunner({
+    client: clientFor([
+      { sku: "outside-1", title: "Безопасный товар один" },
+      { sku: "outside-2", title: "Безопасный товар два" },
+      { sku: "outside-3", title: "Безопасный товар три" },
+      { sku: "outside-4", title: "Безопасный товар четыре" },
+    ], {
+      publish: async () => {
+        publishCalls += 1;
+        return { ok: true };
+      },
+    }),
+    costBridge: { estimate: async () => ({ ok: true, cost: 20, evidence: { reliable: true } }) },
+    state,
+    target: 500,
+    runDir,
+    submissionGateFile: gateFile,
+    concurrency: 4,
+  });
+
+  const refill = await runner.run({
+    validationOnly: true,
+    validationTarget: 8,
+    attemptLimit: 2,
+  });
+  assert.equal(refill.validated, 2);
+  assert.equal(refill.attempted, 2);
+  assert.equal(publishCalls, 0);
+  assert.equal(state.transitions.length, 0);
+  assert.equal(state.selections.length, 0);
+  const rows = (await fs.readFile(path.join(runDir, "validation_gate.jsonl"), "utf8"))
+    .trim().split("\n").map(JSON.parse);
+  assert.ok(rows.every((row) => row.validation_mode === "buffer"));
+
+  const blockedPublish = await runner.run({
+    validationOnly: false,
+    attemptLimit: 8,
+  });
+  assert.equal(blockedPublish.attempted, 0);
+  assert.equal(publishCalls, 0);
+
+  await fs.writeFile(gateFile, `${JSON.stringify({
+    submission_gate: { phase: "failed", target_skus: ["gate-1", "gate-2", "gate-3"] },
+  })}\n`);
+  await assert.rejects(
+    runner.run({ validationOnly: true, validationTarget: 1, attemptLimit: 1 }),
+    /closed after a failed acceptance gate/u,
+  );
 });
 
 test("fresh submission requires two consistent live exact-FBS observations", async () => {
@@ -3758,10 +4088,11 @@ test("fresh runner intent, accepted marker, and strict publication complete thro
           return { ok: true, response: { code: 1 } };
         },
       }),
-      costBridge: { estimate: async () => ({ ok: true, cost: 20, source: "1688-image-match" }) },
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
       state,
       target: 1,
       runDir,
+      requireReliableCostContract: true,
       confirmationAttempts: 1,
       confirmationIntervalMs: 0,
     }).run();

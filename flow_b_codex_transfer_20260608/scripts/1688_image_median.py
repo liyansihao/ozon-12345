@@ -9,6 +9,7 @@ Codex agents when browser automation of 1688 is blocked.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
@@ -90,7 +91,7 @@ def split_tokens(value: str) -> list[str]:
 
 def model_tokens(value: str) -> list[str]:
     tokens = split_tokens(value)
-    return [token for token in tokens if re.search(r"\d", token) and len(token) >= 3]
+    return [token for token in tokens if re.search(r"\d", token) and len(token) >= 2]
 
 
 def title_tokens(value: str) -> list[str]:
@@ -118,6 +119,15 @@ def category_tokens(value: str) -> list[str]:
 def count_hits(title: str, tokens: list[str]) -> int:
     normalized = normalize_text(title)
     return sum(1 for token in tokens if normalize_text(token) and normalize_text(token) in normalized)
+
+
+def matching_tokens(title: str, tokens: list[str]) -> list[str]:
+    normalized = normalize_text(title)
+    return sorted({
+        normalized_token
+        for token in tokens
+        if (normalized_token := normalize_text(token)) and normalized_token in normalized
+    })
 
 
 def assess_match(rows: list[dict], expect_title: str, expect_model: str, expect_category: str, match_top: int) -> dict:
@@ -271,9 +281,14 @@ def scored_similarity_rows(rows: list[dict], expect_title: str, expect_model: st
     scored = []
     for row in rows[:match_top]:
         title = row.get("title", "")
-        model_hits = count_hits(title, model_needles)
-        title_hits = count_hits(title, title_needles)
-        category_hits = count_hits(title, weak_needles)
+        semantic_hits = {
+            "model": matching_tokens(title, model_needles),
+            "title": matching_tokens(title, title_needles),
+            "category": matching_tokens(title, weak_needles),
+        }
+        model_hits = len(semantic_hits["model"])
+        title_hits = len(semantic_hits["title"])
+        category_hits = len(semantic_hits["category"])
         bad_hits = count_hits(title, BAD_ACCESSORY_HINTS)
         score = model_hits * 3 + title_hits * 2 + category_hits - bad_hits * 3
         if bad_hits:
@@ -286,8 +301,59 @@ def scored_similarity_rows(rows: list[dict], expect_title: str, expect_model: st
             level = "weak"
         else:
             level = "none"
-        scored.append({**row, "score": score, "level": level, "bad_hits": bad_hits})
+        scored.append({
+            **row,
+            "score": score,
+            "level": level,
+            "bad_hits": bad_hits,
+            "semantic_hits": semantic_hits,
+        })
     return scored
+
+
+def build_same_item_evidence(
+    filtered_rows: list[dict],
+    *,
+    expect_title: str,
+    expect_model: str,
+    expect_category: str,
+    cost_source: str,
+    selected_cost: float,
+    selected_cluster_rows: list[dict],
+) -> tuple[str, str]:
+    """Bind accepted return rows and request semantics into one auditable digest."""
+    evidence = {
+        "contract": "1688-returned-same-item-v2",
+        "cost_source": cost_source,
+        "request": {
+            "expect_category": normalize_text(expect_category),
+            "expect_model": normalize_text(expect_model),
+            "expect_title": normalize_text(expect_title),
+        },
+        "rows": [
+            {
+                "offer_id": str(row.get("offerId") or "").strip(),
+                "price": float(row["price"]),
+                "semantic_hits": {
+                    "category": list((row.get("semantic_hits") or {}).get("category") or []),
+                    "model": list((row.get("semantic_hits") or {}).get("model") or []),
+                    "title": list((row.get("semantic_hits") or {}).get("title") or []),
+                },
+                "title": normalize_text(row.get("title")),
+            }
+            for row in filtered_rows
+        ],
+        "selected_cluster": [
+            {
+                "offer_id": str(row.get("offerId") or "").strip(),
+                "price": float(row["price"]),
+            }
+            for row in selected_cluster_rows
+        ],
+        "selected_cost": float(selected_cost),
+    }
+    encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def first_page_p70_cost(
@@ -300,29 +366,53 @@ def first_page_p70_cost(
 ) -> dict:
     first_page = scored_similarity_rows(rows, expect_title, expect_model, expect_category, page_size)
     first_page_prices = [row["price"] for row in first_page if row.get("price") is not None]
-    strong_exists = any(row["level"] == "strong" for row in first_page)
-    weak_exists = any(row["level"] == "weak" for row in first_page)
-    allowed_levels = {"strong", "weak"} if strong_exists else ({"weak"} if weak_exists else set())
+    allowed_levels = {"strong"} if any(row["level"] == "strong" for row in first_page) else set()
+    model_required = bool(normalize_text(expect_model))
 
     raw_prices = sorted(float(row["price"]) for row in first_page if row.get("price") is not None and float(row["price"]) > 0)
-    anchor_rows = [
-        row for row in first_page
-        if not row.get("bad_hits") and (not allowed_levels or row.get("level") in allowed_levels)
-    ]
-    anchor_prices = sorted(float(row["price"]) for row in anchor_rows if row.get("price") is not None and float(row["price"]) > 0)
-    anchor_median = anchor_prices[len(anchor_prices) // 2] if anchor_prices else None
-    filtered_rows = []
+    candidate_rows = []
     excluded_rows = []
+    seen_offer_ids = set()
     for row in first_page:
         price = row.get("price")
+        offer_id = str(row.get("offerId") or "").strip()
+        semantic_hits = row.get("semantic_hits") or {}
+        has_required_semantic_hit = (
+            bool(semantic_hits.get("model"))
+            if model_required
+            else bool(semantic_hits.get("title"))
+        )
         reason = ""
         if price is None or float(price) <= 0:
             reason = "missing or invalid price"
         elif row.get("bad_hits"):
             reason = "accessory or packaging title"
-        elif allowed_levels and row.get("level") not in allowed_levels:
-            reason = "not a same-product candidate"
-        elif anchor_median and len(anchor_prices) >= 3 and float(price) < anchor_median * 0.25:
+        elif not allowed_levels or row.get("level") not in allowed_levels:
+            reason = "not a strong same-item semantic match"
+        elif not has_required_semantic_hit:
+            reason = (
+                "explicit model token not matched"
+                if model_required
+                else "explicit title token not matched"
+            )
+        elif not offer_id:
+            reason = "missing returned offer identity"
+        elif offer_id in seen_offer_ids:
+            reason = "duplicate returned offer identity"
+
+        if reason:
+            excluded_rows.append({**row, "exclude_reason": reason})
+        else:
+            seen_offer_ids.add(offer_id)
+            candidate_rows.append(row)
+
+    anchor_prices = sorted(float(row["price"]) for row in candidate_rows)
+    anchor_median = anchor_prices[len(anchor_prices) // 2] if anchor_prices else None
+    filtered_rows = []
+    for row in candidate_rows:
+        price = row.get("price")
+        reason = ""
+        if anchor_median and len(anchor_prices) >= 3 and float(price) < anchor_median * 0.25:
             reason = "extreme low price"
         elif anchor_median and len(anchor_prices) >= 5 and float(price) > anchor_median * 8:
             reason = "extreme high price"
@@ -334,9 +424,14 @@ def first_page_p70_cost(
 
     filtered_prices = sorted(float(row["price"]) for row in filtered_rows if row.get("price") is not None)
     if len(filtered_prices) < 3:
+        shortage_reason = (
+            "no explicit title/model/category semantic same-item matches"
+            if not candidate_rows
+            else "filtered first-page 1688 candidates fewer than 3"
+        )
         return {
             "decision": "REVIEW",
-            "reason": "filtered first-page 1688 candidates fewer than 3",
+            "reason": shortage_reason,
             "p70_cost": None,
             "selected_offer_id": None,
             "first_page_prices": first_page_prices,
@@ -428,6 +523,20 @@ def first_page_p70_cost(
         selected_cluster["rows"],
         key=lambda row: (abs(float(row["price"]) - selected_cost), -row.get("score", 0), row.get("title", "")),
     )[0]
+    cost_source = (
+        "search_first_page_cluster_p80_similarity_filtered"
+        if use_p80
+        else "search_first_page_cluster_p70_similarity_filtered"
+    )
+    same_item_evidence, match_evidence_key = build_same_item_evidence(
+        filtered_rows,
+        expect_title=expect_title,
+        expect_model=expect_model,
+        expect_category=expect_category,
+        cost_source=cost_source,
+        selected_cost=selected_cost,
+        selected_cluster_rows=selected_cluster["rows"],
+    )
     return {
         "decision": "LIGHT_ACCEPT",
         "reason": "filtered first-page similarity clustered cost",
@@ -439,9 +548,9 @@ def first_page_p70_cost(
         "selected_price_cluster": selected_cluster,
         "cluster_p70_cost": cluster_p70_cost,
         "cluster_p80_cost": cluster_p80_cost,
-        "cost_source": "search_first_page_cluster_p80_similarity_filtered"
-        if use_p80
-        else "search_first_page_cluster_p70_similarity_filtered",
+        "cost_source": cost_source,
+        "same_item_evidence": same_item_evidence,
+        "match_evidence_key": match_evidence_key,
         "filtered_rows": filtered_rows,
         "excluded_rows": excluded_rows,
     }
@@ -576,6 +685,10 @@ def main() -> int:
         print(f"NOTE {note}")
     print(f"VALID_COUNT {payload['valid_count']}")
     print("DECISION", payload["decision"])
+    if p70.get("same_item_evidence"):
+        print("SAME_ITEM_EVIDENCE", p70["same_item_evidence"])
+    if p70.get("match_evidence_key"):
+        print("MATCH_EVIDENCE_KEY", p70["match_evidence_key"])
     print("COST_SOURCE", payload["cost_source"])
     print("REASON", payload["reason"])
     for index, row in enumerate(payload["top_rows"], 1):

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -14,6 +15,7 @@ import {
   chromeArguments,
   classifyWorkerFailure,
   candidateBufferDecision,
+  candidateBufferInflow,
   candidateBufferSnapshot,
   clearStaleVerificationResumeRequest,
   cleanupBrowserProfileCaches,
@@ -27,14 +29,44 @@ import {
   resolveProductionLayout,
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
+  runFormalSourceRefresh,
+  runInitialSourceRefresh,
   runFinalArtifacts,
   rollingRateDecision,
   stopBrowserProfileOwners,
   stopOwnedWorker,
+  submissionGateConvergenceDecision,
   supervisorShouldHonorSafeStop,
   waitForWorkerOrBrowserFailure,
   workerEnvironment,
 } from "../scripts/ozon_24h_supervisor.mjs";
+
+const RELIABLE_COST = Object.freeze({
+  cost_verified: true,
+  cost_source: "search_first_page_p70_similarity_filtered",
+  cost: Object.freeze({
+    ok: true,
+    cost: 2,
+    source: "search_first_page_p70_similarity_filtered",
+    prices: Object.freeze([1.8, 2, 2.2]),
+    match_evidence_key: "d".repeat(64),
+    same_item_match: true,
+    returned_evidence_verified: true,
+    match_evidence_contract: "1688-returned-same-item-v2",
+    matched_offer_count: 3,
+  }),
+  cost_evidence: Object.freeze({
+    contract: "1688-same-item-v1",
+    source: "search_first_page_p70_similarity_filtered",
+    reliable_source: true,
+    same_item_match: true,
+    match_evidence_key: "d".repeat(64),
+    filtered_price_count: 3,
+    returned_evidence_verified: true,
+    match_evidence_contract: "1688-returned-same-item-v2",
+    matched_offer_count: 3,
+  }),
+});
 
 test("production layout is installed outside a disposable git worktree", () => {
   const layout = resolveProductionLayout({
@@ -54,6 +86,33 @@ test("supervisor launches children from its real release instead of the app syml
     resolveSupervisorAppRoot("/Users/mac/.ozon-24h-production/releases/stable/scripts"),
     "/Users/mac/.ozon-24h-production/releases/stable",
   );
+});
+
+test("a failed JSON or SQLite submission gate always converges to a safe stop", () => {
+  const baseSqlite = {
+    run_id: "run-1",
+    run_dir: "/tmp/run-1",
+    phase: "active",
+    distinct_sku_budget: 3,
+  };
+  assert.equal(submissionGateConvergenceDecision({
+    jsonGate: { phase: "failed" },
+    sqliteGate: baseSqlite,
+    runId: "run-1",
+    runDir: "/tmp/run-1",
+  }).action, "safe-stop");
+  assert.equal(submissionGateConvergenceDecision({
+    jsonGate: { phase: "three-sku" },
+    sqliteGate: { ...baseSqlite, phase: "failed" },
+    runId: "run-1",
+    runDir: "/tmp/run-1",
+  }).action, "safe-stop");
+  assert.equal(submissionGateConvergenceDecision({
+    jsonGate: { phase: "released" },
+    sqliteGate: baseSqlite,
+    runId: "run-1",
+    runDir: "/tmp/run-1",
+  }).reason, "submission-gate-state-mismatch");
 });
 
 test("supervisor prewarm uses only a run-local scan checkpoint filename", () => {
@@ -212,11 +271,11 @@ test("candidate buffer counts only latest unique fully qualified validations", (
     {
       sku: "1",
       status: "validated",
+      validation_mode: "buffer",
       shipping_mode: "FBS",
       profit_rate: 31,
       purchase_price: 2,
-      cost_verified: true,
-      cost: { ok: true, cost: 2 },
+      ...RELIABLE_COST,
       fbs_evidence: { verified: true },
       quality_gate_passed: true,
     },
@@ -224,33 +283,33 @@ test("candidate buffer counts only latest unique fully qualified validations", (
     {
       sku: "2",
       status: "validated",
+      validation_mode: "buffer",
       shipping_mode: "FBS",
       profit_rate: 31,
       purchase_price: 2,
-      cost_verified: true,
-      cost: { ok: true, cost: 2 },
+      ...RELIABLE_COST,
       fbs_evidence: { verified: true },
       quality_gate_passed: true,
     },
     {
       sku: "3",
       status: "validated",
+      validation_mode: "buffer",
       shipping_mode: "FBO",
       profit_rate: 99,
       purchase_price: 2,
-      cost_verified: true,
-      cost: { ok: true, cost: 2 },
+      ...RELIABLE_COST,
       fbs_evidence: { verified: true },
       quality_gate_passed: true,
     },
     {
       sku: "2815247918",
       status: "validated",
+      validation_mode: "buffer",
       shipping_mode: "FBS",
       profit_rate: 99,
       purchase_price: 2,
-      cost_verified: true,
-      cost: { ok: true, cost: 2 },
+      ...RELIABLE_COST,
       fbs_evidence: { verified: true },
       quality_gate_passed: true,
     },
@@ -261,7 +320,44 @@ test("candidate buffer counts only latest unique fully qualified validations", (
   });
 });
 
-test("process ownership snapshot identifies the exact run worker and profile owner", () => {
+test("candidate buffer inflow counts only newly qualified unconsumed unique SKUs", () => {
+  const base = {
+    status: "validated",
+    validation_mode: "buffer",
+    shipping_mode: "FBS",
+    profit_rate: 31,
+    purchase_price: 2,
+    ...RELIABLE_COST,
+    fbs_evidence: { verified: true },
+    quality_gate_passed: true,
+  };
+  const result = candidateBufferInflow([
+    { ...base, sku: "existing", validated_at: "2026-07-30T00:00:00.000Z" },
+    { ...base, sku: "existing", validated_at: "2026-07-30T00:02:00.000Z" },
+    {
+      ...base,
+      sku: "weak",
+      cost_evidence: null,
+      validated_at: "2026-07-30T00:02:00.000Z",
+    },
+    { ...base, sku: "new", validated_at: "2026-07-30T00:02:00.000Z" },
+    { ...base, sku: "consumed", validated_at: "2026-07-30T00:02:30.000Z" },
+    {
+      ...base,
+      sku: "live-pre-submit",
+      validation_mode: "live-pre-submit",
+      validated_at: "2026-07-30T00:02:30.000Z",
+    },
+  ], {
+    consumedSkus: ["consumed"],
+    previousAt: "2026-07-30T00:01:00.000Z",
+    observedAt: "2026-07-30T00:03:00.000Z",
+  });
+  assert.deepEqual(result.added_skus, ["new"]);
+  assert.equal(result.added_unique, 1);
+});
+
+test("process ownership snapshot rejects a worker from any old run", () => {
   const rows = [
     { pid: 10, command: "/usr/bin/node /app/scripts/ozon_24h_supervisor.mjs supervise /app/config.json" },
     { pid: 20, command: "/usr/bin/node /app/scripts/flow_b_playwright.mjs accept /state/runs/run-1 /state/urls.txt" },
@@ -275,12 +371,129 @@ test("process ownership snapshot identifies the exact run worker and profile own
     profileDir: "/state/profile",
   }), {
     supervisor: 1,
-    worker: 1,
+    worker: 2,
     profile_owner: 1,
     supervisor_pids: [10],
-    worker_pids: [20],
+    worker_pids: [20, 21],
     profile_owner_pids: [30],
   });
+  assert.equal(processOwnershipDecision({
+    phase: "before-worker",
+    ...processOwnershipSnapshot(rows, {
+      supervisorPid: 10,
+      runDir: "/state/runs/run-1",
+      profileDir: "/state/profile",
+    }),
+  }).reason, "duplicate-worker-generation-risk");
+});
+
+test("formal resume never refreshes before two hours and rejects an unauthorized source hash", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-formal-source-resume-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "state");
+  const runDir = path.join(root, "run");
+  const urlsFile = path.join(root, "active_urls.txt");
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.mkdir(stateRoot, { recursive: true });
+  const sourceText = "https://www.ozon.ru/seller/verified-12345/\\n";
+  const sourceHash = crypto.createHash("sha256").update(sourceText).digest("hex");
+  await fs.writeFile(urlsFile, sourceText);
+  await fs.writeFile(path.join(runDir, "source_set_epochs.jsonl"), `${JSON.stringify({
+    type: "source-set-epoch",
+    at: "2026-07-30T00:00:00.000Z",
+    epoch: 2,
+    source_set_sha256: sourceHash,
+  })}\n`);
+  const currentRun = {
+    formal_started: true,
+    urls_file: urlsFile,
+    active_source_set_sha256: sourceHash,
+    source_set_epoch: 2,
+  };
+  let formalCalls = 0;
+  const skipped = await runInitialSourceRefresh({
+    appRoot: root,
+    stateRoot,
+    runDir,
+    currentRun,
+    now: () => new Date("2026-07-30T01:59:59.000Z"),
+    formalRefresh: async () => {
+      formalCalls += 1;
+      return { code: 0 };
+    },
+  });
+  assert.equal(skipped.skipped, true);
+  assert.equal(skipped.epoch, 2);
+  assert.equal(formalCalls, 0);
+
+  await runInitialSourceRefresh({
+    appRoot: root,
+    stateRoot,
+    runDir,
+    currentRun,
+    now: () => new Date("2026-07-30T02:00:00.000Z"),
+    formalRefresh: async () => {
+      formalCalls += 1;
+      return { code: 0 };
+    },
+  });
+  assert.equal(formalCalls, 1);
+
+  await fs.writeFile(urlsFile, "https://www.ozon.ru/seller/unauthorized-99999/\\n");
+  await assert.rejects(
+    runInitialSourceRefresh({
+      appRoot: root,
+      stateRoot,
+      runDir,
+      currentRun,
+      now: () => new Date("2026-07-30T01:00:00.000Z"),
+    }),
+    /not authorized/u,
+  );
+});
+
+test("formal source refresh appends an authorized epoch before updating current run", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-formal-source-epoch-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "state");
+  const runDir = path.join(root, "run");
+  const urlsFile = path.join(root, "active_urls.txt");
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.mkdir(stateRoot, { recursive: true });
+  const oldText = "https://www.ozon.ru/seller/verified-old-12345/\\n";
+  const oldHash = crypto.createHash("sha256").update(oldText).digest("hex");
+  const newText = "https://www.ozon.ru/seller/verified-new-67890/\\n";
+  await fs.writeFile(urlsFile, oldText);
+  await fs.writeFile(path.join(runDir, "source_set_epochs.jsonl"), `${JSON.stringify({
+    type: "source-set-epoch",
+    at: "2026-07-30T00:00:00.000Z",
+    epoch: 0,
+    source_set_sha256: oldHash,
+  })}\n`);
+  const currentRun = {
+    run_id: "formal-run",
+    formal_started: true,
+    urls_file: urlsFile,
+    active_source_set_sha256: oldHash,
+    source_set_epoch: 0,
+  };
+  const refreshed = await runFormalSourceRefresh(root, stateRoot, runDir, currentRun, {
+    refresh: async () => {
+      await fs.writeFile(urlsFile, newText);
+      return { code: 0 };
+    },
+    now: () => new Date("2026-07-30T02:00:00.000Z"),
+  });
+  const newHash = crypto.createHash("sha256").update(newText).digest("hex");
+  assert.equal(refreshed.epoch, 1);
+  assert.equal(refreshed.source_set_sha256, newHash);
+  const epochs = (await fs.readFile(path.join(runDir, "source_set_epochs.jsonl"), "utf8"))
+    .trim().split("\n").map(JSON.parse);
+  assert.equal(epochs.at(-1).previous_source_set_sha256, oldHash);
+  assert.equal(epochs.at(-1).source_set_sha256, newHash);
+  const persisted = JSON.parse(await fs.readFile(path.join(stateRoot, "current_run.json"), "utf8"));
+  assert.equal(persisted.active_source_set_sha256, newHash);
+  assert.equal(persisted.source_set_epoch, 1);
 });
 
 test("checkpoint subprocess inherits the frozen release evidence and exact browser profile", () => {
@@ -745,8 +958,7 @@ test("window finalization reconstructs a missing report before exporting five-st
       submitted_at: "2026-07-27T00:30:00.000Z",
       shipping_mode: "FBS",
       fbs_evidence: { verified: true },
-      cost_verified: true,
-      cost: { ok: true, cost: 10 },
+      ...RELIABLE_COST,
       quality_gate_passed: true,
     },
   })}\n`);

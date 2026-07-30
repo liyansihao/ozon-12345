@@ -213,7 +213,7 @@ test("two-hour replay permits one lossless browser recovery but rejects a second
   assert.equal(lost.checks.zero_state_loss, false);
 });
 
-test("two-hour replay excludes a confirmation submitted before the formal window", () => {
+test("two-hour replay excludes and reports a confirmation submitted before the formal window", () => {
   const rows = strictSeries(70, 115);
   rows[0] = { ...rows[0], submitted_at: minute(-1) };
   const gate = evaluateTwoHourGate({
@@ -224,7 +224,7 @@ test("two-hour replay excludes a confirmation submitted before the formal window
   assert.equal(gate.passed, false);
   assert.equal(gate.unique_current_window_strict, 69);
   assert.equal(gate.carried_in_strict_events, 1);
-  assert.equal(gate.checks.zero_carried_in_strict, false);
+  assert.equal("zero_carried_in_strict" in gate.checks, false);
 });
 
 test("30-minute gate rejects an orphan owner or a buffer that is not replenished", () => {
@@ -243,6 +243,60 @@ test("30-minute gate rejects an orphan owner or a buffer that is not replenished
   assert.equal(gate.checks.zero_orphan_processes, false);
   assert.equal(gate.checks.candidate_buffer_sustained, false);
   assert.equal(gate.checks.candidate_buffer_replenished, false);
+});
+
+test("persisted worker generation prevents a missing worker from lowering its own expected count", () => {
+  const replay = replayAcceptanceEvents([
+    {
+      type: "process-snapshot",
+      at: minute(1),
+      supervisor_count: 1,
+      worker_count: 0,
+      profile_owner_count: 1,
+      expected_worker_count: 0,
+      formal_worker_started: true,
+      worker_generation: 1,
+      recovery_pending: false,
+      orphan_browser_count: 0,
+    },
+    {
+      type: "process-snapshot",
+      at: minute(2),
+      supervisor_count: 1,
+      worker_count: 1,
+      profile_owner_count: 1,
+      formal_worker_started: true,
+      worker_generation: 2,
+      recovery_pending: false,
+      orphan_browser_count: 0,
+    },
+  ], { startedAt: START, endedAt: minute(30) });
+  assert.equal(replay.process_ownership_violations, 2);
+});
+
+test("a persisted recovery interval can observe zero owners without hiding its process exit", () => {
+  const replay = replayAcceptanceEvents([
+    {
+      type: "process-snapshot",
+      at: minute(1),
+      supervisor_count: 1,
+      worker_count: 0,
+      profile_owner_count: 0,
+      formal_worker_started: true,
+      worker_generation: 1,
+      recovery_pending: true,
+      orphan_browser_count: 0,
+    },
+    {
+      type: "process-exit",
+      at: minute(1),
+      process: "worker",
+      planned: false,
+      browser_unhealthy: true,
+    },
+  ], { startedAt: START, endedAt: minute(30) });
+  assert.equal(replay.process_ownership_violations, 0);
+  assert.equal(replay.unexpected_process_exits, 1);
 });
 
 test("ERP rate-limit replay enforces both the 180-second floor and longer server Retry-After", () => {
@@ -266,6 +320,24 @@ test("ERP rate-limit replay enforces both the 180-second floor and longer server
     { type: "erp-sync-attempt", at: minute(22.99) },
   ], { startedAt: START, endedAt: minute(30) });
   assert.equal(tooEarlyForFloor.erp_backoff_violations, 1);
+});
+
+test("a two-hour window inherits ERP backoff state established just before its boundary", () => {
+  const replay = replayAcceptanceEvents([
+    {
+      type: "erp-rate-limit",
+      at: minute(119),
+      store_id: FIXED_STORE_IDS[0],
+      retry_after_ms: 600_000,
+    },
+    {
+      type: "erp-sync-attempt",
+      at: minute(120),
+      store_id: FIXED_STORE_IDS[0],
+    },
+  ], { startedAt: minute(120), endedAt: minute(240) });
+  assert.equal(replay.erp_rate_limits, 0);
+  assert.equal(replay.erp_backoff_violations, 1);
 });
 
 test("24-hour replay exposes reliable-cost and strict-profit violations as hard failures", () => {

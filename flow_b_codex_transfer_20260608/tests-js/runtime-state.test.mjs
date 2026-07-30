@@ -8,6 +8,8 @@ import { DatabaseSync } from "node:sqlite";
 import {
   RUNTIME_STATE_SCHEMA_VERSION,
   createRuntimeState,
+  initializeSubmissionGate,
+  releaseSubmissionGate,
 } from "../scripts/flow_b_playwright/runtime-state.mjs";
 
 async function withTempDir(callback) {
@@ -30,10 +32,28 @@ const strictData = {
     observations: [{ mode: "FBS" }, { mode: "FBS" }],
   },
   cost_verified: true,
+  cost_source: "search_first_page_p70_similarity_filtered",
   cost: {
     ok: true,
     cost: 20,
     source: "search_first_page_p70_similarity_filtered",
+    prices: [18, 20, 22],
+    match_evidence_key: "a".repeat(64),
+    same_item_match: true,
+    returned_evidence_verified: true,
+    match_evidence_contract: "1688-returned-same-item-v2",
+    matched_offer_count: 3,
+  },
+  cost_evidence: {
+    contract: "1688-same-item-v1",
+    source: "search_first_page_p70_similarity_filtered",
+    reliable_source: true,
+    same_item_match: true,
+    match_evidence_key: "a".repeat(64),
+    filtered_price_count: 3,
+    returned_evidence_verified: true,
+    match_evidence_contract: "1688-returned-same-item-v2",
+    matched_offer_count: 3,
   },
   quality_gate_passed: true,
 };
@@ -271,6 +291,74 @@ test("submission reservations use an owner generation lease and become permanent
   });
 });
 
+test("formal prefix gate atomically permits only its three frozen distinct SKUs until release", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "runtime.sqlite");
+    const bootstrap = createRuntimeState({ dbPath });
+    bootstrap.close();
+    const gate = initializeSubmissionGate({
+      dbPath,
+      runId: "fixed-500",
+      runDir: path.join(dir, "formal-run"),
+      targetSkus: ["gate-c", "gate-a", "gate-b"],
+      startedAt: "2026-07-30T00:00:00.000Z",
+    });
+    assert.equal(gate.phase, "active");
+    assert.deepEqual(gate.targetSkus, ["gate-a", "gate-b", "gate-c"]);
+
+    const worker = createRuntimeState({
+      dbPath,
+      ownerId: "worker",
+      generationId: "generation",
+      requiredSubmissionGateRunId: "fixed-500",
+      requiredSubmissionGateRunDir: path.join(dir, "formal-run"),
+    });
+    assert.equal(worker.reserveSubmission("gate-a", {
+      reason: "submission-intent",
+    }).recorded, true);
+    const blocked = worker.reserveSubmission("gate-d", {
+      reason: "must-never-reach-erp",
+    });
+    assert.equal(blocked.recorded, false);
+    assert.equal(blocked.reason, "prefix-gate-budget-exhausted");
+
+    assert.equal(releaseSubmissionGate({
+      dbPath,
+      runId: "fixed-500",
+      releasedAt: "2026-07-30T00:05:00.000Z",
+      result: { passed: true },
+    }).phase, "released");
+    assert.equal(worker.reserveSubmission("gate-d", {
+      reason: "submission-intent-after-release",
+    }).recorded, true);
+    worker.close();
+
+    assert.throws(() => initializeSubmissionGate({
+      dbPath,
+      runId: "fixed-500",
+      runDir: path.join(dir, "formal-run"),
+      targetSkus: ["different-a", "different-b", "different-c"],
+      startedAt: "2026-07-30T00:00:00.000Z",
+    }), /does not match its frozen SKU set/);
+  });
+});
+
+test("a production worker configured to require a missing prefix gate fails closed", async () => {
+  await withTempDir(async (dir) => {
+    const state = createRuntimeState({
+      dbPath: path.join(dir, "runtime.sqlite"),
+      requiredSubmissionGateRunId: "missing-gate",
+      requiredSubmissionGateRunDir: path.join(dir, "formal-run"),
+    });
+    const result = state.reserveSubmission("never-submit", {
+      reason: "submission-intent",
+    });
+    assert.equal(result.recorded, false);
+    assert.equal(result.reason, "submission-gate-missing");
+    state.close();
+  });
+});
+
 test("submission reservations and strict publications atomically claim canonical title keys", async () => {
   await withTempDir(async (dir) => {
     const dbPath = path.join(dir, "runtime.sqlite");
@@ -436,7 +524,26 @@ test("strict publications enforce acceptance invariants and one unique row per S
     assert.throws(() => state.recordStrictPublication("bad-cost-value", {
       reason: "strict-confirmed",
       data: { ...strictData, cost: { ok: true, cost: 0 } },
-    }), /positive 1688 cost/);
+    }), /reliable 1688 cost/);
+    assert.throws(() => state.recordStrictPublication("bad-same-item-proof", {
+      reason: "strict-confirmed",
+      data: {
+        ...strictData,
+        cost_evidence: { ...strictData.cost_evidence, same_item_match: false },
+      },
+    }), /reliable 1688 cost/);
+    assert.throws(() => state.recordStrictPublication("bad-cost-source", {
+      reason: "strict-confirmed",
+      data: {
+        ...strictData,
+        cost_source: "arbitrary-positive-number",
+        cost: { ...strictData.cost, source: "arbitrary-positive-number" },
+        cost_evidence: {
+          ...strictData.cost_evidence,
+          source: "arbitrary-positive-number",
+        },
+      },
+    }), /reliable 1688 cost/);
     assert.throws(() => state.recordStrictPublication("bad-quality-gate", {
       reason: "strict-confirmed",
       data: { ...strictData, quality_gate_passed: false },
@@ -490,7 +597,7 @@ test("SQLite itself rejects forged strict evidence and a mismatched SKU/event pa
         JSON.stringify({ ...strictData, profit_rate: 1 }),
         "2026-07-29T01:00:00.000Z",
         "forged",
-      ), /constraint/i);
+      ), /constraint|strict publication requires/i);
       assert.throws(() => database.prepare(`
         INSERT INTO events (
           event_key, sku, stage, reason, failure_class, terminal, strict,
@@ -513,7 +620,7 @@ test("SQLite itself rejects forged strict evidence and a mismatched SKU/event pa
         }),
         "2026-07-29T01:00:00.000Z",
         "forged",
-      ), /constraint/i);
+      ), /constraint|strict publication requires/i);
 
       const eventId = database
         .prepare("SELECT id FROM events WHERE sku = 'event-owner'")

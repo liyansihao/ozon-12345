@@ -2,13 +2,11 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  isReliable1688CostSource,
+  verifyReturnedSameItemEvidence,
+} from "./cost-evidence.mjs";
 import { createJsonLineWorkerPool } from "./json-line-worker-pool.mjs";
-
-const RELIABLE_SOURCES = new Set([
-  "search_first_page_p70_similarity_filtered",
-  "search_first_page_cluster_p70_similarity_filtered",
-  "search_first_page_cluster_p80_similarity_filtered",
-]);
 
 function lineValue(text, label) {
   const match = String(text || "").match(new RegExp(`^${label}\\s+(.+)$`, "m"));
@@ -16,7 +14,7 @@ function lineValue(text, label) {
 }
 
 export function compactCostOutput(text) {
-  return ["MATCH_EVIDENCE_KEY", "COST_SOURCE", "REASON", "FILTERED_FIRST_PAGE_PRICES", "P70_COST"]
+  return ["SAME_ITEM_EVIDENCE", "MATCH_EVIDENCE_KEY", "COST_SOURCE", "REASON", "FILTERED_FIRST_PAGE_PRICES", "P70_COST"]
     .map((label) => [label, lineValue(text, label)])
     .filter(([, value]) => value !== "")
     .map(([label, value]) => `${label} ${value}`)
@@ -47,15 +45,20 @@ function parsePrices(value) {
   }
 }
 
-export function parseCostOutput(text, sellPrice) {
+export function parseCostOutput(text, sellPrice, {
+  expectedMatchEvidence = null,
+  requireSameItemEvidence = false,
+} = {}) {
   const cost = Number(lineValue(text, "P70_COST"));
   const source = lineValue(text, "COST_SOURCE");
+  const matchEvidenceKey = lineValue(text, "MATCH_EVIDENCE_KEY");
+  const encodedSameItemEvidence = lineValue(text, "SAME_ITEM_EVIDENCE");
   const prices = parsePrices(lineValue(text, "FILTERED_FIRST_PAGE_PRICES"));
   const sale = Number(sellPrice);
   const explicitReason = lineValue(text, "REASON");
 
   if (!Number.isFinite(cost) || cost <= 0) return { ok: false, reason: explicitReason || "missing or invalid P70 cost" };
-  if (!RELIABLE_SOURCES.has(source)) return { ok: false, reason: `unreliable cost source: ${source || "missing"}` };
+  if (!isReliable1688CostSource(source)) return { ok: false, reason: `unreliable cost source: ${source || "missing"}` };
   if (prices.length < 3) return { ok: false, reason: `filtered first-page insufficient ${prices.length}` };
   if (prices.some((price) => !Number.isFinite(price) || price <= 0)) return { ok: false, reason: "invalid filtered first-page prices" };
   if (source === "search_first_page_p70_similarity_filtered" && Math.max(...prices) / Math.min(...prices) > 5) {
@@ -64,7 +67,30 @@ export function parseCostOutput(text, sellPrice) {
   if (!Number.isFinite(sale) || sale <= 0) return { ok: false, reason: "invalid sale price" };
   if (cost < sale * 0.02) return { ok: false, reason: "1688 cost below 2% of sale price is not reliable" };
   if (cost >= sale * 0.85) return { ok: false, reason: "1688 cost is at least 85% of sale price" };
-  return { ok: true, cost, source, prices };
+  const sameItemProof = verifyReturnedSameItemEvidence({
+    encodedEvidence: encodedSameItemEvidence,
+    evidenceKey: matchEvidenceKey,
+    expectedRequest: expectedMatchEvidence,
+    filteredPrices: prices,
+    costSource: source,
+    selectedCost: cost,
+  });
+  if (requireSameItemEvidence && !sameItemProof.ok) {
+    return { ok: false, reason: `same-item evidence rejected: ${sameItemProof.reason}` };
+  }
+  return {
+    ok: true,
+    cost,
+    source,
+    prices,
+    ...(sameItemProof.ok ? {
+      match_evidence_key: matchEvidenceKey,
+      same_item_match: true,
+      returned_evidence_verified: true,
+      match_evidence_contract: sameItemProof.contract,
+      matched_offer_count: sameItemProof.matched_offer_count,
+    } : {}),
+  };
 }
 
 function safeSku(value) {
@@ -187,10 +213,12 @@ export function createCostBridge({
     };
   }
 
-  function matchEvidenceKey(item) {
-    const evidence = matchEvidence(item);
-    if (!Object.values(evidence).some(Boolean)) return null;
-    return crypto.createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
+  function parseOptions(item) {
+    const expectedMatchEvidence = matchEvidence(item);
+    return {
+      expectedMatchEvidence,
+      requireSameItemEvidence: Object.values(expectedMatchEvidence).some(Boolean),
+    };
   }
 
   function isCandidateCollapse(result) {
@@ -285,7 +313,7 @@ export function createCostBridge({
     if (!imageUrl) return null;
     const evidence = matchEvidence(item);
     const hasEvidence = Object.values(evidence).some(Boolean);
-    const payload = hasEvidence ? JSON.stringify({ version: 2, image_url: imageUrl, ...evidence }) : imageUrl;
+    const payload = hasEvidence ? JSON.stringify({ version: 3, image_url: imageUrl, ...evidence }) : imageUrl;
     return crypto.createHash("sha256").update(payload).digest("hex");
   }
 
@@ -347,7 +375,6 @@ export function createCostBridge({
       const outputDir = path.join(root, "1688");
       const imagePath = path.join(imageDir, `${sku}.jpg`);
       const outputPath = path.join(outputDir, `${sku}.out`);
-      const evidenceKey = matchEvidenceKey(item);
       let processStarted = false;
 
       try {
@@ -356,9 +383,8 @@ export function createCostBridge({
 
         if (await readableFile(outputPath)) {
           const cachedText = await fs.readFile(outputPath, "utf8");
-          const cachedEvidenceKey = lineValue(cachedText, "MATCH_EVIDENCE_KEY");
-          if (/^P70_COST\s+/m.test(cachedText) && (!evidenceKey || cachedEvidenceKey === evidenceKey)) {
-            const cached = parseCostOutput(cachedText, item?.sell_price);
+          if (/^P70_COST\s+/m.test(cachedText)) {
+            const cached = parseCostOutput(cachedText, item?.sell_price, parseOptions(item));
             if (cached.ok) return { ...cached, cached: true, outputPath };
           }
         }
@@ -378,11 +404,10 @@ export function createCostBridge({
         );
         const stdout = String(result?.stdout || "");
         const stderr = String(result?.stderr || "");
-        const evidencePrefix = evidenceKey ? `MATCH_EVIDENCE_KEY ${evidenceKey}\n` : "";
-        const combined = `${evidencePrefix}${stdout}${stderr ? `\nSTDERR:\n${stderr}` : ""}`;
+        const combined = `${stdout}${stderr ? `\nSTDERR:\n${stderr}` : ""}`;
         await fs.writeFile(outputPath, combined, "utf8");
         if (Number(result?.code) !== 0) {
-          const parsed = parseCostOutput(combined, item?.sell_price);
+          const parsed = parseCostOutput(combined, item?.sell_price, parseOptions(item));
           const transportError = isTransient1688TransportFailure(result, combined);
           return {
             ok: false,
@@ -397,7 +422,7 @@ export function createCostBridge({
           };
         }
         return {
-          ...parseCostOutput(combined, item?.sell_price),
+          ...parseCostOutput(combined, item?.sell_price, parseOptions(item)),
           process_code: 0,
           cached: false,
           outputPath,
@@ -431,7 +456,7 @@ export function createCostBridge({
     const cached = cache.entries[key];
     const cachedHealthRetryCount = Math.max(0, Number(cached?.health_retry_count) || 0);
     if (cached?.output) {
-      const parsed = parseCostOutput(cached.output, item?.sell_price);
+      const parsed = parseCostOutput(cached.output, item?.sell_price, parseOptions(item));
       const legacyCandidateCollapse = cached.terminal === true
         && cached.deferred !== true
         && isCandidateCollapse({ ...parsed, reason: cached.reason || parsed.reason });

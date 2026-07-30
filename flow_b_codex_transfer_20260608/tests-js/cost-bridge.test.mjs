@@ -16,6 +16,48 @@ async function withTempDir(callback) {
   }
 }
 
+function returnedSameItemOutput({
+  request,
+  prices = [10, 11, 12],
+  source = "search_first_page_cluster_p70_similarity_filtered",
+  selectedCost = 12,
+  title = null,
+} = {}) {
+  const normalizedRequest = {
+    expect_category: String(request?.expect_category || "").toLocaleLowerCase("und").trim(),
+    expect_model: String(request?.expect_model || "").toLocaleLowerCase("und").trim(),
+    expect_title: String(request?.expect_title || "").toLocaleLowerCase("und").trim(),
+  };
+  const modelHit = normalizedRequest.expect_model || "";
+  const titleHit = normalizedRequest.expect_title.split(/\s+/u).find((token) => token.length >= 4) || "product";
+  const returnedTitle = String(title || `${modelHit} ${titleHit} same product`).toLocaleLowerCase("und").trim();
+  const semanticHits = modelHit
+    ? { category: [], model: [modelHit], title: [titleHit].filter((hit) => returnedTitle.includes(hit)) }
+    : { category: [], model: [], title: [titleHit] };
+  const rows = prices.map((price, index) => ({
+    offer_id: `offer-${index + 1}`,
+    price,
+    semantic_hits: semanticHits,
+    title: returnedTitle,
+  }));
+  const evidence = JSON.stringify({
+    contract: "1688-returned-same-item-v2",
+    cost_source: source,
+    request: normalizedRequest,
+    rows,
+    selected_cluster: rows.map(({ offer_id, price }) => ({ offer_id, price })),
+    selected_cost: selectedCost,
+  });
+  const key = crypto.createHash("sha256").update(evidence).digest("hex");
+  return [
+    `SAME_ITEM_EVIDENCE ${evidence}`,
+    `MATCH_EVIDENCE_KEY ${key}`,
+    `COST_SOURCE ${source}`,
+    `FILTERED_FIRST_PAGE_PRICES ${JSON.stringify(prices)}`,
+    `P70_COST ${selectedCost}`,
+  ].join("\n");
+}
+
 test("accepts a reliable filtered first-page P70 cost", () => {
   const text = [
     "VALID_COUNT 5",
@@ -30,6 +72,105 @@ test("accepts a reliable filtered first-page P70 cost", () => {
     source: "search_first_page_p70_similarity_filtered",
     prices: [17, 19.8, 21.3, 23.8],
   });
+});
+
+test("verifies returned offer identities, semantics, prices, source and selected cost for strict proof", () => {
+  const request = { expect_title: "same product lamp" };
+  const output = returnedSameItemOutput({
+    request,
+    prices: [17, 19.8, 21.3, 23.8],
+    source: "search_first_page_p70_similarity_filtered",
+    selectedCost: 21.3,
+  });
+  const result = parseCostOutput(output, 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.same_item_match, true);
+  assert.equal(result.returned_evidence_verified, true);
+  assert.equal(result.match_evidence_contract, "1688-returned-same-item-v2");
+  assert.equal(result.matched_offer_count, 4);
+  assert.match(result.match_evidence_key, /^[a-f0-9]{64}$/u);
+});
+
+test("a request hash plus prices can no longer self-prove a same-item match", () => {
+  const request = { expect_title: "детская кепка миньон" };
+  const result = parseCostOutput([
+    `MATCH_EVIDENCE_KEY ${"f".repeat(64)}`,
+    "P70_COST 12",
+    "COST_SOURCE search_first_page_cluster_p70_similarity_filtered",
+    "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+  ].join("\n"), 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /missing returned same-item evidence/i);
+});
+
+test("rejects returned car-seat evidence for a Russian cap request", () => {
+  const request = { expect_title: "детская кепка миньон" };
+  const unsigned = returnedSameItemOutput({
+    request,
+    title: "автомобильный чехол для сиденья",
+  }).replace(/"title":\["детская"\]/gu, "\"title\":[\"автомобильный\"]");
+  const evidence = unsigned.match(/^SAME_ITEM_EVIDENCE\s+(.+)$/mu)?.[1] || "";
+  const output = unsigned.replace(
+    /^MATCH_EVIDENCE_KEY\s+.+$/mu,
+    `MATCH_EVIDENCE_KEY ${crypto.createHash("sha256").update(evidence).digest("hex")}`,
+  );
+  const result = parseCostOutput(output, 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /not bound to request semantics/i);
+});
+
+test("rejects category-only returned rows and a selected cost/source not bound by evidence", () => {
+  const request = { expect_title: "детская кепка миньон", expect_category: "汽车" };
+  const output = returnedSameItemOutput({ request, title: "汽车通用精品" });
+  const evidenceText = output.replace(
+    /"semantic_hits":\{[^}]+\}/gu,
+    "\"semantic_hits\":{\"category\":[\"汽车\"],\"model\":[],\"title\":[]}",
+  );
+  const evidence = evidenceText.match(/^SAME_ITEM_EVIDENCE\s+(.+)$/mu)?.[1] || "";
+  const resigned = evidenceText.replace(
+    /^MATCH_EVIDENCE_KEY\s+.+$/mu,
+    `MATCH_EVIDENCE_KEY ${crypto.createHash("sha256").update(evidence).digest("hex")}`,
+  );
+  const result = parseCostOutput(resigned, 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /only category evidence/i);
+});
+
+test("rejects a parsed cost or source that differs from the signed returned evidence", () => {
+  const request = { expect_title: "same product lamp" };
+  const output = returnedSameItemOutput({ request, selectedCost: 12 });
+  const changedCost = parseCostOutput(output.replace("P70_COST 12", "P70_COST 11"), 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+  });
+  assert.equal(changedCost.ok, false);
+  assert.match(changedCost.reason, /selected cost mismatch/i);
+
+  const changedSource = parseCostOutput(
+    output.replace(
+      "COST_SOURCE search_first_page_cluster_p70_similarity_filtered",
+      "COST_SOURCE search_first_page_cluster_p80_similarity_filtered",
+    ),
+    100,
+    {
+      expectedMatchEvidence: request,
+      requireSameItemEvidence: true,
+    },
+  );
+  assert.equal(changedSource.ok, false);
+  assert.match(changedSource.reason, /cost source mismatch/i);
 });
 
 test("rejects insufficient evidence and cost near sale price", () => {
@@ -555,11 +696,11 @@ test("semantic match evidence reaches the worker and isolates shared image cache
           requests.push(request);
           return {
             code: 0,
-            stdout: [
-              "COST_SOURCE search_first_page_p70_similarity_filtered",
-              "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
-              "P70_COST 11",
-            ].join("\n"),
+            stdout: returnedSameItemOutput({
+              request,
+              source: "search_first_page_p70_similarity_filtered",
+              selectedCost: 11,
+            }),
             stderr: "",
           };
         },
@@ -605,11 +746,15 @@ test("persistent worker infrastructure failure falls back to the one-shot proces
         ]);
         return {
           code: 0,
-          stdout: [
-            "COST_SOURCE search_first_page_p70_similarity_filtered",
-            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
-            "P70_COST 11",
-          ].join("\n"),
+          stdout: returnedSameItemOutput({
+            request: {
+              expect_title: "OMODA S5 уплотнитель",
+              expect_model: "S5",
+              expect_category: "Автомобильные аксессуары",
+            },
+            source: "search_first_page_p70_similarity_filtered",
+            selectedCost: 11,
+          }),
           stderr: "",
         };
       },

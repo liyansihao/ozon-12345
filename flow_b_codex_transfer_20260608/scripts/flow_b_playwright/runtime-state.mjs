@@ -3,6 +3,7 @@ import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { hasReliableSameItemCostEvidence } from "./cost-evidence.mjs";
 
 export const RUNTIME_STATE_SCHEMA_VERSION = 3;
 
@@ -86,6 +87,200 @@ function canonicalTitleKey(data) {
   return normalized.length >= 24 ? normalized : null;
 }
 
+function normalizedGateSkus(values) {
+  const result = [...new Set((values || []).map((value) => String(value ?? "").trim()).filter(Boolean))]
+    .sort();
+  if (result.length !== 3) {
+    throw new TypeError("submission gate requires exactly three unique target SKUs");
+  }
+  return result;
+}
+
+function ensureSubmissionGateTables(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS submission_gates (
+      run_id TEXT PRIMARY KEY CHECK (length(trim(run_id)) > 0),
+      run_dir TEXT NOT NULL UNIQUE CHECK (length(trim(run_dir)) > 0),
+      phase TEXT NOT NULL CHECK (phase IN ('active', 'released', 'failed')),
+      distinct_sku_budget INTEGER NOT NULL CHECK (distinct_sku_budget = 3),
+      started_at TEXT NOT NULL,
+      released_at TEXT,
+      result_json TEXT NOT NULL CHECK (json_valid(result_json))
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS submission_gate_skus (
+      run_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 1 AND 3),
+      sku TEXT NOT NULL CHECK (length(trim(sku)) > 0),
+      PRIMARY KEY (run_id, ordinal),
+      UNIQUE (run_id, sku),
+      FOREIGN KEY (run_id) REFERENCES submission_gates(run_id) ON DELETE RESTRICT
+    ) STRICT, WITHOUT ROWID;
+  `);
+}
+
+function submissionGateRow(database, runId) {
+  const row = database.prepare(`
+    SELECT run_id, run_dir, phase, distinct_sku_budget, started_at, released_at, result_json
+    FROM submission_gates
+    WHERE run_id = ?
+  `).get(runId);
+  if (!row) return null;
+  const targets = database.prepare(`
+    SELECT sku
+    FROM submission_gate_skus
+    WHERE run_id = ?
+    ORDER BY ordinal
+  `).all(runId).map((value) => String(value.sku));
+  return {
+    runId: String(row.run_id),
+    runDir: String(row.run_dir),
+    phase: String(row.phase),
+    distinctSkuBudget: Number(row.distinct_sku_budget),
+    startedAt: String(row.started_at),
+    releasedAt: row.released_at === null ? null : String(row.released_at),
+    result: parseData(row.result_json),
+    targetSkus: targets,
+  };
+}
+
+function withGateDatabase(dbPath, operation) {
+  if (typeof dbPath !== "string" || !dbPath.trim() || dbPath.trim() === ":memory:") {
+    throw new TypeError("dbPath must identify a durable external file");
+  }
+  const databasePath = path.resolve(dbPath);
+  fsSync.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA synchronous = FULL;
+      PRAGMA foreign_keys = ON;
+      PRAGMA busy_timeout = 5000;
+    `);
+    ensureSubmissionGateTables(database);
+    return operation(database);
+  } finally {
+    database.close();
+  }
+}
+
+export function initializeSubmissionGate({
+  dbPath,
+  runId,
+  runDir,
+  targetSkus,
+  startedAt = new Date().toISOString(),
+} = {}) {
+  const normalizedRunId = String(runId ?? "").trim();
+  const normalizedRunDir = path.resolve(String(runDir ?? ""));
+  if (!normalizedRunId) throw new TypeError("runId is required");
+  if (!String(runDir ?? "").trim()) throw new TypeError("runDir is required");
+  const normalizedTargets = normalizedGateSkus(targetSkus);
+  const normalizedStartedAt = timestamp(startedAt, "startedAt");
+  return withGateDatabase(dbPath, (database) => {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = submissionGateRow(database, normalizedRunId);
+      if (existing) {
+        if (existing.runDir !== normalizedRunDir) {
+          throw new Error("submission gate does not match its frozen run directory");
+        }
+        if (JSON.stringify(existing.targetSkus) !== JSON.stringify(normalizedTargets)) {
+          throw new Error("submission gate does not match its frozen SKU set");
+        }
+        database.exec("COMMIT");
+        return existing;
+      }
+      database.prepare(`
+        INSERT INTO submission_gates (
+          run_id, run_dir, phase, distinct_sku_budget, started_at, released_at, result_json
+        ) VALUES (?, ?, 'active', 3, ?, NULL, '{}')
+      `).run(normalizedRunId, normalizedRunDir, normalizedStartedAt);
+      const insertTarget = database.prepare(`
+        INSERT INTO submission_gate_skus (run_id, ordinal, sku)
+        VALUES (?, ?, ?)
+      `);
+      normalizedTargets.forEach((sku, index) => insertTarget.run(normalizedRunId, index + 1, sku));
+      database.exec("COMMIT");
+      return submissionGateRow(database, normalizedRunId);
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  });
+}
+
+function transitionSubmissionGate({
+  dbPath,
+  runId,
+  phase,
+  at,
+  result = {},
+}) {
+  const normalizedRunId = String(runId ?? "").trim();
+  if (!normalizedRunId) throw new TypeError("runId is required");
+  if (!["released", "failed"].includes(phase)) throw new TypeError("submission gate phase is invalid");
+  const changedAt = timestamp(at, phase === "released" ? "releasedAt" : "failedAt");
+  return withGateDatabase(dbPath, (database) => {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const existing = submissionGateRow(database, normalizedRunId);
+      if (!existing) throw new Error("submission gate is missing");
+      if (existing.phase === phase) {
+        database.exec("COMMIT");
+        return existing;
+      }
+      if (
+        existing.phase !== "active"
+        && !(phase === "failed" && existing.phase === "released")
+      ) {
+        throw new Error(`submission gate is already ${existing.phase}`);
+      }
+      database.prepare(`
+        UPDATE submission_gates
+        SET phase = ?, released_at = ?, result_json = ?
+        WHERE run_id = ? AND phase IN ('active', 'released')
+      `).run(phase, changedAt, stringifyData(result), normalizedRunId);
+      database.exec("COMMIT");
+      return submissionGateRow(database, normalizedRunId);
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  });
+}
+
+export function releaseSubmissionGate({
+  dbPath,
+  runId,
+  releasedAt = new Date().toISOString(),
+  result = {},
+} = {}) {
+  return transitionSubmissionGate({
+    dbPath,
+    runId,
+    phase: "released",
+    at: releasedAt,
+    result,
+  });
+}
+
+export function failSubmissionGate({
+  dbPath,
+  runId,
+  failedAt = new Date().toISOString(),
+  result = {},
+} = {}) {
+  return transitionSubmissionGate({
+    dbPath,
+    runId,
+    phase: "failed",
+    at: failedAt,
+    result,
+  });
+}
+
 function timestamp(value, label, { required = true } = {}) {
   if ((value === null || value === undefined || value === "") && !required) return null;
   const parsed = value instanceof Date ? value : new Date(value);
@@ -122,17 +317,38 @@ function strictInvariantError(data) {
   if (data?.fbs_evidence?.verified !== true) {
     return "strict publication requires verified FBS evidence";
   }
-  if (data?.cost_verified !== true || data?.cost?.ok !== true) {
+  if (!hasReliableSameItemCostEvidence(data)) {
     return "strict publication requires reliable 1688 cost evidence";
-  }
-  const cost = Number(data?.cost?.cost);
-  if (!Number.isFinite(cost) || !(cost > 0)) {
-    return "strict publication requires positive 1688 cost";
   }
   if (data?.quality_gate_passed !== true) {
     return "strict publication requires complete quality-gate evidence";
   }
   return null;
+}
+
+function sqliteReliableCostEvidence(dataExpression) {
+  return `(
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost_verified') AS INTEGER), 0) = 1 AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost.ok') AS INTEGER), 0) = 1 AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost.cost') AS REAL), 0) > 0 AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost_evidence.contract') AS TEXT), '') = '1688-same-item-v1' AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost_evidence.reliable_source') AS INTEGER), 0) = 1 AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost_evidence.same_item_match') AS INTEGER), 0) = 1 AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost_evidence.filtered_price_count') AS INTEGER), 0) >= 3 AND
+    coalesce(json_array_length(json_extract(${dataExpression}, '$.cost.prices')), 0) >= 3 AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost_source') AS TEXT), '') IN (
+      'search_first_page_p70_similarity_filtered',
+      'search_first_page_cluster_p70_similarity_filtered',
+      'search_first_page_cluster_p80_similarity_filtered'
+    ) AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost_evidence.source') AS TEXT), '') =
+      coalesce(CAST(json_extract(${dataExpression}, '$.cost_source') AS TEXT), '') AND
+    coalesce(CAST(json_extract(${dataExpression}, '$.cost_evidence.match_evidence_key') AS TEXT), '') =
+      coalesce(CAST(json_extract(${dataExpression}, '$.cost.match_evidence_key') AS TEXT), '') AND
+    length(coalesce(CAST(json_extract(${dataExpression}, '$.cost_evidence.match_evidence_key') AS TEXT), '')) = 64 AND
+    lower(coalesce(CAST(json_extract(${dataExpression}, '$.cost_evidence.match_evidence_key') AS TEXT), ''))
+      NOT GLOB '*[^0-9a-f]*'
+  )`;
 }
 
 function isStrictPublicationData(data) {
@@ -455,6 +671,8 @@ export function createRuntimeState({
   ownerId = process.env.FLOW_B_SUBMISSION_OWNER || `pid:${process.pid}`,
   generationId = process.env.FLOW_B_WORKER_GENERATION || crypto.randomUUID(),
   submissionLeaseMs = 5 * 60_000,
+  requiredSubmissionGateRunId = process.env.FLOW_B_SUBMISSION_GATE_RUN_ID || null,
+  requiredSubmissionGateRunDir = process.env.FLOW_B_SUBMISSION_GATE_RUN_DIR || null,
 } = {}) {
   if (typeof dbPath !== "string" || !dbPath.trim()) throw new TypeError("dbPath is required");
   if (dbPath.trim() === ":memory:") throw new TypeError("dbPath must identify a durable external file");
@@ -469,6 +687,13 @@ export function createRuntimeState({
   const normalizedSubmissionLeaseMs = Number(submissionLeaseMs);
   if (!Number.isFinite(normalizedSubmissionLeaseMs) || normalizedSubmissionLeaseMs < 1_000) {
     throw new TypeError("submissionLeaseMs must be at least 1000 milliseconds");
+  }
+  const normalizedGateRunId = String(requiredSubmissionGateRunId ?? "").trim() || null;
+  const normalizedGateRunDir = String(requiredSubmissionGateRunDir ?? "").trim()
+    ? path.resolve(String(requiredSubmissionGateRunDir))
+    : null;
+  if ((normalizedGateRunId === null) !== (normalizedGateRunDir === null)) {
+    throw new TypeError("required submission gate run ID and run directory must be configured together");
   }
 
   let dayFormatter;
@@ -565,6 +790,23 @@ export function createRuntimeState({
             coalesce(CAST(json_extract(data_json, '$.cost_verified') AS INTEGER), 0) = 1 AND
             coalesce(CAST(json_extract(data_json, '$.cost.ok') AS INTEGER), 0) = 1 AND
             coalesce(CAST(json_extract(data_json, '$.cost.cost') AS REAL), 0) > 0 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.contract') AS TEXT), '') = '1688-same-item-v1' AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.reliable_source') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.same_item_match') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.filtered_price_count') AS INTEGER), 0) >= 3 AND
+            coalesce(json_array_length(json_extract(data_json, '$.cost.prices')), 0) >= 3 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_source') AS TEXT), '') IN (
+              'search_first_page_p70_similarity_filtered',
+              'search_first_page_cluster_p70_similarity_filtered',
+              'search_first_page_cluster_p80_similarity_filtered'
+            ) AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.source') AS TEXT), '') =
+              coalesce(CAST(json_extract(data_json, '$.cost_source') AS TEXT), '') AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), '') =
+              coalesce(CAST(json_extract(data_json, '$.cost.match_evidence_key') AS TEXT), '') AND
+            length(coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), '')) = 64 AND
+            lower(coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), ''))
+              NOT GLOB '*[^0-9a-f]*' AND
             coalesce(CAST(json_extract(data_json, '$.quality_gate_passed') AS INTEGER), 0) = 1
           )
         ),
@@ -608,6 +850,23 @@ export function createRuntimeState({
             coalesce(CAST(json_extract(data_json, '$.cost_verified') AS INTEGER), 0) = 1 AND
             coalesce(CAST(json_extract(data_json, '$.cost.ok') AS INTEGER), 0) = 1 AND
             coalesce(CAST(json_extract(data_json, '$.cost.cost') AS REAL), 0) > 0 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.contract') AS TEXT), '') = '1688-same-item-v1' AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.reliable_source') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.same_item_match') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.filtered_price_count') AS INTEGER), 0) >= 3 AND
+            coalesce(json_array_length(json_extract(data_json, '$.cost.prices')), 0) >= 3 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_source') AS TEXT), '') IN (
+              'search_first_page_p70_similarity_filtered',
+              'search_first_page_cluster_p70_similarity_filtered',
+              'search_first_page_cluster_p80_similarity_filtered'
+            ) AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.source') AS TEXT), '') =
+              coalesce(CAST(json_extract(data_json, '$.cost_source') AS TEXT), '') AND
+            coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), '') =
+              coalesce(CAST(json_extract(data_json, '$.cost.match_evidence_key') AS TEXT), '') AND
+            length(coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), '')) = 64 AND
+            lower(coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), ''))
+              NOT GLOB '*[^0-9a-f]*' AND
             coalesce(CAST(json_extract(data_json, '$.quality_gate_passed') AS INTEGER), 0) = 1
           )
         ),
@@ -645,6 +904,23 @@ export function createRuntimeState({
           coalesce(CAST(json_extract(data_json, '$.cost_verified') AS INTEGER), 0) = 1 AND
           coalesce(CAST(json_extract(data_json, '$.cost.ok') AS INTEGER), 0) = 1 AND
           coalesce(CAST(json_extract(data_json, '$.cost.cost') AS REAL), 0) > 0 AND
+          coalesce(CAST(json_extract(data_json, '$.cost_evidence.contract') AS TEXT), '') = '1688-same-item-v1' AND
+          coalesce(CAST(json_extract(data_json, '$.cost_evidence.reliable_source') AS INTEGER), 0) = 1 AND
+          coalesce(CAST(json_extract(data_json, '$.cost_evidence.same_item_match') AS INTEGER), 0) = 1 AND
+          coalesce(CAST(json_extract(data_json, '$.cost_evidence.filtered_price_count') AS INTEGER), 0) >= 3 AND
+          coalesce(json_array_length(json_extract(data_json, '$.cost.prices')), 0) >= 3 AND
+          coalesce(CAST(json_extract(data_json, '$.cost_source') AS TEXT), '') IN (
+            'search_first_page_p70_similarity_filtered',
+            'search_first_page_cluster_p70_similarity_filtered',
+            'search_first_page_cluster_p80_similarity_filtered'
+          ) AND
+          coalesce(CAST(json_extract(data_json, '$.cost_evidence.source') AS TEXT), '') =
+            coalesce(CAST(json_extract(data_json, '$.cost_source') AS TEXT), '') AND
+          coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), '') =
+            coalesce(CAST(json_extract(data_json, '$.cost.match_evidence_key') AS TEXT), '') AND
+          length(coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), '')) = 64 AND
+          lower(coalesce(CAST(json_extract(data_json, '$.cost_evidence.match_evidence_key') AS TEXT), ''))
+            NOT GLOB '*[^0-9a-f]*' AND
           coalesce(CAST(json_extract(data_json, '$.quality_gate_passed') AS INTEGER), 0) = 1
         ),
         FOREIGN KEY (sku, event_id) REFERENCES events(sku, id)
@@ -687,6 +963,56 @@ export function createRuntimeState({
       )
       BEGIN
         SELECT RAISE(ABORT, 'strict publication event mismatch');
+      END;
+    `);
+    ensureSubmissionGateTables(database);
+    database.exec(`
+      CREATE TRIGGER IF NOT EXISTS events_strict_same_item_cost_insert
+      BEFORE INSERT ON events
+      FOR EACH ROW
+      WHEN NEW.strict = 1 AND NOT ${sqliteReliableCostEvidence("NEW.data_json")}
+      BEGIN
+        SELECT RAISE(ABORT, 'strict publication requires reliable same-item 1688 cost evidence');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS events_strict_same_item_cost_update
+      BEFORE UPDATE OF strict, data_json ON events
+      FOR EACH ROW
+      WHEN NEW.strict = 1 AND NOT ${sqliteReliableCostEvidence("NEW.data_json")}
+      BEGIN
+        SELECT RAISE(ABORT, 'strict publication requires reliable same-item 1688 cost evidence');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS sku_state_strict_same_item_cost_insert
+      BEFORE INSERT ON sku_state
+      FOR EACH ROW
+      WHEN NEW.strict = 1 AND NOT ${sqliteReliableCostEvidence("NEW.data_json")}
+      BEGIN
+        SELECT RAISE(ABORT, 'strict publication requires reliable same-item 1688 cost evidence');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS sku_state_strict_same_item_cost_update
+      BEFORE UPDATE OF strict, data_json ON sku_state
+      FOR EACH ROW
+      WHEN NEW.strict = 1 AND NOT ${sqliteReliableCostEvidence("NEW.data_json")}
+      BEGIN
+        SELECT RAISE(ABORT, 'strict publication requires reliable same-item 1688 cost evidence');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS strict_publications_same_item_cost_insert
+      BEFORE INSERT ON strict_publications
+      FOR EACH ROW
+      WHEN NOT ${sqliteReliableCostEvidence("NEW.data_json")}
+      BEGIN
+        SELECT RAISE(ABORT, 'strict publication requires reliable same-item 1688 cost evidence');
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS strict_publications_same_item_cost_update
+      BEFORE UPDATE OF data_json ON strict_publications
+      FOR EACH ROW
+      WHEN NOT ${sqliteReliableCostEvidence("NEW.data_json")}
+      BEGIN
+        SELECT RAISE(ABORT, 'strict publication requires reliable same-item 1688 cost evidence');
       END;
     `);
 
@@ -803,6 +1129,16 @@ export function createRuntimeState({
     INSERT INTO submission_reservations (
       sku, owner_id, generation_id, status, title_key, lease_expires_at, data_json, updated_at
     ) VALUES (?, ?, ?, 'reserved', ?, ?, ?, ?)
+  `);
+  const selectRequiredSubmissionGate = database.prepare(`
+    SELECT run_id, run_dir, phase
+    FROM submission_gates
+    WHERE run_id = ?
+  `);
+  const selectRequiredSubmissionGateSku = database.prepare(`
+    SELECT 1 AS present
+    FROM submission_gate_skus
+    WHERE run_id = ? AND sku = ?
   `);
   const updateOwnedReservation = database.prepare(`
     UPDATE submission_reservations
@@ -989,6 +1325,27 @@ export function createRuntimeState({
     ).toISOString();
 
     return transaction(() => {
+      if (normalizedGateRunId !== null) {
+        const gate = selectRequiredSubmissionGate.get(normalizedGateRunId);
+        if (!gate) {
+          return { recorded: false, reason: "submission-gate-missing", state: getState(sku) };
+        }
+        if (path.resolve(String(gate.run_dir)) !== normalizedGateRunDir) {
+          return { recorded: false, reason: "submission-gate-run-mismatch", state: getState(sku) };
+        }
+        if (String(gate.phase) === "failed") {
+          return { recorded: false, reason: "submission-gate-failed", state: getState(sku) };
+        }
+        if (
+          String(gate.phase) === "active"
+          && !selectRequiredSubmissionGateSku.get(normalizedGateRunId, sku)
+        ) {
+          return { recorded: false, reason: "prefix-gate-budget-exhausted", state: getState(sku) };
+        }
+        if (!["active", "released"].includes(String(gate.phase))) {
+          return { recorded: false, reason: "submission-gate-invalid", state: getState(sku) };
+        }
+      }
       const existing = getState(sku);
       if (existing?.terminal) {
         return { recorded: false, reason: "terminal-state", state: existing };

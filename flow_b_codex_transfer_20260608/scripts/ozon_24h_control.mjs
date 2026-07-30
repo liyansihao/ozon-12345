@@ -32,6 +32,13 @@ const FAILED_WINDOW_STOP_REASONS = new Set([
   "rolling-rate-check-failed",
   "startup-checkpoint-failed",
   "repeated-browser-recovery-failure",
+  "three-sku-production-gate-failed",
+  "thirty-minute-production-gate-failed",
+  "two-hour-a-production-gate-failed",
+  "two-hour-b-production-gate-failed",
+  "twenty-four-hour-production-gate-failed",
+  "accepted-submission-cannot-reach-strict",
+  "live-acceptance-evidence-failed",
 ]);
 
 export function shouldResumeCurrentRun(status, current) {
@@ -67,6 +74,22 @@ export function currentRunRetirementDecision({
     return { action: "reject", reason: "current-run-still-has-live-owners" };
   }
   return { action: "retire", reason: "superseded-by-fixed-500-v3" };
+}
+
+export function globalFlowBWorkerPids(lines = []) {
+  const pids = new Set();
+  for (const line of lines || []) {
+    const match = String(line || "").trim().match(/^(\d+)\s+([\s\S]+)$/u);
+    if (!match) continue;
+    const command = match[2];
+    if (
+      command.includes("flow_b_playwright.mjs")
+      && /\b(?:accept|run|publish)\b/u.test(command)
+    ) {
+      pids.add(Number(match[1]));
+    }
+  }
+  return [...pids].sort((left, right) => left - right);
 }
 
 function expandHome(value) {
@@ -164,9 +187,19 @@ function validateConfig(config) {
   if (
     Number(config?.candidate_buffer?.minimum_hours) !== 2
     || Number(config?.candidate_buffer?.minimum_strict_per_hour) !== 35
-    || Number(config?.candidate_buffer?.minimum_ready_candidates) !== 70
+    || Number(config?.candidate_buffer?.minimum_ready_candidates) < 70
   ) {
-    throw new Error("candidate buffer must equal two hours / 70 fully-qualified SKUs");
+    throw new Error("candidate buffer must contain at least two hours / 70 fully-qualified SKUs");
+  }
+  if (Number(config?.source_refresh_seconds) !== 7_200) {
+    throw new Error("formal source policy refresh interval must equal 7200 seconds");
+  }
+  if ([
+    Number(config?.flow_env?.FLOW_B_PUBLISH_TRANCHE_ATTEMPTS),
+    Number(config?.flow_env?.FLOW_B_BUFFER_REFILL_TARGET),
+    Number(config?.flow_env?.FLOW_B_BUFFER_REFILL_ATTEMPT_LIMIT),
+  ].join(",") !== "8,8,24") {
+    throw new Error("same-worker publish/refill tranche must be frozen at 8/8/24");
   }
   if (
     Number(config?.rate_check_interval_seconds) < 60
@@ -199,6 +232,12 @@ function validateConfig(config) {
     || Number(config?.flow_env?.FLOW_B_RUNTIME_STATE_SCHEMA_VERSION) !== 3
     || !String(config?.flow_env?.FLOW_B_RUNTIME_STATE_DB || "").endsWith(".sqlite")) {
     throw new Error("external SQLite state schema must equal version 3");
+  }
+  if (
+    String(config?.flow_env?.FLOW_B_PYTHON || "")
+    !== "${HOME}/.ozon-24h-production/python-1688-v1/bin/python"
+  ) {
+    throw new Error("production 1688 runtime must use the frozen external Python environment");
   }
   for (const [rule, required] of Object.entries(config?.immutable_rules || {})) {
     if (required !== true) throw new Error(`immutable rule is not enabled: ${rule}`);
@@ -513,11 +552,18 @@ async function doctor(config, { appRoot = null } = {}) {
   const paths = deploymentPaths(config);
   const resolvedApp = appRoot ? path.resolve(appRoot) : paths.appLink;
   const checks = {};
+  const runtimeConfig = expandedConfig(config);
+  const python = expandTemplate(
+    runtimeConfig?.flow_env?.FLOW_B_PYTHON,
+    runtimeConfig,
+  );
   const required = {
     app: resolvedApp,
     config: path.join(resolvedApp, "config", "ozon_24h_production.json"),
     supervisor: path.join(resolvedApp, "scripts", "ozon_24h_supervisor.mjs"),
     worker: path.join(resolvedApp, "scripts", "flow_b_playwright.mjs"),
+    python,
+    python_requirements: path.join(resolvedApp, "requirements-1688.txt"),
     browser: expandHome(config.browser.executable),
     profile: expandHome(config.browser.profile_dir),
     extension: expandHome(config.browser.extension_dir),
@@ -525,6 +571,24 @@ async function doctor(config, { appRoot = null } = {}) {
     sources: path.join(paths.stateRoot, "sources", "active_urls.txt"),
   };
   for (const [name, filename] of Object.entries(required)) checks[name] = await pathExists(filename);
+  if (checks.python && checks.worker) {
+    const probe = await run(python, [
+      "-c",
+      [
+        "import importlib.util, pathlib, sys",
+        "script = pathlib.Path(sys.argv[1]).resolve()",
+        "spec = importlib.util.spec_from_file_location('ozon_1688_doctor', script)",
+        "module = importlib.util.module_from_spec(spec)",
+        "spec.loader.exec_module(module)",
+        "session_class = module.load_sync_session_class()",
+        "assert session_class.__name__ == 'Sync1688Session'",
+      ].join("; "),
+      path.join(resolvedApp, "scripts", "flow_b_1688_sync.py"),
+    ], { timeout: 15_000 });
+    checks.python_1688_runtime = probe.ok;
+  } else {
+    checks.python_1688_runtime = false;
+  }
   try {
     const [releaseConfigText, deployment] = await Promise.all([
       fsp.readFile(required.config, "utf8"),
@@ -576,6 +640,19 @@ async function kickstart(config) {
 
 async function start(config) {
   const paths = deploymentPaths(config);
+  const processResult = await run("/bin/ps", ["-axo", "pid=,command="]);
+  if (!processResult.ok) {
+    const error = new Error(`cannot verify global worker ownership: ${processResult.stderr || processResult.error}`);
+    error.code = "OZON_PROCESS_OWNERSHIP_UNKNOWN";
+    throw error;
+  }
+  const existingWorkerPids = globalFlowBWorkerPids(processResult.stdout.split(/\r?\n/u));
+  if (existingWorkerPids.length > 0) {
+    const error = new Error(`refusing production start while a flow_b worker is active: ${existingWorkerPids.join(",")}`);
+    error.code = "OZON_GLOBAL_WORKER_ALREADY_RUNNING";
+    error.worker_pids = existingWorkerPids;
+    throw error;
+  }
   const status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   if (shouldResumeCurrentRun(status, current)) {
@@ -709,14 +786,9 @@ async function actualRuntimeOwnerCounts(config, current) {
   }
   const lines = processResult.stdout.split(/\r?\n/u).filter(Boolean);
   const profileMarker = `--user-data-dir=${expandHome(config.browser.profile_dir)}`;
-  const runDir = path.resolve(String(current?.run_dir || ""));
   return {
     supervisor: lines.filter((line) => line.includes("ozon_24h_supervisor.mjs")).length,
-    worker: lines.filter((line) => (
-      line.includes("flow_b_playwright.mjs")
-      && runDir
-      && line.includes(runDir)
-    )).length,
+    worker: globalFlowBWorkerPids(lines).length,
     profile: lines.filter((line) => (
       line.includes(profileMarker)
       && !line.includes(" --type=")
@@ -767,6 +839,18 @@ async function retireCurrentRun(config) {
     archive_path: archivePath,
   });
   await writeJsonAtomic(path.join(paths.stateRoot, "current_run.json"), {});
+  await writeJsonAtomic(path.join(paths.stateRoot, "process_owners.json"), {
+    observed_at: retiredAt.toISOString(),
+    run_id: null,
+    supervisor_pid: null,
+    worker_pid: null,
+    profile_owner_pid: null,
+    counts: {
+      supervisor: 0,
+      worker: 0,
+      profile_owner: 0,
+    },
+  });
   return {
     ok: true,
     retired_run_id: current.run_id,
@@ -798,6 +882,7 @@ export function compactProductionStatus({
   checkpoint = {},
 } = {}) {
   const value = checkpoint?.compact || checkpoint || {};
+  const hasCurrentRun = Boolean(String(current?.run_id || "").trim());
   return {
     at: operational.observed_at || value.at || null,
     status: operational.status || "UNKNOWN",
@@ -813,9 +898,9 @@ export function compactProductionStatus({
     constrained: value.constrained || [],
     errors: Number(value.errors || 0),
     owners: {
-      supervisor: Number(owners?.counts?.supervisor || 0),
-      worker: Number(owners?.counts?.worker || 0),
-      profile: Number(owners?.counts?.profile_owner || 0),
+      supervisor: hasCurrentRun ? Number(owners?.counts?.supervisor || 0) : 0,
+      worker: hasCurrentRun ? Number(owners?.counts?.worker || 0) : 0,
+      profile: hasCurrentRun ? Number(owners?.counts?.profile_owner || 0) : 0,
     },
     identity: {
       config_sha256: current.config_sha256 || null,
