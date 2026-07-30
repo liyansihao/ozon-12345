@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +8,8 @@ import test from "node:test";
 import {
   buildIncidentDigest,
   compactProductionStatus,
+  currentRunRetirementDecision,
+  deploymentIdentityValid,
   refreshCurrentRunSources,
   resumeMode,
   shouldResumeCurrentRun,
@@ -52,6 +55,48 @@ test("resume restarts the same checkpoint after an intentional safe stop", () =>
   assert.equal(resumeMode({ status: "WAITING_FOR_VERIFICATION" }, current), "verification");
   assert.equal(resumeMode({ status: "RUNNING" }, current), "wake-supervisor");
   assert.equal(resumeMode({ status: "STOPPED" }, { run_id: "partial" }), "wake-supervisor");
+});
+
+test("legacy production run can only be retired after a zero-owner safe stop", () => {
+  assert.deepEqual(currentRunRetirementDecision({
+    status: { status: "STOPPED", reason: "safe stop requested" },
+    current: {
+      ...current,
+      formal_started: true,
+      acceptance_target: 469,
+      acceptance_target_policy: "erp_remaining_capacity",
+    },
+    owners: { supervisor: 0, worker: 0, profile: 0 },
+  }), {
+    action: "retire",
+    reason: "superseded-by-fixed-500-v3",
+  });
+  assert.equal(currentRunRetirementDecision({
+    status: { status: "RUNNING" },
+    current,
+    owners: { supervisor: 0, worker: 0, profile: 0 },
+  }).action, "reject");
+  assert.equal(currentRunRetirementDecision({
+    status: { status: "STOPPED" },
+    current,
+    owners: { supervisor: 0, worker: 1, profile: 0 },
+  }).action, "reject");
+});
+
+test("doctor release identity requires exact commit, config hash, source hash, and schema v3", () => {
+  const configText = "{\"fixed\":true}\n";
+  const valid = {
+    source_commit: "a".repeat(40),
+    config_sha256: crypto.createHash("sha256").update(configText).digest("hex"),
+    source_set_sha256: "b".repeat(64),
+    source_smoke_sha256: "c".repeat(64),
+    state_schema_version: 3,
+  };
+  assert.equal(deploymentIdentityValid(valid, configText), true);
+  assert.equal(deploymentIdentityValid({ ...valid, source_commit: "" }, configText), false);
+  assert.equal(deploymentIdentityValid({ ...valid, config_sha256: "0".repeat(64) }, configText), false);
+  assert.equal(deploymentIdentityValid({ ...valid, source_set_sha256: "" }, configText), false);
+  assert.equal(deploymentIdentityValid({ ...valid, state_schema_version: 2 }, configText), false);
 });
 
 test("same-run resume refreshes the active source pool from the promoted release", async (t) => {

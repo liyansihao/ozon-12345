@@ -457,6 +457,7 @@ test("launchd honors an intentional safe stop across computer restart", () => {
   assert.equal(supervisorShouldHonorSafeStop({ status: "FATAL_STOP" }), true);
   assert.equal(supervisorShouldHonorSafeStop({ status: "WINDOW_COMPLETE" }), true);
   assert.equal(supervisorShouldHonorSafeStop({ status: "TARGET_NOT_MET" }), true);
+  assert.equal(supervisorShouldHonorSafeStop({ status: "RETIRED" }), true);
   assert.equal(supervisorShouldHonorSafeStop({ status: "RUNNING" }), false);
   assert.equal(supervisorShouldHonorSafeStop({ status: "RECOVERING" }), false);
 });

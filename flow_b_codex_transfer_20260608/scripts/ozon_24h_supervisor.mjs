@@ -211,7 +211,7 @@ export function productionRunContractDecision({
 }
 
 export function supervisorShouldHonorSafeStop(operationalStatus) {
-  return new Set(["STOPPED", "FATAL_STOP", "WINDOW_COMPLETE", "TARGET_NOT_MET"])
+  return new Set(["STOPPED", "FATAL_STOP", "WINDOW_COMPLETE", "TARGET_NOT_MET", "RETIRED"])
     .has(String(operationalStatus?.status || ""));
 }
 

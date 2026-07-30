@@ -52,6 +52,23 @@ export function resumeMode(status, current) {
   return "wake-supervisor";
 }
 
+export function currentRunRetirementDecision({
+  status = {},
+  current = {},
+  owners = {},
+} = {}) {
+  if (String(status?.status || "") !== "STOPPED") {
+    return { action: "reject", reason: "current-run-is-not-safely-stopped" };
+  }
+  if (!current?.run_id || !current?.run_dir || !current?.urls_file) {
+    return { action: "reject", reason: "current-run-identity-is-incomplete" };
+  }
+  if (["supervisor", "worker", "profile"].some((name) => Number(owners?.[name] || 0) !== 0)) {
+    return { action: "reject", reason: "current-run-still-has-live-owners" };
+  }
+  return { action: "retire", reason: "superseded-by-fixed-500-v3" };
+}
+
 function expandHome(value) {
   return String(value || "").replaceAll("${HOME}", process.env.HOME || "/Users/mac");
 }
@@ -98,6 +115,16 @@ async function pathExists(filename) {
 
 function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+export function deploymentIdentityValid(deployment, configText) {
+  return (
+    /^[a-f0-9]{40}$/u.test(String(deployment?.source_commit || ""))
+    && String(deployment?.config_sha256 || "") === sha256(configText)
+    && /^[a-f0-9]{64}$/u.test(String(deployment?.source_set_sha256 || ""))
+    && /^[a-f0-9]{64}$/u.test(String(deployment?.source_smoke_sha256 || ""))
+    && Number(deployment?.state_schema_version) === 3
+  );
 }
 
 function validateConfig(config) {
@@ -498,6 +525,15 @@ async function doctor(config, { appRoot = null } = {}) {
     sources: path.join(paths.stateRoot, "sources", "active_urls.txt"),
   };
   for (const [name, filename] of Object.entries(required)) checks[name] = await pathExists(filename);
+  try {
+    const [releaseConfigText, deployment] = await Promise.all([
+      fsp.readFile(required.config, "utf8"),
+      readJson(path.join(resolvedApp, "deployment_manifest.json"), {}),
+    ]);
+    checks.release_identity = deploymentIdentityValid(deployment, releaseConfigText);
+  } catch {
+    checks.release_identity = false;
+  }
   const disk = await run("/bin/df", ["-Pk", paths.stateRoot]);
   const availableKb = disk.ok ? Number(disk.stdout.trim().split(/\s+/).slice(-3, -2)[0]) : 0;
   checks.disk = availableKb >= Number(config.minimum_free_disk_kb || 5242880);
@@ -661,6 +697,82 @@ async function stop(config) {
     ok: true,
     stop_requested: true,
     behavior: "supervisor is stopping its owned child at a durable state-machine boundary",
+  };
+}
+
+async function actualRuntimeOwnerCounts(config, current) {
+  const processResult = await run("/bin/ps", ["-axo", "pid=,command="]);
+  if (!processResult.ok) {
+    const error = new Error(`cannot verify production process ownership: ${processResult.stderr || processResult.error}`);
+    error.code = "OZON_PROCESS_OWNERSHIP_UNKNOWN";
+    throw error;
+  }
+  const lines = processResult.stdout.split(/\r?\n/u).filter(Boolean);
+  const profileMarker = `--user-data-dir=${expandHome(config.browser.profile_dir)}`;
+  const runDir = path.resolve(String(current?.run_dir || ""));
+  return {
+    supervisor: lines.filter((line) => line.includes("ozon_24h_supervisor.mjs")).length,
+    worker: lines.filter((line) => (
+      line.includes("flow_b_playwright.mjs")
+      && runDir
+      && line.includes(runDir)
+    )).length,
+    profile: lines.filter((line) => (
+      line.includes(profileMarker)
+      && !line.includes(" --type=")
+    )).length,
+  };
+}
+
+async function retireCurrentRun(config) {
+  const paths = deploymentPaths(config);
+  const [statusValue, current] = await Promise.all([
+    readJson(path.join(paths.stateRoot, "operational_status.json"), {}),
+    readJson(path.join(paths.stateRoot, "current_run.json"), {}),
+  ]);
+  const owners = await actualRuntimeOwnerCounts(config, current);
+  const decision = currentRunRetirementDecision({
+    status: statusValue,
+    current,
+    owners,
+  });
+  if (decision.action !== "retire") {
+    const error = new Error(decision.reason);
+    error.code = "OZON_CURRENT_RUN_RETIREMENT_REJECTED";
+    error.owners = owners;
+    throw error;
+  }
+  const retiredAt = new Date();
+  const safeRunId = String(current.run_id).replace(/[^a-zA-Z0-9_.-]/gu, "_");
+  const archivePath = path.join(
+    paths.stateRoot,
+    "history",
+    "retired_runs",
+    `${retiredAt.toISOString().replace(/\D/gu, "").slice(0, 14)}_${safeRunId}.json`,
+  );
+  await writeJsonAtomic(archivePath, {
+    retired_at: retiredAt.toISOString(),
+    reason: decision.reason,
+    owners,
+    operational_status: statusValue,
+    current_run: current,
+    evidence_preserved_at: current.run_dir,
+  });
+  await writeJsonAtomic(path.join(paths.stateRoot, "operational_status.json"), {
+    observed_at: retiredAt.toISOString(),
+    status: "RETIRED",
+    reason: decision.reason,
+    retired_run_id: current.run_id,
+    retired_run_dir: current.run_dir,
+    archive_path: archivePath,
+  });
+  await writeJsonAtomic(path.join(paths.stateRoot, "current_run.json"), {});
+  return {
+    ok: true,
+    retired_run_id: current.run_id,
+    retired_run_dir: current.run_dir,
+    archive_path: archivePath,
+    evidence_preserved: true,
   };
 }
 
@@ -836,6 +948,8 @@ async function main(argv = process.argv.slice(2)) {
     result = await start(config);
   } else if (command === "stop") {
     result = await stop(config);
+  } else if (command === "retire-current") {
+    result = await retireCurrentRun(config);
   } else if (command === "resume") {
     result = await resume(config);
   } else if (command === "status") {
@@ -845,7 +959,7 @@ async function main(argv = process.argv.slice(2)) {
   } else if (command === "export") {
     result = await exportConfirmed(config);
   } else {
-    throw new Error("usage: ozon_24h_production.sh [start|install-candidate|doctor-candidate|promote|doctor|status|incident|stop|resume|export]");
+    throw new Error("usage: ozon_24h_production.sh [start|install-candidate|doctor-candidate|promote|doctor|status|incident|stop|retire-current|resume|export]");
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   return result?.ok === false ? 1 : 0;
@@ -871,6 +985,7 @@ export {
   doctor,
   incident,
   installCandidate,
+  retireCurrentRun,
   status,
   validateConfig,
 };
