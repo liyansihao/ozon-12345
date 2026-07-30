@@ -10,6 +10,7 @@ import {
   compactProductionStatus,
   currentRunRetirementDecision,
   deploymentIdentityValid,
+  doctor,
   globalFlowBWorkerPids,
   refreshCurrentRunSources,
   resumeMode,
@@ -144,6 +145,29 @@ test("production config freezes the external 1688 Python runtime", async () => {
     }),
     /refresh interval/u,
   );
+});
+
+test("doctor expands its Python path without supervisor-only helpers", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-control-doctor-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "state");
+  await fs.mkdir(stateRoot, { recursive: true });
+  const result = await doctor({
+    install_root: path.join(root, "app"),
+    state_root: stateRoot,
+    flow_env: {
+      FLOW_B_PYTHON: "${HOME}/definitely-missing-ozon-python",
+    },
+    browser: {
+      executable: path.join(root, "missing-browser"),
+      profile_dir: path.join(root, "missing-profile"),
+      extension_dir: path.join(root, "missing-extension"),
+    },
+    minimum_free_disk_kb: 0,
+  }, { appRoot: path.join(root, "candidate") });
+  assert.equal(result.ok, false);
+  assert.equal(result.checks.python, false);
+  assert.equal(result.app_root, path.join(root, "candidate"));
 });
 
 test("same-run resume refreshes the active source pool from the promoted release", async (t) => {

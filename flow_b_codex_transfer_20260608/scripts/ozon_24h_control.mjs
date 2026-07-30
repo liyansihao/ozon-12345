@@ -552,11 +552,7 @@ async function doctor(config, { appRoot = null } = {}) {
   const paths = deploymentPaths(config);
   const resolvedApp = appRoot ? path.resolve(appRoot) : paths.appLink;
   const checks = {};
-  const runtimeConfig = expandedConfig(config);
-  const python = expandTemplate(
-    runtimeConfig?.flow_env?.FLOW_B_PYTHON,
-    runtimeConfig,
-  );
+  const python = expandHome(config?.flow_env?.FLOW_B_PYTHON);
   const required = {
     app: resolvedApp,
     config: path.join(resolvedApp, "config", "ozon_24h_production.json"),
