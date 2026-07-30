@@ -6,9 +6,12 @@ import { validate24hAcceptanceEnv } from "../scripts/flow_b_acceptance_preflight
 function validEnv() {
   return {
     FLOW_B_ACCEPTANCE_SECONDS: "86400",
-    FLOW_B_ACCEPTANCE_TARGET: "481",
+    FLOW_B_ACCEPTANCE_TARGET_POLICY: "fixed",
+    FLOW_B_ACCEPTANCE_TARGET: "500",
     FLOW_B_STORE_ACCEPTANCE_TARGET: "100",
-    FLOW_B_TARGET_PUBLISH_COUNT: "481",
+    FLOW_B_TARGET_PUBLISH_COUNT: "500",
+    FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE: "1",
+    FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE: "35",
     FLOW_B_DAILY_STORE_LIMIT: "100",
     FLOW_B_STORE_TOTAL_LIMIT: "100",
     FLOW_B_DAILY_STORE_TIMEZONE: "Asia/Shanghai",
@@ -29,6 +32,18 @@ function validEnv() {
     FLOW_B_PROBE_INACTIVE_STORES: "1",
     FLOW_B_VERIFIED_SELLER_MIN_PUBLISHED: "2",
     FLOW_B_UNAVAILABLE_STORE_RETRY_MS: "300000",
+    FLOW_B_URGENT_ONLINE_SYNC_INTERVAL_MS: "180000",
+    FLOW_B_DERIVED_SEARCH_SOURCES: "0",
+    FLOW_B_DERIVED_PRIORITY_SOURCES: "0",
+    FLOW_B_PRIORITIZE_DERIVED_SEARCH: "0",
+    FLOW_B_LOW_TOKEN_INTERVENTION: "0",
+    FLOW_B_SOURCE_STRICT_WEIGHT: "6",
+    FLOW_B_SOURCE_FBS_WEIGHT: "3",
+    FLOW_B_SOURCE_EXPLORE_WEIGHT: "1",
+    FLOW_B_STRICT_SOURCE_PORTFOLIO: "1",
+    FLOW_B_SOURCE_ALLOWLIST_MATCH: "exact",
+    FLOW_B_RUNTIME_STATE_DB: "/tmp/state/runtime/flow_b_state.sqlite",
+    FLOW_B_RUNTIME_STATE_SCHEMA_VERSION: "3",
     FLOW_B_STORE_TARGETS: JSON.stringify([
       { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
       { id: 106640, needle: "丽丽三号", warehouseId: 1020005023616740, requireWarehouse: true },
@@ -43,10 +58,12 @@ test("24-hour acceptance preflight accepts the verified five-store contract", ()
   const result = validate24hAcceptanceEnv(validEnv());
   assert.deepEqual(result.store_ids, [106637, 106640, 106644, 106646, 104965]);
   assert.equal(result.strict_profit_rule, "profit_rate > 30");
-  assert.equal(result.target, 481);
+  assert.equal(result.target, 500);
+  assert.equal(result.per_store_target, 100);
+  assert.equal(result.minimum_average_per_hour, 35);
 });
 
-test("24-hour acceptance preflight accepts one frozen live ERP capacity target", () => {
+test("24-hour acceptance preflight rejects a dynamic or reduced target", () => {
   const env = {
     ...validEnv(),
     FLOW_B_ACCEPTANCE_TARGET_POLICY: "erp_remaining_capacity",
@@ -54,10 +71,14 @@ test("24-hour acceptance preflight accepts one frozen live ERP capacity target",
     FLOW_B_TARGET_PUBLISH_COUNT: "469",
     FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE: "",
   };
-  const result = validate24hAcceptanceEnv(env);
-  assert.equal(result.target, 469);
-  assert.equal(result.target_policy, "erp_remaining_capacity");
-  assert.equal(result.minimum_average_per_hour_exclusive, null);
+  assert.throws(
+    () => validate24hAcceptanceEnv(env),
+    /FLOW_B_ACCEPTANCE_TARGET_POLICY must equal fixed/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_ACCEPTANCE_TARGET: "499" }),
+    /FLOW_B_ACCEPTANCE_TARGET must equal 500/,
+  );
 });
 
 test("24-hour acceptance preflight rejects a relaxed or implicit profit threshold", () => {
@@ -75,11 +96,11 @@ test("24-hour acceptance preflight rejects store order, unsafe warehouse, and mi
   reordered.FLOW_B_STORE_TARGETS = JSON.stringify(JSON.parse(reordered.FLOW_B_STORE_TARGETS).reverse());
   assert.throws(() => validate24hAcceptanceEnv(reordered), /store order must be/);
 
-  const guessedWarehouse = validEnv();
-  const targets = JSON.parse(guessedWarehouse.FLOW_B_STORE_TARGETS);
-  targets[3].warehouseId = 999;
-  guessedWarehouse.FLOW_B_STORE_TARGETS = JSON.stringify(targets);
-  assert.throws(() => validate24hAcceptanceEnv(guessedWarehouse), /warehouseId does not match/);
+  const missingWarehouse = validEnv();
+  const targets = JSON.parse(missingWarehouse.FLOW_B_STORE_TARGETS);
+  targets[3].warehouseId = null;
+  missingWarehouse.FLOW_B_STORE_TARGETS = JSON.stringify(targets);
+  assert.throws(() => validate24hAcceptanceEnv(missingWarehouse), /positive warehouseId/);
 
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_EXCLUDED_SKUS: "" }),
@@ -123,5 +144,25 @@ test("24-hour acceptance preflight rejects disabled quality and reuse controls",
   assert.throws(
     () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_DAILY_STORE_TIMEZONE: "UTC" }),
     /FLOW_B_DAILY_STORE_TIMEZONE must equal Asia\/Shanghai/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_URGENT_ONLINE_SYNC_INTERVAL_MS: "179999" }),
+    /urgent online sync interval must be at least 180000ms/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE: "0" }),
+    /FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE must equal 1/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_DERIVED_SEARCH_SOURCES: "1" }),
+    /FLOW_B_DERIVED_SEARCH_SOURCES must equal 0/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_SOURCE_EXPLORE_WEIGHT: "2" }),
+    /source weights must freeze verified\/exploration at 90\/10/,
+  );
+  assert.throws(
+    () => validate24hAcceptanceEnv({ ...validEnv(), FLOW_B_RUNTIME_STATE_DB: "" }),
+    /external SQLite state/,
   );
 });

@@ -15,6 +15,7 @@ import {
   readJsonLinesIncremental,
   sourceYieldKey,
 } from "./source-scanner.mjs";
+import { boundedTransientFailure } from "./retry-policy.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError, loadCandidateFacts, loadPreflightPureSkus, mergeCandidateFacts } from "./continuous-runtime.mjs";
 import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 
@@ -23,6 +24,109 @@ const ECONOMY_SENTINEL = Object.freeze({
   price_list: { logistics_name: "CEL", logistics_speed: "economy" },
 });
 const observedPublishFeedbackCompositeCache = new Map();
+const MIN_URGENT_ONLINE_SYNC_INTERVAL_MS = 180_000;
+const MAX_ONLINE_SYNC_SERVER_BACKOFF_MS = 24 * 60 * 60 * 1000;
+const FATAL_RUNNER_STATE_CODES = new Set([
+  "SUBMISSION_ACCEPTANCE_PERSIST_FAILED",
+]);
+
+function isFatalRunnerError(error) {
+  return isFatalBrowserError(error) || FATAL_RUNNER_STATE_CODES.has(String(error?.code || ""));
+}
+
+function boundedBackoffMs(value, maximumMs = MAX_ONLINE_SYNC_SERVER_BACKOFF_MS) {
+  const duration = Number(value);
+  if (!Number.isFinite(duration) || duration < 0) return null;
+  return Math.min(Math.max(0, Number(maximumMs) || 0), Math.ceil(duration));
+}
+
+function retryAfterHeaderValue(headers) {
+  if (!headers) return null;
+  if (typeof headers.get === "function") {
+    const value = headers.get("retry-after");
+    if (value !== null && value !== undefined) return value;
+  }
+  if (typeof headers !== "object") return null;
+  const entry = Object.entries(headers).find(([name]) => String(name).toLowerCase() === "retry-after");
+  return entry?.[1] ?? null;
+}
+
+function retryAfterHeaderMs(value, nowMs) {
+  if (value === null || value === undefined || value === "") return null;
+  const text = String(value).trim();
+  if (/^\d+(?:\.\d+)?$/u.test(text)) return Number(text) * 1000;
+  const timestamp = Date.parse(text);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - nowMs) : null;
+}
+
+function messageRetryAfterMs(message) {
+  const text = String(message || "");
+  const duration = (amount, unit) => {
+    const count = Number(amount);
+    if (!Number.isFinite(count) || count < 0) return null;
+    const normalizedUnit = String(unit || "seconds").toLowerCase();
+    if (/^(?:ms|millisecond|milliseconds|毫秒)$/u.test(normalizedUnit)) return count;
+    if (/^(?:m|min|mins|minute|minutes|分钟)$/u.test(normalizedUnit)) return count * 60_000;
+    return count * 1000;
+  };
+  const retryAfter = text.match(
+    /retry[-_\s]?after\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m)?/iu,
+  );
+  if (retryAfter) return duration(retryAfter[1], retryAfter[2]);
+  const humanWait = text.match(
+    /(?:retry|try\s+again|back\s*off|wait)[^0-9]{0,32}(\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m)/iu,
+  );
+  if (humanWait) return duration(humanWait[1], humanWait[2]);
+  const chineseWait = text.match(/(\d+(?:\.\d+)?)\s*(毫秒|秒(?:钟)?|分钟)\s*(?:后|以后)/u);
+  if (chineseWait) return duration(chineseWait[1], chineseWait[2] === "秒钟" ? "秒" : chineseWait[2]);
+  return null;
+}
+
+export function onlineSyncRetryAfterMs(error, {
+  nowMs = Date.now(),
+  maximumMs = MAX_ONLINE_SYNC_SERVER_BACKOFF_MS,
+} = {}) {
+  const response = error?.response;
+  const data = response?.data;
+  const millisecondValues = [
+    error?.retryAfterMs,
+    error?.retry_after_ms,
+    error?.backoffMs,
+    error?.backoff_ms,
+    response?.retryAfterMs,
+    response?.retry_after_ms,
+    data?.retryAfterMs,
+    data?.retry_after_ms,
+  ];
+  const retryAfterValues = [
+    error?.retryAfter,
+    error?.retry_after,
+    response?.retryAfter,
+    response?.retry_after,
+    data?.retryAfter,
+    data?.retry_after,
+    retryAfterHeaderValue(error?.headers),
+    retryAfterHeaderValue(response?.headers),
+  ];
+  const messages = [
+    error?.message,
+    data?.message,
+    data?.msg,
+    data?.error,
+    error?.cause?.message,
+  ].filter(Boolean);
+  const candidates = [
+    ...millisecondValues.map((value) => Number(value)),
+    ...retryAfterValues.map((value) => retryAfterHeaderMs(value, Number(nowMs))),
+    ...messages.map(messageRetryAfterMs),
+  ].filter((value) => Number.isFinite(value) && value >= 0);
+  if (candidates.length === 0
+    && messages.some((message) => /请求过于频繁|too many requests|\b429\b|rate.?limit|throttl/iu.test(String(message)))) {
+    candidates.push(MIN_URGENT_ONLINE_SYNC_INTERVAL_MS);
+  }
+  if (candidates.length === 0) return null;
+  return boundedBackoffMs(Math.max(...candidates), maximumMs);
+}
 
 export function strictSourceYieldEvidence({
   onlineProduct,
@@ -66,6 +170,21 @@ export function normalizeCostFailureReason(cost = {}) {
   if (/timed?\s*out|timeout/i.test(evidence)) return "1688-timeout";
   if (/image|download|http\s*\d|fetch/i.test(evidence)) return "1688-image-fetch-failed";
   return "1688-no-reliable-match";
+}
+
+function reliable1688CostEvidence(data = {}) {
+  return data?.cost_verified === true
+    && data?.cost?.ok === true
+    && Number.isFinite(Number(data?.cost?.cost))
+    && Number(data.cost.cost) > 0;
+}
+
+function publicationCostEvidence(cost = {}) {
+  return {
+    cost_verified: cost?.ok === true && Number(cost?.cost) > 0,
+    cost: { ...(cost || {}) },
+    cost_source: String(cost?.source || "").trim() || null,
+  };
 }
 
 function deterministicProfitFailureReason(error) {
@@ -254,6 +373,7 @@ function hasWarehouseStatusRejection(stockUpdate) {
 
 function isTerminalSubmittedFailure(entry) {
   const data = entry?.data || entry || {};
+  if (data.terminal === true) return true;
   const reason = String(data.reason || "");
   if (reason === "import-failed" && importFailureReason(data.import_log) === "import-transient-error") return false;
   if (["daily-product-limit", "import-failed", "reconciliation-store-not-configured", "stock-activation-terminal-rejected", "fbs-evidence-missing"].includes(reason)) return true;
@@ -489,6 +609,7 @@ export function createPublishRunner({
   let storeUsageDay = null;
   const lastOnlineSyncAt = new Map();
   const lastOnlineSyncPendingCount = new Map();
+  const onlineSyncBlockedUntil = new Map();
   const unavailableStoreUntil = new Map();
   const lastStoreSwitchDiagnosticAt = new Map();
   const lastStoreTargetMetrics = new Map();
@@ -658,20 +779,29 @@ export function createPublishRunner({
     const previousPendingCount = Math.max(0, Number(lastOnlineSyncPendingCount.get(activeStoreId)) || 0);
     const urgent = normalizedPendingCount >= Math.max(1, Number(urgentOnlineSyncPendingCount) || 1)
       || (normalizedPendingCount > 0 && previousPendingCount > 0);
+    const normalCooldownMs = Math.max(0, Number(onlineSyncIntervalMs) || 0);
+    const configuredUrgentCooldownMs = Math.max(0, Number(urgentOnlineSyncIntervalMs) || 0);
     const cooldownMs = urgent
-      ? Math.min(
-        Math.max(0, Number(onlineSyncIntervalMs) || 0),
-        Math.max(0, Number(urgentOnlineSyncIntervalMs) || 0),
+      ? Math.max(
+        MIN_URGENT_ONLINE_SYNC_INTERVAL_MS,
+        Math.min(normalCooldownMs, configuredUrgentCooldownMs),
       )
-      : Math.max(0, Number(onlineSyncIntervalMs) || 0);
+      : normalCooldownMs;
     const firstNonEmptyAfterEmpty = normalizedPendingCount > 0
       && hasPreviousPendingCount
       && previousPendingCount === 0;
-    if (!firstNonEmptyAfterEmpty && currentTime - lastSync < cooldownMs) return;
+    const blockedUntil = Number(onlineSyncBlockedUntil.get(activeStoreId) || 0);
+    if (blockedUntil > currentTime) {
+      lastOnlineSyncPendingCount.set(activeStoreId, normalizedPendingCount);
+      return;
+    }
+    if (blockedUntil > 0) onlineSyncBlockedUntil.delete(activeStoreId);
+    if (!(firstNonEmptyAfterEmpty && !urgent) && currentTime - lastSync < cooldownMs) return;
     lastOnlineSyncAt.set(activeStoreId, currentTime);
     lastOnlineSyncPendingCount.set(activeStoreId, normalizedPendingCount);
     try {
       const syncResult = await client.syncOnlineShops([activeStoreId], "all");
+      onlineSyncBlockedUntil.delete(activeStoreId);
       recordMetric("store_syncs.jsonl", {
         store_id: activeStoreId,
         kind: "online-products",
@@ -682,6 +812,19 @@ export function createPublishRunner({
         result: syncResult ?? null,
       });
     } catch (error) {
+      const retryAfterMs = onlineSyncRetryAfterMs(error, { nowMs: currentTime });
+      const blockedForMs = retryAfterMs === null
+        ? 0
+        : Math.max(cooldownMs, retryAfterMs);
+      const nextBlockedUntil = blockedForMs > 0
+        ? currentTime + boundedBackoffMs(blockedForMs)
+        : 0;
+      if (nextBlockedUntil > 0) {
+        onlineSyncBlockedUntil.set(
+          activeStoreId,
+          Math.max(Number(onlineSyncBlockedUntil.get(activeStoreId) || 0), nextBlockedUntil),
+        );
+      }
       recordMetric("store_syncs.jsonl", {
         store_id: activeStoreId,
         kind: "online-products",
@@ -690,18 +833,35 @@ export function createPublishRunner({
         cooldown_ms: cooldownMs,
         urgent,
         error: String(error?.message || error),
+        ...(retryAfterMs === null ? {} : {
+          retry_after_ms: retryAfterMs,
+          blocked_until: new Date(nextBlockedUntil).toISOString(),
+        }),
       });
     }
   }
 
-  async function publishSerial(sku, payload, targetConfig) {
-    const submission = publishChain.then(async () => {
-      if (haltReason) return { ok: false, reason: haltReason, not_submitted: true };
-      return client.publish(payload);
-    });
-    publishChain = submission.catch(() => {});
-    const publishResult = await submission;
-    if (!publishResult?.ok) return { ok: false, reason: publishResult?.reason || "publish-not-confirmed", publish_result: publishResult ?? null };
+  async function persistAcceptedSubmission(sku, submissionState, publishResult, targetConfig) {
+    const acceptedAt = now().toISOString();
+    const acceptedState = {
+      ...submissionState,
+      reason: "submission-accepted",
+      submission_intent: false,
+      submitted: true,
+      submission_pending: false,
+      submitted_at: acceptedAt,
+      api_call_accepted_at: acceptedAt,
+      api_call_completed_at: acceptedAt,
+      publish_result: publishResult ?? null,
+    };
+    const recorded = await state.transition(sku, "processing", acceptedState);
+    if (recorded === false) {
+      const error = new Error(`accepted submission state could not be persisted for SKU ${sku}`);
+      error.code = "SUBMISSION_ACCEPTANCE_PERSIST_FAILED";
+      error.sku = sku;
+      throw error;
+    }
+
     const submittedStoreId = Number(targetConfig.store.id);
     storeDailyUsage.set(submittedStoreId, Number(storeDailyUsage.get(submittedStoreId) || 0) + 1);
     const reservationKey = `${submittedStoreId}:${sku}`;
@@ -723,13 +883,46 @@ export function createPublishRunner({
       limit: configuredTotalStoreLimit,
       event: "submission-reserved",
     });
+    return acceptedState;
+  }
+
+  async function publishSerial(sku, payload, targetConfig, submissionState, batchControl = null) {
+    const submission = publishChain.then(async () => {
+      if (haltReason) return { ok: false, reason: haltReason, not_submitted: true };
+      if (batchControl?.cancelled) {
+        return { ok: false, reason: "batch-fatal-cancelled", not_submitted: true };
+      }
+      const publishResult = await client.publish(payload);
+      if (!publishResult?.ok) {
+        return {
+          ok: false,
+          reason: publishResult?.reason || "publish-not-confirmed",
+          publish_result: publishResult ?? null,
+          not_submitted: true,
+        };
+      }
+      const acceptedState = await persistAcceptedSubmission(
+        sku,
+        submissionState,
+        publishResult,
+        targetConfig,
+      );
+      return { ok: true, publish_result: publishResult, accepted_state: acceptedState };
+    });
+    publishChain = submission.catch(() => {});
+    const accepted = await submission;
+    if (!accepted?.ok) return accepted;
     await maybeSyncOnlineShop(targetConfig, { pendingCount: 1 });
     const confirmation = await confirmPublication(sku, payload, targetConfig);
     if (confirmation.reason === "daily-product-limit") haltReason = confirmation.reason;
-    return { ...confirmation, publish_result: publishResult };
+    return {
+      ...confirmation,
+      publish_result: accepted.publish_result,
+      accepted_state: accepted.accepted_state,
+    };
   }
 
-  async function skip(item, reason, data = {}) {
+  async function completeSkipIntent(item, reason, data = {}, { intentRecorded = false } = {}) {
     const sku = asSku(item);
     if (validationOnly) {
       recordMetric("validation_gate.jsonl", {
@@ -740,29 +933,201 @@ export function createPublishRunner({
       });
       return { status: "skipped", sku, source_url: item.source_url ?? null, reason };
     }
+    const skipReason = String(reason || item?.skip_reason || item?.reason || "policy-skipped");
+    const intentState = {
+      ...item,
+      ...data,
+      reason: skipReason,
+      skip_reason: skipReason,
+      skip_intent: true,
+      favorite_deleted: false,
+      skip_intent_at: item?.skip_intent_at || now().toISOString(),
+    };
+    if (!intentRecorded) {
+      const recorded = await state.transition(sku, "processing", intentState);
+      if (recorded === false) {
+        return {
+          status: "ignored",
+          sku,
+          source_url: item.source_url ?? null,
+          reason: "skip-intent-not-recorded",
+        };
+      }
+    }
     try {
       await client.deleteFavorite(item);
     } catch (error) {
-      if (isFatalBrowserError(error)) throw error;
+      if (isFatalRunnerError(error)) throw error;
       await state.transition(sku, "failed", {
+        ...intentState,
         reason: "favorite-delete-failed",
-        skip_reason: reason,
+        skip_reason: skipReason,
+        skip_intent: true,
         error: String(error?.message || error),
       });
       return { status: "failed", sku, source_url: item.source_url ?? null, reason: "favorite-delete-failed" };
     }
-    await state.transition(sku, "skipped", { reason, favorite_deleted: true, ...data });
-    return { status: "skipped", sku, source_url: item.source_url ?? null, reason };
+    const closed = await state.transition(sku, "skipped", {
+      ...intentState,
+      reason: skipReason,
+      skip_reason: skipReason,
+      skip_intent: false,
+      favorite_deleted: true,
+      favorite_deleted_at: now().toISOString(),
+    });
+    return closed === false
+      ? { status: "ignored", sku, source_url: item.source_url ?? null, reason: "skip-close-not-recorded" }
+      : { status: "skipped", sku, source_url: item.source_url ?? null, reason: skipReason };
   }
 
-  async function processItem(item, targetConfig) {
+  async function skip(item, reason, data = {}) {
+    return completeSkipIntent(item, reason, data);
+  }
+
+  async function attemptBlock(sku) {
+    if (typeof state.canAttempt !== "function") return null;
+    const decision = await state.canAttempt(sku, { at: now().toISOString() });
+    if (!decision || decision.allowed !== false) return null;
+    return {
+      status: "ignored",
+      sku,
+      reason: String(decision.reason || "state-attempt-not-allowed"),
+      ...(decision.nextEligibleAt ? { retry_at: decision.nextEligibleAt } : {}),
+    };
+  }
+
+  async function finalizePublicationAttempt({
+    item,
+    submissionState,
+    payload,
+    finalResult,
+  }) {
+    const sku = asSku(submissionState);
+    const acceptedState = finalResult?.accepted_state || null;
+    if (!finalResult?.ok) {
+      const reason = finalResult?.reason || "publish-not-confirmed";
+      const submitted = acceptedState?.submitted === true;
+      const retryablePending = submitted && [
+        "publish-final-status-timeout",
+        "import-transient-error",
+        "online-product-not-selling",
+        "stock-activation-failed",
+        "stock-activation-rejected",
+      ].includes(reason);
+      const completedAt = now().toISOString();
+      await state.transition(sku, retryablePending ? "processing" : "failed", {
+        ...submissionState,
+        ...(acceptedState || {}),
+        reason,
+        submission_intent: false,
+        submitted,
+        submission_pending: false,
+        api_call_completed_at: acceptedState?.api_call_completed_at || completedAt,
+        final_result: finalResult ?? null,
+        ...(retryablePending ? {
+          reconcile_attempts: 0,
+          next_reconcile_at: new Date(now().getTime() + 10_000).toISOString(),
+        } : {}),
+      });
+      if (!retryablePending && submitted) {
+        const reservationKey = `${Number(submissionState.store_id)}:${sku}`;
+        if (storeTotalReservations.delete(reservationKey)) {
+          storeTotalUsage.set(
+            Number(submissionState.store_id),
+            Math.max(0, Number(storeTotalUsage.get(Number(submissionState.store_id)) || 0) - 1),
+          );
+        }
+      }
+      return {
+        status: retryablePending ? "submitted" : "failed",
+        sku,
+        source_url: item?.source_url ?? submissionState.source_url ?? null,
+        reason,
+      };
+    }
+
+    const onlineProduct = finalResult.online_product;
+    const recorded = await state.recordPublished({
+      ...submissionState,
+      ...(acceptedState || {}),
+      sku,
+      link: payload.rows[0].link,
+      offer_id: finalResult.import_log?.offer_id || payload.rows[0].offer_id,
+      store_sku: onlineProduct.sku,
+      product_id: onlineProduct.product_id,
+      product_record_id: onlineProduct.id,
+      online_status: onlineProduct.online_status,
+      stock: onlineProduct.stock,
+      import_status: normalizedImportStatus(finalResult.import_log),
+      submission_intent: false,
+      submitted: true,
+      submission_pending: false,
+      mode: "FBS",
+      shipping_mode: "FBS",
+      preflight_mode: "FBS",
+      quality_gate_passed: true,
+      published_at: now().toISOString(),
+    });
+    if (recorded === false) {
+      return {
+        status: "ignored",
+        sku,
+        source_url: item?.source_url ?? submissionState.source_url ?? null,
+        reason: "publication-already-recorded",
+      };
+    }
+    return {
+      status: "published",
+      sku,
+      source_url: item?.source_url ?? submissionState.source_url ?? null,
+      payload,
+      finalResult,
+      source_yield_evidence: strictSourceYieldEvidence({
+        onlineProduct,
+        profitRate: submissionState.profit_rate,
+        shippingMode: "FBS",
+        productUrl: submissionState.detail_url
+          || submissionState.link
+          || submissionState.href
+          || canonicalProductUrl(sku),
+      }),
+    };
+  }
+
+  async function processItem(item, targetConfig, batchControl = null, {
+    eligibilityChecked = false,
+  } = {}) {
     const sku = asSku(item);
     try {
-      if (!validationOnly) await state.transition(sku, "processing", { started_at: now().toISOString() });
+      if (!eligibilityChecked) {
+        const blocked = await attemptBlock(sku);
+        if (blocked) return { ...blocked, source_url: item.source_url ?? null };
+      }
+      if (batchControl?.cancelled) {
+        return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
+      }
+      if (!validationOnly) {
+        const started = await state.transition(sku, "processing", {
+          ...item,
+          reason: "processing-started",
+          started_at: now().toISOString(),
+        });
+        if (started === false) {
+          return {
+            status: "ignored",
+            sku,
+            source_url: item.source_url ?? null,
+            reason: "processing-reservation-not-acquired",
+          };
+        }
+      }
       const [detailResult, categoryData] = await timed(sku, "ozon_detail_and_category", () => Promise.all([
         detailProvider.getProductDetail(sku, item),
         client.getCategoryBySku(sku),
       ]));
+      if (batchControl?.cancelled) {
+        return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
+      }
       const firstDetail = { ...item, ...(detailResult || {}) };
       const firstReason = policy.preflightSkipReason({ ...firstDetail, economy: ECONOMY_SENTINEL });
       if (firstReason) return skip(item, firstReason);
@@ -850,24 +1215,41 @@ export function createPublishRunner({
         expect_category: (category?.labels || []).slice(0, 2).join(" "),
       }, runDir));
       if (!cost?.ok && cost?.deferred === true && cost?.terminal === false) {
-        const retryAt = String(cost.retry_at || new Date(now().getTime() + 300_000).toISOString());
+        const retry = boundedTransientFailure({
+          reason: "1688-health-deferred",
+          now: now(),
+          previousAttempts: item?.transient_attempts,
+          previousDay: item?.retry_day,
+          backoffMs: 300_000,
+          retryAt: cost.retry_at,
+        });
         await state.transition(sku, "failed", {
           ...item,
-          reason: "1688-health-deferred",
-          retry_at: retryAt,
+          ...retry,
           submitted: false,
           submission_pending: false,
           cost,
         });
+        if (retry.terminal) {
+          return {
+            status: "failed",
+            sku,
+            source_url: item.source_url ?? null,
+            reason: retry.reason,
+          };
+        }
         return {
           status: "deferred",
           sku,
           source_url: item.source_url ?? null,
           reason: "1688-health-deferred",
-          retry_at: retryAt,
+          retry_at: retry.retry_at,
         };
       }
-      if (!cost?.ok) return skip(item, normalizeCostFailureReason(cost), { cost });
+      if (!cost?.ok || !(Number(cost?.cost) > 0)) {
+        return skip(item, normalizeCostFailureReason(cost), { cost });
+      }
+      const costEvidence = publicationCostEvidence(cost);
 
       const calc = await timed(sku, "profit_calculation", () => client.calculateProfit(profitCalculationInput({
         sku,
@@ -892,6 +1274,7 @@ export function createPublishRunner({
       if (profitReason) return skip(item, profitReason, { profit });
 
       const payload = buildPayload(item, detail, economy, targetConfig, now);
+      const preparedAt = now().toISOString();
       const submissionState = {
         ...item,
         sku,
@@ -910,9 +1293,13 @@ export function createPublishRunner({
         shipping_mode: "FBS",
         preflight_mode: "FBS",
         fbs_evidence: fbsEvidence,
-        submission_pending: true,
-        prepared_at: now().toISOString(),
-        selected_at: now().toISOString(),
+        ...costEvidence,
+        submission_intent: true,
+        submitted: false,
+        submission_pending: false,
+        submission_payload: payload,
+        prepared_at: preparedAt,
+        selected_at: preparedAt,
       };
       const duplicateOwner = crossStoreDuplicateOwner(submissionState.title, sku, targetConfig.store.id);
       if (duplicateOwner) {
@@ -921,6 +1308,17 @@ export function createPublishRunner({
           duplicate_store_id: duplicateOwner.storeId,
         });
       }
+      submissionState.quality_gate_passed = true;
+      submissionState.quality_checks = {
+        pure_fbs: true,
+        reliable_1688_cost: true,
+        profit_gt_30: true,
+        prohibited_category: true,
+        title: true,
+        image: true,
+        category: true,
+        historical_and_cross_store_duplicate: true,
+      };
       if (validationOnly) {
         recordMetric("validation_gate.jsonl", {
           sku,
@@ -934,111 +1332,111 @@ export function createPublishRunner({
           store_id: submissionState.store_id,
           watermark_id: submissionState.watermark_id,
           cost,
+          cost_verified: costEvidence.cost_verified,
+          cost_source: costEvidence.cost_source,
           fbs_evidence: fbsEvidence,
+          quality_gate_passed: true,
+          quality_checks: submissionState.quality_checks,
           validated_at: now().toISOString(),
         });
         await metricsChain;
         return { status: "validated", sku, source_url: item.source_url ?? null };
       }
-      reserveSelectedTitle(submissionState.title, sku, targetConfig.store.id);
-      await state.recordSelected?.(submissionState);
-      await state.transition(sku, "processing", submissionState);
-      const finalResult = await timed(sku, "maozi_publish_and_confirm", () => publishSerial(sku, payload, targetConfig));
-      if (!finalResult?.ok) {
-        const reason = finalResult?.reason || "publish-not-confirmed";
-        const submitted = Boolean(finalResult?.publish_result?.ok && !finalResult?.publish_result?.not_submitted);
-        const retryablePending = submitted && [
-          "publish-final-status-timeout",
-          "import-transient-error",
-          "online-product-not-selling",
-          "stock-activation-failed",
-          "stock-activation-rejected",
-        ].includes(reason);
-        await state.transition(sku, retryablePending ? "processing" : "failed", {
-          ...submissionState,
-          reason,
-          submitted,
-          final_result: finalResult ?? null,
-          ...(retryablePending ? {
-            reconcile_attempts: 0,
-            next_reconcile_at: new Date(now().getTime() + 10_000).toISOString(),
-          } : {}),
-        });
-        if (!retryablePending && submitted) {
-          const reservationKey = `${Number(targetConfig.store.id)}:${sku}`;
-          if (storeTotalReservations.delete(reservationKey)) {
-            storeTotalUsage.set(Number(targetConfig.store.id), Math.max(0, Number(storeTotalUsage.get(Number(targetConfig.store.id)) || 0) - 1));
-          }
-        }
-        return { status: retryablePending ? "submitted" : "failed", sku, source_url: item.source_url ?? null, reason };
+      if (typeof state.recordSelected === "function") {
+        await state.recordSelected(submissionState);
       }
-
-      const onlineProduct = finalResult.online_product;
-
-      await state.recordPublished({
-        ...item,
-        sku,
-        link: payload.rows[0].link,
-        sell_price: payload.rows[0].sell_price,
-        purchase_price: profit.purchase_price,
-        profit_rate: profit.profit_rate,
-        cate_rate: profit.cate_rate,
-        cate_fee: profit.cate_fee,
-        store_id: targetConfig.store.id,
-        store_name: targetConfig.store.name ?? targetConfig.store.title ?? "",
-        watermark_id: targetConfig.watermark.id,
-        offer_id: finalResult.import_log?.offer_id || payload.rows[0].offer_id,
-        store_sku: onlineProduct.sku,
-        product_id: onlineProduct.product_id,
-        product_record_id: onlineProduct.id,
-        online_status: onlineProduct.online_status,
-        stock: onlineProduct.stock,
-        import_status: normalizedImportStatus(finalResult.import_log),
-        mode: "FBS",
-        shipping_mode: "FBS",
-        preflight_mode: "FBS",
-        fbs_evidence: fbsEvidence,
-        published_at: now().toISOString(),
+      const reserved = await state.transition(sku, "processing", {
+        ...submissionState,
+        reason: "submission-intent",
       });
-      return {
-        status: "published",
+      if (reserved === false) {
+        return {
+          status: "ignored",
+          sku,
+          source_url: item.source_url ?? null,
+          reason: "submission-reservation-not-acquired",
+        };
+      }
+      const persistedIntent = typeof state.entryOf === "function"
+        ? state.entryOf(sku)
+        : null;
+      const persistedIntentData = persistedIntent?.data || {};
+      if (persistedIntentData.reconcile_only === true || persistedIntentData.api_call_started_at) {
+        return recoverSubmissionIntent(
+          { ...submissionState, ...persistedIntentData, sku },
+          targetConfig,
+          batchControl,
+        );
+      }
+      const apiCallStartedAt = now().toISOString();
+      const apiCallState = {
+        ...submissionState,
+        reason: "submission-api-call-started",
+        submission_intent: true,
+        submitted: false,
+        submission_pending: false,
+        api_call_started_at: apiCallStartedAt,
+        api_call_attempts_total: 1,
+        api_call_attempts_day: 1,
+        api_call_day: localDateKey(apiCallStartedAt, dailyStoreTimeZone),
+      };
+      const apiCallRecorded = await state.transition(sku, "processing", apiCallState);
+      if (apiCallRecorded === false) {
+        return {
+          status: "ignored",
+          sku,
+          source_url: item.source_url ?? null,
+          reason: "submission-api-call-reservation-not-acquired",
+        };
+      }
+      reserveSelectedTitle(submissionState.title, sku, targetConfig.store.id);
+      const finalResult = await timed(
         sku,
-        source_url: item.source_url ?? null,
+        "maozi_publish_and_confirm",
+        () => publishSerial(sku, payload, targetConfig, apiCallState, batchControl),
+      );
+      return finalizePublicationAttempt({
+        item,
+        submissionState: apiCallState,
         payload,
         finalResult,
-        source_yield_evidence: strictSourceYieldEvidence({
-          onlineProduct,
-          profitRate: profit.profit_rate,
-          shippingMode: "FBS",
-          productUrl: item.detail_url || item.link || item.href || canonicalProductUrl(sku),
-        }),
-      };
+      });
     } catch (error) {
-      if (isFatalBrowserError(error)) throw error;
+      if (isFatalRunnerError(error)) throw error;
       const deterministicReason = deterministicProfitFailureReason(error);
       if (deterministicReason) {
         return skip(item, deterministicReason, { error: String(error?.message || error) });
       }
       if (isOzonSoftBlockError(error)) {
-        const transientAttempts = Math.max(0, Number(item?.transient_attempts) || 0) + 1;
-        const retryAt = new Date(
-          now().getTime() + transientCandidateBackoffMs(transientAttempts),
-        ).toISOString();
+        const nextAttempt = Math.max(0, Number(item?.transient_attempts) || 0) + 1;
+        const retry = boundedTransientFailure({
+          reason: "ozon-detail-soft-block-deferred",
+          now: now(),
+          previousAttempts: item?.transient_attempts,
+          previousDay: item?.retry_day,
+          backoffMs: transientCandidateBackoffMs(nextAttempt),
+        });
         await state.transition(sku, "failed", {
           ...item,
-          reason: "ozon-detail-soft-block-deferred",
+          ...retry,
           error: String(error?.message || error),
-          retry_at: retryAt,
-          transient_attempts: transientAttempts,
           submitted: false,
           submission_pending: false,
         }).catch(() => {});
+        if (retry.terminal) {
+          return {
+            status: "failed",
+            sku,
+            source_url: item.source_url ?? null,
+            reason: retry.reason,
+          };
+        }
         return {
           status: "deferred",
           sku,
           source_url: item.source_url ?? null,
           reason: "ozon-detail-soft-block-deferred",
-          retry_at: retryAt,
+          retry_at: retry.retry_at,
         };
       }
       await state.transition(sku, "failed", { reason: "exception", error: String(error?.message || error) }).catch(() => {});
@@ -1046,9 +1444,207 @@ export function createPublishRunner({
     }
   }
 
+  async function recoverSubmissionIntent(item, targetConfig, batchControl = null) {
+    const sku = asSku(item);
+    const payload = item?.submission_payload;
+    const offerId = String(item?.offer_id || payload?.rows?.[0]?.offer_id || "").trim();
+    const lease = await state.transition(sku, "processing", {
+      ...item,
+      reason: "submission-intent-recovery",
+      submission_intent: true,
+      submitted: false,
+      submission_pending: false,
+      reconcile_only: true,
+    });
+    if (lease === false) {
+      return {
+        status: "ignored",
+        sku,
+        source_url: item.source_url ?? null,
+        reason: "submission-recovery-reservation-not-acquired",
+      };
+    }
+    if (batchControl?.cancelled) {
+      return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
+    }
+
+    const verificationAttempts = Math.max(1, Math.min(2, Number(confirmationAttempts) || 1));
+    let importLog = null;
+    let onlineProduct = null;
+    try {
+      for (let attempt = 0; attempt < verificationAttempts; attempt += 1) {
+        [importLog, onlineProduct] = await Promise.all([
+          typeof client.findImportLog === "function"
+            ? client.findImportLog({
+              shopId: targetConfig.store.id,
+              sku,
+              offerId: offerId || undefined,
+            })
+            : null,
+          offerId && typeof client.findOnlineProduct === "function"
+            ? client.findOnlineProduct({
+              shopId: targetConfig.store.id,
+              offerId,
+            })
+            : null,
+        ]);
+        if (importLog || onlineProduct) break;
+        if (attempt + 1 < verificationAttempts && Number(confirmationIntervalMs) > 0) {
+          await sleep(Number(confirmationIntervalMs));
+        }
+      }
+    } catch (error) {
+      if (isFatalRunnerError(error)) throw error;
+      await state.transition(sku, "processing", {
+        ...item,
+        reason: "submission-intent-verification-failed",
+        submission_intent: true,
+        submitted: false,
+        submission_pending: false,
+        reconcile_only: true,
+        verification_error: String(error?.message || error),
+        next_reconcile_at: new Date(now().getTime() + 30_000).toISOString(),
+      }).catch(() => {});
+      return {
+        status: "ignored",
+        sku,
+        source_url: item.source_url ?? null,
+        reason: "submission-intent-verification-failed",
+      };
+    }
+
+    const usablePayload = payload?.rows?.[0]
+      ? payload
+      : offerId
+        ? {
+          rows: [{
+            offer_id: offerId,
+            link: item.link || canonicalProductUrl(sku),
+          }],
+        }
+        : null;
+    if (importLog || onlineProduct) {
+      const recoveredPublishResult = {
+        ok: true,
+        recovered: true,
+        evidence: importLog ? "import-log" : "online-product",
+      };
+      const acceptedState = await persistAcceptedSubmission(
+        sku,
+        item,
+        recoveredPublishResult,
+        targetConfig,
+      );
+      await maybeSyncOnlineShop(targetConfig, { pendingCount: 1 });
+      let finalResult;
+      if (isEffectiveOnlineProduct(onlineProduct)) {
+        finalResult = {
+          ok: true,
+          import_log: importLog,
+          online_product: onlineProduct,
+        };
+      } else if (usablePayload) {
+        finalResult = await confirmPublication(sku, usablePayload, targetConfig, { attempts: 1 });
+      } else {
+        finalResult = { ok: false, reason: "submission-intent-payload-missing", import_log: importLog };
+      }
+      return finalizePublicationAttempt({
+        item,
+        submissionState: acceptedState,
+        payload: usablePayload || {
+          rows: [{ offer_id: offerId, link: item.link || canonicalProductUrl(sku) }],
+        },
+        finalResult: {
+          ...finalResult,
+          publish_result: recoveredPublishResult,
+          accepted_state: acceptedState,
+        },
+      });
+    }
+
+    const callDay = localDateKey(now(), dailyStoreTimeZone);
+    const previousDay = String(item?.api_call_day || "");
+    const attemptsTotal = Math.max(
+      item?.api_call_started_at ? 1 : 0,
+      Math.floor(Number(item?.api_call_attempts_total) || 0),
+    );
+    const attemptsToday = previousDay === callDay
+      ? Math.max(1, Math.floor(Number(item?.api_call_attempts_day) || 0))
+      : 0;
+    if (!usablePayload || attemptsTotal >= 2 || attemptsToday >= 2) {
+      await state.transition(sku, "failed", {
+        ...item,
+        reason: usablePayload
+          ? "submission-api-uncertain-retry-exhausted"
+          : "submission-intent-payload-missing",
+        submission_intent: false,
+        submitted: false,
+        submission_pending: false,
+        terminal: true,
+        reconcile_only: false,
+        verification_completed_at: now().toISOString(),
+      });
+      return {
+        status: "failed",
+        sku,
+        source_url: item.source_url ?? null,
+        reason: usablePayload
+          ? "submission-api-uncertain-retry-exhausted"
+          : "submission-intent-payload-missing",
+      };
+    }
+
+    const retryStartedAt = now().toISOString();
+    const retryState = {
+      ...item,
+      reason: "submission-intent-bounded-retry",
+      submission_intent: true,
+      submitted: false,
+      submission_pending: false,
+      reconcile_only: true,
+      submission_payload: usablePayload,
+      previous_api_call_started_at: item?.api_call_started_at || null,
+      api_call_started_at: retryStartedAt,
+      api_call_attempts_total: attemptsTotal + 1,
+      api_call_attempts_day: attemptsToday + 1,
+      api_call_day: callDay,
+    };
+    const retryReserved = await state.transition(sku, "processing", retryState);
+    if (retryReserved === false) {
+      return {
+        status: "ignored",
+        sku,
+        source_url: item.source_url ?? null,
+        reason: "submission-retry-reservation-not-acquired",
+      };
+    }
+    const finalResult = await timed(
+      sku,
+      "maozi_publish_and_confirm",
+      () => publishSerial(sku, usablePayload, targetConfig, retryState, batchControl),
+    );
+    return finalizePublicationAttempt({
+      item,
+      submissionState: retryState,
+      payload: usablePayload,
+      finalResult,
+    });
+  }
+
   async function run() {
     await state.load?.();
     const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
+    const restoredValidatedSkus = new Set();
+    if (validationOnly) {
+      const latestValidation = new Map();
+      for (const row of await readJsonLinesIncremental(path.join(runDir, "validation_gate.jsonl"))) {
+        const sku = String(row?.sku || "").trim();
+        if (sku) latestValidation.set(sku, row);
+      }
+      for (const [sku, row] of latestValidation) {
+        if (String(row?.status || "") === "validated") restoredValidatedSkus.add(sku);
+      }
+    }
     const cleanupLimit = Math.max(0, Math.floor(Number(importedFavoriteCleanupLimit) || 0));
     if (cleanupLimit > 0 && typeof client.listAllFavorites === "function") {
       let allFavorites = [];
@@ -1056,7 +1652,7 @@ export function createPublishRunner({
       try {
         allFavorites = await client.listAllFavorites();
       } catch (error) {
-        if (isFatalBrowserError(error)) throw error;
+        if (isFatalRunnerError(error)) throw error;
         cleanupFailed += 1;
         recordMetric("failed.jsonl", {
           reason: "imported-favorite-list-failed",
@@ -1079,7 +1675,7 @@ export function createPublishRunner({
           await client.deleteFavorite(item);
           cleanupDeleted += 1;
         } catch (error) {
-          if (isFatalBrowserError(error)) throw error;
+          if (isFatalRunnerError(error)) throw error;
           cleanupFailed += 1;
           recordMetric("failed.jsonl", {
             sku: asSku(item),
@@ -1187,7 +1783,7 @@ export function createPublishRunner({
       for (const line of syncEvents.split(/\n/).filter(Boolean)) {
         try {
           const event = JSON.parse(line);
-          if (event?.kind !== "online-products" || event?.ok !== true) continue;
+          if (event?.kind !== "online-products") continue;
           const storeKey = Number(event.store_id);
           const timestamp = Date.parse(event.at);
           if (storeKey > 0 && Number.isFinite(timestamp)) {
@@ -1197,6 +1793,17 @@ export function createPublishRunner({
               const pendingCount = Number(event.pending_count);
               if (Number.isFinite(pendingCount) && pendingCount >= 0) {
                 lastOnlineSyncPendingCount.set(storeKey, pendingCount);
+              }
+              onlineSyncBlockedUntil.delete(storeKey);
+              const blockedUntil = Date.parse(event.blocked_until || "");
+              if (event.ok !== true && Number.isFinite(blockedUntil) && blockedUntil > now().getTime()) {
+                onlineSyncBlockedUntil.set(
+                  storeKey,
+                  Math.min(
+                    blockedUntil,
+                    timestamp + MAX_ONLINE_SYNC_SERVER_BACKOFF_MS,
+                  ),
+                );
               }
             }
           }
@@ -1494,11 +2101,16 @@ export function createPublishRunner({
     );
     const facts = await loadCandidateFacts(runDir, candidateFactSeedFiles);
     const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
-    const favorites = (await client.listFavorites()).map((item) => {
-      const sku = String(item?.sku ?? item?.id ?? "");
-      const restored = restoredBySku.get(sku);
-      return mergeCandidateFacts({ ...(restored?.data || {}), ...item }, facts.get(sku) || {});
-    });
+    const favorites = (await client.listFavorites())
+      .filter((item) => {
+        const sku = String(item?.sku ?? item?.id ?? "");
+        return !validationOnly || !restoredValidatedSkus.has(sku);
+      })
+      .map((item) => {
+        const sku = String(item?.sku ?? item?.id ?? "");
+        const restored = restoredBySku.get(sku);
+        return mergeCandidateFacts({ ...(restored?.data || {}), ...item }, facts.get(sku) || {});
+      });
     const favoriteSkus = new Set(favorites.map((item) => String(item?.sku ?? item?.id ?? "")));
     const delayedSubmissions = restoredEntries
       .filter((entry) => ["processing", "failed"].includes(entry.status)
@@ -1506,6 +2118,7 @@ export function createPublishRunner({
         && !favoriteSkus.has(String(entry.sku))
         && (entry.data?.submitted === true
           || entry.data?.submission_pending === true
+          || entry.data?.submission_intent === true
           || entry.data?.reason === "publish-final-status-timeout"))
       .map((entry) => mergeCandidateFacts({
         ...(entry.data || {}),
@@ -1515,6 +2128,7 @@ export function createPublishRunner({
     if (delayedSubmissions.length > 0) {
       const delayedCountByStore = new Map();
       for (const item of delayedSubmissions) {
+        if (item?.submitted !== true && item?.submission_pending !== true) continue;
         const delayedStoreId = Number(item.store_id) || Number(targetConfig.store.id);
         delayedCountByStore.set(delayedStoreId, Number(delayedCountByStore.get(delayedStoreId) || 0) + 1);
       }
@@ -1529,14 +2143,17 @@ export function createPublishRunner({
     const runnableFavorites = reconciliationOnly || freshSubmissionsPaused
       ? nonTerminalFavorites.filter((item) => {
         const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
-        return restored?.data?.submitted === true || restored?.data?.submission_pending === true;
+        return restored?.data?.submitted === true
+          || restored?.data?.submission_pending === true
+          || restored?.data?.submission_intent === true;
       })
       : nonTerminalFavorites;
     const preflightPureSkus = await loadPreflightPureSkus(runDir, candidateFactSeedFiles);
     const { familyScores, sourceScores } = await loadObservedPublishFeedback(runDir, publishFeedbackSeedFiles);
     const isReconciliationCandidate = (item) => item?.reconcile_only === true
       || item?.submitted === true
-      || item?.submission_pending === true;
+      || item?.submission_pending === true
+      || item?.submission_intent === true;
     const freshCandidates = prioritizePublishCandidates(
       runnableFavorites.filter((item) => !isReconciliationCandidate(item)),
       preflightPureSkus,
@@ -1561,13 +2178,18 @@ export function createPublishRunner({
     let dryCandidates = 0;
     let validated = 0;
 
-    async function handleCandidate(inputItem) {
+    async function handleCandidate(inputItem, batchControl = null) {
       const sku = asSku(inputItem);
+      const blocked = await attemptBlock(sku);
+      if (blocked) return { ...blocked, source_url: inputItem.source_url ?? null };
+      if (batchControl?.cancelled) {
+        return { status: "ignored", sku, source_url: inputItem.source_url ?? null, reason: "batch-fatal-cancelled" };
+      }
       if (state.hasPublished(sku)) {
         try {
           await client.deleteFavorite(inputItem);
         } catch (error) {
-          if (isFatalBrowserError(error)) throw error;
+          if (isFatalRunnerError(error)) throw error;
           recordMetric("failed.jsonl", {
             sku,
             reason: "historical-favorite-delete-failed",
@@ -1583,11 +2205,41 @@ export function createPublishRunner({
         : typeof state.entries === "function"
           ? state.entries().find((entry) => String(entry.sku) === String(sku))
           : null;
-      const restoredStatus = latestEntry?.status ?? state.statusOf?.(sku);
+      let restoredStatus = latestEntry?.status ?? state.statusOf?.(sku);
       const restoredEntry = latestEntry || restoredBySku.get(String(sku));
-      const item = latestEntry
+      let item = latestEntry
         ? mergeCandidateFacts({ ...inputItem, ...(latestEntry.data || {}), sku }, facts.get(String(sku)) || {})
         : inputItem;
+      if (item?.skip_intent === true) {
+        return {
+          ...await completeSkipIntent(
+            item,
+            item.skip_reason || item.reason,
+            item,
+            { intentRecorded: true },
+          ),
+          attempted: true,
+        };
+      }
+      if (item?.submission_intent === true && item?.submitted !== true) {
+        let recoveryTarget = targetConfig;
+        const intentStoreId = Number(item.store_id || 0);
+        if (intentStoreId > 0 && intentStoreId !== Number(targetConfig.store.id)) {
+          const intentTargetIndex = targetPlan.findIndex((entry) => Number(entry.id) === intentStoreId);
+          if (intentTargetIndex < 0) {
+            await state.transition(sku, "failed", {
+              ...item,
+              reason: "reconciliation-store-not-configured",
+            });
+            return { status: "failed", sku, reason: "reconciliation-store-not-configured" };
+          }
+          recoveryTarget = await resolveTargetConfig(intentTargetIndex, { allowExhausted: true });
+        }
+        return {
+          ...await recoverSubmissionIntent(item, recoveryTarget, batchControl),
+          attempted: true,
+        };
+      }
       if (["processing", "failed"].includes(restoredStatus)
         && (item?.submitted === true || item?.submission_pending === true)
         && item?.fbs_evidence?.verified !== true) {
@@ -1599,6 +2251,24 @@ export function createPublishRunner({
           quarantined_at: now().toISOString(),
         });
         return { status: "failed", sku, source_url: item.source_url ?? null, reason: "fbs-evidence-missing" };
+      }
+      if (["processing", "failed"].includes(restoredStatus)
+        && (item?.submitted === true || item?.submission_pending === true)
+        && !reliable1688CostEvidence(item)) {
+        await state.transition(sku, "failed", {
+          ...item,
+          reason: "1688-cost-evidence-missing",
+          terminal: true,
+          submitted: true,
+          submission_pending: false,
+          quarantined_at: now().toISOString(),
+        });
+        return {
+          status: "failed",
+          sku,
+          source_url: item.source_url ?? null,
+          reason: "1688-cost-evidence-missing",
+        };
       }
       const deferredCandidate = isDeferredCandidateReason(item?.reason);
       const deferredRetryAt = Date.parse(item?.retry_at || "");
@@ -1620,7 +2290,7 @@ export function createPublishRunner({
         try {
           await client.deleteFavorite(item);
         } catch (error) {
-          if (isFatalBrowserError(error)) throw error;
+          if (isFatalRunnerError(error)) throw error;
           await state.transition(sku, "failed", { reason: "favorite-delete-failed", error: String(error?.message || error) }).catch(() => {});
           return { status: "failed", sku, reason: "favorite-delete-failed" };
         }
@@ -1744,6 +2414,11 @@ export function createPublishRunner({
               online_status: existing.online_status,
               stock: existing.stock,
               import_status: importStatus,
+              mode: "FBS",
+              shipping_mode: "FBS",
+              preflight_mode: "FBS",
+              fbs_evidence: item.fbs_evidence,
+              ...publicationCostEvidence(item.cost),
               reconciled: true,
               reconciled_at: now().toISOString(),
               published_at: now().toISOString(),
@@ -1801,6 +2476,11 @@ export function createPublishRunner({
                 stock: existing.stock,
                 import_status: importStatus || "not-visible",
                 confirmation_source: "exact-online-offer",
+                mode: "FBS",
+                shipping_mode: "FBS",
+                preflight_mode: "FBS",
+                fbs_evidence: item.fbs_evidence,
+                ...publicationCostEvidence(item.cost),
                 reconciled: true,
                 reconciled_at: now().toISOString(),
                 published_at: now().toISOString(),
@@ -1835,7 +2515,7 @@ export function createPublishRunner({
             return { status: "ignored", sku, reason: "reconciliation-import-not-visible" };
           }
         } catch (error) {
-          if (isFatalBrowserError(error)) throw error;
+          if (isFatalRunnerError(error)) throw error;
           await state.transition(sku, "failed", {
             ...item,
             reason: "reconciliation-check-failed",
@@ -1845,7 +2525,10 @@ export function createPublishRunner({
         }
       }
 
-      return { ...await processItem(item, targetConfig), attempted: true };
+      return {
+        ...await processItem(item, targetConfig, batchControl, { eligibilityChecked: true }),
+        attempted: true,
+      };
     }
 
     let cursor = 0;
@@ -1858,7 +2541,8 @@ export function createPublishRunner({
       const nextCandidate = candidates[cursor];
       const nextIsReconciliation = nextCandidate?.reconcile_only === true
         || nextCandidate?.submitted === true
-        || nextCandidate?.submission_pending === true;
+        || nextCandidate?.submission_pending === true
+        || nextCandidate?.submission_intent === true;
       if (!nextIsReconciliation && published >= targetCount) {
         cursor += 1;
         continue;
@@ -1897,10 +2581,28 @@ export function createPublishRunner({
           remainingStoreQuota,
           nearTarget ? 1 : adaptive.current,
           validationOnly ? validationTargetCount - validated : Number.POSITIVE_INFINITY,
-        );
+      );
       const batch = candidates.slice(cursor, cursor + width);
       cursor += batch.length;
-      const results = await Promise.all(batch.map(handleCandidate));
+      const batchControl = { cancelled: false, fatalError: null };
+      const settled = await Promise.allSettled(batch.map(async (item) => {
+        try {
+          return await handleCandidate(item, batchControl);
+        } catch (error) {
+          if (isFatalRunnerError(error)) {
+            batchControl.cancelled = true;
+            batchControl.fatalError ||= error;
+          }
+          throw error;
+        }
+      }));
+      const rejected = settled.filter((result) => result.status === "rejected");
+      if (rejected.length > 0) {
+        batchControl.cancelled = true;
+        await Promise.allSettled([publishChain, metricsChain]);
+        throw batchControl.fatalError || rejected[0].reason;
+      }
+      const results = settled.map((result) => result.value);
       for (const [index, result] of results.entries()) {
         const item = batch[index];
         if (result.status !== "ignored") {

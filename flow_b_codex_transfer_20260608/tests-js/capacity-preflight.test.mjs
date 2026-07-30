@@ -42,10 +42,11 @@ test("capacity preflight confirms exact ERP warehouses and current Shanghai-day 
   assert.equal(snapshot.all_warehouses_verified, true);
   assert.equal(snapshot.all_quotas_verified, true);
   assert.equal(snapshot.total_remaining_capacity, 490);
-  assert.equal(snapshot.capacity_sufficient, true);
+  assert.equal(snapshot.required_capacity, 500);
+  assert.equal(snapshot.capacity_sufficient, false);
 });
 
-test("used quota below 481 waits for reset and an unverified warehouse never counts", () => {
+test("any used quota below the fixed 500 target fails and an unverified warehouse never counts", () => {
   const used = buildCapacityPreflight({
     configuredStores,
     erpStores: erpStores({ 106637: 20, 106640: 7, 104965: 31 }),
@@ -62,6 +63,26 @@ test("used quota below 481 waits for reset and an unverified warehouse never cou
   });
   assert.equal(badWarehouse.all_warehouses_verified, false);
   assert.equal(badWarehouse.stores.find((row) => row.store_id === 106646).available, false);
+});
+
+test("warehouse mappings and ERP store matches must be unique", () => {
+  const duplicateMapping = configuredStores.map((store, index) => ({
+    ...store,
+    warehouse_id: index === 1 ? configuredStores[0].warehouse_id : store.warehouse_id,
+  }));
+  const duplicateMappingSnapshot = buildCapacityPreflight({
+    configuredStores: duplicateMapping,
+    erpStores: erpStores(),
+    profileStores: [{ id: 106646, warehouse: [{ warehouse_id: 44 }] }],
+  });
+  assert.equal(duplicateMappingSnapshot.all_warehouses_verified, false);
+
+  const duplicateErpStoreSnapshot = buildCapacityPreflight({
+    configuredStores,
+    erpStores: [...erpStores(), erpStores()[0]],
+    profileStores: [{ id: 106646, warehouse: [{ warehouse_id: 44 }] }],
+  });
+  assert.equal(duplicateErpStoreSnapshot.all_stores_found, false);
 });
 
 test("capacity preflight uses the ERP daily-create reset that can clear the shortfall", () => {

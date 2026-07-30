@@ -995,6 +995,37 @@ function exactSourceUrlKey(value) {
   }
 }
 
+export function strictSourcePortfolioUrls(urls = []) {
+  const result = [];
+  const seen = new Set();
+  for (const value of urls || []) {
+    const source = String(value || "").trim();
+    if (!source) continue;
+    let parsed;
+    try {
+      parsed = new URL(source);
+    } catch {
+      throw new Error(`strict source portfolio contains an invalid URL: ${source}`);
+    }
+    if (
+      parsed.protocol !== "https:"
+      || !/(?:^|\.)ozon\.ru$/iu.test(parsed.hostname)
+      || !/^\/seller\/[^/]+\/?$/iu.test(parsed.pathname)
+    ) {
+      throw new Error(`strict source portfolio accepts only Ozon seller URLs: ${source}`);
+    }
+    parsed.hash = "";
+    parsed.searchParams.sort();
+    const normalized = parsed.toString();
+    const key = exactSourceUrlKey(normalized);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(normalized);
+  }
+  if (result.length === 0) throw new Error("strict source portfolio is empty");
+  return result;
+}
+
 export function filterSourceUrlsByAllowlist(urls = [], allowlistUrls = [], { match = "family" } = {}) {
   if (!allowlistUrls.length) return [...urls];
   const key = match === "exact" ? exactSourceUrlKey : sourceUrlKey;
@@ -3095,6 +3126,7 @@ export function completedSourceUrls(records = [], {
 
 export async function scanSources({ context, urlsFile, outFile, env = process.env, log = console.log }) {
   const emit = createScannerLogger(log, env.FLOW_B_LOG_LEVEL || "verbose");
+  const strictSourcePortfolio = String(env.FLOW_B_STRICT_SOURCE_PORTFOLIO || "") === "1";
   const inputPath = path.resolve(urlsFile);
   const outputPath = path.resolve(outFile);
   const inputRevision = await fs.stat(inputPath).then((stat) => (
@@ -3109,17 +3141,27 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       if (error.code !== "ENOENT") throw error;
     }
   }
-  const expandedFreshInputUrls = expandFreshSellerSourceUrls(freshInputUrls);
+  const expandedFreshInputUrls = strictSourcePortfolio
+    ? []
+    : expandFreshSellerSourceUrls(freshInputUrls);
   const classifiedFreshUrls = classifyFreshSourceUrls(expandedFreshInputUrls);
-  const inputUrls = [...new Set([
-    ...(await fs.readFile(inputPath, "utf8")).split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
-    ...expandedFreshInputUrls,
-  ])];
+  const configuredInputUrls = (await fs.readFile(inputPath, "utf8"))
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const inputUrls = strictSourcePortfolio
+    ? strictSourcePortfolioUrls(configuredInputUrls)
+    : [...new Set([
+      ...configuredInputUrls,
+      ...expandedFreshInputUrls,
+    ])];
   const allowlistFile = String(env.FLOW_B_SOURCE_ALLOWLIST_FILE || "").trim();
-  const allowlistUrls = allowlistFile
-    ? (await fs.readFile(path.resolve(allowlistFile), "utf8"))
-      .split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
-    : [];
+  const allowlistUrls = strictSourcePortfolio
+    ? inputUrls
+    : allowlistFile
+      ? (await fs.readFile(path.resolve(allowlistFile), "utf8"))
+        .split(/\r?\n/).map((value) => value.trim()).filter(Boolean)
+      : [];
   const yieldFiles = [...new Set([
     path.join(path.dirname(outputPath), "source_yield.jsonl"),
     path.join(path.dirname(outputPath), "favorite_collection.jsonl"),
@@ -3202,26 +3244,35 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const boundedEvidenceSourceKeys = new Set(
     boundedEvidenceSources.map(sourceNonFbsSampleKey).filter(Boolean),
   );
-  const urls = filterSourceUrlsByAllowlist(filterProductiveSourceVariants(
-    [...new Set([
-      ...publishedSourcePages,
-      ...nextPublishedDiscoveryPages,
-      ...repeatedPublishedDiscoveryPageFour,
-      ...expandHighYieldSourceUrls([
-        ...inputUrls,
-        ...verifiedSellerUrls,
-        ...deepVerifiedSellerVariants,
-        ...submittedSellerSourceVariants,
-        ...pureFbsSellerVariants,
-        ...derivedSearchUrls,
-      ], yieldRows),
-    ])],
-    yieldRows,
-  ), allowlistUrls, {
-    match: String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "family").toLowerCase(),
-  });
+  const allowlistMatch = strictSourcePortfolio
+    ? "exact"
+    : String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "family").toLowerCase();
+  const urls = strictSourcePortfolio
+    ? filterSourceUrlsByAllowlist(
+      inputUrls,
+      allowlistUrls.length > 0 ? allowlistUrls : inputUrls,
+      { match: "exact" },
+    )
+    : filterSourceUrlsByAllowlist(filterProductiveSourceVariants(
+      [...new Set([
+        ...publishedSourcePages,
+        ...nextPublishedDiscoveryPages,
+        ...repeatedPublishedDiscoveryPageFour,
+        ...expandHighYieldSourceUrls([
+          ...inputUrls,
+          ...verifiedSellerUrls,
+          ...deepVerifiedSellerVariants,
+          ...submittedSellerSourceVariants,
+          ...pureFbsSellerVariants,
+          ...derivedSearchUrls,
+        ], yieldRows),
+      ])],
+      yieldRows,
+    ), allowlistUrls, {
+      match: allowlistMatch,
+    });
   const allowlistOptions = {
-    match: String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "family").toLowerCase(),
+    match: allowlistMatch,
   };
   let records = filterSourceRowsByAllowlist(
     await readJsonArrayCached(outputPath),
@@ -3232,49 +3283,51 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
   });
   const highYieldSources = yieldRows.filter((row) => row?.status === "published").map((row) => row.source_url);
-  const prioritizedPending = prioritizeSourceUrls(excludeCompletedSourceFamilies(
-    urls,
-    done,
-    allowlistOptions,
-  ), {
-    highYieldSources,
-    yieldRows,
-    scanRows: records,
-    freshSourceUrls: [
-      ...classifiedFreshUrls.explorationUrls,
-      ...derivedSearchUrls,
-    ],
-    qualifiedFreshSourceUrls: qualifiedPrioritySourceUrls({
-      submittedSellerUrls: [...submittedSellerSourceVariants, ...pureFbsSellerVariants],
-      derivedSearchUrls,
-      prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
-      derivedPriorityLimit,
-    }),
-    productDiscoverySourceUrls: inputUrls.filter((url) => skuFromProductUrl(url)),
-    boundedDeepFreshSourceUrls: boundedEvidenceSources,
-    verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
-      verifiedFreshUrls: [
-        ...classifiedFreshUrls.verifiedSellerUrls,
-        ...deepVerifiedSellerVariants,
-        ...publishedSourcePages,
-        ...nextPublishedDiscoveryPages,
-        ...repeatedPublishedDiscoveryPageFour,
+  const uncompletedUrls = excludeCompletedSourceFamilies(urls, done, allowlistOptions);
+  const prioritizedPending = strictSourcePortfolio
+    ? uncompletedUrls
+    : prioritizeSourceUrls(uncompletedUrls, {
+      highYieldSources,
+      yieldRows,
+      scanRows: records,
+      freshSourceUrls: [
+        ...classifiedFreshUrls.explorationUrls,
+        ...derivedSearchUrls,
       ],
-      verifiedHistoricalUrls: verifiedSellerUrls,
-      derivedSearchUrls,
-      prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
-      derivedPriorityLimit,
-    }),
-  });
-  const pending = interleaveSourcePortfolio(deduplicateSourceDispatchFamilies(
+      qualifiedFreshSourceUrls: qualifiedPrioritySourceUrls({
+        submittedSellerUrls: [...submittedSellerSourceVariants, ...pureFbsSellerVariants],
+        derivedSearchUrls,
+        prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
+        derivedPriorityLimit,
+      }),
+      productDiscoverySourceUrls: inputUrls.filter((url) => skuFromProductUrl(url)),
+      boundedDeepFreshSourceUrls: boundedEvidenceSources,
+      verifiedFreshSourceUrls: verifiedPrioritySourceUrls({
+        verifiedFreshUrls: [
+          ...classifiedFreshUrls.verifiedSellerUrls,
+          ...deepVerifiedSellerVariants,
+          ...publishedSourcePages,
+          ...nextPublishedDiscoveryPages,
+          ...repeatedPublishedDiscoveryPageFour,
+        ],
+        verifiedHistoricalUrls: verifiedSellerUrls,
+        derivedSearchUrls,
+        prioritizeDerived: env.FLOW_B_PRIORITIZE_DERIVED_SEARCH === "1",
+        derivedPriorityLimit,
+      }),
+    });
+  const deduplicatedPending = deduplicateSourceDispatchFamilies(
     prioritizedPending,
     allowlistOptions,
-  ), yieldRows, {
-    strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
-    fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
-    exploreWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORE_WEIGHT", 1),
-    scanRows: records,
-  });
+  );
+  const pending = strictSourcePortfolio
+    ? deduplicatedPending
+    : interleaveSourcePortfolio(deduplicatedPending, yieldRows, {
+      strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
+      fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
+      exploreWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORE_WEIGHT", 1),
+      scanRows: records,
+    });
   const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const workers = Math.max(1, envNumber(env, "FLOW_B_TAB_WORKERS", 4));
   const adaptiveWorkers = sourceAdaptiveConcurrency(favoriteLog, {

@@ -1,1134 +1,38 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
-import fsp from "node:fs/promises";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { prohibitedCategorySkipReason } from "./flow_b_playwright/publish-policy.mjs";
 import {
-  deriveSearchSourceUrls,
-  isStrictSourceYieldRow,
-  normalizeRuntimeSourceYieldRows,
-  sourceYieldKey,
-} from "./flow_b_playwright/source-scanner.mjs";
+  buildStrictSellerSourcePolicy,
+  sellerRootUrl,
+} from "./flow_b_playwright/source-policy.mjs";
 
-const DEFAULT_SAFE_QUERIES = [
-  "деревянный конструктор",
-  "набор канцелярии",
-  "плюшевая игрушка",
-  "органайзер для дома",
-  "щетка для уборки",
-  "силиконовые кухонные принадлежности",
-  "набор инструментов ручных",
-  "развивающая игрушка",
-  "деревянный пазл",
-  "мозаика детская",
-  "органайзер канцелярский",
-  "набор художественных кистей",
-  "щетка для посуды",
-  "губка для уборки",
-  "крючки самоклеящиеся",
-  "зажимы для пакетов",
-  "мерные ложки кухонные",
-  "форма для льда силиконовая",
-  "контейнер для хранения мелочей",
-  "набор отверток ручных",
-  "кабельные стяжки",
-  "скотч двусторонний",
-  "точилка канцелярская",
-  "линейка школьная",
-  "лопатка кухонная силиконовая",
-  "венчик кухонный ручной",
-  "щипцы кухонные силиконовые",
-  "кисть кулинарная силиконовая",
-  "коврик для выпечки силиконовый",
-  "воронка кухонная пластиковая",
-  "сито кухонное металлическое",
-  "дуршлаг складной силиконовый",
-  "овощечистка ручная",
-  "пресс для чеснока ручной",
-  "открывалка для бутылок ручная",
-  "доска разделочная пластиковая",
-  "подставка под горячее силиконовая",
-  "держатель для губки кухонный",
-  "ершик для бутылок",
-  "салфетки микрофибра для уборки",
-  "скребок для стекла ручной",
-  "водосгон для окон ручной",
-  "совок и щетка настольные",
-  "щетка для клавиатуры",
-  "органайзер для кабелей",
-  "держатель для проводов",
-  "клипсы для кабеля",
-  "короб для проводов",
-  "подставка для телефона настольная",
-  "подставка для книг",
-  "держатель для книг",
-  "лоток для документов",
-  "подставка для ручек",
-  "закладки для книг клейкие",
-  "зажимы канцелярские",
-  "скрепки канцелярские",
-  "кнопки канцелярские",
-  "ластик школьный",
-  "транспортир школьный",
-  "циркуль школьный",
-  "пенал пластиковый",
-  "папка для документов пластиковая",
-  "кармашки для документов",
-  "органайзер для ящика",
-  "разделители для ящика",
-  "корзина для хранения пластиковая",
-  "контейнер пищевой пластиковый",
-  "банка для специй пластиковая",
-  "дозатор для мыла механический",
-  "крючок дверной металлический",
-  "стоппер дверной силиконовый",
-  "накладки мебельные фетровые",
-  "зажим для скатерти",
-  "прищепки пластиковые",
-  "набор шестигранников ручных",
-  "рулетка измерительная ручная",
-  "плоскогубцы ручные",
-  "кусачки ручные",
-  "набор бит для отвертки",
-  "магнитный держатель инструмента",
-  "кисть малярная ручная",
-  "шпатель пластиковый",
-  "карандаш строительный",
-  "стяжки многоразовые",
-  "термоусадочные трубки набор",
-  "уплотнительная лента",
-  "мебельные заглушки пластиковые",
-  "ручки мебельные",
-  "защита углов мебели",
-  "блоки деревянные детские",
-  "сортер деревянный детский",
-  "лабиринт деревянный детский",
-  "доска для рисования магнитная",
-  "кубики деревянные",
-  "головоломка деревянная",
-  "шнуровка развивающая деревянная",
-  "счетные палочки деревянные",
-  "трафареты для рисования",
-  "штампы детские пластиковые",
-  "наклейки декоративные набор",
-  "помпоны для творчества",
-  "синельная проволока для творчества",
-  "палочки для поделок деревянные",
-  "глазки для игрушек пластиковые",
-  "бусины деревянные для творчества",
-];
-
-const SAFE_QUERY_FAMILIES = [
-  {
-    products: [
-      "органайзер для ящика",
-      "контейнер для мелочей",
-      "корзина для хранения",
-      "лоток для документов",
-      "подставка для ручек",
-      "органайзер настольный",
-      "короб для проводов",
-      "разделитель для ящика",
-      "банка для специй",
-      "держатель для книг",
-    ],
-    modifiers: [
-      "пластиковый",
-      "прозрачный",
-      "компактный",
-      "с секциями",
-      "набор 2 штуки",
-      "настольный",
-      "для дома",
-      "маленький",
-    ],
-  },
-  {
-    products: [
-      "лопатка кухонная",
-      "венчик кухонный",
-      "щипцы кухонные",
-      "кисть кулинарная",
-      "воронка кухонная",
-      "сито кухонное",
-      "овощечистка ручная",
-      "пресс для чеснока",
-      "открывалка для бутылок",
-      "подставка под горячее",
-    ],
-    modifiers: [
-      "силиконовый",
-      "пластиковый",
-      "металлический",
-      "ручной",
-      "набор 2 штуки",
-      "компактный",
-      "термостойкий",
-      "для кухни",
-    ],
-  },
-  {
-    products: [
-      "щетка для посуды",
-      "ершик для бутылок",
-      "скребок для стекла",
-      "водосгон для окон",
-      "совок и щетка",
-      "щетка для клавиатуры",
-      "салфетка микрофибра",
-      "губка для уборки",
-      "щетка для обуви",
-      "ролик для чистки",
-    ],
-    modifiers: [
-      "ручной",
-      "пластиковый",
-      "с ручкой",
-      "компактный",
-      "набор 2 штуки",
-      "для дома",
-      "многоразовый",
-      "маленький",
-    ],
-  },
-  {
-    products: [
-      "держатель для кабеля",
-      "клипса для кабеля",
-      "органайзер для проводов",
-      "кабельная стяжка",
-      "стяжка многоразовая",
-      "термоусадочная трубка",
-      "скотч двусторонний",
-      "крючок самоклеящийся",
-      "держатель для проводов",
-      "короб для кабелей",
-    ],
-    modifiers: [
-      "самоклеящийся",
-      "пластиковый",
-      "силиконовый",
-      "прозрачный",
-      "набор 10 штук",
-      "набор 20 штук",
-      "для дома",
-      "компактный",
-    ],
-  },
-  {
-    products: [
-      "зажим канцелярский",
-      "скрепка канцелярская",
-      "кнопка канцелярская",
-      "ластик школьный",
-      "точилка канцелярская",
-      "линейка школьная",
-      "транспортир школьный",
-      "циркуль школьный",
-      "закладка для книг",
-      "папка для документов",
-    ],
-    modifiers: [
-      "набор 5 штук",
-      "набор 10 штук",
-      "набор 20 штук",
-      "пластиковый",
-      "металлический",
-      "цветной",
-      "прозрачный",
-      "компактный",
-    ],
-  },
-  {
-    products: [
-      "набор отверток",
-      "набор шестигранников",
-      "рулетка измерительная",
-      "плоскогубцы ручные",
-      "кусачки ручные",
-      "набор бит",
-      "кисть малярная",
-      "шпатель пластиковый",
-      "карандаш строительный",
-      "мебельная ручка",
-    ],
-    modifiers: [
-      "ручной",
-      "компактный",
-      "набор 6 предметов",
-      "набор 10 предметов",
-      "металлический",
-      "пластиковый",
-      "для дома",
-      "маленький",
-    ],
-  },
-  {
-    products: [
-      "помпон для творчества",
-      "синельная проволока",
-      "палочка для поделок",
-      "глазки для игрушек",
-      "бусина деревянная",
-      "трафарет для рисования",
-      "штамп детский",
-      "наклейка декоративная",
-      "кисть художественная",
-      "мозаика детская",
-    ],
-    modifiers: [
-      "набор 10 штук",
-      "набор 20 штук",
-      "набор 50 штук",
-      "цветной",
-      "деревянный",
-      "пластиковый",
-      "для творчества",
-      "компактный",
-    ],
-  },
-  {
-    products: [
-      "кубик деревянный",
-      "пазл деревянный",
-      "сортер деревянный",
-      "лабиринт деревянный",
-      "головоломка деревянная",
-      "шнуровка развивающая",
-      "счетная палочка",
-      "доска для рисования",
-      "блок для конструктора",
-      "мозаика развивающая",
-    ],
-    modifiers: [
-      "детский",
-      "развивающий",
-      "деревянный",
-      "набор 10 деталей",
-      "набор 20 деталей",
-      "компактный",
-      "цветной",
-      "для творчества",
-    ],
-  },
-  {
-    products: [
-      "дозатор для мыла",
-      "стоппер дверной",
-      "накладка мебельная",
-      "зажим для скатерти",
-      "прищепка пластиковая",
-      "защита углов мебели",
-      "заглушка мебельная",
-      "держатель для губки",
-      "крючок дверной",
-      "коврик силиконовый",
-    ],
-    modifiers: [
-      "механический",
-      "самоклеящийся",
-      "пластиковый",
-      "силиконовый",
-      "прозрачный",
-      "набор 4 штуки",
-      "для дома",
-      "компактный",
-    ],
-  },
-];
-
-function sustainableSafeQueries() {
-  const seen = new Set();
-  const generated = [];
-  const productCount = Math.max(...SAFE_QUERY_FAMILIES.map(({ products }) => products.length));
-  const modifierCount = Math.max(...SAFE_QUERY_FAMILIES.map(({ modifiers }) => modifiers.length));
-  for (let modifierIndex = 0; modifierIndex < modifierCount; modifierIndex += 1) {
-    for (let productIndex = 0; productIndex < productCount; productIndex += 1) {
-      for (const { products, modifiers } of SAFE_QUERY_FAMILIES) {
-        const product = products[productIndex];
-        const modifier = modifiers[modifierIndex];
-        if (product && modifier) generated.push(`${product} ${modifier}`);
-      }
-    }
-  }
-  return [
-    ...DEFAULT_SAFE_QUERIES,
-    ...generated,
-  ].filter((query) => {
-    const normalized = String(query || "").trim().toLowerCase();
-    if (!normalized || seen.has(normalized)) return false;
-    seen.add(normalized);
-    return true;
-  });
-}
-
-function sourceUrl(row) {
-  return String(row?.source_url || row?.seller_url || "").trim();
-}
-
-function skuOf(row, fallback) {
-  return String(row?.sku || fallback || "").trim();
-}
-
-function sourceRecord(records, url) {
-  if (!records.has(url)) records.set(url, { source_url: url, skus: new Map(), scans: [] });
-  return records.get(url);
-}
-
-function skuRecord(source, sku) {
-  if (!source.skus.has(sku)) {
-    source.skus.set(sku, {
-      sku,
-      titles: new Set(),
-      statuses: new Set(),
-      reasons: new Set(),
-      fbs_statuses: new Set(),
-      exact_fbs: false,
-      strict_confirmed: false,
-    });
-  }
-  return source.skus.get(sku);
-}
-
-function reasonMatches(reasons, pattern) {
-  return [...reasons].some((reason) => pattern.test(reason));
-}
-
-function reliableCostEvidence(sku) {
-  const positive = sku.statuses.has("published")
-    || sku.statuses.has("submitted")
-    || sku.statuses.has("validated")
-    || reasonMatches(sku.reasons, /profit(?:_rate|-upper-bound)<=30|online-product-rejected|publish-final-status-timeout/i);
-  if (positive) return true;
-  return !reasonMatches(sku.reasons, /1688-no-reliable-match|1688-health-deferred/i)
-    && sku.statuses.size > 0;
-}
-
-function submittedEvidence(sku) {
-  return sku.statuses.has("published")
-    || sku.statuses.has("submitted")
-    || reasonMatches(sku.reasons, /online-product-rejected|publish-final-status-timeout/i);
-}
-
-function ratio(numerator, denominator) {
-  return denominator > 0 ? Math.round((numerator / denominator) * 10_000) / 10_000 : 0;
-}
-
-function noCandidateStreak(scans) {
-  let streak = 0;
-  for (let index = scans.length - 1; index >= 0; index -= 1) {
-    const eligible = Number(scans[index]?.eligible_link_count_before_collection);
-    if (Number.isFinite(eligible) && eligible === 0) streak += 1;
-    else break;
-  }
-  return streak;
-}
-
-function cleanProductiveSubmitYield(row) {
-  return row.prohibited_count === 0
-    && row.failures.online_product_rejected === 0
-    && row.funnel.submitted > 0
-    && ratio(row.funnel.submitted, row.funnel.scanned) >= 0.1;
-}
-
-function disableReason(row) {
-  if (row.source_url_prohibited
-    || (row.prohibited_count >= 2 && ratio(row.prohibited_count, row.funnel.scanned) >= 0.3)) {
-    return "prohibited-category-dominant";
-  }
-  if (row.funnel.submitted >= 4
-    && ratio(row.failures.online_product_rejected, row.funnel.submitted) >= 0.4) {
-    return "online-product-rejected-rate";
-  }
-  if (row.funnel.scanned >= 8
-    && ratio(row.failures.no_reliable_1688_match, row.funnel.scanned) >= 0.75) {
-    return "1688-identity-ambiguity";
-  }
-  if (row.funnel.final_confirmed === 0
-    && !cleanProductiveSubmitYield(row)
-    && row.fbs_checked >= 4
-    && ratio(row.funnel.pure_fbs, row.fbs_checked) < 0.2) {
-    return "low-pure-fbs-rate";
-  }
-  if (row.no_new_candidate_streak >= 2) return "source-exhausted-no-new-candidates";
-  return null;
-}
-
-function sourceScore(row) {
-  const finalRate = ratio(row.funnel.final_confirmed, row.funnel.submitted);
-  const fbsRate = ratio(row.funnel.pure_fbs, row.fbs_checked);
-  const costRate = ratio(row.funnel.reliable_cost, row.funnel.scanned);
-  const profitRate = ratio(row.funnel.profit_pass, row.funnel.reliable_cost);
-  const rejectionRate = ratio(row.failures.online_product_rejected, row.funnel.submitted);
-  return Math.round((
-    row.funnel.final_confirmed * 100
-    + row.funnel.submitted * 12
-    + finalRate * 80
-    + fbsRate * 35
-    + costRate * 25
-    + profitRate * 20
-    - row.failures.online_product_rejected * 50
-    - rejectionRate * 100
-    - row.no_new_candidate_streak * 25
-  ) * 100) / 100;
-}
-
-function prohibitedSourceUrl(value) {
-  let decoded = String(value || "");
-  try {
-    decoded = decodeURIComponent(decoded.replaceAll("+", " "));
-  } catch {}
-  return Boolean(prohibitedCategorySkipReason(decoded));
-}
-
-export function aggregateSourceEvidence({
-  yieldRows = [],
-  fbsRows = [],
-  scanRows = [],
-} = {}) {
-  const records = new Map();
-  for (const [index, row] of yieldRows.entries()) {
-    const url = sourceUrl(row);
-    if (!url) continue;
-    const source = sourceRecord(records, url);
-    const sku = skuRecord(source, skuOf(row, `yield-${index}`));
-    if (row?.title) sku.titles.add(String(row.title));
-    if (row?.status) sku.statuses.add(String(row.status));
-    if (row?.reason) sku.reasons.add(String(row.reason));
-    if (isStrictSourceYieldRow(row)) {
-      sku.strict_confirmed = true;
-      sku.exact_fbs = true;
-    }
-  }
-  for (const [index, row] of fbsRows.entries()) {
-    const url = sourceUrl(row);
-    if (!url) continue;
-    const source = sourceRecord(records, url);
-    const sku = skuRecord(source, skuOf(row, `fbs-${index}`));
-    if (row?.title) sku.titles.add(String(row.title));
-    if (row?.status) sku.fbs_statuses.add(String(row.status));
-    if (row?.reason) sku.reasons.add(String(row.reason));
-    if (/non-pure-fbs|fbs-confirmation-inconsistent|source deferred after low pure-FBS yield/i
-      .test(String(row?.reason || ""))) {
-      sku.exact_fbs = false;
-    } else if (row?.status === "favorited"
-      && String(row?.shipping_mode || row?.preflight_mode || "").toUpperCase() === "FBS") {
-      sku.exact_fbs = true;
-    }
-  }
-  for (const row of scanRows) {
-    const url = sourceUrl(row);
-    if (url) sourceRecord(records, url).scans.push(row);
-  }
-
-  const rows = [...records.values()].map((source) => {
-    const skus = [...source.skus.values()];
-    const reliable = skus.filter(reliableCostEvidence);
-    const identity = reliable.filter((sku) => !reasonMatches(sku.reasons, /identity|spec|model|quantity|same-item/i));
-    const submitted = skus.filter(submittedEvidence);
-    const profit = submitted.filter((sku) => (
-      sku.statuses.has("published")
-      || sku.statuses.has("submitted")
-      || reasonMatches(sku.reasons, /online-product-rejected|publish-final-status-timeout/i)
-    ));
-    const finalConfirmed = skus.filter((sku) => sku.strict_confirmed);
-    const onlineRejected = skus.filter((sku) => reasonMatches(sku.reasons, /online-product-rejected/i));
-    const noMatch = skus.filter((sku) => reasonMatches(sku.reasons, /1688-no-reliable-match/i));
-    const prohibitedCount = skus.filter((sku) => (
-      [...sku.titles].some((title) => prohibitedCategorySkipReason(title))
-    )).length;
-    const row = {
-      source_url: source.source_url,
-      funnel: {
-        scanned: skus.length,
-        pure_fbs: skus.filter((sku) => sku.exact_fbs).length,
-        reliable_cost: reliable.length,
-        identity_spec_pass: identity.length,
-        profit_pass: profit.length,
-        submitted: submitted.length,
-        final_confirmed: finalConfirmed.length,
-      },
-      rates: {},
-      failures: {
-        online_product_rejected: onlineRejected.length,
-        no_reliable_1688_match: noMatch.length,
-      },
-      fbs_checked: skus.filter((sku) => sku.fbs_statuses.size > 0 || sku.strict_confirmed).length,
-      prohibited_count: prohibitedCount,
-      source_url_prohibited: prohibitedSourceUrl(source.source_url),
-      no_new_candidate_streak: noCandidateStreak(source.scans),
-    };
-    row.rates = {
-      pure_fbs: ratio(row.funnel.pure_fbs, row.fbs_checked),
-      reliable_cost: ratio(row.funnel.reliable_cost, row.funnel.scanned),
-      identity_spec_pass: ratio(row.funnel.identity_spec_pass, row.funnel.reliable_cost),
-      profit_pass: ratio(row.funnel.profit_pass, row.funnel.reliable_cost),
-      submit: ratio(row.funnel.submitted, row.funnel.scanned),
-      final_confirmed: ratio(row.funnel.final_confirmed, row.funnel.submitted),
-      online_product_rejected: ratio(row.failures.online_product_rejected, row.funnel.submitted),
-    };
-    row.disabled_reason = disableReason(row);
-    row.score = sourceScore(row);
-    return row;
-  });
-  const families = new Map();
-  for (const row of rows) {
-    const family = sourceDispatchFamily(row.source_url);
-    if (!family) continue;
-    const aggregate = families.get(family) || {
-      source_url: family,
-      family_kind: sourceFamilyKind(row.source_url),
-      funnel: Object.fromEntries(Object.keys(row.funnel).map((key) => [key, 0])),
-      failures: Object.fromEntries(Object.keys(row.failures).map((key) => [key, 0])),
-      fbs_checked: 0,
-      prohibited_count: 0,
-      source_url_prohibited: false,
-      no_new_candidate_streak: 0,
-    };
-    for (const [key, value] of Object.entries(row.funnel)) aggregate.funnel[key] += Number(value) || 0;
-    for (const [key, value] of Object.entries(row.failures)) aggregate.failures[key] += Number(value) || 0;
-    aggregate.fbs_checked += Number(row.fbs_checked) || 0;
-    aggregate.prohibited_count += Number(row.prohibited_count) || 0;
-    aggregate.source_url_prohibited ||= row.source_url_prohibited;
-    aggregate.no_new_candidate_streak = Math.max(
-      aggregate.no_new_candidate_streak,
-      Number(row.no_new_candidate_streak) || 0,
-    );
-    families.set(family, aggregate);
-  }
-  for (const row of rows) {
-    const family = sourceDispatchFamily(row.source_url);
-    const aggregate = family ? families.get(family) : null;
-    const familyReason = aggregate ? disableReason(aggregate) : null;
-    const preserveStrictSource = familyReason === "low-pure-fbs-rate"
-      && row.funnel.final_confirmed > 0;
-    const preserveProductiveSource = familyReason === "low-pure-fbs-rate"
-      && cleanProductiveSubmitYield(row);
-    const preserveSource = preserveStrictSource || preserveProductiveSource;
-    row.family_key = family;
-    row.family_disabled_reason = preserveSource ? null : familyReason;
-    if (!row.disabled_reason && familyReason && !preserveSource) {
-      row.disabled_reason = `${aggregate.family_kind}-family-${familyReason}`;
-    }
-  }
-  return rows.sort((left, right) => right.score - left.score || left.source_url.localeCompare(right.source_url));
-}
-
-function sellerRoot(value) {
-  try {
-    const url = new URL(value);
-    const match = url.pathname.match(/^(\/seller\/[^/]+\/)/u);
-    return match ? `${url.origin}${match[1]}` : null;
-  } catch {
-    return null;
-  }
-}
-
-function normalizedOzonProductUrl(value) {
-  try {
-    const url = new URL(String(value || ""));
-    if (!/(?:^|\.)ozon\.ru$/iu.test(url.hostname)
-      || !/^\/product\/[^/]*\d+\/?$/iu.test(url.pathname)) return null;
-    url.hash = "";
-    url.search = "";
-    if (!url.pathname.endsWith("/")) url.pathname = `${url.pathname}/`;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-function strictProductDiscoveryUrls(yieldRows = [], limit = 0) {
-  const maximum = Math.max(0, Math.floor(Number(limit) || 0));
-  if (maximum === 0) return [];
-  const latestBySku = new Map();
-  (yieldRows || []).forEach((row, order) => {
-    if (!isStrictSourceYieldRow(row)) return;
-    const sku = String(row?.sku || "").trim();
-    const productUrl = normalizedOzonProductUrl(
-      row?.product_url || row?.detail_url || row?.href || row?.link,
-    );
-    const time = Date.parse(String(row?.at || row?.timestamp || "")) || 0;
-    if (!sku || sku === "2815247918" || !productUrl) return;
-    const previous = latestBySku.get(sku);
-    if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
-      latestBySku.set(sku, { productUrl, time, order });
-    }
-  });
-  return [...latestBySku.values()]
-    .sort((left, right) => right.time - left.time || right.order - left.order)
-    .slice(0, maximum)
-    .map((row) => row.productUrl);
-}
-
-const RECENT_SELLER_QUALITY_FAILURE = /non-pure-fbs|fbs-confirmation-inconsistent|1688-no-reliable-match|online-product-rejected|prohibited|profit(?:_|-)?(?:rate|upper)|identity|spec|model|quantity|same-item/iu;
-
-function recentSellerQualityCooldowns(yieldRows = [], {
-  now = Date.now(),
-  failureThreshold = 4,
-  cooldownMs = 6 * 60 * 60_000,
-} = {}) {
-  const currentTime = Number(now);
-  const threshold = Math.max(1, Math.floor(Number(failureThreshold) || 4));
-  const duration = Math.max(0, Number(cooldownMs) || 0);
-  const sellers = new Map();
-  (yieldRows || []).forEach((row, order) => {
-    const seller = sellerRoot(row?.seller_url) || sellerRoot(row?.source_url);
-    const sku = String(row?.sku || "").trim();
-    const time = Date.parse(String(row?.at || row?.timestamp || ""));
-    const status = String(row?.status || "");
-    const strict = isStrictSourceYieldRow(row);
-    const productive = strict || status === "submitted";
-    const qualityFailure = ["skipped", "rejected", "failed"].includes(status)
-      && RECENT_SELLER_QUALITY_FAILURE.test(String(row?.reason || ""));
-    if (!seller || !sku || !Number.isFinite(time) || (!productive && !qualityFailure)) return;
-    const outcomes = sellers.get(seller) || new Map();
-    const previous = outcomes.get(sku);
-    if (!previous || time > previous.time || (time === previous.time && order > previous.order)) {
-      outcomes.set(sku, {
-        strict,
-        productive,
-        qualityFailure,
-        time,
-        order,
-      });
-    }
-    sellers.set(seller, outcomes);
-  });
-  return new Map([...sellers].flatMap(([seller, outcomes]) => {
-    const recent = [...outcomes.values()]
-      .sort((left, right) => right.time - left.time || right.order - left.order);
-    let streak = 0;
-    for (const outcome of recent) {
-      if (!outcome.qualityFailure) break;
-      streak += 1;
-    }
-    if (streak < threshold || !recent[0]) return [];
-    const cooldownUntil = recent[0].time + duration;
-    if (!Number.isFinite(currentTime)
-      || currentTime < recent[0].time
-      || currentTime >= cooldownUntil) return [];
-    return [[seller, {
-      recent_quality_failure_streak: streak,
-      cooldown_until: new Date(cooldownUntil).toISOString(),
-    }]];
-  }));
-}
-
-function pureFbsSellerEvidenceUrls(fbsRows = []) {
-  const latestFirst = fbsRows
-    .map((row, index) => ({
-      row,
-      index,
-      at: Date.parse(String(row?.at || row?.timestamp || "")),
-    }))
-    .sort((left, right) => (
-      (Number.isFinite(right.at) ? right.at : 0) - (Number.isFinite(left.at) ? left.at : 0)
-      || right.index - left.index
-    ));
-  const resolvedSkus = new Set();
-  const seenSellers = new Set();
-  const sellers = [];
-  for (const { row } of latestFirst) {
-    const sku = skuOf(row);
-    if (sku && resolvedSkus.has(sku)) continue;
-    if (sku) resolvedSkus.add(sku);
-    if (row?.status !== "favorited"
-      || String(row?.shipping_mode || row?.preflight_mode || "").toUpperCase() !== "FBS") continue;
-    const root = sellerRoot(row?.seller_url);
-    if (!root || seenSellers.has(root)) continue;
-    seenSellers.add(root);
-    sellers.push(root);
-  }
-  return sellers;
-}
-
-function pureFbsQueryEvidenceRows(fbsRows = []) {
-  const latestFirst = fbsRows
-    .map((row, index) => ({
-      row,
-      index,
-      at: Date.parse(String(row?.at || row?.timestamp || "")),
-    }))
-    .sort((left, right) => (
-      (Number.isFinite(right.at) ? right.at : 0) - (Number.isFinite(left.at) ? left.at : 0)
-      || right.index - left.index
-    ));
-  const resolvedSkus = new Set();
-  const rows = [];
-  for (const { row } of latestFirst) {
-    const sku = skuOf(row);
-    if (sku && resolvedSkus.has(sku)) continue;
-    if (sku) resolvedSkus.add(sku);
-    if (row?.status !== "favorited"
-      || String(row?.shipping_mode || row?.preflight_mode || "").toUpperCase() !== "FBS"
-      || !String(row?.title || "").trim()
-      || !sourceUrl(row)) continue;
-    rows.push({
-      ...row,
-      status: "submitted",
-      evidence_quality: "pure-fbs-source-discovery",
-    });
-  }
-  return rows;
-}
-
-function sourceDispatchFamily(value) {
-  try {
-    const url = new URL(String(value || ""));
-    url.hash = "";
-    url.searchParams.delete("sorting");
-    url.searchParams.delete("currency_price");
-    url.searchParams.delete("page");
-    url.searchParams.sort();
-    return url.toString();
-  } catch {
-    return String(value || "")
-      .replace(/([?&])(?:sorting|currency_price|page)=[^&]*&?/giu, "$1")
-      .replace(/[?&]$/u, "");
-  }
-}
-
-function sourceFamilyKind(value) {
-  if (sellerRoot(value)) return "seller";
-  try {
-    return /^\/search\/?$/iu.test(new URL(String(value || "")).pathname) ? "search" : "source";
-  } catch {
-    return "source";
-  }
-}
-
-function nextSellerVariants(row) {
-  const root = sellerRoot(row.source_url);
-  if (!root) return [];
-  let page = 1;
-  try {
-    page = Math.max(1, Number(new URL(row.source_url).searchParams.get("page")) || 1);
-  } catch {}
-  return [
-    root,
-    `${root}?page=${Math.min(40, page + 1)}`,
-    `${root}?currency_price=500.000%3B&sorting=rating`,
-    `${root}?currency_price=500.000%3B&sorting=discount`,
-  ];
-}
-
-function sellerPageNumber(value) {
-  try {
-    return Math.max(1, Number(new URL(String(value || "")).searchParams.get("page")) || 1);
-  } catch {
-    return 1;
-  }
-}
-
-function strictSellerContinuationUrls(strictRows = [], scanRows = [], limit = 0) {
-  const maximum = Math.max(0, Math.floor(Number(limit) || 0));
-  if (maximum === 0) return [];
-  const scansBySeller = new Map();
-  for (const row of scanRows) {
-    const root = sellerRoot(row?.source_url);
-    if (!root) continue;
-    const page = sellerPageNumber(row.source_url);
-    const pages = scansBySeller.get(root) || new Map();
-    const eligible = Number(row?.eligible_link_count_before_collection);
-    if (Number.isFinite(eligible)) {
-      pages.set(page, Math.max(Number(pages.get(page)) || 0, eligible));
-    } else if (!pages.has(page)) {
-      pages.set(page, null);
-    }
-    scansBySeller.set(root, pages);
-  }
-  const seen = new Set();
-  const continuations = [];
-  for (const row of strictRows) {
-    const root = sellerRoot(row?.source_url) || sellerRoot(row?.seller_url);
-    if (!root || seen.has(root)) continue;
-    seen.add(root);
-    const pages = scansBySeller.get(root) || new Map();
-    if (pages.size === 0) continue;
-    const scannedPages = [...pages.keys()].sort((left, right) => right - left);
-    const recent = scannedPages.slice(0, 2);
-    if (recent.length >= 2 && recent.every((page) => pages.get(page) === 0)) continue;
-    const nextPage = Math.max(1, ...scannedPages, sellerPageNumber(row?.source_url)) + 1;
-    if (nextPage > 40) continue;
-    continuations.push(`${root}?page=${nextPage}`);
-    if (continuations.length >= maximum) break;
-  }
-  return continuations;
-}
-
-function safeQueryUrls() {
-  return sustainableSafeQueries().flatMap((query) => [500, 1000].map((ceiling) => (
-    `https://www.ozon.ru/search/?text=${encodeURIComponent(query)}&is_global=true&currency_price=${ceiling}.000%3B&sorting=rating`
-  ))).filter((url) => !prohibitedSourceUrl(url));
-}
-
-function distinctDispatchUrls(urls = []) {
-  const seen = new Set();
-  return urls.filter((url) => {
-    const family = sourceDispatchFamily(url);
-    if (!family || seen.has(family)) return false;
-    seen.add(family);
-    return true;
-  });
-}
-
-function explorationUrls(safeUrls = [], derivedUrls = []) {
-  const safe = distinctDispatchUrls(safeUrls);
-  const derived = distinctDispatchUrls(derivedUrls);
-  const urls = [];
-  const rounds = Math.max(safe.length, derived.length);
-  for (let index = 0; index < rounds; index += 1) {
-    if (safe[index]) urls.push(safe[index]);
-    if (derived[index]) urls.push(derived[index]);
-  }
-  return urls;
-}
-
-function addUnique(target, seen, value, limit) {
-  const normalized = String(value || "").trim();
-  const family = sourceYieldKey(normalized);
-  if (!normalized || !family || seen.has(family) || target.length >= limit) return false;
-  seen.add(family);
-  target.push(normalized);
-  return true;
-}
-
-export function sourcePortfolioDerivedQueryLimit(minimumActiveSources = 60) {
-  const desired = Math.max(1, Number(minimumActiveSources) || 60);
-  return Math.max(600, desired * 10);
-}
-
-export function buildSourcePortfolio({
-  yieldRows = [],
-  fbsRows = [],
-  scanRows = [],
-  seedUrls = [],
-  minimumActiveSources = 60,
-  maximumActiveSources = 120,
-  now = Date.now(),
-} = {}) {
-  const evidence = aggregateSourceEvidence({ yieldRows, fbsRows, scanRows });
-  const sellerCooldowns = recentSellerQualityCooldowns(yieldRows, { now });
-  for (const row of evidence) {
-    const cooldown = sellerCooldowns.get(sellerRoot(row.source_url));
-    if (!cooldown) continue;
-    row.disabled_reason = "seller-family-recent-quality-failure-streak";
-    row.family_disabled_reason = "recent-quality-failure-streak";
-    row.recent_quality_failure_streak = cooldown.recent_quality_failure_streak;
-    row.cooldown_until = cooldown.cooldown_until;
-  }
-  const enabled = evidence.filter((row) => !row.disabled_reason);
-  const disabled = evidence.filter((row) => row.disabled_reason);
-  const strict = enabled.filter((row) => row.funnel.final_confirmed > 0);
-  const fbs = enabled.filter((row) => row.funnel.pure_fbs > 0 && row.funnel.final_confirmed === 0);
-  const desired = Math.max(1, Number(minimumActiveSources) || 60);
-  const limit = Math.max(desired, Number(maximumActiveSources) || 120);
-  const derivedQueries = deriveSearchSourceUrls(
-    [...yieldRows, ...pureFbsQueryEvidenceRows(fbsRows)],
-    sourcePortfolioDerivedQueryLimit(desired),
-    ["150.000;", "500.000;"],
-    [1],
-  );
-  const strictDerivedQueries = distinctDispatchUrls(deriveSearchSourceUrls(
-    yieldRows.filter((row) => isStrictSourceYieldRow(row)),
-    sourcePortfolioDerivedQueryLimit(desired),
-    ["150.000;", "500.000;"],
-    [1],
-  ));
-  const strictProductUrls = strictProductDiscoveryUrls(
-    yieldRows,
-    Math.max(1, Math.ceil(desired * 0.15)),
-  );
-  const active = [];
-  const seen = new Set();
-  const strictBudget = Math.max(1, Math.ceil(desired * 0.7));
-  const fbsBudget = Math.max(1, Math.ceil(desired * 0.2));
-  const explorationBudget = Math.max(
-    1,
-    desired
-      - Math.min(strict.length, strictBudget)
-      - Math.min(fbs.length, fbsBudget),
-  );
-  for (const row of strict.slice(0, strictBudget)) addUnique(active, seen, row.source_url, limit);
-  for (const row of fbs.slice(0, fbsBudget)) addUnique(active, seen, row.source_url, limit);
-  const continuationBudget = Math.min(
-    explorationBudget,
-    Math.max(1, Math.ceil(explorationBudget * 0.5)),
-  );
-  const strictContinuations = strictSellerContinuationUrls(
-    strict,
-    scanRows,
-    continuationBudget,
-  );
-  for (const url of strictContinuations) {
-    if (active.length >= limit || active.includes(url)) break;
-    active.push(url);
-  }
-  const remainingExplorationBudget = Math.max(
-    0,
-    explorationBudget - strictContinuations.length,
-  );
-  const disabledUrls = new Set(disabled.map((row) => sourceYieldKey(row.source_url)));
-  const disabledFamilies = new Set(evidence
-    .filter((row) => row.family_disabled_reason)
-    .map((row) => row.family_key)
-    .filter(Boolean));
-  const evidenceUrls = new Set(evidence.map((row) => sourceYieldKey(row.source_url)));
-  const evidenceFamilies = new Set(evidence.map((row) => row.family_key).filter(Boolean));
-  const explorationFamilies = new Set();
-  const strictDerivedBudget = remainingExplorationBudget > 3
-    ? Math.min(Math.ceil(desired * 0.2), remainingExplorationBudget - 3)
-    : 0;
-  const pureFbsSellerBudget = Math.max(0, remainingExplorationBudget - strictDerivedBudget);
-  for (const url of pureFbsSellerEvidenceUrls(fbsRows)) {
-    const family = sourceYieldKey(url);
-    const dispatchFamily = sourceDispatchFamily(url);
-    if (!disabledUrls.has(family)
-      && !disabledFamilies.has(dispatchFamily)
-      && !prohibitedSourceUrl(url)
-      && !evidenceFamilies.has(dispatchFamily)
-      && !explorationFamilies.has(dispatchFamily)
-      && !evidenceUrls.has(family)
-      && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
-    if (explorationFamilies.size >= pureFbsSellerBudget) break;
-  }
-  if (strictDerivedBudget > 0) {
-    let strictDerivedAdded = 0;
-    for (const url of strictDerivedQueries) {
-      const family = sourceYieldKey(url);
-      const dispatchFamily = sourceDispatchFamily(url);
-      if (!disabledUrls.has(family)
-        && !disabledFamilies.has(dispatchFamily)
-        && !prohibitedSourceUrl(url)
-        && !evidenceFamilies.has(dispatchFamily)
-        && !explorationFamilies.has(dispatchFamily)
-        && !evidenceUrls.has(family)
-        && addUnique(active, seen, url, limit)) {
-        explorationFamilies.add(dispatchFamily);
-        strictDerivedAdded += 1;
-      }
-      if (strictDerivedAdded >= strictDerivedBudget
-        || explorationFamilies.size >= remainingExplorationBudget
-        || active.length >= limit) break;
-    }
-  }
-  for (const url of strictProductUrls) {
-    const family = sourceYieldKey(url);
-    const dispatchFamily = sourceDispatchFamily(url);
-    if (!disabledUrls.has(family)
-      && !disabledFamilies.has(dispatchFamily)
-      && !prohibitedSourceUrl(url)
-      && !evidenceFamilies.has(dispatchFamily)
-      && !explorationFamilies.has(dispatchFamily)
-      && !evidenceUrls.has(family)
-      && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
-    if (explorationFamilies.size >= remainingExplorationBudget || active.length >= limit) break;
-  }
-  const unseenConfiguredSeeds = distinctDispatchUrls(seedUrls).filter((url) => {
-    const family = sourceYieldKey(url);
-    const dispatchFamily = sourceDispatchFamily(url);
-    return !disabledUrls.has(family)
-      && !disabledFamilies.has(dispatchFamily)
-      && !prohibitedSourceUrl(url)
-      && !evidenceUrls.has(family);
-  });
-  for (const url of unseenConfiguredSeeds) {
-    const dispatchFamily = sourceDispatchFamily(url);
-    if (addUnique(active, seen, url, limit) && !evidenceFamilies.has(dispatchFamily)) {
-      explorationFamilies.add(dispatchFamily);
-    }
-  }
-  const freshExplorationUrls = explorationUrls(safeQueryUrls(), derivedQueries);
-  for (const url of freshExplorationUrls) {
-    const family = sourceYieldKey(url);
-    const dispatchFamily = sourceDispatchFamily(url);
-    if (!disabledUrls.has(family)
-      && !disabledFamilies.has(dispatchFamily)
-      && !prohibitedSourceUrl(url)
-      && !evidenceFamilies.has(dispatchFamily)
-      && !explorationFamilies.has(dispatchFamily)
-      && !evidenceUrls.has(family)
-      && addUnique(active, seen, url, limit)) explorationFamilies.add(dispatchFamily);
-    if (explorationFamilies.size >= remainingExplorationBudget) break;
-  }
-  for (const url of seedUrls) {
-    if (active.length >= desired) break;
-    const family = sourceYieldKey(url);
-    const dispatchFamily = sourceDispatchFamily(url);
-    if (disabledUrls.has(family)
-      || disabledFamilies.has(dispatchFamily)
-      || prohibitedSourceUrl(url)) continue;
-    addUnique(active, seen, url, limit);
-  }
-  for (const row of strict) {
-    for (const variant of nextSellerVariants(row)) {
-      if (!prohibitedSourceUrl(variant)) addUnique(active, seen, variant, limit);
-    }
-    if (active.length >= desired) break;
-  }
-  for (const row of enabled) {
-    if (!prohibitedSourceUrl(row.source_url)) addUnique(active, seen, row.source_url, limit);
-    if (active.length >= desired) break;
-  }
-  if (active.length < desired) {
-    for (const url of freshExplorationUrls) {
-      const family = sourceYieldKey(url);
-      if (!disabledUrls.has(family)
-        && !disabledFamilies.has(sourceDispatchFamily(url))
-        && !prohibitedSourceUrl(url)
-        && !evidenceUrls.has(family)) {
-        addUnique(active, seen, url, limit);
-      }
-      if (active.length >= desired) break;
-    }
-  }
-  return {
-    generated_at: new Date().toISOString(),
-    active_urls: active,
-    metrics: evidence,
-    disabled,
-    counts: {
-      evidence_sources: evidence.length,
-      active_sources: active.length,
-      disabled_sources: disabled.length,
-      strict_sources: strict.length,
-      pure_fbs_sources: fbs.length,
-      exploration_sources: new Set(active
-        .map(sourceDispatchFamily)
-        .filter((family) => family && !evidenceFamilies.has(family))).size,
-    },
-  };
-}
+const POLICY_WINDOW_MS = 2 * 60 * 60_000;
 
 async function readJsonLines(filename) {
   try {
-    const text = await fsp.readFile(filename, "utf8");
-    return text.split(/\r?\n/).flatMap((line) => {
-      try { return [JSON.parse(line)]; } catch { return []; }
-    });
+    return (await fs.readFile(filename, "utf8"))
+      .split(/\r?\n/u)
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line)];
+        } catch {
+          return [];
+        }
+      });
   } catch (error) {
     if (error.code === "ENOENT") return [];
     throw error;
   }
 }
 
-async function readJsonArray(filename) {
-  try {
-    const value = JSON.parse(await fsp.readFile(filename, "utf8"));
-    return Array.isArray(value) ? value : [];
-  } catch (error) {
-    if (error.code === "ENOENT" || error instanceof SyntaxError) return [];
-    throw error;
-  }
-}
-
 async function readJsonObject(filename) {
   try {
-    const value = JSON.parse(await fsp.readFile(filename, "utf8"));
+    const value = JSON.parse(await fs.readFile(filename, "utf8"));
     return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   } catch (error) {
     if (error.code === "ENOENT" || error instanceof SyntaxError) return {};
@@ -1136,64 +40,69 @@ async function readJsonObject(filename) {
   }
 }
 
-export function sourceScanCheckpointPath(runDir, sourceConfig = {}) {
-  const root = path.resolve(runDir);
-  const fallback = path.join(root, "source_deep_scan.json");
-  const configured = String(sourceConfig?.scan_output || "").trim();
-  if (!configured) return fallback;
-  const candidate = path.resolve(root, configured);
-  return path.dirname(candidate) === root && path.extname(candidate) === ".json"
-    ? candidate
-    : fallback;
-}
-
 async function readUrls(filename) {
   try {
-    return (await fsp.readFile(filename, "utf8"))
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => /^https:\/\//u.test(line));
+    return (await fs.readFile(filename, "utf8"))
+      .split(/\r?\n/u)
+      .map((value) => value.trim())
+      .filter(Boolean);
   } catch (error) {
     if (error.code === "ENOENT") return [];
     throw error;
   }
 }
 
-export function enrichCurrentRunStrictSourceYieldRows(yieldRows = [], publishedRows = []) {
-  const strictBySku = new Map();
-  for (const event of publishedRows || []) {
-    const row = { ...(event?.data || {}), ...event };
-    const sku = String(row?.sku || "").trim();
-    if (!sku || sku === "2815247918") continue;
-    const evidence = {
-      strict_confirmed: true,
-      online_status: row.online_status,
-      stock: row.stock,
-      profit_rate: row.profit_rate,
-      shipping_mode: row.shipping_mode || row.preflight_mode || row.mode,
-      product_url: normalizedOzonProductUrl(
-        row?.fbs_evidence?.observations?.find((observation) => observation?.detail_url)?.detail_url
-          || row?.detail_url
-          || row?.href
-          || row?.link,
-      ) || undefined,
-    };
-    if (isStrictSourceYieldRow({ status: "published", ...evidence })) strictBySku.set(sku, evidence);
-  }
-  return (yieldRows || []).map((row) => {
-    const sku = String(row?.sku || "").trim();
-    const evidence = strictBySku.get(sku);
-    return evidence && String(row?.status || "") === "published"
-      ? { ...row, ...evidence }
-      : row;
-  });
+async function writeAtomic(filename, content) {
+  await fs.mkdir(path.dirname(filename), { recursive: true });
+  const temporary = `${filename}.tmp-${process.pid}`;
+  await fs.writeFile(temporary, content, "utf8");
+  await fs.rename(temporary, filename);
 }
 
-async function writeAtomic(filename, content) {
-  await fsp.mkdir(path.dirname(filename), { recursive: true });
-  const temporary = `${filename}.tmp-${process.pid}`;
-  await fsp.writeFile(temporary, content, "utf8");
-  await fsp.rename(temporary, filename);
+function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function mergedEvent(event = {}) {
+  return event?.data && typeof event.data === "object"
+    ? { ...event, ...event.data }
+    : event;
+}
+
+function skuOf(event = {}) {
+  const row = mergedEvent(event);
+  return String(row?.sku ?? row?.id ?? "").trim();
+}
+
+function sellerOf(event = {}) {
+  const row = mergedEvent(event);
+  return sellerRootUrl(
+    row?.seller_url
+      || row?.source_url
+      || row?.url
+      || row?.href,
+  );
+}
+
+function sourceSellerIndex(events = []) {
+  const result = new Map();
+  for (const event of events) {
+    const sku = skuOf(event);
+    const seller = sellerOf(event);
+    if (sku && seller) result.set(sku, seller);
+  }
+  return result;
+}
+
+function evidenceWindowStart(acceptanceWindow, now) {
+  const nowMs = now.getTime();
+  const acceptanceStartMs = Date.parse(String(acceptanceWindow?.started_at || ""));
+  const rollingStartMs = nowMs - POLICY_WINDOW_MS;
+  return new Date(
+    Number.isFinite(acceptanceStartMs)
+      ? Math.max(acceptanceStartMs, rollingStartMs)
+      : rollingStartMs,
+  ).toISOString();
 }
 
 export async function refreshSourcePortfolio({
@@ -1201,52 +110,134 @@ export async function refreshSourcePortfolio({
   runDir = null,
   seedFile,
   minimumActiveSources = 60,
+  now = new Date(),
+  rng = Math.random,
 } = {}) {
-  const historyDir = path.join(stateRoot, "history");
-  const candidateFbsRows = runDir
-    ? (await readJsonLines(path.join(runDir, "candidate_queue.jsonl"))).filter((row) => (
-      /source deferred after low pure-FBS yield/i.test(String(row?.reason || ""))
-    ))
-    : [];
-  const rawYieldRows = [
-    ...await readJsonLines(path.join(historyDir, "source_yield_history.jsonl")),
-    ...(runDir ? await readJsonLines(path.join(runDir, "source_yield.jsonl")) : []),
-  ];
-  const currentPublishedRows = runDir
-    ? await readJsonLines(path.join(runDir, "published.jsonl"))
-    : [];
-  const yieldRows = normalizeRuntimeSourceYieldRows(
-    enrichCurrentRunStrictSourceYieldRows(rawYieldRows, currentPublishedRows),
-  );
-  const fbsRows = [
-    ...await readJsonLines(path.join(historyDir, "fbs_source_history.jsonl")),
-    ...(runDir ? await readJsonLines(path.join(runDir, "favorite_collection.jsonl")) : []),
-    ...candidateFbsRows,
-    ...yieldRows.filter((row) => (
-      /non-pure-fbs|fbs-confirmation-inconsistent/i.test(String(row?.reason || ""))
-    )),
-  ];
-  const sourceConfig = runDir
-    ? await readJsonObject(path.join(runDir, "source_config.json"))
-    : {};
-  const scanRows = runDir
-    ? await readJsonArray(sourceScanCheckpointPath(runDir, sourceConfig))
-    : [];
-  const seedUrls = await readUrls(seedFile);
-  const portfolio = buildSourcePortfolio({
-    yieldRows,
-    fbsRows,
-    scanRows,
+  const resolvedStateRoot = path.resolve(stateRoot);
+  const historyDir = path.join(resolvedStateRoot, "history");
+  const sourceDir = path.join(resolvedStateRoot, "sources");
+  await fs.mkdir(historyDir, { recursive: true });
+  const [
+    historicalYield,
+    historicalFbs,
+    runYield,
+    runFbs,
+    stageTimings,
+    publications,
+    acceptanceWindow,
+    previousPortfolio,
+    policyHistory,
     seedUrls,
-    minimumActiveSources,
-  });
-  const sourceDir = path.join(stateRoot, "sources");
-  await Promise.all([
-    writeAtomic(path.join(sourceDir, "active_urls.txt"), `${portfolio.active_urls.join("\n")}\n`),
-    writeAtomic(path.join(sourceDir, "source_portfolio.json"), `${JSON.stringify(portfolio, null, 2)}\n`),
-    writeAtomic(path.join(sourceDir, "source_funnel.jsonl"), `${portfolio.metrics.map((row) => JSON.stringify(row)).join("\n")}\n`),
-    writeAtomic(path.join(sourceDir, "source_disabled.jsonl"), `${portfolio.disabled.map((row) => JSON.stringify(row)).join("\n")}\n`),
+  ] = await Promise.all([
+    readJsonLines(path.join(historyDir, "source_yield_history.jsonl")),
+    readJsonLines(path.join(historyDir, "fbs_source_history.jsonl")),
+    runDir ? readJsonLines(path.join(runDir, "source_yield.jsonl")) : [],
+    runDir ? readJsonLines(path.join(runDir, "favorite_collection.jsonl")) : [],
+    runDir ? readJsonLines(path.join(runDir, "stage_timings.jsonl")) : [],
+    runDir ? readJsonLines(path.join(runDir, "published.jsonl")) : [],
+    runDir ? readJsonObject(path.join(runDir, "acceptance_window.json")) : {},
+    readJsonObject(path.join(sourceDir, "source_portfolio.json")),
+    readJsonLines(path.join(historyDir, "source_policy_decisions.jsonl")),
+    readUrls(seedFile),
   ]);
+
+  const attributionRows = [
+    ...historicalYield,
+    ...historicalFbs,
+    ...runYield,
+    ...runFbs,
+    ...publications,
+  ];
+  const sellerBySku = sourceSellerIndex(attributionRows);
+  const attributedDetails = stageTimings
+    .filter((row) => String(row?.stage || row?.data?.stage || "") === "ozon_detail_and_category")
+    .map((row) => ({
+      ...row,
+      seller_url: sellerOf(row) || sellerBySku.get(skuOf(row)) || null,
+    }));
+  const attributedPublications = publications.map((event) => {
+    const row = mergedEvent(event);
+    return {
+      ...row,
+      seller_url: sellerOf(row) || sellerBySku.get(skuOf(row)) || null,
+    };
+  });
+  const explorationSellerUrls = [
+    ...seedUrls,
+    ...attributionRows.flatMap((row) => [
+      mergedEvent(row)?.seller_url,
+      mergedEvent(row)?.source_url,
+    ]),
+  ].map(sellerRootUrl).filter(Boolean);
+
+  const policy = buildStrictSellerSourcePolicy({
+    detailAttempts: attributedDetails,
+    publications: attributedPublications,
+    explorationSellerUrls,
+    previousDecision: previousPortfolio?.policy || null,
+    windowStartedAt: evidenceWindowStart(acceptanceWindow, now),
+    now,
+    slots: Math.max(10, Math.floor(Number(minimumActiveSources) || 60)),
+    exploitRatio: 0.9,
+    rng,
+  });
+  if (policy.active_urls.length === 0) {
+    throw new Error("seller-only source policy produced no usable Ozon seller URLs");
+  }
+  const activeSourceText = `${policy.active_urls.join("\n")}\n`;
+  const sourceSetSha256 = sha256(activeSourceText);
+
+  const portfolio = {
+    schema_version: 2,
+    generated_at: policy.generated_at,
+    strategy: "current-2h-unique-strict-per-unique-detail-attempt",
+    derived_search_enabled: false,
+    active_urls: policy.active_urls,
+    source_set_sha256: sourceSetSha256,
+    policy,
+    metrics: policy.sellers,
+    disabled: [],
+    counts: {
+      active_sources: policy.active_urls.length,
+      strict_policy_sellers: policy.sellers.filter((row) => row.unique_strict > 0).length,
+      exploration_sources: policy.allocation.explore,
+      unique_detail_attempts: policy.unique_detail_attempts,
+      unique_strict: policy.unique_strict,
+      derived_sources: 0,
+    },
+  };
+  const lastRecordedDecision = policyHistory.at(-1) || {};
+  const decisionChanged = (
+    String(lastRecordedDecision?.generated_at || "") !== String(policy.generated_at || "")
+    || String(lastRecordedDecision?.source_set_sha256 || "") !== sourceSetSha256
+  );
+  await Promise.all([
+    writeAtomic(path.join(sourceDir, "active_urls.txt"), activeSourceText),
+    writeAtomic(path.join(sourceDir, "source_portfolio.json"), `${JSON.stringify(portfolio, null, 2)}\n`),
+    writeAtomic(
+      path.join(sourceDir, "source_funnel.jsonl"),
+      `${portfolio.metrics.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    ),
+    writeAtomic(path.join(sourceDir, "source_disabled.jsonl"), ""),
+  ]);
+  if (decisionChanged) {
+    await fs.appendFile(
+      path.join(historyDir, "source_policy_decisions.jsonl"),
+      `${JSON.stringify({
+        recorded_at: new Date(now).toISOString(),
+        policy_version: policy.policy_version,
+        generated_at: policy.generated_at,
+        frozen_until: policy.frozen_until,
+        strategy: portfolio.strategy,
+        source_set_sha256: sourceSetSha256,
+        allocation: policy.allocation,
+        unique_detail_attempts: policy.unique_detail_attempts,
+        unique_strict: policy.unique_strict,
+        active_urls: policy.active_urls,
+      })}\n`,
+      "utf8",
+    );
+  }
   return portfolio;
 }
 
@@ -1269,7 +260,7 @@ async function invokedAsMain(argv1 = process.argv[1]) {
   if (!argv1) return false;
   const modulePath = fileURLToPath(import.meta.url);
   try {
-    return await fsp.realpath(path.resolve(argv1)) === await fsp.realpath(modulePath);
+    return await fs.realpath(path.resolve(argv1)) === await fs.realpath(modulePath);
   } catch {
     return path.resolve(argv1) === path.resolve(modulePath);
   }

@@ -52,7 +52,7 @@ async function main() {
       erpStores,
       profileStores,
       configuredDailyLimit: Number(process.env.FLOW_B_DAILY_STORE_LIMIT || 100),
-      requiredCapacity: Number(process.env.FLOW_B_ACCEPTANCE_TARGET || 481),
+      requiredCapacity: Number(process.env.FLOW_B_ACCEPTANCE_TARGET || 500),
     });
     await writeJsonAtomic(output, snapshot);
     process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);

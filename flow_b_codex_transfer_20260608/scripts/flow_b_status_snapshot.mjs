@@ -10,17 +10,37 @@ function rounded(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
-function strictRows(rows, startedMs, endedMs) {
+function strictRows(
+  rows,
+  startedMs,
+  endedMs,
+  {
+    requireQualityEvidence = false,
+    requireCurrentWindowSubmission = false,
+  } = {},
+) {
   const unique = new Map();
   for (const event of rows || []) {
     const row = { ...(event?.data || {}), ...event };
     const sku = String(row?.sku || "").trim();
     const at = Date.parse(row?.published_at || row?.timestamp || "");
+    const submittedAt = Date.parse(row?.submitted_at || row?.created_at || "");
+    const qualityEvidencePassed = (
+      String(row?.shipping_mode || row?.mode || "").toUpperCase() === "FBS"
+      && row?.fbs_evidence?.verified === true
+      && row?.cost_verified === true
+      && row?.cost?.ok === true
+      && Number(row?.cost?.cost) > 0
+      && row?.quality_gate_passed === true
+    );
     if (!sku
       || EXCLUDED_SKUS.has(sku)
       || !(Number(row?.profit_rate) > 30)
       || String(row?.online_status || "") !== "selling"
       || !(Number(row?.stock) > 0)
+      || (requireQualityEvidence && !qualityEvidencePassed)
+      || (requireCurrentWindowSubmission
+        && !(submittedAt >= startedMs && submittedAt <= endedMs))
       || !(at >= startedMs && at <= endedMs)) continue;
     unique.set(sku, row);
   }
@@ -78,9 +98,12 @@ export function buildStatusSnapshot({
   const totalTarget = Math.max(
     1,
     Number(config.acceptance_target || config.publish_target)
-      || (requirePerStore ? perStoreTarget * storeIds.length : 481),
+      || (requirePerStore ? perStoreTarget * storeIds.length : 500),
   );
-  const strict = strictRows(published, startedMs, anchorMs);
+  const strict = strictRows(published, startedMs, anchorMs, {
+    requireQualityEvidence: config.require_quality_evidence === true,
+    requireCurrentWindowSubmission: config.current_window_only === true,
+  });
   const strictChronological = [...strict].sort((left, right) => (
     Date.parse(left.published_at || left.timestamp || "") - Date.parse(right.published_at || right.timestamp || "")
   ));
@@ -210,7 +233,11 @@ export function buildStatusSnapshot({
   const rolling = {};
   for (const minutes of [15, 30, 60, 120]) {
     const windowMs = minutes * 60_000;
-    const count = strict.filter((row) => Date.parse(row.published_at || row.timestamp || "") >= anchorMs - windowMs).length;
+    const rollingStartedMs = Math.max(startedMs, anchorMs - windowMs);
+    const count = strictRows(published, rollingStartedMs, anchorMs, {
+      requireQualityEvidence: config.require_quality_evidence === true,
+      requireCurrentWindowSubmission: config.current_window_only === true,
+    }).length;
     const denominatorHours = Math.min(windowMs, Math.max(1, anchorMs - startedMs)) / 3_600_000;
     rolling[minutes] = { count, per_hour: rounded(count / denominatorHours) };
   }
@@ -221,8 +248,6 @@ export function buildStatusSnapshot({
     && configuredMinimumAverage !== undefined
     && String(configuredMinimumAverage).trim() !== ""
     && Number.isFinite(Number(configuredMinimumAverage));
-  const speedPassed = !hasMinimumAverage
-    || strict.length / Math.max(elapsedHours, Number.EPSILON) > Number(configuredMinimumAverage);
   const paceDeadlineMs = startedMs + (totalTarget / 35) * 3_600_000;
   const paceCounts = Object.fromEntries(storeIds.map((id) => [String(id), 0]));
   let targetReachedMs = null;
@@ -246,6 +271,8 @@ export function buildStatusSnapshot({
   const activePerHour = hoursToTarget && hoursToTarget > 0
     ? rounded(totalTarget / hoursToTarget)
     : targetReachedMs === startedMs ? null : rounded(strict.length / Math.max(elapsedHours, Number.EPSILON));
+  const completionSpeedPassed = !hasMinimumAverage
+    || (targetReachedMs !== null && Number(activePerHour) >= Number(configuredMinimumAverage));
   return {
     observed_at: new Date(observedMs).toISOString(),
     window: {
@@ -265,7 +292,7 @@ export function buildStatusSnapshot({
       passed: complete
         && strict.length >= totalTarget
         && storesPassed
-        && speedPassed,
+        && completionSpeedPassed,
     },
     pace_35: {
       deadline_at: new Date(paceDeadlineMs).toISOString(),

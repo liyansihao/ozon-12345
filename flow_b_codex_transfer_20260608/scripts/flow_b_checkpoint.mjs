@@ -45,11 +45,17 @@ export async function checkpointFrozenEvidence({
   ]);
   const environmentCommit = String(env?.FLOW_B_FROZEN_COMMIT || "").trim();
   const environmentConfigHash = String(env?.FLOW_B_FROZEN_CONFIG_HASH || "").trim();
+  const environmentSourceSetHash = String(env?.FLOW_B_FROZEN_SOURCE_SET_HASH || "").trim();
+  const environmentStateSchemaVersion = Number(env?.FLOW_B_STATE_SCHEMA_VERSION);
   return {
     git_commit: environmentCommit || deployment?.source_commit || null,
     config_sha256: environmentConfigHash
       || deployment?.config_sha256
       || (configText ? crypto.createHash("sha256").update(configText).digest("hex") : null),
+    source_set_sha256: environmentSourceSetHash || deployment?.source_set_sha256 || null,
+    state_schema_version: Number.isInteger(environmentStateSchemaVersion)
+      ? environmentStateSchemaVersion
+      : Number(deployment?.state_schema_version || 3),
   };
 }
 
@@ -111,14 +117,34 @@ function stageStats(rows) {
   }]));
 }
 
-function strictPublished(rows, startedMs, endedMs) {
+function strictPublished(
+  rows,
+  startedMs,
+  endedMs,
+  {
+    requireQualityEvidence = false,
+    requireCurrentWindowSubmission = false,
+  } = {},
+) {
   const seen = new Map();
   for (const event of rows) {
     const row = { ...(event?.data || {}), ...event };
     const sku = skuOf(row);
     const at = Date.parse(row?.published_at || row?.timestamp || "");
+    const submittedAt = Date.parse(row?.submitted_at || row?.created_at || "");
+    const qualityEvidencePassed = (
+      String(row?.shipping_mode || row?.mode || "").toUpperCase() === "FBS"
+      && row?.fbs_evidence?.verified === true
+      && row?.cost_verified === true
+      && row?.cost?.ok === true
+      && Number(row?.cost?.cost) > 0
+      && row?.quality_gate_passed === true
+    );
     if (!sku || sku === "2815247918" || !(at > startedMs && at <= endedMs)
-      || !(Number(row?.profit_rate) > 30) || row?.online_status !== "selling" || !(Number(row?.stock) > 0)) continue;
+      || !(Number(row?.profit_rate) > 30) || row?.online_status !== "selling" || !(Number(row?.stock) > 0)
+      || (requireQualityEvidence && !qualityEvidencePassed)
+      || (requireCurrentWindowSubmission
+        && !(submittedAt > startedMs && submittedAt <= endedMs))) continue;
     seen.set(sku, row);
   }
   return [...seen.values()];
@@ -233,8 +259,12 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
   const cumulativeFailures = [...failed, ...skipped, ...runtimeErrors];
   const intervalFailures = cumulativeFailures.filter((row) => inInterval(row, intervalStartedMs, observedMs));
   const intervalTimings = timings.filter((row) => inInterval(row, intervalStartedMs, observedMs));
-  const cumulativeStrict = strictPublished(published, startedMs - 1, observedMs);
-  const intervalStrict = strictPublished(published, intervalStartedMs, observedMs);
+  const strictOptions = {
+    requireQualityEvidence: config?.require_quality_evidence === true,
+    requireCurrentWindowSubmission: config?.current_window_only === true,
+  };
+  const cumulativeStrict = strictPublished(published, startedMs - 1, observedMs, strictOptions);
+  const intervalStrict = strictPublished(published, intervalStartedMs, observedMs, strictOptions);
   const cumulativeStages = {
     candidate: uniqueSkuCount(candidates.filter((row) => eventAt(row) <= observedMs)),
     cost_1688: uniqueSkuCount(timings.filter((row) => row?.stage === "1688_cost" && row?.ok !== false && eventAt(row) <= observedMs)),
@@ -273,7 +303,11 @@ export async function buildCheckpoint(runDir, observedAt = new Date().toISOStrin
       automatic_recoveries: cumulativeRecoveries.length,
       recovery_actions: classifyRecoveryActions(cumulativeRecoveries),
       stage_timings: stageStats(timings.filter((row) => eventAt(row) <= observedMs)),
-      duplicate_skus: Math.max(0, published.filter((row) => strictPublished([row], startedMs - 1, observedMs).length).length - cumulativeStrict.length),
+      duplicate_skus: Math.max(
+        0,
+        published.filter((row) => strictPublished([row], startedMs - 1, observedMs, strictOptions).length).length
+          - cumulativeStrict.length,
+      ),
       minimum_profit_rate: cumulativeStrict.length ? Math.min(...cumulativeStrict.map((row) => Number(row.profit_rate))) : null,
     },
     compact: {

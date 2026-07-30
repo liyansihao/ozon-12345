@@ -178,18 +178,32 @@ async function closePublishingSession(session) {
   if (!session) return;
   await session.detailProvider?.close?.().catch(() => {});
   await session.costBridge?.close?.().catch(() => {});
+  await session.state?.close?.().catch(() => {});
   await session.maoziPage?.close?.().catch(() => {});
 }
 
 async function createPublishingSession(context, options, env, shared) {
   const maoziPage = await openMaoziPage(context, { forceNew: true });
+  let state = null;
   try {
     await ensureMaoziLogin(maoziPage, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
     const client = createMaoziClient({ transport: createRuntimeMaoziTransport(maoziPage, context, env) });
-    const state = createPublishState({
+    const runtimeStateDbPath = String(env.FLOW_B_RUNTIME_STATE_DB || "").trim();
+    const resolvedRuntimeStateDbPath = runtimeStateDbPath ? path.resolve(runtimeStateDbPath) : null;
+    if (
+      resolvedRuntimeStateDbPath &&
+      (
+        resolvedRuntimeStateDbPath === path.resolve(options.runDir) ||
+        resolvedRuntimeStateDbPath.startsWith(`${path.resolve(options.runDir)}${path.sep}`)
+      )
+    ) {
+      throw new Error("FLOW_B_RUNTIME_STATE_DB must be outside the disposable run directory");
+    }
+    state = createPublishState({
       runDir: options.runDir,
       publishedCsv: publishedCsvPath(env),
       pendingStateFiles: String(env.FLOW_B_PENDING_STATE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
+      runtimeStateDbPath: resolvedRuntimeStateDbPath,
     });
     const costBridge = createCostBridge({
       python: env.FLOW_B_PYTHON || "python3",
@@ -252,8 +266,9 @@ async function createPublishingSession(context, options, env, shared) {
       pendingStoreRetryMs: Math.max(0, Number(env.FLOW_B_PENDING_STORE_RETRY_MS) || 300_000),
       probeInactiveStores: env.FLOW_B_PROBE_INACTIVE_STORES !== "0",
     });
-    return { maoziPage, costBridge, detailProvider, runner };
+    return { maoziPage, costBridge, detailProvider, runner, state };
   } catch (error) {
+    await state?.close?.().catch(() => {});
     await maoziPage.close().catch(() => {});
     throw error;
   }
@@ -345,7 +360,13 @@ function collectionEliminationReason(row) {
   return "collection-failed";
 }
 
-export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) {
+export async function writeAcceptanceReport(
+  runDir,
+  startedAt,
+  endedAt,
+  target,
+  { productionContract = false } = {},
+) {
   const publishedEvents = await readJsonLines(path.join(runDir, "published.jsonl"));
   const skipped = await readJsonLines(path.join(runDir, "skipped.jsonl"));
   const failed = await readJsonLines(path.join(runDir, "failed.jsonl"));
@@ -356,21 +377,28 @@ export async function writeAcceptanceReport(runDir, startedAt, endedAt, target) 
   const published = publishedEvents.map((row) => ({ ...row, ...(row.data || {}) }));
   let sourceConfig = {};
   try { sourceConfig = JSON.parse(await fs.readFile(path.join(runDir, "source_config.json"), "utf8")); } catch {}
-  const minimumAveragePerHourExclusive = Object.prototype.hasOwnProperty.call(
-    sourceConfig,
-    "minimum_average_per_hour_exclusive",
-  )
-    ? sourceConfig.minimum_average_per_hour_exclusive
-    : 20;
+  const minimumAveragePerHourExclusive = productionContract
+    ? 35
+    : Object.prototype.hasOwnProperty.call(sourceConfig, "minimum_average_per_hour_exclusive")
+      ? sourceConfig.minimum_average_per_hour_exclusive
+      : 20;
+  const reportTarget = productionContract ? 500 : target;
+  const reportStoreIds = productionContract
+    ? [106637, 106640, 106644, 106646, 104965]
+    : (sourceConfig.store_targets || []).map((entry) => entry?.id);
   const acceptance = acceptanceSummary({
     rows: published,
     startedAt,
     endedAt,
-    target,
-    storeIds: (sourceConfig.store_targets || []).map((entry) => entry?.id),
-    perStoreTarget: sourceConfig.per_store_target ?? null,
+    target: reportTarget,
+    storeIds: reportStoreIds,
+    perStoreTarget: productionContract ? 100 : sourceConfig.per_store_target ?? null,
     minimumAveragePerHourExclusive,
     requireZeroDuplicates: true,
+    requireQualityEvidence: productionContract || sourceConfig.require_quality_evidence === true,
+    requireCurrentWindowSubmission: productionContract || sourceConfig.current_window_only === true,
+    requireExactTarget: productionContract,
+    requireExactPerStore: productionContract,
   });
   const windowStart = Date.parse(startedAt);
   const windowEnd = Date.parse(endedAt);
@@ -479,6 +507,7 @@ async function runAcceptance(context, options, env) {
     acceptance_target_policy: env.FLOW_B_ACCEPTANCE_TARGET_POLICY || "fixed",
     minimum_average_per_hour_exclusive: minimumAveragePerHourExclusive,
     per_store_target: perStoreAcceptanceTarget(env),
+    require_quality_evidence: true,
     store_id: Number(env.FLOW_B_STORE_ID || 104965),
     store_targets: storeTargets,
     watermark_id: Number(env.FLOW_B_WATERMARK_ID || 60822),

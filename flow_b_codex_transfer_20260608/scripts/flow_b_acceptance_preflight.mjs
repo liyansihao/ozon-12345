@@ -5,13 +5,6 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 const EXPECTED_STORE_IDS = Object.freeze([106637, 106640, 106644, 106646, 104965]);
-const VERIFIED_WAREHOUSES = Object.freeze({
-  104965: 1020005023597900,
-  106637: 1020005023256510,
-  106640: 1020005023616740,
-  106644: 1020005023616380,
-  106646: 1020005023616970,
-});
 
 function requireNumber(env, name, expected) {
   const value = Number(env[name]);
@@ -40,9 +33,12 @@ function parseTargets(env) {
   for (const target of targets) {
     const id = Number(target.id);
     if (target.requireWarehouse !== true) throw new Error(`store ${id} must require a verified warehouse`);
-    if (Number(target.warehouseId) !== VERIFIED_WAREHOUSES[id]) {
-      throw new Error(`store ${id} warehouseId does not match the verified configuration`);
+    if (!Number.isSafeInteger(Number(target.warehouseId)) || Number(target.warehouseId) <= 0) {
+      throw new Error(`store ${id} must configure a positive warehouseId for live ERP uniqueness verification`);
     }
+  }
+  if (new Set(targets.map((target) => String(target.warehouseId))).size !== targets.length) {
+    throw new Error("warehouse mappings must be unique across all five stores");
   }
   return ids;
 }
@@ -50,27 +46,12 @@ function parseTargets(env) {
 export function validate24hAcceptanceEnv(env = process.env) {
   requireNumber(env, "FLOW_B_ACCEPTANCE_SECONDS", 86400);
   const targetPolicy = String(env.FLOW_B_ACCEPTANCE_TARGET_POLICY || "fixed");
-  let target;
-  let minimumAveragePerHourExclusive = 20;
-  if (targetPolicy === "erp_remaining_capacity") {
-    target = Number(env.FLOW_B_ACCEPTANCE_TARGET);
-    if (!Number.isInteger(target) || target < 1 || target > EXPECTED_STORE_IDS.length * 100) {
-      throw new Error("FLOW_B_ACCEPTANCE_TARGET must be a frozen live ERP capacity between 1 and 500");
-    }
-    if (Number(env.FLOW_B_TARGET_PUBLISH_COUNT) !== target) {
-      throw new Error("FLOW_B_TARGET_PUBLISH_COUNT must equal the frozen live ERP capacity");
-    }
-    if (String(env.FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE ?? "").trim() !== "") {
-      throw new Error("dynamic ERP-capacity runs must not use a fixed hourly completion threshold");
-    }
-    minimumAveragePerHourExclusive = null;
-  } else if (targetPolicy === "fixed") {
-    target = requireNumber(env, "FLOW_B_ACCEPTANCE_TARGET", 481);
-    requireNumber(env, "FLOW_B_TARGET_PUBLISH_COUNT", 481);
-  } else {
-    throw new Error("FLOW_B_ACCEPTANCE_TARGET_POLICY must equal fixed or erp_remaining_capacity");
-  }
+  if (targetPolicy !== "fixed") throw new Error("FLOW_B_ACCEPTANCE_TARGET_POLICY must equal fixed");
+  const target = requireNumber(env, "FLOW_B_ACCEPTANCE_TARGET", 500);
+  requireNumber(env, "FLOW_B_TARGET_PUBLISH_COUNT", 500);
   requireNumber(env, "FLOW_B_STORE_ACCEPTANCE_TARGET", 100);
+  requireFlag(env, "FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE");
+  requireNumber(env, "FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE", 35);
   requireNumber(env, "FLOW_B_DAILY_STORE_LIMIT", 100);
   requireNumber(env, "FLOW_B_STORE_TOTAL_LIMIT", 100);
   if (String(env.FLOW_B_DAILY_STORE_TIMEZONE || "") !== "Asia/Shanghai") {
@@ -112,14 +93,43 @@ export function validate24hAcceptanceEnv(env = process.env) {
   if (!(unavailableRetryMs > 0) || unavailableRetryMs > 300_000) {
     throw new Error("unavailable store retry must be at most 300000ms");
   }
+  const urgentOnlineSyncIntervalMs = Number(env.FLOW_B_URGENT_ONLINE_SYNC_INTERVAL_MS);
+  if (!(urgentOnlineSyncIntervalMs >= 180_000)) {
+    throw new Error("urgent online sync interval must be at least 180000ms");
+  }
+  for (const name of [
+    "FLOW_B_DERIVED_SEARCH_SOURCES",
+    "FLOW_B_DERIVED_PRIORITY_SOURCES",
+    "FLOW_B_PRIORITIZE_DERIVED_SEARCH",
+    "FLOW_B_LOW_TOKEN_INTERVENTION",
+  ]) {
+    if (String(env[name] || "") !== "0") throw new Error(`${name} must equal 0`);
+  }
+  requireFlag(env, "FLOW_B_STRICT_SOURCE_PORTFOLIO");
+  if (String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "") !== "exact") {
+    throw new Error("FLOW_B_SOURCE_ALLOWLIST_MATCH must equal exact");
+  }
+  const sourceWeights = [
+    Number(env.FLOW_B_SOURCE_STRICT_WEIGHT),
+    Number(env.FLOW_B_SOURCE_FBS_WEIGHT),
+    Number(env.FLOW_B_SOURCE_EXPLORE_WEIGHT),
+  ];
+  if (sourceWeights.join(",") !== "6,3,1") {
+    throw new Error("source weights must freeze verified/exploration at 90/10");
+  }
+  if (!String(env.FLOW_B_RUNTIME_STATE_DB || "").trim().endsWith(".sqlite")) {
+    throw new Error("FLOW_B_RUNTIME_STATE_DB must identify the external SQLite state");
+  }
+  requireNumber(env, "FLOW_B_RUNTIME_STATE_SCHEMA_VERSION", 3);
   const storeIds = parseTargets(env);
   return {
     ok: true,
     duration_seconds: 86400,
     target,
     target_policy: targetPolicy,
-    minimum_average_per_hour_exclusive: minimumAveragePerHourExclusive,
-    per_store_target: null,
+    minimum_average_per_hour: 35,
+    minimum_average_per_hour_exclusive: 35,
+    per_store_target: 100,
     store_ids: storeIds,
     strict_profit_rule: "profit_rate > 30",
     watermark_id: 60822,
@@ -130,6 +140,7 @@ export function validate24hAcceptanceEnv(env = process.env) {
       sourcing_1688: 4,
       favorite_detail_interval_ms: favoriteDetailIntervalMs,
       confirmation_attempts: 1,
+      urgent_online_sync_interval_ms: urgentOnlineSyncIntervalMs,
     },
   };
 }

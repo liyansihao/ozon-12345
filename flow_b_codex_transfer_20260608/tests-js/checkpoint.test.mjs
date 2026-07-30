@@ -38,6 +38,8 @@ test("manual checkpoint invocation falls back to the stable deployment manifest"
   await fs.writeFile(path.join(appRoot, "deployment_manifest.json"), JSON.stringify({
     source_commit: "release-commit",
     config_sha256: "release-config-sha256",
+    source_set_sha256: "source-set-sha256",
+    state_schema_version: 3,
   }));
 
   assert.deepEqual(await checkpointFrozenEvidence({
@@ -47,6 +49,8 @@ test("manual checkpoint invocation falls back to the stable deployment manifest"
   }), {
     git_commit: "release-commit",
     config_sha256: "release-config-sha256",
+    source_set_sha256: "source-set-sha256",
+    state_schema_version: 3,
   });
 });
 

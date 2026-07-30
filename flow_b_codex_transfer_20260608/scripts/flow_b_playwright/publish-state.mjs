@@ -2,6 +2,9 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 
+import { classifySkuFailure } from "./retry-policy.mjs";
+import { createRuntimeState } from "./runtime-state.mjs";
+
 const TERMINAL_STATUSES = new Set(["published", "failed", "skipped"]);
 const VALID_STATUSES = new Set(["processing", ...TERMINAL_STATUSES]);
 const CANONICAL_LINK_HEADERS = new Set(["product_link", "canonical_product_link"]);
@@ -133,6 +136,19 @@ function csvPublishedSkus(text) {
   return skus;
 }
 
+function csvColumnValues(text, headerName) {
+  const values = new Set();
+  const records = parseCsvRecords(text);
+  const headers = records[0] ?? [];
+  const column = headers.findIndex((header) => normalizeHeader(header) === normalizeHeader(headerName));
+  if (column < 0) return values;
+  for (const record of records.slice(1)) {
+    const value = String(record[column] ?? "").trim();
+    if (value) values.add(value);
+  }
+  return values;
+}
+
 export function canonicalProductUrl(sku) {
   return `https://www.ozon.ru/product/${String(sku)}`;
 }
@@ -151,17 +167,30 @@ function csvCell(value) {
   return /[",\r\n]/u.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [] }) {
+export function createPublishState({
+  runDir,
+  publishedCsv,
+  pendingStateFiles = [],
+  runtimeStateDbPath = null,
+}) {
   if (!runDir) throw new TypeError("runDir is required");
   if (!publishedCsv) throw new TypeError("publishedCsv is required");
   if (!Array.isArray(pendingStateFiles)) throw new TypeError("pendingStateFiles must be an array");
+  if (runtimeStateDbPath !== null && (typeof runtimeStateDbPath !== "string" || !runtimeStateDbPath.trim())) {
+    throw new TypeError("runtimeStateDbPath must be a non-empty external path");
+  }
 
-  const statePath = path.join(runDir, "sku_states.jsonl");
-  const publishedPath = path.join(runDir, "published.jsonl");
-  const failedPath = path.join(runDir, "failed.jsonl");
-  const skippedPath = path.join(runDir, "skipped.jsonl");
-  const selectedPath = path.join(runDir, "selected.jsonl");
-  const summaryPath = path.join(runDir, "summary.json");
+  const resolvedRunDir = path.resolve(runDir);
+  const statePath = path.join(resolvedRunDir, "sku_states.jsonl");
+  const publishedPath = path.join(resolvedRunDir, "published.jsonl");
+  const failedPath = path.join(resolvedRunDir, "failed.jsonl");
+  const skippedPath = path.join(resolvedRunDir, "skipped.jsonl");
+  const selectedPath = path.join(resolvedRunDir, "selected.jsonl");
+  const summaryPath = path.join(resolvedRunDir, "summary.json");
+  const runtimeAuditPath = path.join(resolvedRunDir, "runtime_state_audit.jsonl");
+  const runtimeState = runtimeStateDbPath
+    ? createRuntimeState({ dbPath: runtimeStateDbPath })
+    : null;
   const states = new Map();
   const publishedSkus = new Set();
   const runPublishedSkus = new Set();
@@ -172,6 +201,23 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
   let writeChain = Promise.resolve();
   let publishedTransitionChain = Promise.resolve();
   let selectedTransitionChain = Promise.resolve();
+  let closing = null;
+  let acceptingOperations = true;
+  let lastStrictAuditReconciliation = null;
+  const activeOperations = new Set();
+
+  function trackOperation(task) {
+    if (!acceptingOperations) {
+      return Promise.reject(new Error("publish state is closing or closed"));
+    }
+    const operation = Promise.resolve().then(task);
+    activeOperations.add(operation);
+    operation.then(
+      () => activeOperations.delete(operation),
+      () => activeOperations.delete(operation),
+    );
+    return operation;
+  }
 
   function queueWrite(task) {
     const queued = writeChain.then(task);
@@ -191,10 +237,28 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
     return queued;
   }
 
+  async function newlineBeforeAppend(filename) {
+    let handle;
+    try {
+      handle = await fs.open(filename, "r");
+      const stat = await handle.stat();
+      if (stat.size === 0) return "";
+      const tail = Buffer.alloc(1);
+      await handle.read(tail, 0, 1, stat.size - 1);
+      return tail[0] === 10 || tail[0] === 13 ? "" : "\n";
+    } catch (error) {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    } finally {
+      await handle?.close();
+    }
+  }
+
   async function appendJsonl(filename, event) {
     await queueWrite(async () => {
-      await fs.mkdir(runDir, { recursive: true });
-      await fs.appendFile(filename, `${JSON.stringify(event)}\n`, "utf8");
+      await fs.mkdir(resolvedRunDir, { recursive: true });
+      const separator = await newlineBeforeAppend(filename);
+      await fs.appendFile(filename, `${separator}${JSON.stringify(event)}\n`, "utf8");
     });
   }
 
@@ -214,6 +278,13 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
       const separator = existing.endsWith("\n") || existing.endsWith("\r") ? "" : "\n";
       await fs.appendFile(publishedCsv, `${separator}${canonicalProductUrl(sku)}\n`, "utf8");
     });
+  }
+
+  async function appendPublishedCsvIfMissing(sku, knownSkus) {
+    if (knownSkus.has(sku)) return false;
+    await appendPublishedCsv(sku);
+    knownSkus.add(sku);
+    return true;
   }
 
   async function appendStoreReports(sku, data) {
@@ -243,6 +314,50 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
         await fs.appendFile(filename, line, "utf8");
       });
     }
+  }
+
+  async function appendStoreReportsIfMissing(sku, data, knownByFile) {
+    const storeId = Number(data?.store_id);
+    if (!(storeId > 0)) return 0;
+    const row = {
+      store_id: storeId,
+      store_name: data?.store_name ?? "",
+      sku,
+      product_link: canonicalProductUrl(sku),
+      title: data?.title ?? "",
+      profit_rate: data?.profit_rate ?? "",
+      sell_price: data?.sell_price ?? "",
+      purchase_price: data?.purchase_price ?? "",
+      offer_id: data?.offer_id ?? "",
+      published_at: data?.published_at ?? "",
+    };
+    const line = `${STORE_REPORT_HEADERS.map((header) => csvCell(row[header])).join(",")}\n`;
+    let appended = 0;
+    for (const filename of [
+      path.join(runDir, "published_by_store.csv"),
+      path.join(runDir, `published_store_${storeId}.csv`),
+    ]) {
+      let known = knownByFile.get(filename);
+      if (!known) {
+        known = csvColumnValues(await readTextIfPresent(filename), "sku");
+        knownByFile.set(filename, known);
+      }
+      if (known.has(sku)) continue;
+      await queueWrite(async () => {
+        await fs.mkdir(path.dirname(filename), { recursive: true });
+        const existing = await readTextIfPresent(filename);
+        if (!existing.trim()) {
+          await fs.writeFile(filename, `${STORE_REPORT_HEADERS.join(",")}\n`, "utf8");
+        }
+        const separator = existing && !existing.endsWith("\n") && !existing.endsWith("\r")
+          ? "\n"
+          : "";
+        await fs.appendFile(filename, `${separator}${line}`, "utf8");
+      });
+      known.add(sku);
+      appended += 1;
+    }
+    return appended;
   }
 
   async function appendSelectionReports(sku, data) {
@@ -324,7 +439,244 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
     states.set(sku, { status, data });
   }
 
-  async function load() {
+  function runtimePublicStatus(stage) {
+    if (stage === "published") return "published";
+    if (stage === "skipped") return "skipped";
+    if (stage === "failed") return "failed";
+    return "processing";
+  }
+
+  function runtimePublicEntry(runtimeValue) {
+    if (!runtimeValue) return null;
+    const data = {
+      ...(runtimeValue.data || {}),
+      reason: runtimeValue.reason,
+      terminal: Boolean(runtimeValue.terminal),
+      strict_confirmed: Boolean(runtimeValue.strict),
+    };
+    if (runtimeValue.failureClass) data.failure_class = runtimeValue.failureClass;
+    if (runtimeValue.nextEligibleAt) {
+      data.retry_at ??= runtimeValue.nextEligibleAt;
+      data.next_eligible_at = runtimeValue.nextEligibleAt;
+    }
+    if (!runtimeValue.terminal) {
+      const eligibility = runtimeState.canAttempt(runtimeValue.sku);
+      if (Number.isFinite(Number(eligibility.attempts))) {
+        data.transient_attempts = Number(eligibility.attempts);
+      }
+      if (eligibility.reason === "daily-transient-limit") {
+        // This closure is valid for the current Shanghai day. SQLite retains the
+        // attempt ledger, so the SKU becomes eligible naturally on the next day.
+        data.terminal = true;
+        data.retry_limit_scope = "shanghai-day";
+      }
+    }
+    return {
+      sku: runtimeValue.sku,
+      status: runtimePublicStatus(runtimeValue.stage),
+      data,
+    };
+  }
+
+  function syncRuntimeSku(skuValue) {
+    if (!runtimeState) return null;
+    const sku = normalizeSku(skuValue);
+    if (!sku) return null;
+    const entry = runtimePublicEntry(runtimeState.get(sku));
+    if (!entry) {
+      states.delete(sku);
+      publishedSkus.delete(sku);
+      runPublishedSkus.delete(sku);
+      return null;
+    }
+    states.set(sku, { status: entry.status, data: { ...entry.data } });
+    if (entry.status === "published") publishedSkus.add(sku);
+    else publishedSkus.delete(sku);
+    return entry;
+  }
+
+  function hydrateFromRuntime({ pendingSeeds = new Map(), localRunPublished = new Set() } = {}) {
+    if (!runtimeState) return;
+    const allSkus = new Set(runtimeState.auditEvents().map((event) => event.sku));
+    states.clear();
+    publishedSkus.clear();
+    runPublishedSkus.clear();
+    for (const sku of allSkus) {
+      const entry = syncRuntimeSku(sku);
+      if (!entry) continue;
+      const pendingSeed = pendingSeeds.get(sku);
+      if (
+        pendingSeed &&
+        ["processing", "failed"].includes(entry.status) &&
+        !entry.data.terminal &&
+        (entry.data.submitted === true || entry.data.submission_pending === true)
+      ) {
+        entry.data.reconcile_only = true;
+        entry.data.cross_run_seed = true;
+        entry.data.seed_source_file = pendingSeed.filename;
+        states.set(sku, { status: entry.status, data: { ...entry.data } });
+      }
+    }
+    const runtimeRunSkus = new Set(
+      runtimeState.auditEvents()
+        .filter((event) => (
+          event.strict &&
+          path.resolve(String(event.data?.runtime_run_dir || "")) === resolvedRunDir
+        ))
+        .map((event) => event.sku),
+    );
+    for (const sku of new Set([...localRunPublished, ...runtimeRunSkus])) {
+      if (runtimeState.get(sku)?.strict) runPublishedSkus.add(sku);
+    }
+  }
+
+  function strictQualityError(sku, data) {
+    if (String(sku) === "2815247918") return "excluded SKU cannot be counted as strict";
+    const modes = [data?.mode, data?.shipping_mode, data?.preflight_mode]
+      .filter((value) => value !== null && value !== undefined && value !== "");
+    if (
+      modes.length === 0 ||
+      modes.some((value) => String(value).trim().toUpperCase() !== "FBS") ||
+      data?.fbs_evidence?.verified !== true
+    ) {
+      return "strict publication requires verified pure FBS evidence";
+    }
+    if (!(Number(data?.purchase_price) > 0)) {
+      return "strict publication requires a reliable 1688 cost";
+    }
+    if (
+      data?.cost_verified !== true ||
+      data?.cost?.ok !== true ||
+      !(Number(data?.cost?.cost) > 0)
+    ) {
+      return "strict publication requires reliable 1688 cost evidence";
+    }
+    if (data?.quality_gate_passed !== true) {
+      return "strict publication requires complete quality-gate evidence";
+    }
+    return null;
+  }
+
+  function durableReason(status, data) {
+    const explicit = String(data?.reason || data?.error || "").trim();
+    if (explicit) return explicit;
+    if (status === "published") return "strict-confirmed";
+    if (status === "skipped") return "policy-skipped";
+    if (data?.submission_intent === true) return "submission-intent";
+    if (data?.submission_pending === true) return "submission-prepared";
+    if (data?.submitted === true) return "submission-reconciliation";
+    return status === "processing" ? "processing-started" : "unclassified-failure";
+  }
+
+  function durableFailureKind(reason, data) {
+    const explicit = String(data?.failure_class || data?.failureClass || "").trim().toLowerCase();
+    if (["deterministic", "invariant", "transient"].includes(explicit)) {
+      if (data?.terminal === true && explicit === "transient") return "invariant";
+      return explicit;
+    }
+    if (/fbs-evidence-missing|transient-retry-limit-exhausted/iu.test(reason)) return "invariant";
+    if (data?.terminal === true) return "deterministic";
+    if (reason === "online-product-rejected") {
+      const product = data?.final_result?.online_product || data?.online_product;
+      const targetStoreId = Number(data?.store_id);
+      const evidenceStoreId = Number(product?.shop_id);
+      return targetStoreId > 0 && evidenceStoreId > 0 && targetStoreId !== evidenceStoreId
+        ? "transient"
+        : "deterministic";
+    }
+    if ([
+      "daily-product-limit",
+      "import-failed",
+      "reconciliation-store-not-configured",
+      "stock-activation-terminal-rejected",
+    ].includes(reason)) {
+      return "deterministic";
+    }
+    const classified = classifySkuFailure(reason);
+    return classified === "deterministic" ? "deterministic" : "transient";
+  }
+
+  function recordRuntimeTransition(sku, status, data) {
+    const reason = durableReason(status, data);
+    const existingData = runtimeState.get(sku)?.data || {};
+    let runtimeData = {
+      ...existingData,
+      ...data,
+      reason,
+      runtime_run_dir: resolvedRunDir,
+    };
+    if (status === "published") {
+      const qualityError = strictQualityError(sku, runtimeData);
+      if (qualityError) throw new TypeError(qualityError);
+      return runtimeState.recordStrictPublication(sku, {
+        reason: "strict-confirmed",
+        data: runtimeData,
+      });
+    }
+    if (status === "skipped") {
+      return runtimeState.recordSkip(sku, { reason, data: runtimeData });
+    }
+    if (
+      status === "processing" &&
+      data?.submission_intent === true &&
+      data?.submitted !== true
+    ) {
+      return runtimeState.reserveSubmission(sku, {
+        reason,
+        data: runtimeData,
+      });
+    }
+    if (runtimeData.submitted === true) {
+      const reservation = runtimeState.submissionReservation(sku);
+      if (reservation?.status === "reserved") {
+        const confirmed = runtimeState.confirmSubmission(sku, {
+          reason: "erp-submission-accepted",
+          data: runtimeData,
+        });
+        if (!confirmed.recorded) return confirmed;
+        runtimeData = {
+          ...(confirmed.state?.data || runtimeData),
+          ...runtimeData,
+          submitted: true,
+          submission_intent: false,
+          submission_pending: false,
+        };
+      }
+    }
+    if (status === "failed") {
+      const kind = durableFailureKind(reason, data);
+      if (kind !== "transient") {
+        return runtimeState.recordFailure(sku, { reason, kind, data: runtimeData });
+      }
+      const configuredRetryAt = Date.parse(String(
+        runtimeData.retry_at || runtimeData.next_reconcile_at || "",
+      ));
+      const nextEligibleAt = new Date(
+        Number.isFinite(configuredRetryAt) ? configuredRetryAt : Date.now() + 300_000,
+      ).toISOString();
+      return runtimeState.recordFailure(sku, {
+        reason,
+        kind,
+        nextEligibleAt,
+        data: {
+          ...runtimeData,
+          retry_at: nextEligibleAt,
+        },
+      });
+    }
+    const delayedAt = Date.parse(String(runtimeData.next_reconcile_at || ""));
+    if (runtimeData.submitted === true && Number.isFinite(delayedAt)) {
+      return runtimeState.recordFailure(sku, {
+        reason,
+        kind: durableFailureKind(reason, runtimeData),
+        nextEligibleAt: new Date(delayedAt).toISOString(),
+        data: runtimeData,
+      });
+    }
+    return runtimeState.recordProcessing(sku, { reason, data: runtimeData });
+  }
+
+  async function loadInternal() {
     if (loaded) return api;
     if (loading) return loading;
     loading = (async () => {
@@ -381,7 +733,34 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
           states.set(sku, { status: "published", data: { link: canonicalProductUrl(sku), source: "csv" } });
         }
       }
+      if (runtimeState) {
+        const localRunPublished = new Set(runPublishedSkus);
+        const existingRuntimeEvents = runtimeState.auditEvents();
+        const hasNativeRuntimeEvents = existingRuntimeEvents.some((event) => event.source === "runtime");
+        if (!hasNativeRuntimeEvents) {
+          // CSV is imported first so richer JSONL evidence can upgrade a
+          // historical link-only publication to a strict publication.
+          await runtimeState.importLegacy({ publishedCsv: [publishedCsv] });
+          await runtimeState.importLegacy({ skuStates: pendingStateFiles });
+          await runtimeState.importLegacy({
+            skuStates: [statePath],
+            published: [publishedPath],
+            failed: [failedPath],
+            skipped: [skippedPath],
+          });
+        }
+        hydrateFromRuntime({
+          pendingSeeds: latestPendingSeeds,
+          localRunPublished,
+        });
+      }
       loaded = true;
+      try {
+        lastStrictAuditReconciliation = await reconcileStrictAuditOutputsInternal();
+      } catch (error) {
+        loaded = false;
+        throw error;
+      }
       if (summaryTarget !== undefined) writeSummary(summaryTarget);
       return api;
     })();
@@ -392,23 +771,105 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
     }
   }
 
+  async function reconcileStrictAuditOutputsInternal() {
+    if (!runtimeState) {
+      return {
+        strict: 0,
+        state_jsonl_added: 0,
+        published_jsonl_added: 0,
+        published_csv_added: 0,
+        store_csv_added: 0,
+      };
+    }
+    const strictRows = runtimeState.strictPublications().filter((row) => {
+      const runtimeRunDir = String(row.data?.runtime_run_dir || "").trim();
+      return runtimeRunDir && path.resolve(runtimeRunDir) === resolvedRunDir;
+    });
+    const statePublished = new Set(
+      parseJsonLines(await readTextIfPresent(statePath))
+        .map(eventFromHistory)
+        .filter((event) => event?.status === "published")
+        .map((event) => event.sku),
+    );
+    const publishedJsonl = new Set(
+      parseJsonLines(await readTextIfPresent(publishedPath))
+        .map(eventFromHistory)
+        .filter((event) => event?.status === "published")
+        .map((event) => event.sku),
+    );
+    const publishedCsvSkus = csvPublishedSkus(await readTextIfPresent(publishedCsv));
+    const knownStoreSkus = new Map();
+    const result = {
+      strict: strictRows.length,
+      state_jsonl_added: 0,
+      published_jsonl_added: 0,
+      published_csv_added: 0,
+      store_csv_added: 0,
+    };
+
+    for (const row of strictRows) {
+      const sku = row.sku;
+      const data = {
+        ...(row.data || {}),
+        link: canonicalProductUrl(sku),
+      };
+      const event = {
+        sku,
+        status: "published",
+        data,
+        timestamp: String(data.published_at || row.publishedAt),
+      };
+      if (!statePublished.has(sku)) {
+        await appendJsonl(statePath, event);
+        statePublished.add(sku);
+        result.state_jsonl_added += 1;
+      }
+      if (!publishedJsonl.has(sku)) {
+        await appendJsonl(publishedPath, { ...event, link: canonicalProductUrl(sku) });
+        publishedJsonl.add(sku);
+        result.published_jsonl_added += 1;
+      }
+      if (await appendPublishedCsvIfMissing(sku, publishedCsvSkus)) {
+        result.published_csv_added += 1;
+      }
+      result.store_csv_added += await appendStoreReportsIfMissing(sku, data, knownStoreSkus);
+      publishedSkus.add(sku);
+      runPublishedSkus.add(sku);
+      states.set(sku, { status: "published", data });
+    }
+    return result;
+  }
+
   async function transitionInternal(skuValue, status, data = {}) {
     const sku = normalizeSku(skuValue);
     if (!sku) throw new TypeError("sku is required");
     if (!VALID_STATUSES.has(status)) throw new TypeError(`unsupported status: ${status}`);
-    await load();
+    await loadInternal();
 
-    if (publishedSkus.has(sku)) return false;
+    if (hasPublished(sku)) return false;
 
-    const nextData = eventData(data);
+    let nextData = eventData(data);
     if (status === "published") nextData.link = canonicalProductUrl(sku);
+    if (runtimeState) {
+      const result = recordRuntimeTransition(sku, status, nextData);
+      if (!result.recorded) {
+        syncRuntimeSku(sku);
+        return false;
+      }
+      const persisted = syncRuntimeSku(sku);
+      nextData = {
+        ...(persisted?.data || nextData),
+        ...(status === "published" ? { link: canonicalProductUrl(sku) } : {}),
+      };
+    }
     const event = {
       sku,
       status,
       data: nextData,
       timestamp: new Date().toISOString(),
     };
-    states.set(sku, { status, data: nextData });
+    const publicStatus = runtimeState ? (syncRuntimeSku(sku)?.status ?? status) : status;
+    states.set(sku, { status: publicStatus, data: nextData });
     await appendJsonl(statePath, event);
 
     if (status === "published") {
@@ -426,7 +887,7 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
     return true;
   }
 
-  async function transition(skuValue, status, data = {}) {
+  async function transitionOperation(skuValue, status, data = {}) {
     if (status === "published") {
       const sku = normalizeSku(skuValue);
       if (!sku) throw new TypeError("sku is required");
@@ -435,16 +896,38 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
     return transitionInternal(skuValue, status, data);
   }
 
+  function load() {
+    return trackOperation(() => loadInternal());
+  }
+
+  function transition(skuValue, status, data = {}) {
+    return trackOperation(() => transitionOperation(skuValue, status, data));
+  }
+
   function hasPublished(skuValue) {
     const sku = normalizeSku(skuValue);
-    return sku !== null && publishedSkus.has(sku);
+    if (sku === null) return false;
+    if (runtimeState) return runtimeState.get(sku)?.stage === "published";
+    return publishedSkus.has(sku);
   }
 
   function statusOf(skuValue) {
     const sku = normalizeSku(skuValue);
     if (sku === null) return null;
+    if (runtimeState) return syncRuntimeSku(sku)?.status ?? null;
     if (publishedSkus.has(sku)) return "published";
     return states.get(sku)?.status ?? null;
+  }
+
+  function canAttempt(skuValue, options = {}) {
+    const sku = normalizeSku(skuValue);
+    if (sku === null) return { allowed: false, reason: "sku-required", state: null };
+    if (runtimeState) return runtimeState.canAttempt(sku, options);
+    const state = states.get(sku);
+    if (publishedSkus.has(sku) || TERMINAL_STATUSES.has(state?.status)) {
+      return { allowed: false, reason: "terminal-state", state: entryOf(sku) };
+    }
+    return { allowed: true, reason: "eligible", attempts: 0, state: entryOf(sku) };
   }
 
   function runPublishedCount() {
@@ -452,6 +935,9 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
   }
 
   function entries() {
+    if (runtimeState) {
+      for (const sku of [...states.keys()]) syncRuntimeSku(sku);
+    }
     return [...states].map(([sku, value]) => ({
       sku,
       status: value.status,
@@ -462,6 +948,7 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
   function entryOf(skuValue) {
     const sku = normalizeSku(skuValue);
     if (sku === null) return null;
+    if (runtimeState) return syncRuntimeSku(sku);
     const value = states.get(sku);
     if (!value) return null;
     return {
@@ -475,22 +962,21 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
     return writeSummary(target);
   }
 
-  async function recordPublished(item) {
-    const operation = enqueuePublishedTransition(async () => {
+  function recordPublished(item) {
+    return trackOperation(() => enqueuePublishedTransition(async () => {
       const sku = normalizeSku(item?.sku ?? item?.id);
       if (!sku) throw new TypeError("published item sku is required");
       if (hasPublished(sku)) {
-        await load();
+        await loadInternal();
         return false;
       }
       return transitionInternal(sku, "published", { ...(item ?? {}), link: canonicalProductUrl(sku) });
-    });
-    return operation;
+    }));
   }
 
-  async function recordSelected(item) {
-    return enqueueSelectedTransition(async () => {
-      await load();
+  function recordSelected(item) {
+    return trackOperation(() => enqueueSelectedTransition(async () => {
+      await loadInternal();
       const sku = normalizeSku(item?.sku ?? item?.id);
       const storeId = Number(item?.store_id);
       if (!sku) throw new TypeError("selected item sku is required");
@@ -503,9 +989,93 @@ export function createPublishState({ runDir, publishedCsv, pendingStateFiles = [
       await appendJsonl(selectedPath, event);
       await appendSelectionReports(sku, data);
       return true;
+    }));
+  }
+
+  function reconcileStrictAuditOutputs() {
+    return trackOperation(async () => {
+      await loadInternal();
+      lastStrictAuditReconciliation = await reconcileStrictAuditOutputsInternal();
+      return lastStrictAuditReconciliation;
     });
   }
 
-  const api = { load, transition, hasPublished, statusOf, entryOf, entries, runPublishedCount, summary, recordPublished, recordSelected };
+  async function close() {
+    if (closing) return closing;
+    acceptingOperations = false;
+    closing = (async () => {
+      const errors = [];
+      const capture = async (operation) => {
+        try {
+          return await operation;
+        } catch (error) {
+          errors.push(error);
+          return null;
+        }
+      };
+      if (loading) await capture(loading);
+      while (activeOperations.size > 0) {
+        await Promise.allSettled([...activeOperations]);
+      }
+      await capture(Promise.all([
+        publishedTransitionChain,
+        selectedTransitionChain,
+      ]));
+      await capture(writeChain);
+      if (runtimeState) {
+        try {
+          const reconciliation = await capture(reconcileStrictAuditOutputsInternal());
+          if (reconciliation) lastStrictAuditReconciliation = reconciliation;
+          await capture(writeChain);
+          await capture(runtimeState.exportAuditJsonl(runtimeAuditPath));
+        } finally {
+          runtimeState.close();
+        }
+      }
+      if (errors.length > 0) throw errors[0];
+    })();
+    return closing;
+  }
+
+  function strictAuditReconciliation() {
+    return lastStrictAuditReconciliation
+      ? { ...lastStrictAuditReconciliation }
+      : null;
+  }
+
+  const api = {
+    load,
+    transition,
+    hasPublished,
+    statusOf,
+    canAttempt,
+    entryOf,
+    entries,
+    runPublishedCount,
+    summary,
+    recordPublished,
+    recordSelected,
+    reconcileStrictAuditOutputs,
+    strictAuditReconciliation,
+    close,
+  };
   return api;
+}
+
+export async function reconcileRuntimeAuditOutputs({
+  runtimeStateDbPath,
+  runDir,
+  publishedCsv,
+} = {}) {
+  const state = createPublishState({
+    runtimeStateDbPath,
+    runDir,
+    publishedCsv,
+  });
+  try {
+    await state.load();
+    return state.strictAuditReconciliation();
+  } finally {
+    await state.close();
+  }
 }

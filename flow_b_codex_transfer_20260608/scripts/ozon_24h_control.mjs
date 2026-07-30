@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import {
   buildLaunchdPlist,
+  productionRunContractDecision,
   resolveProductionLayout,
 } from "./ozon_24h_supervisor.mjs";
 
@@ -19,15 +20,27 @@ const ACTIVE_STATUSES = new Set([
   "STARTING",
   "PREFLIGHTING_CAPACITY",
   "PREWARMING_CANDIDATES",
+  "PREPARING_CANDIDATE_BUFFER",
   "WAITING_FOR_QUOTA_RESET",
   "RUNNING",
   "RECOVERING",
   "WAITING_FOR_VERIFICATION",
 ]);
 const RESUMABLE_STATUSES = new Set([...ACTIVE_STATUSES, "STOPPED"]);
+const FAILED_WINDOW_STOP_REASONS = new Set([
+  "rolling-120-minute-strict-rate-below-threshold",
+  "rolling-rate-check-failed",
+  "startup-checkpoint-failed",
+  "repeated-browser-recovery-failure",
+]);
 
 export function shouldResumeCurrentRun(status, current) {
   if (!current?.run_id || !current?.run_dir || !current?.urls_file) return false;
+  if (String(status?.status || "") === "STOPPED"
+    && current?.formal_started === true
+    && FAILED_WINDOW_STOP_REASONS.has(String(status?.reason || ""))) {
+    return false;
+  }
   return RESUMABLE_STATUSES.has(String(status?.status || ""));
 }
 
@@ -48,6 +61,21 @@ async function readJson(filename, fallback = null) {
     return JSON.parse(await fsp.readFile(filename, "utf8"));
   } catch (error) {
     if (error.code === "ENOENT" && fallback !== null) return fallback;
+    throw error;
+  }
+}
+
+async function readJsonLines(filename) {
+  try {
+    return (await fsp.readFile(filename, "utf8")).split(/\r?\n/u).filter(Boolean).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
     throw error;
   }
 }
@@ -76,17 +104,14 @@ function validateConfig(config) {
   if (config?.frozen !== true) throw new Error("production config must be frozen");
   if (Number(config?.acceptance?.duration_seconds) !== 86400) throw new Error("acceptance duration must be 86400 seconds");
   const targetPolicy = String(config?.acceptance?.target_policy || "fixed");
-  if (targetPolicy === "erp_remaining_capacity") {
-    if (config?.acceptance?.minimum_average_per_hour_exclusive !== null) {
-      throw new Error("dynamic ERP-capacity runs must not use a fixed hourly completion threshold");
-    }
-  } else if (targetPolicy === "fixed") {
-    if (Number(config?.acceptance?.strict_target) < 481) throw new Error("strict target must be at least 481");
-    if (Number(config?.acceptance?.minimum_average_per_hour_exclusive) !== 20) {
-      throw new Error("minimum strict rate threshold must be exclusively greater than 20/hour");
-    }
-  } else {
-    throw new Error("acceptance target policy must equal fixed or erp_remaining_capacity");
+  if (targetPolicy !== "fixed") throw new Error("acceptance target policy must equal fixed");
+  if (Number(config?.acceptance?.strict_target) !== 500) throw new Error("strict target must equal 500");
+  if (Number(config?.acceptance?.per_store_target) !== 100) throw new Error("per-store strict target must equal 100");
+  if (Number(config?.acceptance?.rolling_rate_window_minutes) !== 120) {
+    throw new Error("rolling strict rate window must equal 120 minutes");
+  }
+  if (Number(config?.acceptance?.minimum_average_per_hour_exclusive) !== 35) {
+    throw new Error("minimum strict rate threshold must equal 35/hour");
   }
   if (Number(config?.acceptance?.minimum_profit_rate_exclusive) !== 30) {
     throw new Error("profit rate must be exclusively greater than 30");
@@ -99,6 +124,54 @@ function validateConfig(config) {
     if (!Number.isSafeInteger(Number(store.warehouse_id))) {
       throw new Error(`store ${store.id} is missing an ERP-verified warehouse mapping`);
     }
+  }
+  if (new Set(config.stores.map((store) => String(store.warehouse_id))).size !== 5) {
+    throw new Error("five-store warehouse mappings must be unique");
+  }
+  if (String(config?.flow_env?.FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE || "") !== "1") {
+    throw new Error("per-store acceptance must be enabled");
+  }
+  if (Number(config?.flow_env?.FLOW_B_URGENT_ONLINE_SYNC_INTERVAL_MS) < 180_000) {
+    throw new Error("urgent online sync interval must be at least 180000ms");
+  }
+  if (
+    Number(config?.candidate_buffer?.minimum_hours) !== 2
+    || Number(config?.candidate_buffer?.minimum_strict_per_hour) !== 35
+    || Number(config?.candidate_buffer?.minimum_ready_candidates) !== 70
+  ) {
+    throw new Error("candidate buffer must equal two hours / 70 fully-qualified SKUs");
+  }
+  if (
+    Number(config?.rate_check_interval_seconds) < 60
+    || Number(config?.rate_check_interval_seconds) > 300
+  ) {
+    throw new Error("rolling rate must be checked every 60..300 seconds");
+  }
+  for (const name of [
+    "FLOW_B_DERIVED_SEARCH_SOURCES",
+    "FLOW_B_DERIVED_PRIORITY_SOURCES",
+    "FLOW_B_PRIORITIZE_DERIVED_SEARCH",
+    "FLOW_B_LOW_TOKEN_INTERVENTION",
+  ]) {
+    if (String(config?.flow_env?.[name] || "") !== "0") {
+      throw new Error(`${name} must equal 0`);
+    }
+  }
+  if (String(config?.flow_env?.FLOW_B_STRICT_SOURCE_PORTFOLIO || "") !== "1"
+    || String(config?.flow_env?.FLOW_B_SOURCE_ALLOWLIST_MATCH || "") !== "exact") {
+    throw new Error("production sourcing must use the exact strict seller portfolio");
+  }
+  if ([
+    Number(config?.flow_env?.FLOW_B_SOURCE_STRICT_WEIGHT),
+    Number(config?.flow_env?.FLOW_B_SOURCE_FBS_WEIGHT),
+    Number(config?.flow_env?.FLOW_B_SOURCE_EXPLORE_WEIGHT),
+  ].join(",") !== "6,3,1") {
+    throw new Error("source weights must freeze verified/exploration at 90/10");
+  }
+  if (Number(config?.state_schema_version) !== 3
+    || Number(config?.flow_env?.FLOW_B_RUNTIME_STATE_SCHEMA_VERSION) !== 3
+    || !String(config?.flow_env?.FLOW_B_RUNTIME_STATE_DB || "").endsWith(".sqlite")) {
+    throw new Error("external SQLite state schema must equal version 3");
   }
   for (const [rule, required] of Object.entries(config?.immutable_rules || {})) {
     if (required !== true) throw new Error(`immutable rule is not enabled: ${rule}`);
@@ -160,6 +233,56 @@ async function copyInitialState(sourceRoot, stateRoot) {
   }
 }
 
+export async function validateCandidateSourcePortfolio({
+  appRoot,
+  releasesRoot,
+  seedFile = path.join(appRoot, "config", "ozon_source_seed.txt"),
+} = {}) {
+  const resolvedAppRoot = path.resolve(appRoot);
+  const resolvedReleasesRoot = path.resolve(releasesRoot);
+  await fsp.mkdir(resolvedReleasesRoot, { recursive: true });
+  const stagingStateRoot = await fsp.mkdtemp(
+    path.join(resolvedReleasesRoot, ".candidate-source-smoke-"),
+  );
+  try {
+    const seedSourceText = await fsp.readFile(path.resolve(seedFile), "utf8");
+    const sourceRefresh = await run(process.execPath, [
+      path.join(resolvedAppRoot, "scripts", "ozon_source_portfolio.mjs"),
+      "refresh",
+      stagingStateRoot,
+      "-",
+      path.resolve(seedFile),
+    ], { cwd: resolvedAppRoot });
+    if (!sourceRefresh.ok) {
+      throw new Error(
+        `candidate source portfolio smoke check failed: ${sourceRefresh.stderr || sourceRefresh.error}`,
+      );
+    }
+    const sourceText = await fsp.readFile(
+      path.join(stagingStateRoot, "sources", "active_urls.txt"),
+      "utf8",
+    );
+    const activeUrls = sourceText
+      .split(/\r?\n/u)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (
+      activeUrls.length === 0
+      || activeUrls.some((value) => !/^https:\/\/(?:www\.)?ozon\.ru\/seller\//u.test(value))
+    ) {
+      throw new Error("candidate source portfolio smoke check produced a non-seller source set");
+    }
+    return {
+      sourceText,
+      sourceSetSha256: sha256(seedSourceText),
+      smokeSourceSetSha256: sha256(sourceText),
+      activeSourceCount: activeUrls.length,
+    };
+  } finally {
+    await fsp.rm(stagingStateRoot, { recursive: true, force: true });
+  }
+}
+
 export async function refreshCurrentRunSources({
   appRoot,
   stateRoot,
@@ -192,14 +315,48 @@ export async function refreshCurrentRunSources({
   const refreshed = {
     ...current,
     source_sha256: sha256(sourceText),
+    source_set_sha256: sha256(sourceText),
     source_refreshed_at: new Date().toISOString(),
   };
+  if (current?.formal_started === false) {
+    const pendingPath = path.join(runDir, "pending_manifest.json");
+    const pending = await readJson(pendingPath, {});
+    await writeJsonAtomic(pendingPath, {
+      ...pending,
+      source_sha256: refreshed.source_sha256,
+      source_set_sha256: refreshed.source_set_sha256,
+      source_refreshed_at: refreshed.source_refreshed_at,
+    });
+  }
   await writeJsonAtomic(path.join(absoluteStateRoot, "current_run.json"), refreshed);
   return refreshed;
 }
 
 async function installCandidate({ sourceRoot, config, configSource }) {
   const paths = deploymentPaths(config);
+  const repositoryRoot = path.resolve(sourceRoot, "..");
+  const sourceRelative = path.relative(repositoryRoot, path.resolve(sourceRoot));
+  const versionedInputs = [
+    path.join(sourceRelative, "config"),
+    path.join(sourceRelative, "scripts"),
+    "package.json",
+    "package-lock.json",
+  ];
+  const sourceStatus = await run("/usr/bin/git", [
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+    "--",
+    ...versionedInputs,
+  ], { cwd: repositoryRoot });
+  if (!sourceStatus.ok) {
+    throw new Error(`cannot verify candidate source revision: ${sourceStatus.stderr || sourceStatus.error}`);
+  }
+  if (sourceStatus.stdout.trim()) {
+    throw new Error(
+      "candidate production inputs must be committed before install so deployment_manifest.source_commit is exact",
+    );
+  }
   await fsp.mkdir(paths.releases, { recursive: true });
   await fsp.mkdir(paths.stateRoot, { recursive: true });
   const rsync = await run("/usr/bin/rsync", [
@@ -208,11 +365,19 @@ async function installCandidate({ sourceRoot, config, configSource }) {
     "--exclude", "runs/",
     "--exclude", "runtime/",
     "--exclude", "data/flow_b/",
+    "--exclude", "docs/",
+    "--exclude", "tests/",
+    "--exclude", "tests-js/",
+    "--exclude", "exports/",
+    "--exclude", ".pytest_cache/",
+    "--exclude", ".DS_Store",
+    "--exclude", "*.md",
+    "--exclude", "*.jsonl",
+    "--exclude", "current_store.json",
     `${path.resolve(sourceRoot)}/`,
     `${paths.candidate}/`,
   ]);
   if (!rsync.ok) throw new Error(`candidate install failed: ${rsync.stderr || rsync.error}`);
-  const repositoryRoot = path.resolve(sourceRoot, "..");
   for (const filename of ["package.json", "package-lock.json"]) {
     const source = path.join(repositoryRoot, filename);
     if (await pathExists(source)) await fsp.copyFile(source, path.join(paths.candidate, filename));
@@ -226,17 +391,12 @@ async function installCandidate({ sourceRoot, config, configSource }) {
     "--no-fund",
   ], { cwd: paths.candidate });
   if (!npm.ok) throw new Error(`candidate dependency install failed: ${npm.stderr || npm.error}`);
+  const candidateSources = await validateCandidateSourcePortfolio({
+    appRoot: paths.candidate,
+    releasesRoot: paths.releases,
+    seedFile: path.join(paths.candidate, "config", "ozon_source_seed.txt"),
+  });
   await copyInitialState(sourceRoot, paths.stateRoot);
-  const sourceRefresh = await run(process.execPath, [
-    path.join(paths.candidate, "scripts", "ozon_source_portfolio.mjs"),
-    "refresh",
-    paths.stateRoot,
-    "-",
-    path.join(paths.candidate, "config", "ozon_source_seed.txt"),
-  ], { cwd: paths.candidate });
-  if (!sourceRefresh.ok) {
-    throw new Error(`candidate source portfolio refresh failed: ${sourceRefresh.stderr || sourceRefresh.error}`);
-  }
   const configText = await fsp.readFile(configSource, "utf8");
   const revision = await run("/usr/bin/git", ["rev-parse", "HEAD"], { cwd: repositoryRoot });
   await writeJsonAtomic(path.join(paths.candidate, "deployment_manifest.json"), {
@@ -244,6 +404,9 @@ async function installCandidate({ sourceRoot, config, configSource }) {
     source_root: path.resolve(sourceRoot),
     source_commit: revision.ok ? revision.stdout.trim() : null,
     config_sha256: sha256(configText),
+    source_set_sha256: candidateSources.sourceSetSha256,
+    source_smoke_sha256: candidateSources.smokeSourceSetSha256,
+    state_schema_version: Number(config.state_schema_version || 3),
     role: "candidate",
     launch_runtime_requires_git: false,
   });
@@ -252,6 +415,9 @@ async function installCandidate({ sourceRoot, config, configSource }) {
     candidate: paths.candidate,
     state_root: paths.stateRoot,
     config_sha256: sha256(configText),
+    source_set_sha256: candidateSources.sourceSetSha256,
+    active_source_count: candidateSources.activeSourceCount,
+    state_schema_version: Number(config.state_schema_version || 3),
   };
 }
 
@@ -377,8 +543,42 @@ async function start(config) {
   const status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   if (shouldResumeCurrentRun(status, current)) {
+    const [releaseConfigText, deployment] = await Promise.all([
+      fsp.readFile(path.join(paths.appLink, "config", "ozon_24h_production.json"), "utf8"),
+      readJson(path.join(paths.appLink, "deployment_manifest.json"), {}),
+    ]);
+    const releaseConfigHash = sha256(releaseConfigText);
+    if (!String(deployment?.source_commit || "")
+      || String(deployment?.config_sha256 || "") !== releaseConfigHash
+      || Number(deployment?.state_schema_version) !== 3) {
+      const error = new Error("promoted release identity is missing or inconsistent");
+      error.code = "OZON_RELEASE_IDENTITY_INVALID";
+      throw error;
+    }
+    const runDir = path.resolve(current.run_dir);
+    if (path.dirname(runDir) !== path.join(paths.stateRoot, "runs")
+      || path.resolve(current.urls_file) !== path.join(paths.stateRoot, "sources", "active_urls.txt")) {
+      const error = new Error("current run paths are outside the production state root");
+      error.code = "OZON_PRODUCTION_STATE_PATH_INVALID";
+      throw error;
+    }
+    const contract = productionRunContractDecision({
+      currentRun: current,
+      pendingManifest: await readJson(path.join(runDir, "pending_manifest.json"), {}),
+      acceptanceWindow: await readJson(path.join(runDir, "acceptance_window.json"), {}),
+      sourceConfig: await readJson(path.join(runDir, "source_config.json"), {}),
+      frozenManifest: await readJson(path.join(runDir, "frozen_manifest.json"), {}),
+      expectedConfigHash: releaseConfigHash,
+      expectedCommitSha: deployment.source_commit,
+    });
+    if (contract.action !== "continue") {
+      const error = new Error(`${contract.reason}: ${contract.issues.join(",")}`);
+      error.code = "OZON_PRODUCTION_RUN_CONTRACT";
+      error.contract = contract;
+      throw error;
+    }
     const mode = resumeMode(status, current);
-    const resumedCurrent = mode === "restart-current-run"
+    const resumedCurrent = mode === "restart-current-run" && current.formal_started === false
       ? await refreshCurrentRunSources({
         appRoot: paths.appLink,
         stateRoot: paths.stateRoot,
@@ -427,6 +627,8 @@ async function start(config) {
     requested_at: requestedAt.toISOString(),
     config_sha256: sha256(configText),
     source_sha256: sha256(sourceText),
+    source_set_sha256: sha256(sourceText),
+    state_schema_version: Number(config.state_schema_version || 3),
     formal_window_started: false,
   });
   await writeJsonAtomic(path.join(paths.stateRoot, "current_run.json"), {
@@ -437,6 +639,8 @@ async function start(config) {
     formal_started: false,
     config_sha256: sha256(configText),
     source_sha256: sha256(sourceText),
+    source_set_sha256: sha256(sourceText),
+    state_schema_version: Number(config.state_schema_version || 3),
   });
   await writeJsonAtomic(path.join(paths.stateRoot, "operational_status.json"), {
     status: "PREFLIGHTING_CAPACITY",
@@ -470,6 +674,101 @@ async function resume(config) {
   return { ok: true, resume_requested: true };
 }
 
+function shortText(value, maximum = 160) {
+  const text = String(value ?? "").replace(/\s+/gu, " ").trim();
+  return text.length <= maximum ? text : `${text.slice(0, maximum - 1)}…`;
+}
+
+export function compactProductionStatus({
+  current = {},
+  operational = {},
+  owners = {},
+  checkpoint = {},
+} = {}) {
+  const value = checkpoint?.compact || checkpoint || {};
+  return {
+    at: operational.observed_at || value.at || null,
+    status: operational.status || "UNKNOWN",
+    reason: shortText(operational.reason || "", 160) || null,
+    run_id: current.run_id || null,
+    formal_started: current.formal_started === true,
+    strict: Number(value.strict || 0),
+    target: Number(value.target || 500),
+    rate_h: Number(value.rate_h || 0),
+    rolling_120_h: Number(value?.rolling_h?.["120"] || 0),
+    by_store: value.by_store || {},
+    pending: value.pending || {},
+    constrained: value.constrained || [],
+    errors: Number(value.errors || 0),
+    owners: {
+      supervisor: Number(owners?.counts?.supervisor || 0),
+      worker: Number(owners?.counts?.worker || 0),
+      profile: Number(owners?.counts?.profile_owner || 0),
+    },
+    identity: {
+      config_sha256: current.config_sha256 || null,
+      source_set_sha256: current.source_set_sha256 || current.source_sha256 || null,
+      state_schema_version: Number(current.state_schema_version || 3),
+    },
+  };
+}
+
+function uniqueSkuCount(rows) {
+  return new Set((rows || []).map((row) => String(row?.sku ?? row?.data?.sku ?? "").trim()).filter(Boolean)).size;
+}
+
+function errorFingerprint(row) {
+  const source = shortText(
+    row?.reason || row?.error || row?.message || row?.data?.reason || row?.data?.error || "unknown",
+    500,
+  ).toLowerCase()
+    .replace(/https?:\/\/\S+/gu, "<url>")
+    .replace(/\b\d+\b/gu, "<n>");
+  return {
+    fingerprint: sha256(source).slice(0, 12),
+    reason: shortText(source, 120),
+  };
+}
+
+export function buildIncidentDigest({
+  failed = [],
+  skipped = [],
+  runtimeErrors = [],
+  candidates = [],
+  selected = [],
+  published = [],
+  recoveries = [],
+} = {}) {
+  const fingerprints = new Map();
+  for (const row of [...failed, ...skipped, ...runtimeErrors]) {
+    const value = errorFingerprint(row);
+    const existing = fingerprints.get(value.fingerprint) || { ...value, count: 0 };
+    existing.count += 1;
+    fingerprints.set(value.fingerprint, existing);
+  }
+  return {
+    generated_at: new Date().toISOString(),
+    unique_skus: {
+      failed: uniqueSkuCount(failed),
+      skipped: uniqueSkuCount(skipped),
+      runtime_error: uniqueSkuCount(runtimeErrors),
+    },
+    funnel: {
+      candidate: uniqueSkuCount(candidates),
+      selected: uniqueSkuCount(selected),
+      strict_published: uniqueSkuCount(published),
+    },
+    error_fingerprints: [...fingerprints.values()]
+      .sort((left, right) => right.count - left.count || left.fingerprint.localeCompare(right.fingerprint))
+      .slice(0, 10),
+    recent_recoveries: recoveries.slice(-5).map((row) => ({
+      at: row?.at || null,
+      action: shortText(row?.action || "", 80),
+      outcome: shortText(row?.outcome || row?.reason || "", 120) || null,
+    })),
+  };
+}
+
 async function status(config) {
   const paths = deploymentPaths(config);
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
@@ -478,7 +777,31 @@ async function status(config) {
   const checkpoint = current?.run_dir
     ? await readJson(path.join(current.run_dir, "compact_checkpoint.json"), {})
     : {};
-  return { current_run: current, operational, owners, checkpoint: checkpoint.compact || checkpoint };
+  return compactProductionStatus({ current, operational, owners, checkpoint });
+}
+
+async function incident(config) {
+  const paths = deploymentPaths(config);
+  const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
+  const runDir = path.resolve(String(current?.run_dir || path.join(paths.stateRoot, "runs", "missing")));
+  const [failed, skipped, runtimeErrors, candidates, selected, published, recoveries] = await Promise.all([
+    readJsonLines(path.join(runDir, "failed.jsonl")),
+    readJsonLines(path.join(runDir, "skipped.jsonl")),
+    readJsonLines(path.join(runDir, "runtime_errors.jsonl")),
+    readJsonLines(path.join(runDir, "candidate_queue.jsonl")),
+    readJsonLines(path.join(runDir, "selected.jsonl")),
+    readJsonLines(path.join(runDir, "published.jsonl")),
+    readJsonLines(path.join(paths.stateRoot, "recovery.jsonl")),
+  ]);
+  return buildIncidentDigest({
+    failed,
+    skipped,
+    runtimeErrors,
+    candidates,
+    selected,
+    published,
+    recoveries: recoveries.filter((row) => path.resolve(String(row?.run_dir || "")) === runDir),
+  });
 }
 
 async function exportConfirmed(config) {
@@ -517,10 +840,12 @@ async function main(argv = process.argv.slice(2)) {
     result = await resume(config);
   } else if (command === "status") {
     result = await status(config);
+  } else if (command === "incident") {
+    result = await incident(config);
   } else if (command === "export") {
     result = await exportConfirmed(config);
   } else {
-    throw new Error("usage: ozon_24h_production.sh [start|install-candidate|doctor-candidate|promote|doctor|status|stop|resume|export]");
+    throw new Error("usage: ozon_24h_production.sh [start|install-candidate|doctor-candidate|promote|doctor|status|incident|stop|resume|export]");
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   return result?.ok === false ? 1 : 0;
@@ -544,6 +869,8 @@ if (invoked) {
 export {
   deploymentPaths,
   doctor,
+  incident,
   installCandidate,
+  status,
   validateConfig,
 };

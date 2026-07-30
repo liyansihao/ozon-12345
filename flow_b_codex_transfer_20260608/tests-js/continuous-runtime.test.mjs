@@ -240,7 +240,7 @@ test("acceptance only counts unique in-window profit>30 selling publications wit
   ];
   const summary = acceptanceSummary({ rows, startedAt, endedAt, target: 1 });
   assert.equal(summary.success_count, 1);
-  assert.equal(summary.effective_per_hour, 0.5);
+  assert.equal(summary.effective_per_hour, 60);
   assert.equal(summary.passed, true);
   assert.deepEqual(summary.skus, ["ok-1"]);
 });
@@ -276,25 +276,25 @@ test("short throughput gates can disable per-store acceptance without changing s
   }), 100);
 });
 
-test("formal acceptance requires strictly more than 20 per hour and zero duplicate SKU events", () => {
+test("formal acceptance enforces fixed-500 effective speed and zero duplicate SKU events", () => {
   const startedAt = "2026-07-27T00:00:00.000Z";
   const endedAt = "2026-07-28T00:00:00.000Z";
-  const rows = Array.from({ length: 481 }, (_, index) => ({
+  const rows = Array.from({ length: 500 }, (_, index) => ({
     sku: String(index + 1),
     profit_rate: 31,
     online_status: "selling",
     stock: 1,
-    published_at: "2026-07-27T12:00:00.000Z",
+    published_at: "2026-07-27T14:00:00.000Z",
   }));
   const passed = acceptanceSummary({
     rows,
     startedAt,
     endedAt,
-    target: 481,
-    minimumAveragePerHourExclusive: 20,
+    target: 500,
+    minimumAveragePerHourExclusive: 35,
     requireZeroDuplicates: true,
   });
-  assert.equal(passed.effective_per_hour, 20.04);
+  assert.equal(passed.effective_per_hour, 35.71);
   assert.equal(passed.duplicate_skus, 0);
   assert.equal(passed.passed, true);
 
@@ -302,12 +302,128 @@ test("formal acceptance requires strictly more than 20 per hour and zero duplica
     rows: [...rows, rows[0]],
     startedAt,
     endedAt,
-    target: 481,
-    minimumAveragePerHourExclusive: 20,
+    target: 500,
+    minimumAveragePerHourExclusive: 35,
     requireZeroDuplicates: true,
   });
   assert.equal(duplicate.duplicate_skus, 1);
   assert.equal(duplicate.passed, false);
+});
+
+test("formal speed gate is inclusive and uses time to reach the fixed target", () => {
+  const startedAt = "2026-07-27T00:00:00.000Z";
+  const endedAt = "2026-07-28T00:00:00.000Z";
+  const rows = Array.from({ length: 70 }, (_, index) => ({
+    sku: `pace-${index}`,
+    profit_rate: 31,
+    online_status: "selling",
+    stock: 1,
+    published_at: "2026-07-27T02:00:00.000Z",
+  }));
+  const summary = acceptanceSummary({
+    rows,
+    startedAt,
+    endedAt,
+    target: 70,
+    minimumAveragePerHourExclusive: 35,
+  });
+  assert.equal(summary.target_reached_at, "2026-07-27T02:00:00.000Z");
+  assert.equal(summary.hours_to_target, 2);
+  assert.equal(summary.effective_per_hour, 35);
+  assert.equal(summary.passed, true);
+});
+
+test("formal acceptance refuses final-status rows without full quality evidence", () => {
+  const base = {
+    sku: "quality-1",
+    profit_rate: 31,
+    online_status: "selling",
+    stock: 1,
+    shipping_mode: "FBS",
+    fbs_evidence: { verified: true },
+    cost_verified: true,
+    cost: { ok: true, cost: 10 },
+    quality_gate_passed: true,
+    published_at: "2026-07-27T01:00:00.000Z",
+  };
+  const accepted = acceptanceSummary({
+    rows: [base],
+    startedAt: "2026-07-27T00:00:00.000Z",
+    endedAt: "2026-07-27T02:00:00.000Z",
+    target: 1,
+    requireQualityEvidence: true,
+  });
+  assert.equal(accepted.success_count, 1);
+  assert.equal(accepted.quality_evidence_violations, 0);
+  assert.equal(accepted.passed, true);
+
+  const rejected = acceptanceSummary({
+    rows: [{ ...base, cost_verified: false }],
+    startedAt: "2026-07-27T00:00:00.000Z",
+    endedAt: "2026-07-27T02:00:00.000Z",
+    target: 1,
+    requireQualityEvidence: true,
+  });
+  assert.equal(rejected.success_count, 0);
+  assert.equal(rejected.quality_evidence_violations, 1);
+  assert.equal(rejected.passed, false);
+});
+
+test("formal acceptance excludes carry-in submissions confirmed inside the window", () => {
+  const base = {
+    profit_rate: 31,
+    online_status: "selling",
+    stock: 1,
+    shipping_mode: "FBS",
+    fbs_evidence: { verified: true },
+    cost_verified: true,
+    cost: { ok: true, cost: 10 },
+    quality_gate_passed: true,
+    published_at: "2026-07-27T00:30:00.000Z",
+  };
+  const summary = acceptanceSummary({
+    rows: [
+      { ...base, sku: "carry-in", submitted_at: "2026-07-26T23:59:59.000Z" },
+      { ...base, sku: "current", submitted_at: "2026-07-27T00:10:00.000Z" },
+    ],
+    startedAt: "2026-07-27T00:00:00.000Z",
+    endedAt: "2026-07-27T02:00:00.000Z",
+    target: 1,
+    requireQualityEvidence: true,
+    requireCurrentWindowSubmission: true,
+  });
+  assert.equal(summary.success_count, 1);
+  assert.deepEqual(summary.skus, ["current"]);
+  assert.equal(summary.passed, true);
+});
+
+test("fixed production acceptance rejects target or store quota overshoot", () => {
+  const startedAt = "2026-07-27T00:00:00.000Z";
+  const endedAt = "2026-07-28T00:00:00.000Z";
+  const storeIds = [1, 2, 3, 4, 5];
+  const rows = storeIds.flatMap((storeId) => Array.from({
+    length: storeId === 1 ? 101 : 100,
+  }, (_, index) => ({
+    sku: `${storeId}-${index}`,
+    store_id: storeId,
+    profit_rate: 31,
+    online_status: "selling",
+    stock: 1,
+    published_at: "2026-07-27T10:00:00.000Z",
+  })));
+  const summary = acceptanceSummary({
+    rows,
+    startedAt,
+    endedAt,
+    target: 500,
+    storeIds,
+    perStoreTarget: 100,
+    requireExactTarget: true,
+    requireExactPerStore: true,
+  });
+  assert.equal(summary.success_count, 501);
+  assert.equal(summary.success_by_store["1"], 101);
+  assert.equal(summary.passed, false);
 });
 
 test("producer loop keeps rescanning after success and survives one failed scan", async () => {

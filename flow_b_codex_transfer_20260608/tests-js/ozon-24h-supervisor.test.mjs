@@ -7,22 +7,28 @@ import test from "node:test";
 
 import {
   browserOwnerPidsForRecovery,
+  browserRecoverySafeStopDecision,
   buildLaunchdPlist,
   capacityPreflightDecision,
   checkpointEnvironment,
   chromeArguments,
   classifyWorkerFailure,
+  candidateBufferDecision,
+  candidateBufferSnapshot,
   clearStaleVerificationResumeRequest,
   cleanupBrowserProfileCaches,
   cleanupProfileCachesForConfig,
   currentRunDisposition,
   nextRestartDelaySeconds,
-  pendingPrewarmDue,
+  processOwnershipDecision,
+  processOwnershipSnapshot,
+  productionRunContractDecision,
   readAppendedTail,
   resolveProductionLayout,
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
   runFinalArtifacts,
+  rollingRateDecision,
   stopBrowserProfileOwners,
   stopOwnedWorker,
   supervisorShouldHonorSafeStop,
@@ -65,34 +71,7 @@ test("supervisor prewarm uses only a run-local scan checkpoint filename", () => 
   );
 });
 
-test("pending candidate prewarm is bounded and yields to the quota reset", () => {
-  const now = Date.parse("2026-07-27T14:00:00.000Z");
-  assert.equal(pendingPrewarmDue({
-    now,
-    resetAt: "2026-07-27T16:00:00.000Z",
-    lastCompletedAt: null,
-  }), true);
-  assert.equal(pendingPrewarmDue({
-    now,
-    resetAt: "2026-07-27T16:00:00.000Z",
-    lastCompletedAt: "2026-07-27T13:50:00.000Z",
-    intervalSeconds: 900,
-  }), false);
-  assert.equal(pendingPrewarmDue({
-    now,
-    resetAt: "2026-07-27T16:00:00.000Z",
-    lastCompletedAt: "2026-07-27T13:59:30.000Z",
-    lastSourceCommit: "old",
-    currentSourceCommit: "new",
-  }), true);
-  assert.equal(pendingPrewarmDue({
-    now: Date.parse("2026-07-27T15:58:30.000Z"),
-    resetAt: "2026-07-27T16:00:00.000Z",
-    lastCompletedAt: null,
-  }), false);
-});
-
-test("capacity preflight waits for reset and never opens an under-capacity window", () => {
+test("capacity preflight fatally rejects any capacity below the fixed 500 target", () => {
   assert.deepEqual(capacityPreflightDecision({
     all_stores_found: true,
     all_warehouses_verified: true,
@@ -100,15 +79,16 @@ test("capacity preflight waits for reset and never opens an under-capacity windo
     total_remaining_capacity: 469,
     next_reset_at: "2026-07-27T16:00:00.000Z",
   }), {
-    action: "wait-for-quota-reset",
+    action: "fatal-stop",
     reason: "insufficient-current-day-capacity",
-    next_reset_at: "2026-07-27T16:00:00.000Z",
+    total_remaining_capacity: 469,
+    required_capacity: 500,
   });
   assert.equal(capacityPreflightDecision({
     all_stores_found: true,
     all_warehouses_verified: true,
     all_quotas_verified: true,
-    total_remaining_capacity: 481,
+    total_remaining_capacity: 500,
   }).action, "start-formal-window");
   assert.equal(capacityPreflightDecision({
     all_stores_found: true,
@@ -118,27 +98,19 @@ test("capacity preflight waits for reset and never opens an under-capacity windo
   }).action, "fatal-stop");
 });
 
-test("ERP-capacity policy freezes the verified remaining capacity as today's target", () => {
-  assert.deepEqual(capacityPreflightDecision({
-    all_stores_found: true,
-    all_warehouses_verified: true,
-    all_quotas_verified: true,
-    total_remaining_capacity: 469,
-  }, 481, "erp_remaining_capacity"), {
-    action: "start-formal-window",
-    reason: null,
-    effective_target: 469,
-  });
-  assert.equal(capacityPreflightDecision({
-    all_stores_found: true,
-    all_warehouses_verified: true,
-    all_quotas_verified: true,
-    total_remaining_capacity: 0,
-    next_reset_at: "2026-07-28T16:00:00.000Z",
-  }, 481, "erp_remaining_capacity").action, "wait-for-quota-reset");
+test("capacity preflight rejects dynamic target policies", () => {
+  assert.deepEqual(
+    capacityPreflightDecision({
+      all_stores_found: true,
+      all_warehouses_verified: true,
+      all_quotas_verified: true,
+      total_remaining_capacity: 500,
+    }, 500, "erp_remaining_capacity"),
+    { action: "fatal-stop", reason: "acceptance-target-policy-must-be-fixed" },
+  );
 });
 
-test("worker inherits the one frozen ERP target instead of the static fallback", () => {
+test("worker environment cannot inherit a reduced target", () => {
   const environment = workerEnvironment({
     browser: {
       cdp_endpoint: "http://127.0.0.1:9223",
@@ -148,10 +120,10 @@ test("worker inherits the one frozen ERP target instead of the static fallback",
     },
     state_root: "/tmp/state",
     stores: [],
-    acceptance: { target_policy: "erp_remaining_capacity" },
+    acceptance: { target_policy: "fixed", strict_target: 500 },
     flow_env: {
-      FLOW_B_ACCEPTANCE_TARGET: "481",
-      FLOW_B_TARGET_PUBLISH_COUNT: "481",
+      FLOW_B_ACCEPTANCE_TARGET: "500",
+      FLOW_B_TARGET_PUBLISH_COUNT: "500",
     },
   }, {
     run_id: "daily-run",
@@ -159,9 +131,156 @@ test("worker inherits the one frozen ERP target instead of the static fallback",
     acceptance_target_policy: "erp_remaining_capacity",
   });
 
-  assert.equal(environment.FLOW_B_ACCEPTANCE_TARGET, "469");
-  assert.equal(environment.FLOW_B_TARGET_PUBLISH_COUNT, "469");
-  assert.equal(environment.FLOW_B_ACCEPTANCE_TARGET_POLICY, "erp_remaining_capacity");
+  assert.equal(environment.FLOW_B_ACCEPTANCE_TARGET, "500");
+  assert.equal(environment.FLOW_B_TARGET_PUBLISH_COUNT, "500");
+  assert.equal(environment.FLOW_B_ACCEPTANCE_TARGET_POLICY, "fixed");
+  assert.equal(environment.FLOW_B_STORE_ACCEPTANCE_TARGET, "100");
+  assert.equal(environment.FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE, "1");
+  assert.equal(environment.FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE, "35");
+});
+
+test("two failed browser recoveries within sixty minutes force a safe stop", () => {
+  const failed = (at) => ({ at, action: "browser-recovery-attempt", outcome: "failed" });
+  assert.deepEqual(browserRecoverySafeStopDecision([
+    failed("2026-07-29T10:00:00.000Z"),
+    failed("2026-07-29T10:59:59.000Z"),
+  ], { now: "2026-07-29T11:00:00.000Z" }), {
+    action: "safe-stop",
+    reason: "repeated-browser-recovery-failure",
+    consecutive_failures: 2,
+  });
+  assert.equal(browserRecoverySafeStopDecision([
+    failed("2026-07-29T09:59:59.000Z"),
+    failed("2026-07-29T10:59:59.000Z"),
+  ], { now: "2026-07-29T11:00:00.000Z" }).action, "continue");
+  assert.equal(browserRecoverySafeStopDecision([
+    failed("2026-07-29T10:00:00.000Z"),
+    { at: "2026-07-29T10:30:00.000Z", action: "browser-recovery-attempt", outcome: "succeeded" },
+    failed("2026-07-29T10:59:59.000Z"),
+  ], { now: "2026-07-29T11:00:00.000Z" }).action, "continue");
+});
+
+test("process ownership enforces one supervisor, one generation, and one profile owner", () => {
+  assert.equal(processOwnershipDecision({
+    phase: "before-worker",
+    supervisor: 1,
+    worker: 0,
+    profile_owner: 0,
+  }).action, "continue");
+  assert.equal(processOwnershipDecision({
+    phase: "worker-running",
+    supervisor: 1,
+    worker: 1,
+    profile_owner: 1,
+  }).action, "continue");
+  assert.deepEqual(processOwnershipDecision({
+    phase: "worker-running",
+    supervisor: 1,
+    worker: 2,
+    profile_owner: 1,
+  }), {
+    action: "fatal-stop",
+    reason: "duplicate-worker-generation-risk",
+  });
+  assert.equal(processOwnershipDecision({
+    phase: "after-exit",
+    supervisor: 1,
+    worker: 0,
+    profile_owner: 0,
+  }).action, "continue");
+});
+
+test("rolling 120-minute speed and two-hour candidate buffer are hard gates", () => {
+  assert.equal(rollingRateDecision({ elapsedMinutes: 119, rolling120PerHour: 0 }).action, "observe");
+  assert.equal(rollingRateDecision({ elapsedMinutes: 120, rolling120PerHour: 34.99 }).action, "safe-stop");
+  assert.equal(rollingRateDecision({ elapsedMinutes: 120, rolling120PerHour: 35 }).action, "continue");
+  assert.equal(rollingRateDecision({
+    elapsedMinutes: 900,
+    rolling120PerHour: 0,
+    targetReached: true,
+  }).action, "continue");
+  assert.deepEqual(candidateBufferDecision({ uniqueReady: 69 }), {
+    action: "prepare",
+    unique_ready: 69,
+    required_ready: 70,
+  });
+  assert.equal(candidateBufferDecision({ uniqueReady: 70 }).action, "ready");
+});
+
+test("candidate buffer counts only latest unique fully qualified validations", () => {
+  assert.deepEqual(candidateBufferSnapshot([
+    {
+      sku: "1",
+      status: "validated",
+      shipping_mode: "FBS",
+      profit_rate: 31,
+      purchase_price: 2,
+      cost_verified: true,
+      cost: { ok: true, cost: 2 },
+      fbs_evidence: { verified: true },
+      quality_gate_passed: true,
+    },
+    { sku: "1", status: "rejected", reason: "duplicate-title" },
+    {
+      sku: "2",
+      status: "validated",
+      shipping_mode: "FBS",
+      profit_rate: 31,
+      purchase_price: 2,
+      cost_verified: true,
+      cost: { ok: true, cost: 2 },
+      fbs_evidence: { verified: true },
+      quality_gate_passed: true,
+    },
+    {
+      sku: "3",
+      status: "validated",
+      shipping_mode: "FBO",
+      profit_rate: 99,
+      purchase_price: 2,
+      cost_verified: true,
+      cost: { ok: true, cost: 2 },
+      fbs_evidence: { verified: true },
+      quality_gate_passed: true,
+    },
+    {
+      sku: "2815247918",
+      status: "validated",
+      shipping_mode: "FBS",
+      profit_rate: 99,
+      purchase_price: 2,
+      cost_verified: true,
+      cost: { ok: true, cost: 2 },
+      fbs_evidence: { verified: true },
+      quality_gate_passed: true,
+    },
+  ]), {
+    unique_ready: 1,
+    ready_skus: ["2"],
+    rejected_or_invalid: 3,
+  });
+});
+
+test("process ownership snapshot identifies the exact run worker and profile owner", () => {
+  const rows = [
+    { pid: 10, command: "/usr/bin/node /app/scripts/ozon_24h_supervisor.mjs supervise /app/config.json" },
+    { pid: 20, command: "/usr/bin/node /app/scripts/flow_b_playwright.mjs accept /state/runs/run-1 /state/urls.txt" },
+    { pid: 21, command: "/usr/bin/node /app/scripts/flow_b_playwright.mjs accept /state/runs/other /state/urls.txt" },
+    { pid: 30, command: "/Applications/Chrome --user-data-dir=/state/profile about:blank" },
+    { pid: 31, command: "/Applications/Chrome --type=renderer --user-data-dir=/state/profile" },
+  ];
+  assert.deepEqual(processOwnershipSnapshot(rows, {
+    supervisorPid: 10,
+    runDir: "/state/runs/run-1",
+    profileDir: "/state/profile",
+  }), {
+    supervisor: 1,
+    worker: 1,
+    profile_owner: 1,
+    supervisor_pids: [10],
+    worker_pids: [20],
+    profile_owner_pids: [30],
+  });
 });
 
 test("checkpoint subprocess inherits the frozen release evidence and exact browser profile", () => {
@@ -182,6 +301,7 @@ test("checkpoint subprocess inherits the frozen release evidence and exact brows
   assert.equal(environment.FLOW_B_PW_PROFILE, "/tmp/exact-profile");
   assert.equal(environment.FLOW_B_FROZEN_COMMIT, "abc123");
   assert.equal(environment.FLOW_B_FROZEN_CONFIG_HASH, "config-sha256");
+  assert.equal(environment.FLOW_B_STATE_SCHEMA_VERSION, "3");
   assert.equal(environment.FLOW_B_PRODUCTION_STATE_ROOT, "/tmp/production-state");
   assert.equal(environment.FLOW_B_PRODUCTION_RUN_ID, "daily-run");
 });
@@ -224,8 +344,117 @@ test("launchd supervisor exits successfully when no daily run is active", () => 
   }), "active");
 });
 
+test("production resume contract rejects legacy dynamic windows and accepts the fixed identity", () => {
+  const currentRun = {
+    run_id: "fixed-run",
+    run_dir: "/state/runs/fixed-run",
+    urls_file: "/state/sources/active_urls.txt",
+    formal_started: true,
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    config_sha256: "config-hash",
+    source_set_sha256: "source-hash",
+    state_schema_version: 3,
+  };
+  const acceptanceWindow = {
+    started_at: "2026-07-27T00:00:00.000Z",
+    ended_at: "2026-07-28T00:00:00.000Z",
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    per_store_target: 100,
+    rolling_rate_window_minutes: 120,
+    minimum_average_per_hour_exclusive: 35,
+    current_window_only: true,
+  };
+  const sourceConfig = {
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    per_store_target: 100,
+    minimum_average_per_hour_exclusive: 35,
+    require_quality_evidence: true,
+    current_window_only: true,
+    store_targets: [
+      { id: 106637, warehouseId: 1 },
+      { id: 106640, warehouseId: 2 },
+      { id: 106644, warehouseId: 3 },
+      { id: 106646, warehouseId: 4 },
+      { id: 104965, warehouseId: 5 },
+    ],
+  };
+  const frozenManifest = {
+    run_id: "fixed-run",
+    commit_sha: "release-commit",
+    config_sha256: "config-hash",
+    source_set_sha256: "source-hash",
+    state_schema_version: 3,
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    per_store_target: 100,
+    rolling_rate_window_minutes: 120,
+    minimum_strict_per_hour: 35,
+    current_window_only: true,
+  };
+  assert.equal(productionRunContractDecision({
+    currentRun,
+    acceptanceWindow,
+    sourceConfig,
+    frozenManifest,
+    expectedConfigHash: "config-hash",
+    expectedCommitSha: "release-commit",
+  }).action, "continue");
+  const legacy = productionRunContractDecision({
+    currentRun: {
+      ...currentRun,
+      acceptance_target: 469,
+      acceptance_target_policy: "erp_remaining_capacity",
+    },
+    acceptanceWindow: {
+      ...acceptanceWindow,
+      acceptance_target: 469,
+      acceptance_target_policy: "erp_remaining_capacity",
+    },
+    sourceConfig,
+    frozenManifest,
+    expectedConfigHash: "config-hash",
+    expectedCommitSha: "release-commit",
+  });
+  assert.equal(legacy.action, "fatal-stop");
+  assert.ok(legacy.issues.includes("current-target-not-500"));
+  assert.ok(legacy.issues.includes("current-target-policy-not-fixed"));
+});
+
+test("pre-formal resume requires matching config, source-set, and state identities", () => {
+  const currentRun = {
+    run_id: "pending-run",
+    run_dir: "/state/runs/pending-run",
+    urls_file: "/state/sources/active_urls.txt",
+    formal_started: false,
+    config_sha256: "config-hash",
+    source_set_sha256: "source-hash",
+    state_schema_version: 3,
+  };
+  const pendingManifest = {
+    run_id: "pending-run",
+    config_sha256: "config-hash",
+    source_set_sha256: "source-hash",
+    state_schema_version: 3,
+    formal_window_started: false,
+  };
+  assert.equal(productionRunContractDecision({
+    currentRun,
+    pendingManifest,
+    expectedConfigHash: "config-hash",
+  }).action, "continue");
+  assert.equal(productionRunContractDecision({
+    currentRun,
+    pendingManifest: { ...pendingManifest, source_set_sha256: "old-source" },
+    expectedConfigHash: "config-hash",
+  }).action, "fatal-stop");
+});
+
 test("launchd honors an intentional safe stop across computer restart", () => {
   assert.equal(supervisorShouldHonorSafeStop({ status: "STOPPED" }), true);
+  assert.equal(supervisorShouldHonorSafeStop({ status: "FATAL_STOP" }), true);
   assert.equal(supervisorShouldHonorSafeStop({ status: "WINDOW_COMPLETE" }), true);
   assert.equal(supervisorShouldHonorSafeStop({ status: "TARGET_NOT_MET" }), true);
   assert.equal(supervisorShouldHonorSafeStop({ status: "RUNNING" }), false);
@@ -463,11 +692,44 @@ test("window finalization reconstructs a missing report before exporting five-st
   await fs.writeFile(path.join(runDir, "acceptance_window.json"), JSON.stringify({
     started_at: "2026-07-27T00:00:00.000Z",
     ended_at: "2026-07-28T00:00:00.000Z",
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    per_store_target: 100,
+    rolling_rate_window_minutes: 120,
+    minimum_average_per_hour_exclusive: 35,
+    current_window_only: true,
   }));
   await fs.writeFile(path.join(runDir, "source_config.json"), JSON.stringify({
-    acceptance_target: 481,
-    per_store_target: null,
-    store_targets: [{ id: 104965, needle: "丽丽1号" }],
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    per_store_target: 100,
+    minimum_average_per_hour_exclusive: 35,
+    require_quality_evidence: true,
+    current_window_only: true,
+    store_targets: [
+      { id: 106637, needle: "丽丽二号", warehouseId: 1 },
+      { id: 106640, needle: "丽丽三号", warehouseId: 2 },
+      { id: 106644, needle: "丽丽四号", warehouseId: 3 },
+      { id: 106646, needle: "丽丽五号", warehouseId: 4 },
+      { id: 104965, needle: "丽丽1号", warehouseId: 5 },
+    ],
+  }));
+  await fs.writeFile(path.join(runDir, "frozen_manifest.json"), JSON.stringify({
+    run_id: "formal",
+    commit_sha: "release-commit",
+    config_sha256: "config-hash",
+    source_set_sha256: "source-hash",
+    state_schema_version: 3,
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    per_store_target: 100,
+    rolling_rate_window_minutes: 120,
+    minimum_strict_per_hour: 35,
+    current_window_only: true,
+  }));
+  await fs.writeFile(path.join(runDir, "acceptance_summary.json"), JSON.stringify({
+    passed: true,
+    target: 1,
   }));
   await fs.writeFile(path.join(runDir, "published.jsonl"), `${JSON.stringify({
     status: "published",
@@ -479,13 +741,30 @@ test("window finalization reconstructs a missing report before exporting five-st
       online_status: "selling",
       stock: 1,
       published_at: "2026-07-27T01:00:00.000Z",
+      submitted_at: "2026-07-27T00:30:00.000Z",
+      shipping_mode: "FBS",
+      fbs_evidence: { verified: true },
+      cost_verified: true,
+      cost: { ok: true, cost: 10 },
+      quality_gate_passed: true,
     },
   })}\n`);
   const result = await runFinalArtifacts(
     path.resolve(import.meta.dirname, ".."),
     stateRoot,
-    { run_id: "formal" },
+    {
+      run_id: "formal",
+      run_dir: runDir,
+      urls_file: path.join(stateRoot, "sources", "active_urls.txt"),
+      formal_started: true,
+      acceptance_target: 500,
+      acceptance_target_policy: "fixed",
+      config_sha256: "config-hash",
+      source_set_sha256: "source-hash",
+      state_schema_version: 3,
+    },
     runDir,
+    { config_sha256: "config-hash", source_commit: "release-commit" },
   );
   assert.equal(result.output, path.join(stateRoot, "exports", "formal"));
   assert.equal(result.report.success_count, 1);

@@ -262,43 +262,74 @@ export function acceptanceSummary({
   perStoreTarget = null,
   minimumAveragePerHourExclusive = null,
   requireZeroDuplicates = false,
+  requireQualityEvidence = false,
+  requireCurrentWindowSubmission = false,
+  requireExactTarget = false,
+  requireExactPerStore = false,
 }) {
   const start = Date.parse(startedAt);
   const end = Date.parse(endedAt);
   const durationHours = Math.max(0, end - start) / 3_600_000;
   const unique = new Map();
+  const qualifyingRows = [];
   for (const row of rows || []) {
     const sku = String(row?.sku || "").trim();
     const at = Date.parse(row?.published_at || row?.timestamp || "");
+    const submittedAt = Date.parse(row?.submitted_at || row?.created_at || "");
+    const qualityEvidencePassed = (
+      String(row?.shipping_mode || row?.mode || "").toUpperCase() === "FBS"
+      && row?.fbs_evidence?.verified === true
+      && row?.cost_verified === true
+      && row?.cost?.ok === true
+      && Number(row?.cost?.cost) > 0
+      && row?.quality_gate_passed === true
+    );
     if (!sku
       || BAD_SKUS.has(sku)
       || !(Number(row?.profit_rate) > 30)
       || String(row?.online_status || "") !== "selling"
       || !(Number(row?.stock) > 0)
+      || (requireQualityEvidence && !qualityEvidencePassed)
+      || (requireCurrentWindowSubmission
+        && !(submittedAt >= start && submittedAt <= end))
       || !(at >= start && at <= end)) continue;
-    unique.set(sku, row);
+    qualifyingRows.push(row);
+  }
+  qualifyingRows.sort((left, right) => (
+    Date.parse(left?.published_at || left?.timestamp || "")
+    - Date.parse(right?.published_at || right?.timestamp || "")
+  ));
+  for (const row of qualifyingRows) {
+    const sku = String(row?.sku || "").trim();
+    if (!unique.has(sku)) unique.set(sku, row);
   }
   const successCount = unique.size;
-  const strictEventCount = (rows || []).filter((row) => {
-    const sku = String(row?.sku || "").trim();
-    const at = Date.parse(row?.published_at || row?.timestamp || "");
-    return sku
-      && !BAD_SKUS.has(sku)
-      && Number(row?.profit_rate) > 30
-      && String(row?.online_status || "") === "selling"
-      && Number(row?.stock) > 0
-      && at >= start
-      && at <= end;
-  }).length;
+  const strictEventCount = qualifyingRows.length;
   const duplicateSkus = Math.max(0, strictEventCount - successCount);
-  const effectivePerHour = durationHours
-    ? Math.round((successCount / durationHours) * 100) / 100
+  const qualityViolationCount = requireQualityEvidence
+    ? (rows || []).filter((row) => {
+      const sku = String(row?.sku || "").trim();
+      const at = Date.parse(row?.published_at || row?.timestamp || "");
+      const submittedAt = Date.parse(row?.submitted_at || row?.created_at || "");
+      const finalStatusEligible = sku
+        && !BAD_SKUS.has(sku)
+        && Number(row?.profit_rate) > 30
+        && String(row?.online_status || "") === "selling"
+        && Number(row?.stock) > 0
+        && (!requireCurrentWindowSubmission
+          || (submittedAt >= start && submittedAt <= end))
+        && at >= start
+        && at <= end;
+      return finalStatusEligible && !(
+        String(row?.shipping_mode || row?.mode || "").toUpperCase() === "FBS"
+        && row?.fbs_evidence?.verified === true
+        && row?.cost_verified === true
+        && row?.cost?.ok === true
+        && Number(row?.cost?.cost) > 0
+        && row?.quality_gate_passed === true
+      );
+    }).length
     : 0;
-  const hasSpeedThreshold = minimumAveragePerHourExclusive !== null
-    && minimumAveragePerHourExclusive !== undefined
-    && Number.isFinite(Number(minimumAveragePerHourExclusive));
-  const speedThreshold = hasSpeedThreshold ? Number(minimumAveragePerHourExclusive) : null;
-  const speedPassed = !hasSpeedThreshold || effectivePerHour > speedThreshold;
   const normalizedStoreIds = [...new Set((storeIds || []).map(Number).filter((id) => id > 0))];
   const successByStore = Object.fromEntries(normalizedStoreIds.map((id) => [String(id), 0]));
   for (const row of unique.values()) {
@@ -317,22 +348,65 @@ export function acceptanceSummary({
       Math.max(0, normalizedPerStoreTarget - Number(successByStore[String(id)] || 0)),
     ]))
     : {};
-  const storesPassed = !requirePerStore || Object.values(remainingByStore).every((remaining) => remaining === 0);
+  const storesPassed = !requirePerStore || normalizedStoreIds.every((id) => {
+    const count = Number(successByStore[String(id)] || 0);
+    return requireExactPerStore
+      ? count === normalizedPerStoreTarget
+      : count >= normalizedPerStoreTarget;
+  });
+  const completionStoreCounts = Object.fromEntries(normalizedStoreIds.map((id) => [String(id), 0]));
+  const completionSkus = new Set();
+  let targetReachedAt = null;
+  for (const row of qualifyingRows) {
+    const sku = String(row?.sku || "").trim();
+    if (completionSkus.has(sku)) continue;
+    completionSkus.add(sku);
+    const storeKey = String(Number(row?.store_id || 0));
+    if (storeKey in completionStoreCounts) completionStoreCounts[storeKey] += 1;
+    const totalReached = completionSkus.size >= Number(target);
+    const perStoreReached = !requirePerStore
+      || Object.values(completionStoreCounts).every((count) => count >= normalizedPerStoreTarget);
+    if (totalReached && perStoreReached) {
+      targetReachedAt = Date.parse(row?.published_at || row?.timestamp || "");
+      break;
+    }
+  }
+  const hoursToTarget = targetReachedAt === null
+    ? null
+    : Math.max(Number.EPSILON, targetReachedAt - start) / 3_600_000;
+  const effectiveDurationHours = hoursToTarget ?? durationHours;
+  const effectiveNumerator = targetReachedAt === null ? successCount : Number(target);
+  const effectivePerHour = effectiveDurationHours
+    ? Math.round((effectiveNumerator / effectiveDurationHours) * 100) / 100
+    : 0;
+  const hasSpeedThreshold = minimumAveragePerHourExclusive !== null
+    && minimumAveragePerHourExclusive !== undefined
+    && Number.isFinite(Number(minimumAveragePerHourExclusive));
+  const speedThreshold = hasSpeedThreshold ? Number(minimumAveragePerHourExclusive) : null;
+  const speedPassed = !hasSpeedThreshold || effectivePerHour >= speedThreshold;
   return {
     window_started_at: new Date(start).toISOString(),
     window_ended_at: new Date(end).toISOString(),
     duration_hours: Math.round(durationHours * 1000) / 1000,
     success_count: successCount,
     effective_per_hour: effectivePerHour,
+    target_reached_at: targetReachedAt === null ? null : new Date(targetReachedAt).toISOString(),
+    hours_to_target: hoursToTarget === null
+      ? null
+      : Math.round(hoursToTarget * 1000) / 1000,
     minimum_average_per_hour_exclusive: speedThreshold,
     duplicate_skus: duplicateSkus,
+    quality_evidence_violations: qualityViolationCount,
     target: Number(target),
     per_store_target: requirePerStore ? normalizedPerStoreTarget : null,
     success_by_store: successByStore,
     remaining_by_store: remainingByStore,
-    passed: successCount >= Number(target)
+    passed: (requireExactTarget
+      ? successCount === Number(target)
+      : successCount >= Number(target))
       && storesPassed
       && speedPassed
+      && qualityViolationCount === 0
       && (!requireZeroDuplicates || duplicateSkus === 0),
     excluded_skus: [...BAD_SKUS],
     skus: [...unique.keys()],

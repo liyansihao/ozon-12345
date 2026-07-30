@@ -1,0 +1,1697 @@
+import crypto from "node:crypto";
+import fsSync from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+
+export const RUNTIME_STATE_SCHEMA_VERSION = 3;
+
+const FAILURE_CLASSES = new Set(["deterministic", "invariant", "transient"]);
+const SHANGHAI_TIME_ZONE = "Asia/Shanghai";
+const LEGACY_STATUSES = new Set([
+  "processing",
+  "submitted",
+  "delayed",
+  "published",
+  "failed",
+  "skipped",
+]);
+const CANONICAL_LINK_HEADERS = new Set(["product_link", "canonical_product_link"]);
+const PRODUCT_URL_PATTERN = /https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s]+)/iu;
+const STAGE_PRIORITY = new Map([
+  ["processing", 1],
+  ["submitted", 2],
+  ["delayed", 3],
+  ["failed", 4],
+  ["skipped", 5],
+  ["published", 6],
+]);
+
+function normalizeSku(value) {
+  const sku = value === null || value === undefined ? "" : String(value).trim();
+  if (!sku) throw new TypeError("sku is required");
+  return sku;
+}
+
+function optionalSku(value) {
+  try {
+    return normalizeSku(value);
+  } catch {
+    return null;
+  }
+}
+
+function requireReason(value) {
+  const reason = value === null || value === undefined ? "" : String(value).trim();
+  if (!reason) throw new TypeError("reason is required");
+  return reason;
+}
+
+function asData(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return { ...value };
+  return value === undefined ? {} : { value };
+}
+
+function stringifyData(value) {
+  return JSON.stringify(asData(value));
+}
+
+function parseData(value) {
+  try {
+    const parsed = JSON.parse(String(value ?? "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function canonicalJsonValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalJsonValue(value[key])]),
+  );
+}
+
+function canonicalJson(value) {
+  return JSON.stringify(canonicalJsonValue(value));
+}
+
+function canonicalTitleKey(data) {
+  const explicit = String(data?.title_key ?? "").trim();
+  const source = explicit || String(data?.title ?? "");
+  const normalized = source.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+  return normalized.length >= 24 ? normalized : null;
+}
+
+function timestamp(value, label, { required = true } = {}) {
+  if ((value === null || value === undefined || value === "") && !required) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(parsed.getTime())) throw new TypeError(`${label} must be a valid timestamp`);
+  return parsed.toISOString();
+}
+
+function tolerantTimestamp(value) {
+  try {
+    return timestamp(value, "timestamp");
+  } catch {
+    return null;
+  }
+}
+
+function normalizeFailureClass(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (FAILURE_CLASSES.has(normalized)) return normalized;
+  if (["permanent", "policy", "validation"].includes(normalized)) return "deterministic";
+  return null;
+}
+
+function strictInvariantError(data) {
+  const profitRate = Number(data?.profit_rate);
+  if (!Number.isFinite(profitRate) || !(profitRate > 30)) return "strict publication requires profit_rate > 30";
+  if (String(data?.online_status ?? "").trim().toLowerCase() !== "selling") {
+    return "strict publication requires online_status=selling";
+  }
+  const stock = Number(data?.stock);
+  if (!Number.isFinite(stock) || !(stock > 0)) return "strict publication requires stock > 0";
+  if (String(data?.shipping_mode ?? "").trim().toUpperCase() !== "FBS") {
+    return "strict publication requires pure FBS";
+  }
+  if (data?.fbs_evidence?.verified !== true) {
+    return "strict publication requires verified FBS evidence";
+  }
+  if (data?.cost_verified !== true || data?.cost?.ok !== true) {
+    return "strict publication requires reliable 1688 cost evidence";
+  }
+  const cost = Number(data?.cost?.cost);
+  if (!Number.isFinite(cost) || !(cost > 0)) {
+    return "strict publication requires positive 1688 cost";
+  }
+  if (data?.quality_gate_passed !== true) {
+    return "strict publication requires complete quality-gate evidence";
+  }
+  return null;
+}
+
+function isStrictPublicationData(data) {
+  return strictInvariantError(data) === null;
+}
+
+function rowToState(row) {
+  if (!row) return null;
+  return {
+    sku: row.sku,
+    stage: row.stage,
+    reason: row.reason,
+    failureClass: row.failure_class,
+    terminal: Boolean(row.terminal),
+    strict: Boolean(row.strict),
+    nextEligibleAt: row.next_eligible_at,
+    data: parseData(row.data_json),
+    updatedAt: row.updated_at,
+  };
+}
+
+function rowToEvent(row) {
+  return {
+    id: Number(row.id),
+    eventKey: row.event_key,
+    sku: row.sku,
+    stage: row.stage,
+    reason: row.reason,
+    failureClass: row.failure_class,
+    terminal: Boolean(row.terminal),
+    strict: Boolean(row.strict),
+    nextEligibleAt: row.next_eligible_at,
+    data: parseData(row.data_json),
+    occurredAt: row.occurred_at,
+    source: row.source,
+  };
+}
+
+function rowToReservation(row) {
+  if (!row) return null;
+  return {
+    sku: row.sku,
+    ownerId: row.owner_id,
+    generationId: row.generation_id,
+    status: row.status,
+    titleKey: row.title_key,
+    leaseExpiresAt: row.lease_expires_at,
+    data: parseData(row.data_json),
+    updatedAt: row.updated_at,
+  };
+}
+
+function importedStateWins(existing, candidate) {
+  if (!existing) return true;
+  const timeOrder = candidate.occurredAt.localeCompare(existing.updatedAt);
+  if (timeOrder !== 0) return timeOrder > 0;
+
+  const candidatePriority = (STAGE_PRIORITY.get(candidate.stage) ?? 0) + (candidate.strict ? 100 : 0);
+  const existingPriority = (STAGE_PRIORITY.get(existing.stage) ?? 0) + (existing.strict ? 100 : 0);
+  if (candidatePriority !== existingPriority) return candidatePriority > existingPriority;
+
+  const candidateTieBreak = JSON.stringify([
+    candidate.stage,
+    candidate.failureClass,
+    candidate.terminal,
+    candidate.reason,
+    candidate.nextEligibleAt,
+    candidate.data,
+  ]);
+  const existingTieBreak = JSON.stringify([
+    existing.stage,
+    existing.failureClass,
+    existing.terminal,
+    existing.reason,
+    existing.nextEligibleAt,
+    existing.data,
+  ]);
+  return candidateTieBreak.localeCompare(existingTieBreak) > 0;
+}
+
+async function readTextIfPresent(filename) {
+  try {
+    return await fs.readFile(filename, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return "";
+    throw error;
+  }
+}
+
+function parseCsvRecords(text) {
+  const records = [];
+  let record = [];
+  let field = "";
+  let quoted = false;
+  const source = String(text ?? "");
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (quoted) {
+      if (character === '"') {
+        if (source[index + 1] === '"') {
+          field += '"';
+          index += 1;
+        } else {
+          quoted = false;
+        }
+      } else {
+        field += character;
+      }
+    } else if (character === '"' && field.length === 0) {
+      quoted = true;
+    } else if (character === ",") {
+      record.push(field);
+      field = "";
+    } else if (character === "\n") {
+      record.push(field);
+      records.push(record);
+      record = [];
+      field = "";
+    } else if (character === "\r") {
+      if (source[index + 1] === "\n") index += 1;
+      record.push(field);
+      records.push(record);
+      record = [];
+      field = "";
+    } else {
+      field += character;
+    }
+  }
+
+  if (!quoted && (field.length > 0 || record.length > 0)) {
+    record.push(field);
+    records.push(record);
+  }
+  return records;
+}
+
+function normalizeHeader(value) {
+  return String(value ?? "").replace(/^\uFEFF/u, "").trim().toLowerCase();
+}
+
+function canonicalSkuFromUrl(value) {
+  return optionalSku(String(value ?? "").match(PRODUCT_URL_PATTERN)?.[1]);
+}
+
+function legacyEventKey(kind, filename, ordinal, raw) {
+  const digest = crypto
+    .createHash("sha256")
+    .update(JSON.stringify([kind, path.resolve(filename), ordinal, raw]))
+    .digest("hex");
+  return `legacy:${kind}:${digest}`;
+}
+
+function legacyTransientEventKey(spec) {
+  const digest = crypto
+    .createHash("sha256")
+    .update(canonicalJson({
+      sku: spec.sku,
+      stage: spec.stage,
+      reason: spec.reason,
+      failureClass: spec.failureClass,
+      terminal: spec.terminal,
+      strict: spec.strict,
+      nextEligibleAt: spec.nextEligibleAt,
+      occurredAt: spec.occurredAtInferred ? null : spec.occurredAt,
+      data: spec.data,
+    }))
+    .digest("hex");
+  return `legacy:transient:${digest}`;
+}
+
+function validMigrationBackup(filename, expectedVersion) {
+  let backup;
+  try {
+    backup = new DatabaseSync(filename, { readOnly: true });
+    const quickCheck = backup.prepare("PRAGMA quick_check").get();
+    const integrity = String(quickCheck?.quick_check ?? Object.values(quickCheck ?? {})[0] ?? "");
+    const version = Number(
+      backup.prepare("SELECT value FROM metadata WHERE key = 'schema_version'").get()?.value,
+    );
+    return integrity.toLowerCase() === "ok" && version === Number(expectedVersion);
+  } catch {
+    return false;
+  } finally {
+    backup?.close();
+  }
+}
+
+function legacyData(value) {
+  if (value?.data && typeof value.data === "object" && !Array.isArray(value.data)) {
+    return { ...value.data };
+  }
+  return Object.fromEntries(
+    Object.entries(value ?? {}).filter(([key]) => !["sku", "id", "status", "timestamp"].includes(key)),
+  );
+}
+
+function firstValue(...values) {
+  return values.find((value) => value !== null && value !== undefined && value !== "");
+}
+
+function legacyTransition(value, kind, fallbackOccurredAt) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const sku = optionalSku(value.sku ?? value.id);
+  if (!sku) return null;
+
+  const defaultStatus = {
+    published: "published",
+    failed: "failed",
+    skipped: "skipped",
+  }[kind];
+  const stage = String(value.status ?? defaultStatus ?? "").trim().toLowerCase();
+  if (!LEGACY_STATUSES.has(stage)) return null;
+
+  const data = legacyData(value);
+  const reason = String(firstValue(
+    data.reason,
+    value.reason,
+    data.error,
+    value.error,
+    `legacy-${stage}`,
+  )).trim();
+  const parsedOccurredAt = tolerantTimestamp(firstValue(
+    value.timestamp,
+    data.timestamp,
+    value.published_at,
+    data.published_at,
+  ));
+  const occurredAt = parsedOccurredAt ?? fallbackOccurredAt;
+  const nextEligibleAt = tolerantTimestamp(firstValue(
+    data.next_eligible_at,
+    value.next_eligible_at,
+    data.retry_at,
+    value.retry_at,
+    data.next_reconcile_at,
+    value.next_reconcile_at,
+  ));
+
+  if (stage === "published") {
+    return {
+      sku,
+      stage,
+      reason,
+      failureClass: null,
+      terminal: true,
+      strict: isStrictPublicationData(data),
+      nextEligibleAt: null,
+      data,
+      occurredAt,
+      occurredAtInferred: parsedOccurredAt === null,
+    };
+  }
+  if (stage === "skipped") {
+    return {
+      sku,
+      stage,
+      reason,
+      failureClass: "deterministic",
+      terminal: true,
+      strict: false,
+      nextEligibleAt: null,
+      data,
+      occurredAt,
+      occurredAtInferred: parsedOccurredAt === null,
+    };
+  }
+  if (stage === "failed") {
+    const explicitClass = normalizeFailureClass(firstValue(
+      data.failure_class,
+      value.failure_class,
+      data.failureClass,
+      value.failureClass,
+    ));
+    const failureClass = explicitClass ?? (nextEligibleAt ? "transient" : "deterministic");
+    return {
+      sku,
+      stage,
+      reason,
+      failureClass,
+      terminal: failureClass !== "transient",
+      strict: false,
+      nextEligibleAt: failureClass === "transient" ? (nextEligibleAt ?? occurredAt) : null,
+      data,
+      occurredAt,
+      occurredAtInferred: parsedOccurredAt === null,
+    };
+  }
+  if (stage === "delayed") {
+    return {
+      sku,
+      stage,
+      reason,
+      failureClass: null,
+      terminal: false,
+      strict: false,
+      nextEligibleAt: nextEligibleAt ?? occurredAt,
+      data,
+      occurredAt,
+      occurredAtInferred: parsedOccurredAt === null,
+    };
+  }
+  return {
+    sku,
+    stage,
+    reason,
+    failureClass: null,
+    terminal: false,
+    strict: false,
+    nextEligibleAt: null,
+    data,
+    occurredAt,
+    occurredAtInferred: parsedOccurredAt === null,
+  };
+}
+
+export function createRuntimeState({
+  dbPath,
+  now = () => new Date(),
+  timeZone = SHANGHAI_TIME_ZONE,
+  ownerId = process.env.FLOW_B_SUBMISSION_OWNER || `pid:${process.pid}`,
+  generationId = process.env.FLOW_B_WORKER_GENERATION || crypto.randomUUID(),
+  submissionLeaseMs = 5 * 60_000,
+} = {}) {
+  if (typeof dbPath !== "string" || !dbPath.trim()) throw new TypeError("dbPath is required");
+  if (dbPath.trim() === ":memory:") throw new TypeError("dbPath must identify a durable external file");
+  if (typeof now !== "function") throw new TypeError("now must be a function");
+  if (timeZone !== SHANGHAI_TIME_ZONE) {
+    throw new TypeError(`timeZone must be ${SHANGHAI_TIME_ZONE}`);
+  }
+  const normalizedOwnerId = String(ownerId ?? "").trim();
+  const normalizedGenerationId = String(generationId ?? "").trim();
+  if (!normalizedOwnerId) throw new TypeError("ownerId is required");
+  if (!normalizedGenerationId) throw new TypeError("generationId is required");
+  const normalizedSubmissionLeaseMs = Number(submissionLeaseMs);
+  if (!Number.isFinite(normalizedSubmissionLeaseMs) || normalizedSubmissionLeaseMs < 1_000) {
+    throw new TypeError("submissionLeaseMs must be at least 1000 milliseconds");
+  }
+
+  let dayFormatter;
+  try {
+    dayFormatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+  } catch {
+    throw new TypeError("timeZone must be a valid IANA time zone");
+  }
+
+  const databasePath = path.resolve(dbPath);
+  fsSync.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const database = new DatabaseSync(databasePath);
+  let closed = false;
+  let migrationBackupPath = null;
+  let migrationTransactionOpen = false;
+
+  try {
+    database.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA synchronous = FULL;
+      PRAGMA foreign_keys = ON;
+      PRAGMA busy_timeout = 5000;
+    `);
+    const metadataExists = Boolean(database.prepare(`
+      SELECT 1 AS present
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'metadata'
+    `).get());
+    const preexistingVersion = metadataExists
+      ? Number(database.prepare("SELECT value FROM metadata WHERE key = 'schema_version'").get()?.value)
+      : null;
+    if (
+      preexistingVersion !== null &&
+      Number.isFinite(preexistingVersion) &&
+      ![1, 2, RUNTIME_STATE_SCHEMA_VERSION].includes(preexistingVersion)
+    ) {
+      throw new Error(
+        `unsupported runtime-state schema version ${preexistingVersion}; expected ${RUNTIME_STATE_SCHEMA_VERSION}`,
+      );
+    }
+    if ([1, 2].includes(preexistingVersion)) {
+      const stableBackupPath = `${databasePath}.schema-v${preexistingVersion}.backup.sqlite`;
+      if (
+        !fsSync.existsSync(stableBackupPath) ||
+        validMigrationBackup(stableBackupPath, preexistingVersion)
+      ) {
+        migrationBackupPath = stableBackupPath;
+      } else {
+        migrationBackupPath = `${stableBackupPath}.retry-${Date.now()}-${crypto.randomUUID()}`;
+      }
+      if (!fsSync.existsSync(migrationBackupPath)) {
+        database.prepare("VACUUM INTO ?").run(migrationBackupPath);
+      }
+    }
+    database.exec("BEGIN IMMEDIATE");
+    migrationTransactionOpen = true;
+    database.exec(`
+
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_key TEXT NOT NULL UNIQUE,
+        sku TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+        failure_class TEXT CHECK (
+          failure_class IS NULL OR
+          failure_class IN ('deterministic', 'invariant', 'transient')
+        ),
+        terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+        strict INTEGER NOT NULL CHECK (strict IN (0, 1)),
+        next_eligible_at TEXT,
+        data_json TEXT NOT NULL CHECK (json_valid(data_json)),
+        occurred_at TEXT NOT NULL,
+        source TEXT NOT NULL,
+        UNIQUE (sku, id),
+        CHECK (strict = 0 OR (stage = 'published' AND terminal = 1)),
+        CHECK (
+          strict = 0 OR (
+            coalesce(CAST(json_extract(data_json, '$.profit_rate') AS REAL), 0) > 30 AND
+            coalesce(lower(trim(CAST(json_extract(data_json, '$.online_status') AS TEXT))), '') = 'selling' AND
+            coalesce(CAST(json_extract(data_json, '$.stock') AS REAL), 0) > 0 AND
+            coalesce(upper(trim(CAST(json_extract(data_json, '$.shipping_mode') AS TEXT))), '') = 'FBS' AND
+            coalesce(CAST(json_extract(data_json, '$.fbs_evidence.verified') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_verified') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost.ok') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost.cost') AS REAL), 0) > 0 AND
+            coalesce(CAST(json_extract(data_json, '$.quality_gate_passed') AS INTEGER), 0) = 1
+          )
+        ),
+        CHECK (
+          failure_class IS NULL OR
+          failure_class = 'transient' OR
+          terminal = 1
+        ),
+        CHECK (
+          failure_class IS NULL OR
+          failure_class <> 'transient' OR
+          (terminal = 0 AND next_eligible_at IS NOT NULL)
+        ),
+        CHECK (stage <> 'delayed' OR next_eligible_at IS NOT NULL)
+      ) STRICT;
+
+      CREATE UNIQUE INDEX IF NOT EXISTS events_one_strict_publication_per_sku
+      ON events(sku) WHERE strict = 1;
+
+      CREATE TABLE IF NOT EXISTS sku_state (
+        sku TEXT PRIMARY KEY,
+        stage TEXT NOT NULL,
+        reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+        failure_class TEXT CHECK (
+          failure_class IS NULL OR
+          failure_class IN ('deterministic', 'invariant', 'transient')
+        ),
+        terminal INTEGER NOT NULL CHECK (terminal IN (0, 1)),
+        strict INTEGER NOT NULL CHECK (strict IN (0, 1)),
+        next_eligible_at TEXT,
+        data_json TEXT NOT NULL CHECK (json_valid(data_json)),
+        updated_at TEXT NOT NULL,
+        CHECK (strict = 0 OR (stage = 'published' AND terminal = 1)),
+        CHECK (
+          strict = 0 OR (
+            coalesce(CAST(json_extract(data_json, '$.profit_rate') AS REAL), 0) > 30 AND
+            coalesce(lower(trim(CAST(json_extract(data_json, '$.online_status') AS TEXT))), '') = 'selling' AND
+            coalesce(CAST(json_extract(data_json, '$.stock') AS REAL), 0) > 0 AND
+            coalesce(upper(trim(CAST(json_extract(data_json, '$.shipping_mode') AS TEXT))), '') = 'FBS' AND
+            coalesce(CAST(json_extract(data_json, '$.fbs_evidence.verified') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost_verified') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost.ok') AS INTEGER), 0) = 1 AND
+            coalesce(CAST(json_extract(data_json, '$.cost.cost') AS REAL), 0) > 0 AND
+            coalesce(CAST(json_extract(data_json, '$.quality_gate_passed') AS INTEGER), 0) = 1
+          )
+        ),
+        CHECK (
+          failure_class IS NULL OR
+          failure_class = 'transient' OR
+          terminal = 1
+        ),
+        CHECK (
+          failure_class IS NULL OR
+          failure_class <> 'transient' OR
+          (terminal = 0 AND next_eligible_at IS NOT NULL)
+        ),
+        CHECK (stage <> 'delayed' OR next_eligible_at IS NOT NULL)
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS transient_attempts (
+        sku TEXT NOT NULL,
+        shanghai_day TEXT NOT NULL,
+        attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 2),
+        PRIMARY KEY (sku, shanghai_day)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE IF NOT EXISTS strict_publications (
+        sku TEXT PRIMARY KEY,
+        event_id INTEGER NOT NULL UNIQUE,
+        published_at TEXT NOT NULL,
+        data_json TEXT NOT NULL CHECK (json_valid(data_json)),
+        CHECK (
+          coalesce(CAST(json_extract(data_json, '$.profit_rate') AS REAL), 0) > 30 AND
+          coalesce(lower(trim(CAST(json_extract(data_json, '$.online_status') AS TEXT))), '') = 'selling' AND
+          coalesce(CAST(json_extract(data_json, '$.stock') AS REAL), 0) > 0 AND
+          coalesce(upper(trim(CAST(json_extract(data_json, '$.shipping_mode') AS TEXT))), '') = 'FBS' AND
+          coalesce(CAST(json_extract(data_json, '$.fbs_evidence.verified') AS INTEGER), 0) = 1 AND
+          coalesce(CAST(json_extract(data_json, '$.cost_verified') AS INTEGER), 0) = 1 AND
+          coalesce(CAST(json_extract(data_json, '$.cost.ok') AS INTEGER), 0) = 1 AND
+          coalesce(CAST(json_extract(data_json, '$.cost.cost') AS REAL), 0) > 0 AND
+          coalesce(CAST(json_extract(data_json, '$.quality_gate_passed') AS INTEGER), 0) = 1
+        ),
+        FOREIGN KEY (sku, event_id) REFERENCES events(sku, id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TABLE IF NOT EXISTS submission_reservations (
+        sku TEXT PRIMARY KEY,
+        owner_id TEXT NOT NULL CHECK (length(trim(owner_id)) > 0),
+        generation_id TEXT NOT NULL CHECK (length(trim(generation_id)) > 0),
+        status TEXT NOT NULL CHECK (status IN ('reserved', 'submitted', 'closed')),
+        title_key TEXT,
+        lease_expires_at TEXT,
+        data_json TEXT NOT NULL CHECK (json_valid(data_json)),
+        updated_at TEXT NOT NULL,
+        CHECK (
+          (status = 'reserved' AND lease_expires_at IS NOT NULL) OR
+          (status <> 'reserved' AND lease_expires_at IS NULL)
+        )
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS strict_title_claims (
+        title_key TEXT PRIMARY KEY,
+        sku TEXT NOT NULL UNIQUE,
+        event_id INTEGER NOT NULL UNIQUE,
+        claimed_at TEXT NOT NULL,
+        FOREIGN KEY (sku, event_id) REFERENCES events(sku, id)
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TRIGGER IF NOT EXISTS strict_publications_event_guard
+      BEFORE INSERT ON strict_publications
+      FOR EACH ROW
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM events
+        WHERE id = NEW.event_id
+          AND sku = NEW.sku
+          AND strict = 1
+          AND stage = 'published'
+          AND terminal = 1
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'strict publication event mismatch');
+      END;
+    `);
+
+    const versionRow = database
+      .prepare("SELECT value FROM metadata WHERE key = 'schema_version'")
+      .get();
+    if (!versionRow) {
+      database
+        .prepare("INSERT INTO metadata (key, value) VALUES ('schema_version', ?)")
+        .run(String(RUNTIME_STATE_SCHEMA_VERSION));
+    } else if ([1, 2].includes(Number(versionRow.value))) {
+      database
+        .prepare("UPDATE metadata SET value = ? WHERE key = 'schema_version'")
+        .run(String(RUNTIME_STATE_SCHEMA_VERSION));
+    } else if (Number(versionRow.value) !== RUNTIME_STATE_SCHEMA_VERSION) {
+      throw new Error(
+        `unsupported runtime-state schema version ${versionRow.value}; expected ${RUNTIME_STATE_SCHEMA_VERSION}`,
+      );
+    }
+    const reservationColumns = new Set(
+      database.prepare("PRAGMA table_info(submission_reservations)").all().map((row) => row.name),
+    );
+    if (!reservationColumns.has("title_key")) {
+      database.exec("ALTER TABLE submission_reservations ADD COLUMN title_key TEXT;");
+    }
+    database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS active_submission_title_key
+      ON submission_reservations(title_key)
+      WHERE title_key IS NOT NULL AND status IN ('reserved', 'submitted');
+    `);
+    const selectExistingStrictTitles = database.prepare(`
+      SELECT sku, event_id, published_at, data_json
+      FROM strict_publications
+      ORDER BY event_id
+    `);
+    const backfillStrictTitle = database.prepare(`
+      INSERT OR IGNORE INTO strict_title_claims (title_key, sku, event_id, claimed_at)
+      VALUES (?, ?, ?, ?)
+    `);
+    for (const row of selectExistingStrictTitles.all()) {
+      const titleKey = canonicalTitleKey(parseData(row.data_json));
+      if (titleKey) backfillStrictTitle.run(titleKey, row.sku, row.event_id, row.published_at);
+    }
+    database.exec(`PRAGMA user_version = ${RUNTIME_STATE_SCHEMA_VERSION};`);
+    database.exec("COMMIT");
+    migrationTransactionOpen = false;
+  } catch (error) {
+    if (migrationTransactionOpen) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {}
+    }
+    database.close();
+    throw error;
+  }
+
+  const selectState = database.prepare("SELECT * FROM sku_state WHERE sku = ?");
+  const selectAttempt = database.prepare(`
+    SELECT attempts FROM transient_attempts WHERE sku = ? AND shanghai_day = ?
+  `);
+  const upsertAttempt = database.prepare(`
+    INSERT INTO transient_attempts (sku, shanghai_day, attempts)
+    VALUES (?, ?, ?)
+    ON CONFLICT (sku, shanghai_day) DO UPDATE SET attempts = excluded.attempts
+  `);
+  const insertEvent = database.prepare(`
+    INSERT INTO events (
+      event_key, sku, stage, reason, failure_class, terminal, strict,
+      next_eligible_at, data_json, occurred_at, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const insertEventIfNew = database.prepare(`
+    INSERT OR IGNORE INTO events (
+      event_key, sku, stage, reason, failure_class, terminal, strict,
+      next_eligible_at, data_json, occurred_at, source
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  const upsertState = database.prepare(`
+    INSERT INTO sku_state (
+      sku, stage, reason, failure_class, terminal, strict,
+      next_eligible_at, data_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (sku) DO UPDATE SET
+      stage = excluded.stage,
+      reason = excluded.reason,
+      failure_class = excluded.failure_class,
+      terminal = excluded.terminal,
+      strict = excluded.strict,
+      next_eligible_at = excluded.next_eligible_at,
+      data_json = excluded.data_json,
+      updated_at = excluded.updated_at
+  `);
+  const insertStrictPublication = database.prepare(`
+    INSERT INTO strict_publications (sku, event_id, published_at, data_json)
+    VALUES (?, ?, ?, ?)
+  `);
+  const hasStrictPublication = database.prepare(`
+    SELECT 1 AS present FROM strict_publications WHERE sku = ?
+  `);
+  const selectReservation = database.prepare(`
+    SELECT * FROM submission_reservations WHERE sku = ?
+  `);
+  const selectActiveTitleReservation = database.prepare(`
+    SELECT sku, owner_id, generation_id, status
+    FROM submission_reservations
+    WHERE title_key = ? AND status IN ('reserved', 'submitted')
+  `);
+  const selectStrictTitleClaim = database.prepare(`
+    SELECT title_key, sku, event_id, claimed_at
+    FROM strict_title_claims
+    WHERE title_key = ?
+  `);
+  const insertReservation = database.prepare(`
+    INSERT INTO submission_reservations (
+      sku, owner_id, generation_id, status, title_key, lease_expires_at, data_json, updated_at
+    ) VALUES (?, ?, ?, 'reserved', ?, ?, ?, ?)
+  `);
+  const updateOwnedReservation = database.prepare(`
+    UPDATE submission_reservations
+    SET title_key = ?, lease_expires_at = ?, data_json = ?, updated_at = ?
+    WHERE sku = ?
+      AND owner_id = ?
+      AND generation_id = ?
+      AND status = 'reserved'
+  `);
+  const takeOverReservation = database.prepare(`
+    UPDATE submission_reservations
+    SET owner_id = ?, generation_id = ?, status = 'reserved',
+        title_key = ?, lease_expires_at = ?, data_json = ?, updated_at = ?
+    WHERE sku = ?
+      AND status IN ('reserved', 'closed')
+      AND (
+        status = 'closed' OR
+        lease_expires_at <= ?
+      )
+  `);
+  const markReservationSubmitted = database.prepare(`
+    UPDATE submission_reservations
+    SET status = 'submitted', lease_expires_at = NULL, data_json = ?, updated_at = ?
+    WHERE sku = ?
+      AND owner_id = ?
+      AND generation_id = ?
+      AND status = 'reserved'
+  `);
+  const closeReservation = database.prepare(`
+    UPDATE submission_reservations
+    SET status = 'closed', lease_expires_at = NULL, updated_at = ?
+    WHERE sku = ? AND status <> 'closed'
+  `);
+  const selectStrictPublications = database.prepare(`
+    SELECT sku, event_id, published_at, data_json
+    FROM strict_publications
+    ORDER BY event_id
+  `);
+  const insertStrictTitleClaim = database.prepare(`
+    INSERT INTO strict_title_claims (title_key, sku, event_id, claimed_at)
+    VALUES (?, ?, ?, ?)
+  `);
+  const insertStrictTitleClaimIfNew = database.prepare(`
+    INSERT OR IGNORE INTO strict_title_claims (title_key, sku, event_id, claimed_at)
+    VALUES (?, ?, ?, ?)
+  `);
+
+  function assertOpen() {
+    if (closed) throw new Error("runtime state is closed");
+  }
+
+  function currentTimestamp() {
+    return timestamp(now(), "now");
+  }
+
+  function shanghaiDay(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) throw new TypeError("timestamp must be valid");
+    const parts = Object.fromEntries(
+      dayFormatter
+        .formatToParts(date)
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+    return `${parts.year}-${parts.month}-${parts.day}`;
+  }
+
+  function transaction(callback) {
+    assertOpen();
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      const result = callback();
+      database.exec("COMMIT");
+      return result;
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  function getState(sku) {
+    return rowToState(selectState.get(sku));
+  }
+
+  function getReservation(sku) {
+    return rowToReservation(selectReservation.get(sku));
+  }
+
+  function addEvent(spec, { eventKey = `runtime:${crypto.randomUUID()}`, idempotent = false } = {}) {
+    const statement = idempotent ? insertEventIfNew : insertEvent;
+    const result = statement.run(
+      eventKey,
+      spec.sku,
+      spec.stage,
+      spec.reason,
+      spec.failureClass,
+      spec.terminal ? 1 : 0,
+      spec.strict ? 1 : 0,
+      spec.nextEligibleAt,
+      stringifyData(spec.data),
+      spec.occurredAt,
+      spec.source,
+    );
+    return Number(result.changes) === 1 ? Number(result.lastInsertRowid) : null;
+  }
+
+  function writeState(spec) {
+    upsertState.run(
+      spec.sku,
+      spec.stage,
+      spec.reason,
+      spec.failureClass,
+      spec.terminal ? 1 : 0,
+      spec.strict ? 1 : 0,
+      spec.nextEligibleAt,
+      stringifyData(spec.data),
+      spec.occurredAt,
+    );
+  }
+
+  function recordTransition(rawSku, options, transition) {
+    const sku = normalizeSku(rawSku);
+    const reason = requireReason(options?.reason);
+    const occurredAt = currentTimestamp();
+    const spec = {
+      sku,
+      stage: transition.stage,
+      reason,
+      failureClass: transition.failureClass ?? null,
+      terminal: Boolean(transition.terminal),
+      strict: Boolean(transition.strict),
+      nextEligibleAt: transition.nextEligibleAt ?? null,
+      data: asData(options?.data),
+      occurredAt,
+      source: "runtime",
+    };
+
+    return transaction(() => {
+      const existing = getState(sku);
+      if (existing?.terminal) {
+        return { recorded: false, reason: "terminal-state", state: existing };
+      }
+      if (transition.enforceEligibility) {
+        const attempts = Number(selectAttempt.get(sku, shanghaiDay(occurredAt))?.attempts ?? 0);
+        if (attempts >= 2) {
+          return {
+            recorded: false,
+            reason: "daily-transient-limit",
+            attempts,
+            dailyLimitReached: true,
+            state: existing,
+          };
+        }
+        if (
+          existing?.nextEligibleAt &&
+          Date.parse(occurredAt) < Date.parse(existing.nextEligibleAt)
+        ) {
+          return {
+            recorded: false,
+            reason: "not-yet-eligible",
+            attempts,
+            dailyLimitReached: false,
+            nextEligibleAt: existing.nextEligibleAt,
+            state: existing,
+          };
+        }
+      }
+      const eventId = addEvent(spec);
+      if (spec.strict) {
+        insertStrictPublication.run(sku, eventId, occurredAt, stringifyData(spec.data));
+      }
+      writeState(spec);
+      if (spec.terminal) closeReservation.run(occurredAt, sku);
+      return { recorded: true, eventId, state: rowToState(selectState.get(sku)) };
+    });
+  }
+
+  function reserveSubmission(rawSku, options = {}) {
+    const sku = normalizeSku(rawSku);
+    const reason = requireReason(options.reason);
+    const occurredAt = currentTimestamp();
+    const leaseExpiresAt = new Date(
+      Date.parse(occurredAt) + normalizedSubmissionLeaseMs,
+    ).toISOString();
+
+    return transaction(() => {
+      const existing = getState(sku);
+      if (existing?.terminal) {
+        return { recorded: false, reason: "terminal-state", state: existing };
+      }
+      const attempts = Number(selectAttempt.get(sku, shanghaiDay(occurredAt))?.attempts ?? 0);
+      if (attempts >= 2) {
+        return {
+          recorded: false,
+          reason: "daily-transient-limit",
+          attempts,
+          dailyLimitReached: true,
+          state: existing,
+        };
+      }
+      if (
+        existing?.nextEligibleAt &&
+        Date.parse(occurredAt) < Date.parse(existing.nextEligibleAt)
+      ) {
+        return {
+          recorded: false,
+          reason: "not-yet-eligible",
+          attempts,
+          dailyLimitReached: false,
+          nextEligibleAt: existing.nextEligibleAt,
+          state: existing,
+        };
+      }
+
+      const reservation = getReservation(sku);
+      if (reservation?.status === "submitted") {
+        return {
+          recorded: false,
+          reason: "submission-already-submitted",
+          reservation,
+          state: existing,
+        };
+      }
+      const sameGeneration = (
+        reservation?.status === "reserved" &&
+        reservation.ownerId === normalizedOwnerId &&
+        reservation.generationId === normalizedGenerationId
+      );
+      const leaseActive = (
+        reservation?.status === "reserved" &&
+        Date.parse(reservation.leaseExpiresAt) > Date.parse(occurredAt)
+      );
+      if (reservation && !sameGeneration && leaseActive) {
+        return {
+          recorded: false,
+          reason: "submission-reserved-by-another-generation",
+          reservation,
+          state: existing,
+        };
+      }
+
+      const takeover = Boolean(
+        reservation &&
+        reservation.status === "reserved" &&
+        !sameGeneration,
+      );
+      const sameGenerationReentry = Boolean(
+        sameGeneration &&
+        reservation?.data?.api_call_started_at,
+      );
+      const mergedData = {
+        ...(existing?.data || {}),
+        ...(reservation?.data || {}),
+        ...asData(options.data),
+        submission_intent: true,
+        submitted: false,
+        submission_pending: false,
+        submission_owner_id: normalizedOwnerId,
+        submission_generation_id: normalizedGenerationId,
+        submission_lease_expires_at: leaseExpiresAt,
+        ...(takeover ? {
+          reconcile_only: true,
+          cross_generation_takeover: true,
+          previous_submission_owner_id: reservation.ownerId,
+          previous_submission_generation_id: reservation.generationId,
+        } : {}),
+        ...(sameGenerationReentry ? {
+          reconcile_only: true,
+          same_generation_reentry: true,
+        } : {}),
+      };
+      const titleKey = canonicalTitleKey(mergedData);
+      if (titleKey) mergedData.title_key = titleKey;
+      const strictTitleClaim = titleKey ? selectStrictTitleClaim.get(titleKey) : null;
+      if (strictTitleClaim && strictTitleClaim.sku !== sku) {
+        return {
+          recorded: false,
+          reason: "duplicate-title-terminal",
+          duplicateSku: strictTitleClaim.sku,
+          state: existing,
+        };
+      }
+      const activeTitleReservation = titleKey
+        ? selectActiveTitleReservation.get(titleKey)
+        : null;
+      if (activeTitleReservation && activeTitleReservation.sku !== sku) {
+        return {
+          recorded: false,
+          reason: "duplicate-title-reservation",
+          duplicateSku: activeTitleReservation.sku,
+          state: existing,
+        };
+      }
+
+      let reservationChanged;
+      if (!reservation) {
+        reservationChanged = insertReservation.run(
+          sku,
+          normalizedOwnerId,
+          normalizedGenerationId,
+          titleKey,
+          leaseExpiresAt,
+          stringifyData(mergedData),
+          occurredAt,
+        );
+      } else if (sameGeneration) {
+        reservationChanged = updateOwnedReservation.run(
+          titleKey,
+          leaseExpiresAt,
+          stringifyData(mergedData),
+          occurredAt,
+          sku,
+          normalizedOwnerId,
+          normalizedGenerationId,
+        );
+      } else {
+        reservationChanged = takeOverReservation.run(
+          normalizedOwnerId,
+          normalizedGenerationId,
+          titleKey,
+          leaseExpiresAt,
+          stringifyData(mergedData),
+          occurredAt,
+          sku,
+          occurredAt,
+        );
+      }
+      if (Number(reservationChanged.changes) !== 1) {
+        return {
+          recorded: false,
+          reason: "submission-reservation-cas-conflict",
+          reservation: getReservation(sku),
+          state: getState(sku),
+        };
+      }
+
+      const spec = {
+        sku,
+        stage: "submitted",
+        reason,
+        failureClass: null,
+        terminal: false,
+        strict: false,
+        nextEligibleAt: null,
+        data: mergedData,
+        occurredAt,
+        source: "runtime",
+      };
+      const eventId = addEvent(spec);
+      writeState(spec);
+      return {
+        recorded: true,
+        eventId,
+        takeover,
+        reservation: getReservation(sku),
+        state: getState(sku),
+      };
+    });
+  }
+
+  function confirmSubmission(rawSku, options = {}) {
+    const sku = normalizeSku(rawSku);
+    const reason = requireReason(options.reason);
+    const occurredAt = currentTimestamp();
+    return transaction(() => {
+      const existing = getState(sku);
+      if (existing?.terminal) {
+        return { recorded: false, reason: "terminal-state", state: existing };
+      }
+      const reservation = getReservation(sku);
+      if (reservation?.status === "submitted") {
+        return {
+          recorded: false,
+          reason: "submission-already-submitted",
+          reservation,
+          state: existing,
+        };
+      }
+      if (
+        reservation?.status !== "reserved" ||
+        reservation.ownerId !== normalizedOwnerId ||
+        reservation.generationId !== normalizedGenerationId
+      ) {
+        return {
+          recorded: false,
+          reason: reservation
+            ? "submission-reserved-by-another-generation"
+            : "submission-reservation-missing",
+          reservation,
+          state: existing,
+        };
+      }
+      const mergedData = {
+        ...(existing?.data || {}),
+        ...(reservation.data || {}),
+        ...asData(options.data),
+        submission_intent: false,
+        submitted: true,
+        submission_pending: false,
+        submission_owner_id: normalizedOwnerId,
+        submission_generation_id: normalizedGenerationId,
+      };
+      delete mergedData.submission_lease_expires_at;
+      const changed = markReservationSubmitted.run(
+        stringifyData(mergedData),
+        occurredAt,
+        sku,
+        normalizedOwnerId,
+        normalizedGenerationId,
+      );
+      if (Number(changed.changes) !== 1) {
+        return {
+          recorded: false,
+          reason: "submission-reservation-cas-conflict",
+          reservation: getReservation(sku),
+          state: getState(sku),
+        };
+      }
+      const spec = {
+        sku,
+        stage: "submitted",
+        reason,
+        failureClass: null,
+        terminal: false,
+        strict: false,
+        nextEligibleAt: null,
+        data: mergedData,
+        occurredAt,
+        source: "runtime",
+      };
+      const eventId = addEvent(spec);
+      writeState(spec);
+      return {
+        recorded: true,
+        eventId,
+        reservation: getReservation(sku),
+        state: getState(sku),
+      };
+    });
+  }
+
+  function recordSubmission(sku, options = {}) {
+    return reserveSubmission(sku, options);
+  }
+
+  function recordProcessing(sku, options = {}) {
+    return recordTransition(sku, options, {
+      stage: "processing",
+      terminal: false,
+      enforceEligibility: true,
+    });
+  }
+
+  function recordDelay(sku, options = {}) {
+    const reason = requireReason(options.reason);
+    const nextEligibleAt = timestamp(options.nextEligibleAt, "nextEligibleAt");
+    return recordTransition(sku, { ...options, reason }, {
+      stage: "delayed",
+      terminal: false,
+      nextEligibleAt,
+    });
+  }
+
+  function recordSkip(sku, options = {}) {
+    return recordTransition(sku, options, {
+      stage: "skipped",
+      failureClass: "deterministic",
+      terminal: true,
+    });
+  }
+
+  function recordFailure(rawSku, options = {}) {
+    const sku = normalizeSku(rawSku);
+    const reason = requireReason(options.reason);
+    const failureClass = normalizeFailureClass(options.kind);
+    if (!failureClass) {
+      throw new TypeError("kind must be deterministic, invariant, or transient");
+    }
+
+    if (failureClass !== "transient") {
+      return recordTransition(sku, { ...options, reason }, {
+        stage: "failed",
+        failureClass,
+        terminal: true,
+      });
+    }
+
+    const nextEligibleAt = timestamp(options.nextEligibleAt, "nextEligibleAt");
+    const occurredAt = currentTimestamp();
+    const day = shanghaiDay(occurredAt);
+    const spec = {
+      sku,
+      stage: "failed",
+      reason,
+      failureClass,
+      terminal: false,
+      strict: false,
+      nextEligibleAt,
+      data: asData(options.data),
+      occurredAt,
+      source: "runtime",
+    };
+
+    return transaction(() => {
+      const existing = getState(sku);
+      if (existing?.terminal) {
+        return {
+          recorded: false,
+          attempts: Number(selectAttempt.get(sku, day)?.attempts ?? 0),
+          dailyLimitReached: false,
+          reason: "terminal-state",
+          state: existing,
+        };
+      }
+
+      const attempts = Number(selectAttempt.get(sku, day)?.attempts ?? 0);
+      if (attempts >= 2) {
+        return {
+          recorded: false,
+          attempts,
+          dailyLimitReached: true,
+          reason: "daily-transient-limit",
+          state: existing,
+        };
+      }
+
+      const nextAttempts = attempts + 1;
+      upsertAttempt.run(sku, day, nextAttempts);
+      const eventId = addEvent(spec);
+      writeState(spec);
+      if (
+        spec.data?.submitted !== true &&
+        !String(spec.data?.api_call_started_at || "").trim()
+      ) {
+        closeReservation.run(occurredAt, sku);
+      }
+      return {
+        recorded: true,
+        eventId,
+        attempts: nextAttempts,
+        dailyLimitReached: nextAttempts >= 2,
+        state: rowToState(selectState.get(sku)),
+      };
+    });
+  }
+
+  function recordStrictPublication(rawSku, options = {}) {
+    const sku = normalizeSku(rawSku);
+    const reason = requireReason(options.reason);
+    const data = asData(options.data);
+    const titleKey = canonicalTitleKey(data);
+    if (titleKey) data.title_key = titleKey;
+    const invariantError = strictInvariantError(data);
+    if (invariantError) throw new TypeError(invariantError);
+    const occurredAt = currentTimestamp();
+    const spec = {
+      sku,
+      stage: "published",
+      reason,
+      failureClass: null,
+      terminal: true,
+      strict: true,
+      nextEligibleAt: null,
+      data,
+      occurredAt,
+      source: "runtime",
+    };
+
+    return transaction(() => {
+      const existing = getState(sku);
+      const canUpgradeHistoricalPublication = (
+        existing?.terminal &&
+        existing.stage === "published" &&
+        !existing.strict
+      );
+      if (
+        hasStrictPublication.get(sku) ||
+        (existing?.terminal && !canUpgradeHistoricalPublication)
+      ) {
+        return { recorded: false, reason: "terminal-state", state: existing };
+      }
+      const strictTitleClaim = titleKey ? selectStrictTitleClaim.get(titleKey) : null;
+      if (strictTitleClaim && strictTitleClaim.sku !== sku) {
+        return {
+          recorded: false,
+          reason: "duplicate-title-terminal",
+          duplicateSku: strictTitleClaim.sku,
+          state: existing,
+        };
+      }
+      const activeTitleReservation = titleKey
+        ? selectActiveTitleReservation.get(titleKey)
+        : null;
+      if (activeTitleReservation && activeTitleReservation.sku !== sku) {
+        return {
+          recorded: false,
+          reason: "duplicate-title-reservation",
+          duplicateSku: activeTitleReservation.sku,
+          state: existing,
+        };
+      }
+      const eventId = addEvent(spec);
+      insertStrictPublication.run(sku, eventId, occurredAt, stringifyData(data));
+      if (titleKey && !strictTitleClaim) {
+        insertStrictTitleClaim.run(titleKey, sku, eventId, occurredAt);
+      }
+      writeState(spec);
+      closeReservation.run(occurredAt, sku);
+      return { recorded: true, eventId, state: rowToState(selectState.get(sku)) };
+    });
+  }
+
+  function canAttempt(rawSku, { at } = {}) {
+    assertOpen();
+    const sku = normalizeSku(rawSku);
+    const checkAt = at === undefined ? currentTimestamp() : timestamp(at, "at");
+    const state = getState(sku);
+    if (state?.terminal) {
+      return { allowed: false, reason: "terminal-state", state };
+    }
+    if (state?.nextEligibleAt && Date.parse(checkAt) < Date.parse(state.nextEligibleAt)) {
+      return {
+        allowed: false,
+        reason: "not-yet-eligible",
+        nextEligibleAt: state.nextEligibleAt,
+        state,
+      };
+    }
+    const attempts = Number(selectAttempt.get(sku, shanghaiDay(checkAt))?.attempts ?? 0);
+    if (attempts >= 2) {
+      return { allowed: false, reason: "daily-transient-limit", attempts, state };
+    }
+    return { allowed: true, reason: "eligible", attempts, state };
+  }
+
+  function applyImported(spec, eventKey, source) {
+    return transaction(() => {
+      let normalizedSpec = spec;
+      let acceptedTransientDay = null;
+      let acceptedTransientAttempts = null;
+      if (spec.failureClass === "transient") {
+        const day = shanghaiDay(spec.occurredAt);
+        const attempts = Number(selectAttempt.get(spec.sku, day)?.attempts ?? 0);
+        if (attempts >= 2) {
+          normalizedSpec = {
+            ...spec,
+            reason: `legacy-transient-daily-limit-exceeded: ${spec.reason}`,
+            failureClass: "invariant",
+            terminal: true,
+            nextEligibleAt: null,
+            data: {
+              ...spec.data,
+              original_reason: spec.reason,
+              original_failure_class: "transient",
+              invariant_reason: "daily-transient-limit",
+            },
+          };
+        } else {
+          acceptedTransientDay = day;
+          acceptedTransientAttempts = attempts + 1;
+        }
+      }
+
+      const existing = getState(normalizedSpec.sku);
+      const canUpgradeHistoricalPublication = (
+        normalizedSpec.strict &&
+        existing?.stage === "published" &&
+        !existing.strict
+      );
+      const canApply = (
+        importedStateWins(existing, normalizedSpec) ||
+        canUpgradeHistoricalPublication
+      );
+      const storedSpec = {
+        ...normalizedSpec,
+        strict: normalizedSpec.strict && canApply,
+        source,
+      };
+      const eventId = addEvent(storedSpec, { eventKey, idempotent: true });
+      if (eventId === null) return false;
+
+      if (acceptedTransientDay !== null) {
+        upsertAttempt.run(storedSpec.sku, acceptedTransientDay, acceptedTransientAttempts);
+      }
+      if (canApply) {
+        if (storedSpec.strict) {
+          insertStrictPublication.run(
+            storedSpec.sku,
+            eventId,
+            storedSpec.occurredAt,
+            stringifyData(storedSpec.data),
+          );
+          const titleKey = canonicalTitleKey(storedSpec.data);
+          if (titleKey) {
+            insertStrictTitleClaimIfNew.run(
+              titleKey,
+              storedSpec.sku,
+              eventId,
+              storedSpec.occurredAt,
+            );
+          }
+        }
+        writeState(storedSpec);
+      }
+      return true;
+    });
+  }
+
+  async function collectJsonlCandidates(kind, filenames) {
+    const candidates = [];
+    for (const filename of filenames) {
+      const text = await readTextIfPresent(filename);
+      const lines = text.split(/\r?\n/u);
+      for (let index = 0; index < lines.length; index += 1) {
+        const raw = lines[index].trim();
+        if (!raw) continue;
+        let value;
+        try {
+          value = JSON.parse(raw);
+        } catch {
+          continue;
+        }
+        const fallbackOccurredAt = currentTimestamp();
+        const spec = legacyTransition(value, kind, fallbackOccurredAt);
+        if (!spec) continue;
+        const eventKey = spec.failureClass === "transient"
+          ? legacyTransientEventKey(spec)
+          : legacyEventKey(kind, filename, index + 1, raw);
+        const source = `legacy:${kind}:${path.resolve(filename)}`;
+        candidates.push({ spec, eventKey, source });
+      }
+    }
+    return candidates;
+  }
+
+  async function collectPublishedCsvCandidates(filenames) {
+    const candidates = [];
+    for (const filename of filenames) {
+      const text = await readTextIfPresent(filename);
+      const records = parseCsvRecords(text);
+      const headers = records[0] ?? [];
+      const linkColumn = headers.findIndex((header) => CANONICAL_LINK_HEADERS.has(normalizeHeader(header)));
+      if (linkColumn < 0) continue;
+      const createdAtColumn = headers.findIndex((header) => (
+        ["created_at", "published_at"].includes(normalizeHeader(header))
+      ));
+
+      for (let index = 1; index < records.length; index += 1) {
+        const record = records[index];
+        const sku = canonicalSkuFromUrl(record[linkColumn]);
+        if (!sku) continue;
+        const occurredAt = tolerantTimestamp(
+          createdAtColumn >= 0 ? record[createdAtColumn] : null,
+        ) ?? currentTimestamp();
+        const raw = JSON.stringify(record);
+        const spec = {
+          sku,
+          stage: "published",
+          reason: "legacy-published-csv",
+          failureClass: null,
+          terminal: true,
+          strict: false,
+          nextEligibleAt: null,
+          data: {
+            product_link: record[linkColumn],
+            source: "csv",
+          },
+          occurredAt,
+        };
+        const eventKey = legacyEventKey("published-csv", filename, index + 1, raw);
+        const source = `legacy:published-csv:${path.resolve(filename)}`;
+        candidates.push({ spec, eventKey, source });
+      }
+    }
+    return candidates;
+  }
+
+  async function importLegacy({
+    skuStates = [],
+    published = [],
+    failed = [],
+    skipped = [],
+    publishedCsv = [],
+  } = {}) {
+    assertOpen();
+    const groups = { skuStates, published, failed, skipped, publishedCsv };
+    for (const [name, filenames] of Object.entries(groups)) {
+      if (!Array.isArray(filenames)) throw new TypeError(`${name} must be an array`);
+    }
+
+    const candidates = (await Promise.all([
+      collectJsonlCandidates("sku-states", skuStates),
+      collectJsonlCandidates("published", published),
+      collectJsonlCandidates("failed", failed),
+      collectJsonlCandidates("skipped", skipped),
+      collectPublishedCsvCandidates(publishedCsv),
+    ])).flat();
+    candidates.sort((left, right) => (
+      left.spec.occurredAt.localeCompare(right.spec.occurredAt) ||
+      left.spec.sku.localeCompare(right.spec.sku) ||
+      left.eventKey.localeCompare(right.eventKey)
+    ));
+
+    let importedEvents = 0;
+    for (const candidate of candidates) {
+      if (applyImported(candidate.spec, candidate.eventKey, candidate.source)) {
+        importedEvents += 1;
+      }
+    }
+    return { importedEvents };
+  }
+
+  function get(rawSku) {
+    assertOpen();
+    return getState(normalizeSku(rawSku));
+  }
+
+  function schemaVersion() {
+    assertOpen();
+    return Number(
+      database.prepare("SELECT value FROM metadata WHERE key = 'schema_version'").get()?.value,
+    );
+  }
+
+  function strictCount() {
+    assertOpen();
+    return Number(database.prepare("SELECT count(*) AS count FROM strict_publications").get().count);
+  }
+
+  function strictPublications() {
+    assertOpen();
+    return selectStrictPublications.all().map((row) => ({
+      sku: row.sku,
+      eventId: Number(row.event_id),
+      publishedAt: row.published_at,
+      data: parseData(row.data_json),
+    }));
+  }
+
+  function submissionReservation(rawSku) {
+    assertOpen();
+    return getReservation(normalizeSku(rawSku));
+  }
+
+  function auditEvents() {
+    assertOpen();
+    return database.prepare("SELECT * FROM events ORDER BY id").all().map(rowToEvent);
+  }
+
+  async function exportAuditJsonl(filename) {
+    assertOpen();
+    if (typeof filename !== "string" || !filename.trim()) {
+      throw new TypeError("filename is required");
+    }
+    const events = auditEvents();
+    await fs.mkdir(path.dirname(path.resolve(filename)), { recursive: true });
+    const text = events.length > 0
+      ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n`
+      : "";
+    await fs.writeFile(filename, text, "utf8");
+    return events.length;
+  }
+
+  function close() {
+    if (closed) return;
+    database.close();
+    closed = true;
+  }
+
+  return {
+    databasePath,
+    migrationBackupPath,
+    schemaVersion,
+    recordSubmission,
+    reserveSubmission,
+    confirmSubmission,
+    recordProcessing,
+    recordFailure,
+    recordSkip,
+    recordDelay,
+    recordStrictPublication,
+    canAttempt,
+    get,
+    strictCount,
+    strictPublications,
+    submissionReservation,
+    auditEvents,
+    importLegacy,
+    exportAuditJsonl,
+    close,
+  };
+}

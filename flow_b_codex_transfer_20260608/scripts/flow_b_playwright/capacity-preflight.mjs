@@ -52,7 +52,7 @@ export function buildCapacityPreflight({
   profileStores = [],
   checkedAt = new Date(),
   configuredDailyLimit = 100,
-  requiredCapacity = 481,
+  requiredCapacity = 500,
 } = {}) {
   if (!Array.isArray(configuredStores) || configuredStores.length !== 5) {
     throw new Error("capacity preflight requires exactly five configured stores");
@@ -60,10 +60,16 @@ export function buildCapacityPreflight({
   if (!Array.isArray(erpStores)) throw new Error("ERP store list is required");
   const checked = checkedAt instanceof Date ? checkedAt : new Date(checkedAt);
   const day = localDayParts(checked);
+  const configuredWarehouseCounts = configuredStores.reduce((counts, configured) => {
+    const warehouseId = Number(configured?.warehouse_id ?? configured?.warehouseId);
+    if (warehouseId > 0) counts.set(warehouseId, Number(counts.get(warehouseId) || 0) + 1);
+    return counts;
+  }, new Map());
   const rows = configuredStores.map((configured) => {
     const storeId = Number(configured?.id);
     const warehouseId = Number(configured?.warehouse_id ?? configured?.warehouseId);
-    const erp = erpStores.find((row) => Number(row?.id) === storeId) || null;
+    const matchingErpStores = erpStores.filter((row) => Number(row?.id) === storeId);
+    const erp = matchingErpStores.length === 1 ? matchingErpStores[0] : null;
     const profile = profileStores.find((row) => Number(row?.id) === storeId) || null;
     const merged = erp ? { ...erp, ...(profile ? { user_profile: profile } : {}) } : {};
     const warehouseCandidates = verifiedWarehouseCandidates(merged)
@@ -75,9 +81,11 @@ export function buildCapacityPreflight({
       }))
       .filter((row) => Number.isSafeInteger(row.warehouse_id) && row.warehouse_id > 0);
     const candidates = warehouseCandidates.map((row) => row.warehouse_id);
+    const matchingWarehouseCandidates = candidates.filter((candidate) => candidate === warehouseId);
     const warehouseVerified = Number.isSafeInteger(warehouseId)
       && warehouseId > 0
-      && candidates.includes(warehouseId);
+      && matchingWarehouseCandidates.length === 1
+      && Number(configuredWarehouseCounts.get(warehouseId)) === 1;
     const dailyCreate = erp?.product_limit?.daily_create ?? profile?.product_limit?.daily_create;
     const erpLimit = Number(dailyCreate?.limit);
     const erpUsage = Number(dailyCreate?.usage);
@@ -97,6 +105,8 @@ export function buildCapacityPreflight({
       warehouse_candidates: candidates,
       warehouse_candidate_details: warehouseCandidates,
       warehouse_verified: warehouseVerified,
+      warehouse_mapping_unique: warehouseVerified,
+      erp_store_match_count: matchingErpStores.length,
       erp_daily_limit: quotaVerified ? erpLimit : null,
       erp_daily_usage: quotaVerified ? erpUsage : null,
       erp_daily_reset_at: erpResetAt,
@@ -116,7 +126,7 @@ export function buildCapacityPreflight({
     next_reset_source: nextReset.source,
     required_capacity: Number(requiredCapacity),
     total_remaining_capacity: totalRemainingCapacity,
-    all_stores_found: rows.every((row) => row.store_name),
+    all_stores_found: rows.every((row) => row.store_name && row.erp_store_match_count === 1),
     all_warehouses_verified: rows.every((row) => row.warehouse_verified),
     all_quotas_verified: rows.every((row) => row.quota_verified),
     capacity_sufficient: totalRemainingCapacity >= Number(requiredCapacity),

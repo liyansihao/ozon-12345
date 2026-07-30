@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -11,6 +12,7 @@ const execFileAsync = promisify(execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_LABEL = "com.codex.ozon.24h-production";
 const DEFAULT_INSTALL_ROOT = path.join(process.env.HOME || "/Users/mac", ".ozon-24h-production");
+const PRODUCTION_STORE_IDS = [106637, 106640, 106644, 106646, 104965];
 const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|安全检查|验证码/i;
 const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
 
@@ -95,59 +97,260 @@ export function currentRunDisposition(currentRun) {
   return "active";
 }
 
+function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function exactStoreIds(rows) {
+  return (rows || []).map((row) => Number(row?.id));
+}
+
+export function productionRunContractDecision({
+  currentRun = {},
+  pendingManifest = {},
+  acceptanceWindow = {},
+  sourceConfig = {},
+  frozenManifest = {},
+  expectedConfigHash = null,
+  expectedCommitSha = null,
+} = {}) {
+  const issues = [];
+  const runId = String(currentRun?.run_id || "");
+  const configHash = String(currentRun?.config_sha256 || "");
+  const sourceSetHash = String(currentRun?.source_set_sha256 || currentRun?.source_sha256 || "");
+  if (!runId) issues.push("current-run-id-missing");
+  if (Number(currentRun?.state_schema_version) !== 3) issues.push("current-state-schema-not-v3");
+  if (!configHash) issues.push("current-config-hash-missing");
+  if (expectedConfigHash && configHash !== String(expectedConfigHash)) {
+    issues.push("current-config-hash-mismatch");
+  }
+  if (!sourceSetHash) issues.push("current-source-set-hash-missing");
+
+  if (currentRun?.formal_started === false) {
+    if (String(pendingManifest?.run_id || "") !== runId) issues.push("pending-run-id-mismatch");
+    if (String(pendingManifest?.config_sha256 || "") !== configHash) {
+      issues.push("pending-config-hash-mismatch");
+    }
+    if (String(pendingManifest?.source_set_sha256 || pendingManifest?.source_sha256 || "") !== sourceSetHash) {
+      issues.push("pending-source-set-hash-mismatch");
+    }
+    if (Number(pendingManifest?.state_schema_version) !== 3) issues.push("pending-state-schema-not-v3");
+    if (pendingManifest?.formal_window_started !== false) issues.push("pending-formal-flag-invalid");
+  } else if (currentRun?.formal_started === true) {
+    if (Number(currentRun?.acceptance_target) !== 500) issues.push("current-target-not-500");
+    if (String(currentRun?.acceptance_target_policy || "") !== "fixed") {
+      issues.push("current-target-policy-not-fixed");
+    }
+
+    const startedMs = Date.parse(acceptanceWindow?.started_at || "");
+    const endedMs = Date.parse(acceptanceWindow?.ended_at || "");
+    if (!Number.isFinite(startedMs) || !Number.isFinite(endedMs) || endedMs - startedMs !== 86_400_000) {
+      issues.push("acceptance-window-not-24h");
+    }
+    if (Number(acceptanceWindow?.acceptance_target) !== 500) issues.push("window-target-not-500");
+    if (String(acceptanceWindow?.acceptance_target_policy || "") !== "fixed") {
+      issues.push("window-target-policy-not-fixed");
+    }
+    if (Number(acceptanceWindow?.per_store_target) !== 100) issues.push("window-store-target-not-100");
+    if (Number(acceptanceWindow?.rolling_rate_window_minutes) !== 120) {
+      issues.push("window-rate-period-not-120m");
+    }
+    if (Number(acceptanceWindow?.minimum_average_per_hour_exclusive) !== 35) {
+      issues.push("window-rate-not-35");
+    }
+    if (acceptanceWindow?.current_window_only !== true) issues.push("window-scope-invalid");
+
+    if (Number(sourceConfig?.acceptance_target) !== 500) issues.push("source-target-not-500");
+    if (String(sourceConfig?.acceptance_target_policy || "") !== "fixed") {
+      issues.push("source-target-policy-not-fixed");
+    }
+    if (Number(sourceConfig?.per_store_target) !== 100) issues.push("source-store-target-not-100");
+    if (Number(sourceConfig?.minimum_average_per_hour_exclusive) !== 35) {
+      issues.push("source-rate-not-35");
+    }
+    if (sourceConfig?.require_quality_evidence !== true) issues.push("source-quality-evidence-not-required");
+    if (sourceConfig?.current_window_only !== true) issues.push("source-window-scope-invalid");
+    if (exactStoreIds(sourceConfig?.store_targets).join(",") !== PRODUCTION_STORE_IDS.join(",")) {
+      issues.push("source-store-set-mismatch");
+    }
+    const warehouseIds = (sourceConfig?.store_targets || []).map((row) => Number(row?.warehouseId));
+    if (warehouseIds.length !== 5
+      || warehouseIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+      || new Set(warehouseIds).size !== 5) {
+      issues.push("source-warehouse-map-invalid");
+    }
+
+    if (String(frozenManifest?.run_id || "") !== runId) issues.push("frozen-run-id-mismatch");
+    if (String(frozenManifest?.config_sha256 || "") !== configHash) {
+      issues.push("frozen-config-hash-mismatch");
+    }
+    if (String(frozenManifest?.source_set_sha256 || "") !== sourceSetHash) {
+      issues.push("frozen-source-set-hash-mismatch");
+    }
+    if (Number(frozenManifest?.state_schema_version) !== 3) issues.push("frozen-state-schema-not-v3");
+    if (Number(frozenManifest?.acceptance_target) !== 500) issues.push("frozen-target-not-500");
+    if (String(frozenManifest?.acceptance_target_policy || "") !== "fixed") {
+      issues.push("frozen-target-policy-not-fixed");
+    }
+    if (Number(frozenManifest?.per_store_target) !== 100) issues.push("frozen-store-target-not-100");
+    if (Number(frozenManifest?.rolling_rate_window_minutes) !== 120) {
+      issues.push("frozen-rate-period-not-120m");
+    }
+    if (Number(frozenManifest?.minimum_strict_per_hour) !== 35) issues.push("frozen-rate-not-35");
+    if (frozenManifest?.current_window_only !== true) issues.push("frozen-window-scope-invalid");
+    if (expectedCommitSha && String(frozenManifest?.commit_sha || "") !== String(expectedCommitSha)) {
+      issues.push("frozen-commit-mismatch");
+    }
+  } else {
+    issues.push("formal-started-flag-must-be-boolean");
+  }
+
+  return issues.length === 0
+    ? { action: "continue", reason: null, issues: [] }
+    : { action: "fatal-stop", reason: "fixed-production-run-contract-mismatch", issues };
+}
+
 export function supervisorShouldHonorSafeStop(operationalStatus) {
-  return new Set(["STOPPED", "WINDOW_COMPLETE", "TARGET_NOT_MET"])
+  return new Set(["STOPPED", "FATAL_STOP", "WINDOW_COMPLETE", "TARGET_NOT_MET"])
     .has(String(operationalStatus?.status || ""));
 }
 
-export function capacityPreflightDecision(snapshot, requiredCapacity = 481, targetPolicy = "fixed") {
+export function capacityPreflightDecision(snapshot, requiredCapacity = 500, targetPolicy = "fixed") {
+  if (String(targetPolicy || "") !== "fixed") {
+    return { action: "fatal-stop", reason: "acceptance-target-policy-must-be-fixed" };
+  }
   if (snapshot?.all_stores_found !== true
     || snapshot?.all_warehouses_verified !== true
     || snapshot?.all_quotas_verified !== true) {
     return { action: "fatal-stop", reason: "capacity-or-warehouse-verification-failed" };
   }
-  if (targetPolicy === "erp_remaining_capacity") {
-    const effectiveTarget = Number(snapshot?.total_remaining_capacity);
-    if (Number.isInteger(effectiveTarget) && effectiveTarget > 0) {
-      return {
-        action: "start-formal-window",
-        reason: null,
-        effective_target: effectiveTarget,
-      };
-    }
-    return {
-      action: "wait-for-quota-reset",
-      reason: "no-current-day-capacity",
-      next_reset_at: snapshot?.next_reset_at || null,
-    };
-  }
   if (Number(snapshot?.total_remaining_capacity) < Number(requiredCapacity)) {
     return {
-      action: "wait-for-quota-reset",
+      action: "fatal-stop",
       reason: "insufficient-current-day-capacity",
-      next_reset_at: snapshot?.next_reset_at || null,
+      total_remaining_capacity: Number(snapshot?.total_remaining_capacity) || 0,
+      required_capacity: Number(requiredCapacity),
     };
   }
   return { action: "start-formal-window", reason: null };
 }
 
-export function pendingPrewarmDue({
-  lastCompletedAt = null,
-  now = Date.now(),
-  resetAt = null,
-  intervalSeconds = 900,
-  minimumResetHeadroomSeconds = 120,
-  lastSourceCommit = null,
-  currentSourceCommit = null,
+export function browserRecoverySafeStopDecision(events = [], {
+  now = new Date(),
+  windowMs = 60 * 60_000,
+  threshold = 2,
 } = {}) {
-  const current = Number(now);
-  const reset = Date.parse(String(resetAt || ""));
-  if (!Number.isFinite(current)) return false;
-  if (Number.isFinite(reset) && reset - current <= Number(minimumResetHeadroomSeconds) * 1000) return false;
-  if (currentSourceCommit && currentSourceCommit !== lastSourceCommit) return true;
-  const previous = Date.parse(String(lastCompletedAt || ""));
-  return !Number.isFinite(previous)
-    || current - previous >= Math.max(60, Number(intervalSeconds) || 900) * 1000;
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(String(now || ""));
+  if (!Number.isFinite(nowMs)) throw new TypeError("browser recovery decision now is invalid");
+  let consecutiveFailures = 0;
+  for (const event of events || []) {
+    const at = Date.parse(String(event?.at || event?.timestamp || ""));
+    if (!Number.isFinite(at) || at < nowMs - Number(windowMs) || at > nowMs) continue;
+    if (String(event?.action || "") !== "browser-recovery-attempt") continue;
+    if (String(event?.outcome || "") === "succeeded") consecutiveFailures = 0;
+    else if (String(event?.outcome || "") === "failed") consecutiveFailures += 1;
+  }
+  if (consecutiveFailures >= Math.max(1, Number(threshold) || 2)) {
+    return {
+      action: "safe-stop",
+      reason: "repeated-browser-recovery-failure",
+      consecutive_failures: consecutiveFailures,
+    };
+  }
+  return { action: "continue", reason: null, consecutive_failures: consecutiveFailures };
+}
+
+export function processOwnershipDecision({
+  phase = "before-worker",
+  supervisor = 0,
+  worker = 0,
+  profile_owner: profileOwner = 0,
+} = {}) {
+  if (Number(supervisor) !== 1) {
+    return {
+      action: "fatal-stop",
+      reason: Number(supervisor) > 1
+        ? "duplicate-supervisor-risk"
+        : "supervisor-ownership-lost",
+    };
+  }
+  if (Number(worker) > 1) return { action: "fatal-stop", reason: "duplicate-worker-generation-risk" };
+  if (Number(profileOwner) > 1) return { action: "fatal-stop", reason: "duplicate-profile-owner-risk" };
+  if (phase === "worker-running" && Number(worker) !== 1) {
+    return { action: "fatal-stop", reason: "worker-generation-ownership-lost" };
+  }
+  if (phase === "worker-running" && Number(profileOwner) !== 1) {
+    return { action: "fatal-stop", reason: "profile-owner-ownership-lost" };
+  }
+  if (phase === "browser-ready" && Number(profileOwner) !== 1) {
+    return { action: "fatal-stop", reason: "profile-owner-ownership-lost" };
+  }
+  if (phase === "browser-ready" && Number(worker) !== 0) {
+    return { action: "fatal-stop", reason: "unexpected-live-worker-generation" };
+  }
+  if (["before-worker", "after-exit"].includes(phase) && Number(worker) !== 0) {
+    return { action: "fatal-stop", reason: "unexpected-live-worker-generation" };
+  }
+  if (phase === "after-exit" && Number(profileOwner) !== 0) {
+    return { action: "fatal-stop", reason: "orphan-profile-owner-risk" };
+  }
+  return { action: "continue", reason: null };
+}
+
+export function rollingRateDecision({
+  elapsedMinutes = 0,
+  rolling120PerHour = 0,
+  minimumPerHour = 35,
+  targetReached = false,
+} = {}) {
+  if (targetReached === true) return { action: "continue", reason: "target-already-reached" };
+  if (Number(elapsedMinutes) < 120) return { action: "observe", reason: "insufficient-120-minute-window" };
+  if (Number(rolling120PerHour) < Number(minimumPerHour)) {
+    return {
+      action: "safe-stop",
+      reason: "rolling-120-minute-strict-rate-below-threshold",
+      observed_per_hour: Number(rolling120PerHour) || 0,
+      minimum_per_hour: Number(minimumPerHour),
+    };
+  }
+  return { action: "continue", reason: null };
+}
+
+export function candidateBufferDecision({
+  uniqueReady = 0,
+  targetHours = 2,
+  minimumPerHour = 35,
+} = {}) {
+  const requiredReady = Math.ceil(Number(targetHours) * Number(minimumPerHour));
+  const ready = Math.max(0, Math.floor(Number(uniqueReady) || 0));
+  return ready >= requiredReady
+    ? { action: "ready", unique_ready: ready, required_ready: requiredReady }
+    : { action: "prepare", unique_ready: ready, required_ready: requiredReady };
+}
+
+export function candidateBufferSnapshot(rows = []) {
+  const latest = new Map();
+  for (const row of rows || []) {
+    const sku = String(row?.sku || "").trim();
+    if (sku) latest.set(sku, row);
+  }
+  const readySkus = [...latest].filter(([sku, row]) => (
+    sku !== "2815247918"
+    && String(row?.status || "") === "validated"
+    && String(row?.shipping_mode || "").toUpperCase() === "FBS"
+    && row?.fbs_evidence?.verified === true
+    && row?.cost_verified === true
+    && row?.cost?.ok === true
+    && Number(row?.cost?.cost) > 0
+    && Number(row?.purchase_price) > 0
+    && Number(row?.profit_rate) > 30
+    && row?.quality_gate_passed === true
+  )).map(([sku]) => sku).sort();
+  return {
+    unique_ready: readySkus.length,
+    ready_skus: readySkus,
+    rejected_or_invalid: Math.max(0, latest.size - readySkus.length),
+  };
 }
 
 export function buildLaunchdPlist({
@@ -214,12 +417,18 @@ async function appendJsonLine(filename, value) {
   await fsp.appendFile(filename, `${JSON.stringify(value)}\n`, "utf8");
 }
 
-async function readJsonLineCount(filename) {
+async function readJsonLines(filename) {
   try {
     const text = await fsp.readFile(filename, "utf8");
-    return text.split(/\r?\n/u).filter(Boolean).length;
+    return text.split(/\r?\n/u).filter(Boolean).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
   } catch (error) {
-    if (error.code === "ENOENT") return 0;
+    if (error.code === "ENOENT") return [];
     throw error;
   }
 }
@@ -295,6 +504,70 @@ function exactProfileOwner(row, profileDir) {
 
 async function profileOwners(profileDir) {
   return (await processTable()).filter((row) => exactProfileOwner(row, profileDir));
+}
+
+function commandHasArgument(command, value) {
+  const target = String(value || "").trim();
+  if (!target) return false;
+  return String(command || "")
+    .split(/\s+/u)
+    .map((token) => token.replace(/^['"]|['"]$/gu, ""))
+    .includes(target);
+}
+
+export function processOwnershipSnapshot(rows = [], {
+  supervisorPid = process.pid,
+  runDir,
+  profileDir,
+} = {}) {
+  const supervisorPids = new Set();
+  const workerPids = new Set();
+  const normalizedRunDir = absolute(runDir);
+  const normalizedProfileDir = absolute(profileDir);
+  const profileOwnerPids = new Set();
+  for (const row of rows || []) {
+    const pid = Number(row?.pid);
+    const command = String(row?.command || "");
+    if (!(pid > 0)) continue;
+    if (
+      pid === Number(supervisorPid)
+      || (command.includes("ozon_24h_supervisor.mjs") && /\bsupervise\b/u.test(command))
+    ) {
+      supervisorPids.add(pid);
+    }
+    if (
+      command.includes("flow_b_playwright.mjs")
+      && commandHasArgument(command, normalizedRunDir)
+      && /\b(?:accept|run|publish)\b/u.test(command)
+    ) {
+      workerPids.add(pid);
+    }
+    if (exactProfileOwner(row, normalizedProfileDir)) profileOwnerPids.add(pid);
+  }
+  return {
+    supervisor: supervisorPids.size,
+    worker: workerPids.size,
+    profile_owner: profileOwnerPids.size,
+    supervisor_pids: [...supervisorPids].sort((left, right) => left - right),
+    worker_pids: [...workerPids].sort((left, right) => left - right),
+    profile_owner_pids: [...profileOwnerPids].sort((left, right) => left - right),
+  };
+}
+
+async function assertProcessOwnership({ phase, runDir, profileDir }) {
+  const snapshot = processOwnershipSnapshot(await processTable(), {
+    supervisorPid: process.pid,
+    runDir,
+    profileDir,
+  });
+  const decision = processOwnershipDecision({ phase, ...snapshot });
+  if (decision.action === "fatal-stop") {
+    const error = new Error(decision.reason);
+    error.code = "OZON_PROCESS_OWNERSHIP";
+    error.ownership = snapshot;
+    throw error;
+  }
+  return snapshot;
 }
 
 function endpointPort(endpoint) {
@@ -553,6 +826,10 @@ export function checkpointEnvironment(config, currentRun, baseEnvironment = proc
   environment.FLOW_B_PRODUCTION_RUN_ID = String(currentRun.run_id);
   environment.FLOW_B_FROZEN_COMMIT = String(config.frozen_commit || "");
   environment.FLOW_B_FROZEN_CONFIG_HASH = String(config.frozen_config_hash || "");
+  environment.FLOW_B_FROZEN_SOURCE_SET_HASH = String(
+    currentRun.source_set_sha256 || currentRun.source_sha256 || "",
+  );
+  environment.FLOW_B_STATE_SCHEMA_VERSION = String(config.state_schema_version || 3);
   return environment;
 }
 
@@ -568,15 +845,12 @@ export function workerEnvironment(config, currentRun) {
   environment.FLOW_B_CHROMIUM_EXECUTABLE = absolute(config.browser.executable);
   environment.FLOW_B_RESUME_WINDOW = "1";
   environment.FLOW_B_CAPACITY_STORES = JSON.stringify(config.stores || []);
-  if (Number.isInteger(Number(currentRun.acceptance_target)) && Number(currentRun.acceptance_target) > 0) {
-    environment.FLOW_B_ACCEPTANCE_TARGET = String(currentRun.acceptance_target);
-    environment.FLOW_B_TARGET_PUBLISH_COUNT = String(currentRun.acceptance_target);
-  }
-  environment.FLOW_B_ACCEPTANCE_TARGET_POLICY = String(
-    currentRun.acceptance_target_policy
-      || config.acceptance?.target_policy
-      || "fixed",
-  );
+  environment.FLOW_B_ACCEPTANCE_TARGET = "500";
+  environment.FLOW_B_TARGET_PUBLISH_COUNT = "500";
+  environment.FLOW_B_STORE_ACCEPTANCE_TARGET = "100";
+  environment.FLOW_B_REQUIRE_PER_STORE_ACCEPTANCE = "1";
+  environment.FLOW_B_MINIMUM_AVERAGE_PER_HOUR_EXCLUSIVE = "35";
+  environment.FLOW_B_ACCEPTANCE_TARGET_POLICY = "fixed";
   return environment;
 }
 
@@ -659,20 +933,55 @@ async function runCheckpoint(appRoot, runDir, label, environment = process.env) 
   });
 }
 
-export async function runFinalArtifacts(appRoot, stateRoot, currentRun, runDir) {
+export async function reconcileStrictRuntimeAudit(appRoot, stateRoot, runDir) {
+  const stateModule = await import(
+    pathToFileURL(path.join(appRoot, "scripts", "flow_b_playwright", "publish-state.mjs")).href
+  );
+  return stateModule.reconcileRuntimeAuditOutputs({
+    runtimeStateDbPath: path.join(stateRoot, "runtime", "flow_b_state.sqlite"),
+    runDir,
+    publishedCsv: path.join(stateRoot, "dedupe", "published_links.csv"),
+  });
+}
+
+export async function runFinalArtifacts(
+  appRoot,
+  stateRoot,
+  currentRun,
+  runDir,
+  releaseIdentity = {},
+) {
   const output = path.join(stateRoot, "exports", currentRun.run_id);
   await fsp.mkdir(output, { recursive: true });
+  await reconcileStrictRuntimeAudit(appRoot, stateRoot, runDir);
   const acceptanceReport = path.join(runDir, "acceptance_summary.json");
-  if (!fs.existsSync(acceptanceReport)) {
-    const window = await readJson(path.join(runDir, "acceptance_window.json"));
-    const reportModule = await import(pathToFileURL(path.join(appRoot, "scripts", "flow_b_playwright.mjs")).href);
-    await reportModule.writeAcceptanceReport(
-      runDir,
-      window.started_at,
-      window.ended_at,
-      Number((await readJson(path.join(runDir, "source_config.json"), {}))?.acceptance_target || 481),
-    );
+  const [window, sourceConfig, frozenManifest] = await Promise.all([
+    readJson(path.join(runDir, "acceptance_window.json")),
+    readJson(path.join(runDir, "source_config.json")),
+    readJson(path.join(runDir, "frozen_manifest.json")),
+  ]);
+  const contract = productionRunContractDecision({
+    currentRun,
+    acceptanceWindow: window,
+    sourceConfig,
+    frozenManifest,
+    expectedConfigHash: releaseIdentity.config_sha256 || currentRun.config_sha256,
+    expectedCommitSha: releaseIdentity.source_commit || frozenManifest.commit_sha,
+  });
+  if (contract.action !== "continue") {
+    const error = new Error(`${contract.reason}: ${contract.issues.join(",")}`);
+    error.code = "OZON_PRODUCTION_RUN_CONTRACT";
+    error.contract = contract;
+    throw error;
   }
+  const reportModule = await import(pathToFileURL(path.join(appRoot, "scripts", "flow_b_playwright.mjs")).href);
+  await reportModule.writeAcceptanceReport(
+    runDir,
+    window.started_at,
+    window.ended_at,
+    500,
+    { productionContract: true },
+  );
   const exported = await runCommand(process.execPath, [
     path.join(appRoot, "scripts", "export_confirmed_store_skus.mjs"),
     runDir,
@@ -718,24 +1027,32 @@ async function runCapacityPreflight(config, appRoot, stateRoot, currentRun) {
   }
 }
 
-function spawnPendingPrewarm(config, appRoot, runDir, urlsFile, currentRun, resetAt) {
-  const stdoutFd = fs.openSync(path.join(runDir, "prewarm.stdout.log"), "a");
-  const stderrFd = fs.openSync(path.join(runDir, "prewarm.stderr.log"), "a");
-  const maximumMs = Math.max(60, Number(config.pending_prewarm_max_run_seconds) || 600) * 1000;
-  const resetMs = Date.parse(String(resetAt || ""));
-  const deadlineMs = Number.isFinite(resetMs)
-    ? Math.min(Date.now() + maximumMs, resetMs - 5_000)
-    : Date.now() + maximumMs;
+function spawnCandidateBufferPreparation(
+  config,
+  appRoot,
+  runDir,
+  urlsFile,
+  currentRun,
+  remainingTarget,
+) {
+  const stdoutFd = fs.openSync(path.join(runDir, "candidate-buffer.stdout.log"), "a");
+  const stderrFd = fs.openSync(path.join(runDir, "candidate-buffer.stderr.log"), "a");
+  const maximumMs = Math.max(
+    60,
+    Number(config.candidate_buffer?.preparation_max_run_seconds) || 600,
+  ) * 1000;
   const child = spawn(process.execPath, [
     path.join(appRoot, "scripts", "flow_b_playwright.mjs"),
-    "scan",
+    "run",
+    runDir,
     urlsFile,
-    resolveSourceScanStateFile(runDir, config),
   ], {
     cwd: appRoot,
     env: {
       ...workerEnvironment(config, currentRun),
-      FLOW_B_DEADLINE_AT: new Date(Math.max(Date.now() + 1_000, deadlineMs)).toISOString(),
+      FLOW_B_VALIDATION_ONLY: "1",
+      FLOW_B_VALIDATION_TARGET: String(Math.max(1, Number(remainingTarget) || 1)),
+      FLOW_B_DEADLINE_AT: new Date(Date.now() + maximumMs).toISOString(),
     },
     stdio: ["ignore", stdoutFd, stderrFd],
   });
@@ -750,12 +1067,11 @@ async function activateFormalWindow({
   currentRun,
   runDir,
   appRoot,
-  acceptanceTarget,
 }) {
   const startedAt = new Date();
   const endedAt = new Date(startedAt.getTime() + Number(config.acceptance.duration_seconds) * 1000);
-  const frozenTarget = Number(acceptanceTarget || config.acceptance.strict_target);
-  const targetPolicy = String(config.acceptance.target_policy || "fixed");
+  const frozenTarget = 500;
+  const targetPolicy = "fixed";
   const preflight = await readJson(path.join(stateRoot, "capacity_preflight.json"));
   const configText = await fsp.readFile(path.join(appRoot, "config", "ozon_24h_production.json"), "utf8");
   const crypto = await import("node:crypto");
@@ -765,18 +1081,47 @@ async function activateFormalWindow({
     ended_at: endedAt.toISOString(),
     acceptance_target: frozenTarget,
     acceptance_target_policy: targetPolicy,
-    minimum_average_per_hour_exclusive: config.acceptance.minimum_average_per_hour_exclusive,
+    per_store_target: 100,
+    rolling_rate_window_minutes: 120,
+    minimum_average_per_hour_exclusive: 35,
+    current_window_only: true,
+  });
+  const preparedSourceConfig = await readJson(path.join(runDir, "source_config.json"), {});
+  await writeJsonAtomic(path.join(runDir, "source_config.json"), {
+    ...preparedSourceConfig,
+    mode: "continuous-acceptance",
+    window_started_at: startedAt.toISOString(),
+    window_ended_at: endedAt.toISOString(),
+    publish_target: 500,
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    minimum_average_per_hour_exclusive: 35,
+    per_store_target: 100,
+    require_quality_evidence: true,
+    current_window_only: true,
+    store_targets: (config.stores || []).map((store) => ({
+      id: Number(store.id),
+      needle: String(store.name || ""),
+      warehouseId: Number(store.warehouse_id),
+      requireWarehouse: true,
+    })),
+    daily_store_timezone: "Asia/Shanghai",
   });
   await writeJsonAtomic(path.join(runDir, "frozen_manifest.json"), {
     run_id: currentRun.run_id,
     requested_at: currentRun.requested_at,
     started_at: startedAt.toISOString(),
     ended_at: endedAt.toISOString(),
+    commit_sha: config.frozen_commit || null,
     config_sha256: configHash,
-    source_sha256: currentRun.source_sha256 || null,
+    source_set_sha256: currentRun.source_set_sha256 || currentRun.source_sha256 || null,
+    state_schema_version: Number(config.state_schema_version || 3),
     capacity_preflight: preflight,
     acceptance_target: frozenTarget,
     acceptance_target_policy: targetPolicy,
+    per_store_target: 100,
+    rolling_rate_window_minutes: 120,
+    minimum_strict_per_hour: 35,
     current_window_only: true,
   });
   Object.assign(currentRun, {
@@ -873,6 +1218,24 @@ export async function supervise(configPath) {
     error.code = "OZON_INVALID_CURRENT_RUN";
     throw error;
   }
+  const configText = await fsp.readFile(configPath, "utf8");
+  const actualConfigHash = sha256(configText);
+  const deploymentIssues = [];
+  if (!String(deployment?.source_commit || "")) deploymentIssues.push("deployment-commit-missing");
+  if (String(deployment?.config_sha256 || "") !== actualConfigHash) {
+    deploymentIssues.push("deployment-config-hash-mismatch");
+  }
+  if (Number(deployment?.state_schema_version) !== 3) deploymentIssues.push("deployment-state-schema-not-v3");
+  if (deploymentIssues.length > 0) {
+    await updateOperationalState(stateRoot, currentRun, {
+      status: "FATAL_STOP",
+      reason: "deployment-identity-invalid",
+      issues: deploymentIssues,
+      evidence_preserved: true,
+    });
+    await releaseLock();
+    return 0;
+  }
   const startupStatus = await readJson(path.join(stateRoot, "operational_status.json"), {});
   if (supervisorShouldHonorSafeStop(startupStatus)) {
     await releaseLock();
@@ -881,10 +1244,49 @@ export async function supervise(configPath) {
   const runDir = absolute(currentRun.run_dir);
   const urlsFile = absolute(currentRun.urls_file);
   const stopFile = path.join(stateRoot, "stop.request");
+  const statePathIssues = [];
+  if (path.dirname(runDir) !== path.join(stateRoot, "runs")) {
+    statePathIssues.push("run-directory-outside-state-root");
+  }
+  if (urlsFile !== path.join(stateRoot, "sources", "active_urls.txt")) {
+    statePathIssues.push("source-file-outside-state-root");
+  }
+  if (statePathIssues.length > 0) {
+    await updateOperationalState(stateRoot, currentRun, {
+      status: "FATAL_STOP",
+      reason: "production-state-path-invalid",
+      issues: statePathIssues,
+      evidence_preserved: true,
+    });
+    await releaseLock();
+    return 0;
+  }
+  const runContract = productionRunContractDecision({
+    currentRun,
+    pendingManifest: await readJson(path.join(runDir, "pending_manifest.json"), {}),
+    acceptanceWindow: await readJson(path.join(runDir, "acceptance_window.json"), {}),
+    sourceConfig: await readJson(path.join(runDir, "source_config.json"), {}),
+    frozenManifest: await readJson(path.join(runDir, "frozen_manifest.json"), {}),
+    expectedConfigHash: actualConfigHash,
+    expectedCommitSha: deployment.source_commit,
+  });
+  if (runContract.action !== "continue") {
+    await updateOperationalState(stateRoot, currentRun, {
+      status: "FATAL_STOP",
+      reason: runContract.reason,
+      issues: runContract.issues,
+      evidence_preserved: true,
+    });
+    await releaseLock();
+    return 0;
+  }
   let worker = null;
   let checkpointTimer = null;
   let sourceRefreshTimer = null;
   let shuttingDown = false;
+  let forcedSafeStopReason = null;
+  let browserRecoveryEvents = [];
+  let browserRecoveryPending = false;
   const stopWorker = async () => {
     const activeWorker = worker;
     await stopOwnedWorker(activeWorker);
@@ -898,9 +1300,55 @@ export async function supervise(configPath) {
   process.on("SIGHUP", onSignal);
   try {
     await fsp.mkdir(runDir, { recursive: true });
+    browserRecoveryEvents = (await readJsonLines(path.join(stateRoot, "recovery.jsonl")))
+      .filter((event) => (
+        path.resolve(String(event?.run_dir || "")) === runDir
+        && event?.action === "browser-recovery-attempt"
+      ));
+    const ensureOwnedBrowser = async () => {
+      try {
+        const owner = await ensureBrowserOwner({ config, stateRoot, runDir });
+        if (browserRecoveryPending) {
+          const succeeded = {
+            at: new Date().toISOString(),
+            run_dir: runDir,
+            action: "browser-recovery-attempt",
+            outcome: "succeeded",
+            profile_owner_pid: owner.pid,
+          };
+          browserRecoveryEvents.push(succeeded);
+          await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), succeeded);
+          browserRecoveryPending = false;
+        }
+        return owner;
+      } catch (error) {
+        const failed = {
+          at: new Date().toISOString(),
+          run_dir: runDir,
+          action: "browser-recovery-attempt",
+          outcome: "failed",
+          error: String(error?.message || error),
+        };
+        browserRecoveryEvents.push(failed);
+        browserRecoveryPending = true;
+        await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), failed);
+        const recoveryDecision = browserRecoverySafeStopDecision(browserRecoveryEvents);
+        if (recoveryDecision.action === "safe-stop") {
+          const stopped = new Error(recoveryDecision.reason);
+          stopped.code = "OZON_BROWSER_RECOVERY_SAFE_STOP";
+          stopped.recovery = recoveryDecision;
+          throw stopped;
+        }
+        throw error;
+      }
+    };
+    await assertProcessOwnership({
+      phase: "before-worker",
+      runDir,
+      profileDir: config.browser.profile_dir,
+    });
     const sourceRefresh = await runSourceRefresh(appRoot, stateRoot, runDir);
     if (sourceRefresh.code !== 0) throw new Error("initial source portfolio refresh failed");
-    let prewarmStatus = await readJson(path.join(stateRoot, "prewarm_status.json"), {});
     while (currentRun.formal_started === false && !shuttingDown) {
       if (fs.existsSync(stopFile)) {
         await updateOperationalState(stateRoot, currentRun, {
@@ -912,7 +1360,12 @@ export async function supervise(configPath) {
       }
       let browserOwner;
       try {
-        browserOwner = await ensureBrowserOwner({ config, stateRoot, runDir });
+        browserOwner = await ensureOwnedBrowser();
+        await assertProcessOwnership({
+          phase: "browser-ready",
+          runDir,
+          profileDir: config.browser.profile_dir,
+        });
         await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid });
         const result = await runCapacityPreflight(config, appRoot, stateRoot, currentRun);
         if (result.code !== 0) throw result.error || new Error(`capacity preflight exited ${result.code}`);
@@ -931,45 +1384,35 @@ export async function supervise(configPath) {
           return 0;
         }
         if (decision.action === "start-formal-window") {
-          await activateFormalWindow({
-            config,
-            stateRoot,
-            currentRun,
-            runDir,
-            appRoot,
-            acceptanceTarget: decision.effective_target,
+          const validationRows = await readJsonLines(path.join(runDir, "validation_gate.jsonl"));
+          const bufferBefore = candidateBufferSnapshot(validationRows);
+          const bufferDecision = candidateBufferDecision({
+            uniqueReady: bufferBefore.unique_ready,
+            targetHours: config.candidate_buffer?.minimum_hours || 2,
+            minimumPerHour: config.candidate_buffer?.minimum_strict_per_hour || 35,
           });
-          break;
-        }
-        if (pendingPrewarmDue({
-          lastCompletedAt: prewarmStatus?.last_completed_at,
-          resetAt: decision.next_reset_at,
-          intervalSeconds: config.pending_prewarm_interval_seconds,
-          lastSourceCommit: prewarmStatus?.source_commit,
-          currentSourceCommit: config.frozen_commit,
-        })) {
-          const prewarmStartedAt = new Date();
-          worker = spawnPendingPrewarm(
+          if (bufferDecision.action === "ready") {
+            await activateFormalWindow({
+              config,
+              stateRoot,
+              currentRun,
+              runDir,
+              appRoot,
+            });
+            break;
+          }
+          const refreshed = await runSourceRefresh(appRoot, stateRoot, runDir);
+          if (refreshed.code !== 0) throw new Error("candidate-buffer source refresh failed");
+          const prepareStartedAt = new Date();
+          worker = spawnCandidateBufferPreparation(
             config,
             appRoot,
             runDir,
             urlsFile,
             currentRun,
-            decision.next_reset_at,
+            bufferDecision.required_ready - bufferDecision.unique_ready,
           );
-          await writeProcessOwners({
-            stateRoot,
-            currentRun,
-            browserPid: browserOwner.pid,
-            workerPid: worker.pid,
-          });
-          await updateOperationalState(stateRoot, currentRun, {
-            status: "PREWARMING_CANDIDATES",
-            reason: "building strict-gated candidate supply before quota reset",
-            prewarm_started_at: prewarmStartedAt.toISOString(),
-            next_reset_at: decision.next_reset_at,
-          });
-          const result = await new Promise((resolve) => {
+          const preparationResult = new Promise((resolve) => {
             worker.once("error", (error) => resolve({ code: 127, signal: null, error }));
             worker.once("exit", (code, signal) => resolve({
               code: Number(code ?? 1),
@@ -977,44 +1420,82 @@ export async function supervise(configPath) {
               error: null,
             }));
           });
-          worker = null;
+          if (pidAlive(worker.pid)) {
+            await assertProcessOwnership({
+              phase: "worker-running",
+              runDir,
+              profileDir: config.browser.profile_dir,
+            });
+          }
           await writeProcessOwners({
             stateRoot,
             currentRun,
             browserPid: browserOwner.pid,
+            workerPid: worker.pid,
           });
-          prewarmStatus = {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "PREPARING_CANDIDATE_BUFFER",
+            reason: "two-hour fully-qualified candidate buffer is below the hard gate",
+            unique_ready: bufferDecision.unique_ready,
+            required_ready: bufferDecision.required_ready,
+            preparation_started_at: prepareStartedAt.toISOString(),
+          });
+          const prepared = await preparationResult;
+          worker = null;
+          await assertProcessOwnership({
+            phase: "browser-ready",
+            runDir,
+            profileDir: config.browser.profile_dir,
+          });
+          const bufferAfter = candidateBufferSnapshot(
+            await readJsonLines(path.join(runDir, "validation_gate.jsonl")),
+          );
+          await writeJsonAtomic(path.join(stateRoot, "candidate_buffer_status.json"), {
             run_id: currentRun.run_id,
-            last_started_at: prewarmStartedAt.toISOString(),
-            last_completed_at: new Date().toISOString(),
-            exit_code: result.code,
-            signal: result.signal,
-            source_commit: config.frozen_commit,
-            candidate_queue_rows: await readJsonLineCount(path.join(runDir, "candidate_queue.jsonl")),
-            favorite_collection_rows: await readJsonLineCount(path.join(runDir, "favorite_collection.jsonl")),
-          };
-          await writeJsonAtomic(path.join(stateRoot, "prewarm_status.json"), prewarmStatus);
-          if (shuttingDown) continue;
-          if (result.code !== 0) {
-            throw result.error || new Error(`pending candidate prewarm exited ${result.code}`);
+            observed_at: new Date().toISOString(),
+            required_ready: bufferDecision.required_ready,
+            ...bufferAfter,
+            preparation_exit_code: prepared.code,
+            preparation_signal: prepared.signal,
+          });
+          if (prepared.code !== 0) {
+            throw prepared.error || new Error(`candidate-buffer preparation exited ${prepared.code}`);
+          }
+          if (bufferAfter.unique_ready <= bufferBefore.unique_ready) {
+            throw new Error("qualified candidate buffer did not grow");
+          }
+          if (bufferAfter.unique_ready >= bufferDecision.required_ready) {
+            await activateFormalWindow({
+              config,
+              stateRoot,
+              currentRun,
+              runDir,
+              appRoot,
+            });
+            break;
           }
           continue;
         }
-        await updateOperationalState(stateRoot, currentRun, {
-          status: "WAITING_FOR_QUOTA_RESET",
-          reason: decision.reason,
-          total_remaining_capacity: snapshot.total_remaining_capacity,
-          required_capacity: config.acceptance.target_policy === "erp_remaining_capacity"
-            ? "maximum-live-erp-capacity"
-            : config.acceptance.strict_target,
-          next_reset_at: decision.next_reset_at,
-        });
-        const resetAt = Date.parse(decision.next_reset_at || "");
-        const waitMs = Number.isFinite(resetAt)
-          ? Math.max(1_000, Math.min(30_000, resetAt - Date.now() + 5_000))
-          : 30_000;
-        await delay(waitMs);
+        throw new Error(`unexpected capacity preflight decision: ${decision.action}`);
       } catch (error) {
+        if (error?.code === "OZON_BROWSER_RECOVERY_SAFE_STOP") {
+          forcedSafeStopReason = error.recovery?.reason || "repeated-browser-recovery-failure";
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "STOPPED",
+            reason: forcedSafeStopReason,
+            recovery: error.recovery || null,
+            evidence_preserved: true,
+          });
+          return 0;
+        }
+        if (error?.code === "OZON_PROCESS_OWNERSHIP") {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "FATAL_STOP",
+            reason: String(error.message),
+            ownership: error.ownership || null,
+          });
+          return 0;
+        }
         const evidence = `${error?.message || error}\n${await readTail(path.join(stateRoot, "capacity.stderr.log"))}`;
         const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
         const decision = classifyWorkerFailure({ message: evidence, profileOwnerCount: owners.length });
@@ -1055,15 +1536,100 @@ export async function supervise(configPath) {
       return 0;
     }
     if (currentRun.formal_started === false) return 0;
-    await runCheckpoint(
+    const startupCheckpoint = await runCheckpoint(
       appRoot,
       runDir,
       "supervisor-start",
       checkpointEnvironment(config, currentRun),
     );
+    if (startupCheckpoint.code !== 0) {
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "STOPPED",
+        reason: "startup-checkpoint-failed",
+        error: String(startupCheckpoint.error?.message || `checkpoint exited ${startupCheckpoint.code}`),
+        evidence_preserved: true,
+      });
+      return 0;
+    }
+    let paceCheckRunning = false;
+    const enforceRollingPace = async ({ writeCheckpoint = true } = {}) => {
+      if (paceCheckRunning || shuttingDown) return;
+      paceCheckRunning = true;
+      try {
+        if (writeCheckpoint) {
+          const checkpointResult = await runCheckpoint(
+            appRoot,
+            runDir,
+            "2h",
+            checkpointEnvironment(config, currentRun),
+          );
+          if (checkpointResult.code !== 0) {
+            throw checkpointResult.error || new Error(`rolling checkpoint exited ${checkpointResult.code}`);
+          }
+        }
+        const checkpoint = await readJson(path.join(runDir, "compact_checkpoint.json"), {});
+        const observedMs = Date.parse(checkpoint?.observed_at || "");
+        const startedMs = Date.parse(currentRun.started_at || "");
+        const elapsedMinutes = Number.isFinite(observedMs) && Number.isFinite(startedMs)
+          ? (observedMs - startedMs) / 60_000
+          : 0;
+        const decision = rollingRateDecision({
+          elapsedMinutes,
+          rolling120PerHour: checkpoint?.compact?.rolling_h?.["120"] ?? 0,
+          minimumPerHour: 35,
+          targetReached: (
+            Number(checkpoint?.compact?.strict || 0) >= 500
+            && checkpoint?.compact?.pace35 === true
+          ),
+        });
+        if (decision.action !== "safe-stop") return;
+        forcedSafeStopReason = decision.reason;
+        shuttingDown = true;
+        await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+          at: new Date().toISOString(),
+          run_dir: runDir,
+          action: "rolling-rate-hard-gate",
+          ...decision,
+        });
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "STOPPED",
+          reason: decision.reason,
+          rolling_rate: decision,
+          evidence_preserved: true,
+        });
+        await stopWorker().catch(() => {});
+      } catch (error) {
+        forcedSafeStopReason ||= "rolling-rate-check-failed";
+        shuttingDown = true;
+        await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+          at: new Date().toISOString(),
+          run_dir: runDir,
+          action: "rolling-rate-check-failed",
+          error: String(error?.message || error),
+        });
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "STOPPED",
+          reason: forcedSafeStopReason,
+          error: String(error?.message || error),
+          evidence_preserved: true,
+        }).catch(() => {});
+        await stopWorker().catch(() => {});
+      } finally {
+        paceCheckRunning = false;
+      }
+    };
+    await enforceRollingPace({ writeCheckpoint: false });
+    if (shuttingDown) {
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "STOPPED",
+        reason: forcedSafeStopReason,
+        evidence_preserved: true,
+      });
+      return 0;
+    }
     checkpointTimer = setInterval(() => {
-      void runCheckpoint(appRoot, runDir, "2h", checkpointEnvironment(config, currentRun));
-    }, Math.max(60_000, Number(config.checkpoint_interval_seconds || 7200) * 1000));
+      void enforceRollingPace();
+    }, Math.max(60_000, Number(config.rate_check_interval_seconds || 300) * 1000));
     checkpointTimer.unref();
     sourceRefreshTimer = setInterval(() => {
       void runSourceRefresh(appRoot, stateRoot, runDir);
@@ -1078,16 +1644,66 @@ export async function supervise(configPath) {
         break;
       }
       if (await acceptanceEnded(runDir)) {
-        await runCheckpoint(
-          appRoot,
-          runDir,
-          "window-complete",
-          checkpointEnvironment(config, currentRun),
-        );
-        const artifacts = await runFinalArtifacts(appRoot, stateRoot, currentRun, runDir);
         await stopOwnedWorker(worker);
         worker = null;
+        let finalBrowserOwner;
+        try {
+          finalBrowserOwner = await ensureOwnedBrowser();
+          await assertProcessOwnership({
+            phase: "browser-ready",
+            runDir,
+            profileDir: config.browser.profile_dir,
+          });
+          if (browserRecoveryPending) {
+            throw new Error("browser recovery remained unresolved at the acceptance boundary");
+          }
+          await writeProcessOwners({
+            stateRoot,
+            currentRun,
+            browserPid: finalBrowserOwner.pid,
+          });
+        } catch (error) {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "FATAL_STOP",
+            reason: "window-end-runtime-health-failed",
+            error: String(error?.message || error),
+            ownership: error?.ownership || null,
+            evidence_preserved: true,
+          });
+          return 0;
+        }
+        let artifacts;
+        try {
+          await reconcileStrictRuntimeAudit(appRoot, stateRoot, runDir);
+          const checkpointResult = await runCheckpoint(
+            appRoot,
+            runDir,
+            "window-complete",
+            checkpointEnvironment(config, currentRun),
+          );
+          if (checkpointResult.code !== 0) {
+            throw checkpointResult.error || new Error(`final checkpoint exited ${checkpointResult.code}`);
+          }
+          artifacts = await runFinalArtifacts(appRoot, stateRoot, currentRun, runDir, {
+            config_sha256: config.frozen_config_hash,
+            source_commit: config.frozen_commit,
+          });
+        } catch (error) {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "FATAL_STOP",
+            reason: "final-acceptance-artifact-failed",
+            error: String(error?.message || error),
+            contract: error?.contract || null,
+            evidence_preserved: true,
+          });
+          return 0;
+        }
         const stoppedBrowserPids = await stopBrowserProfileOwners(config.browser.profile_dir);
+        await assertProcessOwnership({
+          phase: "after-exit",
+          runDir,
+          profileDir: config.browser.profile_dir,
+        });
         let cleanedBrowserCaches = [];
         let browserCacheCleanupError = null;
         try {
@@ -1123,8 +1739,31 @@ export async function supervise(configPath) {
 
       let browserOwner;
       try {
-        browserOwner = await ensureBrowserOwner({ config, stateRoot, runDir });
+        browserOwner = await ensureOwnedBrowser();
+        await assertProcessOwnership({
+          phase: "browser-ready",
+          runDir,
+          profileDir: config.browser.profile_dir,
+        });
       } catch (error) {
+        if (error?.code === "OZON_BROWSER_RECOVERY_SAFE_STOP") {
+          forcedSafeStopReason = error.recovery?.reason || "repeated-browser-recovery-failure";
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "STOPPED",
+            reason: forcedSafeStopReason,
+            recovery: error.recovery || null,
+            evidence_preserved: true,
+          });
+          break;
+        }
+        if (error?.code === "OZON_PROCESS_OWNERSHIP") {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "FATAL_STOP",
+            reason: String(error.message),
+            ownership: error.ownership || null,
+          });
+          return 0;
+        }
         const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
         const decision = classifyWorkerFailure({ message: error?.message, profileOwnerCount: owners.length });
         if (decision.action === "fatal-stop") {
@@ -1169,6 +1808,13 @@ export async function supervise(configPath) {
       });
       fs.closeSync(stdoutFd);
       fs.closeSync(stderrFd);
+      if (pidAlive(worker.pid)) {
+        await assertProcessOwnership({
+          phase: "worker-running",
+          runDir,
+          profileDir: config.browser.profile_dir,
+        });
+      }
       await writeProcessOwners({
         stateRoot,
         currentRun,
@@ -1185,6 +1831,11 @@ export async function supervise(configPath) {
       });
       if (result.browser_unhealthy) await stopOwnedWorker(activeWorker);
       worker = null;
+      await assertProcessOwnership({
+        phase: "browser-ready",
+        runDir,
+        profileDir: config.browser.profile_dir,
+      });
       await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid });
       if (shuttingDown) break;
       if (await acceptanceEnded(runDir)) continue;
@@ -1247,7 +1898,8 @@ export async function supervise(configPath) {
     if (shuttingDown) {
       await updateOperationalState(stateRoot, currentRun, {
         status: "STOPPED",
-        reason: "safe stop requested",
+        reason: forcedSafeStopReason || "safe stop requested",
+        evidence_preserved: Boolean(forcedSafeStopReason),
       });
       await fsp.unlink(stopFile).catch(() => {});
     }
@@ -1273,7 +1925,41 @@ export async function supervise(configPath) {
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
     process.off("SIGHUP", onSignal);
+    let cleanupError = null;
+    try {
+      await stopOwnedWorker(worker);
+      worker = null;
+      await stopBrowserProfileOwners(config.browser.profile_dir);
+      await assertProcessOwnership({
+        phase: "after-exit",
+        runDir,
+        profileDir: config.browser.profile_dir,
+      });
+      await writeProcessOwners({
+        stateRoot,
+        currentRun,
+        browserPid: null,
+        workerPid: null,
+        supervisorPid: null,
+      });
+    } catch (error) {
+      cleanupError = error;
+      await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+        at: new Date().toISOString(),
+        run_dir: runDir,
+        action: "owner-cleanup-failed",
+        error: String(error?.message || error),
+        ownership: error?.ownership || null,
+      }).catch(() => {});
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "FATAL_STOP",
+        reason: "owner-cleanup-failed",
+        error: String(error?.message || error),
+        ownership: error?.ownership || null,
+      }).catch(() => {});
+    }
     await releaseLock();
+    if (cleanupError) throw cleanupError;
   }
 }
 

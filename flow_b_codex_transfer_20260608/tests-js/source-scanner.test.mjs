@@ -119,6 +119,7 @@ import {
   fullFunnelSourceScores,
   filterSourceUrlsByAllowlist,
   filterSourceRowsByAllowlist,
+  strictSourcePortfolioUrls,
   fatalSourceBatchError,
   completedSourceUrls,
   clearJsonLinesFileCache,
@@ -191,6 +192,26 @@ test("source allowlist constrains derived seller variants to explicitly selected
     [urls[0], urls[2], urls[4]],
     { match: "exact" },
   ).map((row) => row.index), [0, 2, 4]);
+});
+
+test("strict source portfolio preserves exact seller pages and rejects derived search URLs", () => {
+  const urls = [
+    "https://www.ozon.ru/seller/verified-one/?page=2",
+    "https://www.ozon.ru/seller/verified-one/?page=3",
+    "https://www.ozon.ru/seller/verified-one/?page=2",
+  ];
+  assert.deepEqual(strictSourcePortfolioUrls(urls), [
+    "https://www.ozon.ru/seller/verified-one/?page=2",
+    "https://www.ozon.ru/seller/verified-one/?page=3",
+  ]);
+  assert.throws(
+    () => strictSourcePortfolioUrls(["https://www.ozon.ru/search/?text=toys"]),
+    /accepts only Ozon seller URLs/,
+  );
+  assert.throws(
+    () => strictSourcePortfolioUrls(["https://example.com/seller/not-ozon/"]),
+    /accepts only Ozon seller URLs/,
+  );
 });
 
 test("verified seller promotion requires at least two strict publications", () => {

@@ -93,7 +93,7 @@ test("35 per hour pace uses time to complete every store quota, not the idle 24 
   assert.equal(snapshot.pace_35.passed, true);
 });
 
-test("ERP-capacity completion is not rejected because a sub-481 daily cap cannot average 20 over 24 hours", () => {
+test("historical snapshots without a configured speed threshold remain backward-compatible", () => {
   const snapshot = buildStatusSnapshot({
     config: {
       window_started_at: "2026-07-17T00:00:00.000Z",
@@ -119,18 +119,56 @@ test("ERP-capacity completion is not rejected because a sub-481 daily cap cannot
   assert.equal(snapshot.strict.passed, true);
 });
 
-test("first checkpoint uses the frozen window target before worker source config exists", async () => {
+test("current-window status excludes carry-in confirmations from cumulative and rolling strict", () => {
+  const snapshot = buildStatusSnapshot({
+    config: {
+      window_started_at: "2026-07-17T00:00:00.000Z",
+      window_ended_at: "2026-07-18T00:00:00.000Z",
+      acceptance_target: 1,
+      per_store_target: 1,
+      current_window_only: true,
+      store_targets: [{ id: 2, needle: "丽丽二号" }],
+    },
+    published: [
+      {
+        sku: "carry-in",
+        store_id: 2,
+        profit_rate: 31,
+        online_status: "selling",
+        stock: 1,
+        submitted_at: "2026-07-16T23:59:00.000Z",
+        published_at: "2026-07-17T01:55:00.000Z",
+      },
+      {
+        sku: "current",
+        store_id: 2,
+        profit_rate: 31,
+        online_status: "selling",
+        stock: 1,
+        submitted_at: "2026-07-17T01:50:00.000Z",
+        published_at: "2026-07-17T01:56:00.000Z",
+      },
+    ],
+    observedAt: "2026-07-17T02:00:00.000Z",
+  });
+
+  assert.equal(snapshot.strict.total, 1);
+  assert.deepEqual(snapshot.strict.by_store, { "2": 1 });
+  assert.equal(snapshot.rolling[120].count, 1);
+});
+
+test("first checkpoint uses the frozen fixed-500 window target before worker source config exists", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-frozen-window-"));
   await fs.writeFile(path.join(runDir, "acceptance_window.json"), JSON.stringify({
     started_at: "2026-07-17T00:00:00.000Z",
     ended_at: "2026-07-18T00:00:00.000Z",
-    acceptance_target: 469,
-    acceptance_target_policy: "erp_remaining_capacity",
-    minimum_average_per_hour_exclusive: null,
+    acceptance_target: 500,
+    acceptance_target_policy: "fixed",
+    minimum_average_per_hour_exclusive: 35,
   }));
 
   const snapshot = await snapshotRun(runDir, "2026-07-17T00:00:01.000Z");
-  assert.equal(snapshot.strict.target, 469);
+  assert.equal(snapshot.strict.target, 500);
 });
 
 test("token-light status keeps acceptance blockers without verbose store metadata", () => {
