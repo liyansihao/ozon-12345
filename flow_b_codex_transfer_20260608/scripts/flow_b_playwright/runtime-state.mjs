@@ -87,9 +87,15 @@ function canonicalTitleKey(data) {
   return normalized.length >= 24 ? normalized : null;
 }
 
-function normalizedGateSkus(values) {
+function normalizedGateSkus(values, phase = "active") {
   const result = [...new Set((values || []).map((value) => String(value ?? "").trim()).filter(Boolean))]
     .sort();
+  if (phase === "released") {
+    if (result.length !== 0) {
+      throw new TypeError("released submission gate requires zero target SKUs");
+    }
+    return result;
+  }
   if (result.length !== 3) {
     throw new TypeError("submission gate requires exactly three unique target SKUs");
   }
@@ -171,13 +177,22 @@ export function initializeSubmissionGate({
   runDir,
   targetSkus,
   startedAt = new Date().toISOString(),
+  phase = "active",
+  result = {},
 } = {}) {
   const normalizedRunId = String(runId ?? "").trim();
   const normalizedRunDir = path.resolve(String(runDir ?? ""));
   if (!normalizedRunId) throw new TypeError("runId is required");
   if (!String(runDir ?? "").trim()) throw new TypeError("runDir is required");
-  const normalizedTargets = normalizedGateSkus(targetSkus);
+  const normalizedPhase = String(phase || "").trim();
+  if (!["active", "released"].includes(normalizedPhase)) {
+    throw new TypeError("initial submission gate phase is invalid");
+  }
+  const normalizedTargets = normalizedGateSkus(targetSkus, normalizedPhase);
   const normalizedStartedAt = timestamp(startedAt, "startedAt");
+  const normalizedResult = result && typeof result === "object" && !Array.isArray(result)
+    ? result
+    : {};
   return withGateDatabase(dbPath, (database) => {
     database.exec("BEGIN IMMEDIATE");
     try {
@@ -189,14 +204,24 @@ export function initializeSubmissionGate({
         if (JSON.stringify(existing.targetSkus) !== JSON.stringify(normalizedTargets)) {
           throw new Error("submission gate does not match its frozen SKU set");
         }
+        if (normalizedPhase === "released" && existing.phase !== "released") {
+          throw new Error("submission gate does not match its initial released phase");
+        }
         database.exec("COMMIT");
         return existing;
       }
       database.prepare(`
         INSERT INTO submission_gates (
           run_id, run_dir, phase, distinct_sku_budget, started_at, released_at, result_json
-        ) VALUES (?, ?, 'active', 3, ?, NULL, '{}')
-      `).run(normalizedRunId, normalizedRunDir, normalizedStartedAt);
+        ) VALUES (?, ?, ?, 3, ?, ?, ?)
+      `).run(
+        normalizedRunId,
+        normalizedRunDir,
+        normalizedPhase,
+        normalizedStartedAt,
+        normalizedPhase === "released" ? normalizedStartedAt : null,
+        stringifyData(normalizedResult),
+      );
       const insertTarget = database.prepare(`
         INSERT INTO submission_gate_skus (run_id, ordinal, sku)
         VALUES (?, ?, ?)

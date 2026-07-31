@@ -90,6 +90,43 @@ test("formal staged gates freeze one run, one clock, and exactly three initial S
   assert.equal(state.gates.twenty_four_hour.ended_at, minute(1_440));
 });
 
+test("operator-direct formal windows start released and audit the skipped three-SKU prefix", () => {
+  const state = buildStagedGateState({
+    runId: "direct-500",
+    runDir: "/tmp/direct-formal-run",
+    startedAt: START,
+    endedAt: minute(1_440),
+    targetSkus: [],
+    operatorDirectPublish: {
+      authorized_by: "workspace-user",
+      authorized_at: "2026-07-31T00:34:44.000Z",
+      reason: "immediate formal window",
+    },
+  });
+
+  assert.deepEqual(state.submission_gate, {
+    phase: "released",
+    target_skus: [],
+  });
+  assert.deepEqual(state.gates.three_sku, {
+    started_at: START,
+    ended_at: START,
+    status: "passed",
+    evaluated_at: START,
+    result: {
+      passed: true,
+      skipped: true,
+      reason: "operator-direct-publish-zero-buffer-authorized",
+      audit: {
+        authorized_by: "workspace-user",
+        authorized_at: "2026-07-31T00:34:44.000Z",
+        authorization_reason: "immediate formal window",
+      },
+    },
+  });
+  assert.equal(submissionGatePolicy(state).allowed_skus, null);
+});
+
 test("submission gate fails closed until the persisted three-SKU prefix is released", () => {
   assert.deepEqual(submissionGatePolicy({
     phase: "three-sku",

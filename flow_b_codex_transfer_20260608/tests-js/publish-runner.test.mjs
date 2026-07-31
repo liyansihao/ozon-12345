@@ -1387,6 +1387,46 @@ test("cross-window candidate facts retain cached economics but require two live 
   await fs.rm(runDir, { recursive: true, force: true });
 });
 
+test("1688 cost matching skips blank product model fields and keeps later model metadata", async () => {
+  for (const [modelFields, expectedModel] of [
+    [{ model: "", model_name: "M4", article: "ARTICLE-IGNORED" }, "M4"],
+    [{ model: "  ", model_name: "", article: "A7" }, "A7"],
+  ]) {
+    const state = fakeState();
+    let estimatedModel = null;
+    const client = clientFor([{ sku: `model-fallback-${expectedModel}` }], {
+      getCategoryBySku: async () => ({
+        cate: [11, 22, "1,12.00"],
+        product_info: {
+          weight: 100,
+          depth: 20,
+          width: 10,
+          height: 5,
+          ...modelFields,
+        },
+      }),
+    });
+
+    const result = await createPublishRunner({
+      client,
+      costBridge: {
+        estimate: async (item) => {
+          estimatedModel = item.expect_model;
+          return { ok: true, cost: 20 };
+        },
+      },
+      state,
+      target: 1,
+      runDir: "/tmp/run",
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(result.published, 1);
+    assert.equal(estimatedModel, expectedModel);
+  }
+});
+
 test("offer IDs retain the complete SKU and cannot collide on a six-digit suffix", () => {
   const now = new Date("2026-07-15T00:00:00Z");
   assert.equal(offerIdForSku("4799637133", now), "mz-150726-4799637133");

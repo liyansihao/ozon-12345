@@ -118,6 +118,17 @@ test("production config freezes the external 1688 Python runtime", async () => {
   );
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   assert.doesNotThrow(() => validateConfig(config));
+  assert.equal(config.operator_direct_publish.minimum_ready_candidates, 0);
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      operator_direct_publish: {
+        ...config.operator_direct_publish,
+        minimum_ready_candidates: 3,
+      },
+    }),
+    /zero-buffer authorization/u,
+  );
   assert.throws(
     () => validateConfig({
       ...config,

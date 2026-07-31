@@ -196,6 +196,53 @@ class FirstPageClusterCostTest(unittest.TestCase):
         self.assertEqual(result["filtered_first_page_prices"], [20.0, 21.0])
         self.assertIn("fewer than 3", result["reason"])
 
+    def test_non_model_metadata_does_not_disable_explicit_title_matching(self):
+        result = image_median_1688.first_page_p70_cost(
+            rows([20, 21, 22]),
+            expect_title="same product lamp",
+            expect_model="cap",
+            page_size=10,
+        )
+
+        self.assertEqual(result["decision"], "LIGHT_ACCEPT")
+        self.assertEqual(result["filtered_first_page_prices"], [20.0, 21.0, 22.0])
+        self.assertEqual(result["p70_cost"], 22.0)
+
+    def test_short_alphanumeric_model_remains_an_exact_required_signal(self):
+        result = image_median_1688.first_page_p70_cost(
+            [
+                {
+                    "offerId": "m4-1",
+                    "title": "bmw m4 grille",
+                    "price": 20,
+                    "saleQuantity": 101,
+                    "shop": "same",
+                },
+                {
+                    "offerId": "m4-2",
+                    "title": "bmw m4 grille",
+                    "price": 21,
+                    "saleQuantity": 102,
+                    "shop": "same",
+                },
+                {
+                    "offerId": "wrong-model",
+                    "title": "bmw m3 grille",
+                    "price": 22,
+                    "saleQuantity": 103,
+                    "shop": "wrong",
+                },
+            ],
+            expect_title="bmw grille",
+            expect_model="M4",
+            page_size=10,
+        )
+
+        self.assertEqual(image_median_1688.model_tokens("M4"), ["m4"])
+        self.assertEqual(result["decision"], "REVIEW")
+        self.assertEqual(result["filtered_first_page_prices"], [20.0, 21.0])
+        self.assertIn("fewer than 3", result["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

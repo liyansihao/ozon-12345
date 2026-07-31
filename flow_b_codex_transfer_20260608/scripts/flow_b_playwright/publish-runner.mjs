@@ -1389,7 +1389,10 @@ export function createPublishRunner({
         detail?.model,
         detail?.model_name,
         detail?.article,
-      ].find((value) => typeof value === "string" || typeof value === "number");
+      ].find((value) => (
+        (typeof value === "string" && value.trim() !== "")
+        || typeof value === "number"
+      ));
       const cost = await timed(sku, "1688_cost", () => costBridge.estimate({
         ...detail,
         sell_price: salePrice,

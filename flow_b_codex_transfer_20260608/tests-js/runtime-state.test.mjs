@@ -343,6 +343,56 @@ test("formal prefix gate atomically permits only its three frozen distinct SKUs 
   });
 });
 
+test("operator-direct submission gate is durably released at T0 without frozen SKUs", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "runtime.sqlite");
+    const bootstrap = createRuntimeState({ dbPath });
+    bootstrap.close();
+    const gate = initializeSubmissionGate({
+      dbPath,
+      runId: "direct-500",
+      runDir: path.join(dir, "formal-run"),
+      targetSkus: [],
+      startedAt: "2026-07-31T00:00:00.000Z",
+      phase: "released",
+      result: {
+        passed: true,
+        skipped: true,
+        reason: "operator-direct-publish-zero-buffer-authorized",
+      },
+    });
+    assert.equal(gate.phase, "released");
+    assert.equal(gate.releasedAt, "2026-07-31T00:00:00.000Z");
+    assert.deepEqual(gate.targetSkus, []);
+    assert.deepEqual(gate.result, {
+      passed: true,
+      skipped: true,
+      reason: "operator-direct-publish-zero-buffer-authorized",
+    });
+
+    const worker = createRuntimeState({
+      dbPath,
+      ownerId: "worker",
+      generationId: "generation",
+      requiredSubmissionGateRunId: "direct-500",
+      requiredSubmissionGateRunDir: path.join(dir, "formal-run"),
+    });
+    assert.equal(worker.reserveSubmission("first-qualified-sku", {
+      reason: "submission-intent",
+    }).recorded, true);
+    worker.close();
+
+    assert.throws(() => initializeSubmissionGate({
+      dbPath,
+      runId: "invalid-direct",
+      runDir: path.join(dir, "invalid-formal-run"),
+      targetSkus: ["must-not-freeze"],
+      startedAt: "2026-07-31T00:00:00.000Z",
+      phase: "released",
+    }), /released submission gate requires zero target SKUs/);
+  });
+});
+
 test("a production worker configured to require a missing prefix gate fails closed", async () => {
   await withTempDir(async (dir) => {
     const state = createRuntimeState({

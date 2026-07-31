@@ -65,6 +65,7 @@ export function buildStagedGateState({
   endedAt,
   targetSkus,
   identity = {},
+  operatorDirectPublish = null,
 } = {}) {
   const normalizedRunId = String(runId || "").trim();
   const normalizedRunDir = path.resolve(String(runDir || ""));
@@ -75,8 +76,35 @@ export function buildStagedGateState({
   if (timestamp(end) - timestamp(start) < 24 * 60 * 60_000) {
     throw new TypeError("formal acceptance window must cover at least 24 hours");
   }
-  const frozenTargets = sortedUniqueSkus(targetSkus).slice(0, 3);
-  if (frozenTargets.length !== 3) throw new TypeError("three-SKU gate requires exactly three unique target SKUs");
+  const directPublish = operatorDirectPublish !== null && operatorDirectPublish !== undefined;
+  const frozenTargets = sortedUniqueSkus(targetSkus);
+  if (directPublish) {
+    if (frozenTargets.length !== 0) {
+      throw new TypeError("operator-direct gate must not freeze target SKUs");
+    }
+    if (
+      !String(operatorDirectPublish?.authorized_by || "").trim()
+      || !String(operatorDirectPublish?.reason || "").trim()
+    ) {
+      throw new TypeError("operator-direct gate requires audited authorization");
+    }
+    iso(operatorDirectPublish.authorized_at, "operatorDirectPublish.authorized_at");
+  } else {
+    frozenTargets.splice(3);
+    if (frozenTargets.length !== 3) {
+      throw new TypeError("three-SKU gate requires exactly three unique target SKUs");
+    }
+  }
+  const directGateResult = directPublish ? {
+    passed: true,
+    skipped: true,
+    reason: "operator-direct-publish-zero-buffer-authorized",
+    audit: {
+      authorized_by: String(operatorDirectPublish.authorized_by).trim(),
+      authorized_at: iso(operatorDirectPublish.authorized_at, "operatorDirectPublish.authorized_at"),
+      authorization_reason: String(operatorDirectPublish.reason).trim(),
+    },
+  } : null;
   return {
     schema_version: 1,
     run_id: normalizedRunId,
@@ -91,16 +119,16 @@ export function buildStagedGateState({
       state_schema_version: Number(identity.state_schema_version || 0),
     },
     submission_gate: {
-      phase: "three-sku",
+      phase: directPublish ? "released" : "three-sku",
       target_skus: frozenTargets,
     },
     gates: {
       three_sku: {
         started_at: start,
-        ended_at: null,
-        status: "pending",
-        evaluated_at: null,
-        result: null,
+        ended_at: directPublish ? start : null,
+        status: directPublish ? "passed" : "pending",
+        evaluated_at: directPublish ? start : null,
+        result: directGateResult,
       },
       thirty_minute: gateWindow(start, 0, 30),
       two_hour_a: gateWindow(start, 0, 120),

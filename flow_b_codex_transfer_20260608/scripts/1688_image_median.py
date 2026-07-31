@@ -367,7 +367,8 @@ def first_page_p70_cost(
     first_page = scored_similarity_rows(rows, expect_title, expect_model, expect_category, page_size)
     first_page_prices = [row["price"] for row in first_page if row.get("price") is not None]
     allowed_levels = {"strong"} if any(row["level"] == "strong" for row in first_page) else set()
-    model_required = bool(normalize_text(expect_model))
+    model_needles = model_tokens(expect_model)
+    model_required = bool(model_needles)
 
     raw_prices = sorted(float(row["price"]) for row in first_page if row.get("price") is not None and float(row["price"]) > 0)
     candidate_rows = []

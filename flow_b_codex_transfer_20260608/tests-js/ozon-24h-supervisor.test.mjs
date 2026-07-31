@@ -113,6 +113,19 @@ test("a failed JSON or SQLite submission gate always converges to a safe stop", 
     runId: "run-1",
     runDir: "/tmp/run-1",
   }).reason, "submission-gate-state-mismatch");
+  assert.deepEqual(submissionGateConvergenceDecision({
+    jsonGate: { phase: "released", target_skus: [] },
+    sqliteGate: {
+      ...baseSqlite,
+      phase: "released",
+      target_skus: [],
+    },
+    runId: "run-1",
+    runDir: "/tmp/run-1",
+  }), {
+    action: "continue",
+    reason: null,
+  });
 });
 
 test("supervisor prewarm uses only a run-local scan checkpoint filename", () => {
@@ -280,6 +293,16 @@ test("rolling 120-minute speed and two-hour candidate buffer are hard gates", ()
     required_ready: 70,
   });
   assert.equal(candidateBufferDecision({ uniqueReady: 70 }).action, "ready");
+  assert.deepEqual(candidateBufferDecision({
+    uniqueReady: 0,
+    targetHours: 0,
+    minimumPerHour: 0,
+    minimumReadyCandidates: 0,
+  }), {
+    action: "ready",
+    unique_ready: 0,
+    required_ready: 0,
+  });
 });
 
 test("candidate buffer counts only latest unique fully qualified validations", () => {

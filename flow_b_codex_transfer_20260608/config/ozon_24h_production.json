@@ -18,10 +18,10 @@
   "operator_direct_publish": {
     "enabled": true,
     "authorized_by": "workspace-user",
-    "authorized_at": "2026-07-31T00:09:56.000Z",
-    "reason": "User explicitly requested continuous formal collection, follow-sell validation, and immediate publishing without waiting for the two-hour candidate buffer.",
+    "authorized_at": "2026-07-31T00:34:44.000Z",
+    "reason": "User explicitly requested an immediate formal window with continuous collection, follow-sell validation, and qualified publishing without any initial ready-SKU threshold.",
     "allow_current_day_capacity_shortfall": true,
-    "minimum_ready_candidates": 3
+    "minimum_ready_candidates": 0
   },
   "restart_delays_seconds": [
     30,

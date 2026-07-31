@@ -1280,7 +1280,25 @@ async function activateFormalWindow({
 }) {
   const frozenReadySkus = [...new Set((readySkus || []).map((value) => String(value || "").trim()).filter(Boolean))]
     .sort();
-  if (frozenReadySkus.length < 3) throw new Error("formal window requires at least three frozen qualified SKUs");
+  const directPublish = config?.operator_direct_publish?.enabled === true;
+  if (!directPublish && frozenReadySkus.length < 3) {
+    throw new Error("formal window requires at least three frozen qualified SKUs");
+  }
+  const directAuthorization = directPublish ? {
+    authorized_by: String(config.operator_direct_publish.authorized_by || "").trim(),
+    authorized_at: String(config.operator_direct_publish.authorized_at || "").trim(),
+    reason: String(config.operator_direct_publish.reason || "").trim(),
+  } : null;
+  const directGateResult = directPublish ? {
+    passed: true,
+    skipped: true,
+    reason: "operator-direct-publish-zero-buffer-authorized",
+    audit: {
+      authorized_by: directAuthorization.authorized_by,
+      authorized_at: new Date(directAuthorization.authorized_at).toISOString(),
+      authorization_reason: directAuthorization.reason,
+    },
+  } : {};
   const sourceText = await fsp.readFile(currentRun.urls_file, "utf8");
   if (!sourceText.split(/\r?\n/u).some((line) => /^https:\/\//u.test(line.trim()))) {
     throw new Error("formal window source set has no usable URLs");
@@ -1294,8 +1312,10 @@ async function activateFormalWindow({
     dbPath: runtimeDbPath,
     runId: currentRun.run_id,
     runDir,
-    targetSkus: frozenReadySkus.slice(0, 3),
+    targetSkus: directPublish ? [] : frozenReadySkus.slice(0, 3),
     startedAt: proposedStartedAt.toISOString(),
+    phase: directPublish ? "released" : "active",
+    result: directGateResult,
   });
   const startedAt = new Date(sqliteGate.startedAt);
   const endedAt = new Date(startedAt.getTime() + Number(config.acceptance.duration_seconds) * 1000);
@@ -1311,6 +1331,7 @@ async function activateFormalWindow({
     startedAt: startedAt.toISOString(),
     endedAt: endedAt.toISOString(),
     targetSkus: sqliteGate.targetSkus,
+    operatorDirectPublish: directAuthorization,
     identity: {
       commit_sha: config.frozen_commit || "",
       config_sha256: configHash,
