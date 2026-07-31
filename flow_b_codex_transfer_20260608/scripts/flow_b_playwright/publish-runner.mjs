@@ -2648,8 +2648,9 @@ export function createPublishRunner({
         ? restoredEntries
           .filter((entry) => {
             const data = entry?.data || {};
-            const belongsToRun = !data.runtime_run_dir
-              || path.resolve(String(data.runtime_run_dir)) === resolvedRunDir;
+            const runtimeRunDir = String(data.runtime_run_dir || "").trim();
+            const belongsToRun = runtimeRunDir
+              && path.resolve(runtimeRunDir) === resolvedRunDir;
             return belongsToRun && (
               entry.status === "published"
               || data.submitted === true

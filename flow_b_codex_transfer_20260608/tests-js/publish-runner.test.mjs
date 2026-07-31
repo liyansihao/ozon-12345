@@ -4619,6 +4619,7 @@ test("direct background reconciliation records online state without changing ERP
           sku: "direct-background",
           submitted: true,
           reconcile_only: true,
+          runtime_run_dir: runDir,
           store_id: 7,
           offer_id: "mz-direct-background",
           profit_rate: 40,
@@ -4674,6 +4675,46 @@ test("direct background reconciliation records online state without changing ERP
     assert.equal(result.accepted, 1);
     assert.equal(state.entryOf("direct-background").data.outcome_status, "online");
     assert.equal(state.entryOf("direct-background").data.background_status.online, true);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode excludes historical ERP acceptances without current-run ownership", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-run-scope-"));
+  try {
+    const state = fakeState({
+      historical: {
+        status: "processing",
+        data: {
+          sku: "historical",
+          submitted: true,
+          store_id: 7,
+        },
+      },
+      current: {
+        status: "processing",
+        data: {
+          sku: "current",
+          submitted: true,
+          runtime_run_dir: runDir,
+          store_id: 7,
+        },
+      },
+    });
+    const result = await createPublishRunner({
+      client: clientFor([]),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(result.remaining, 499);
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }
