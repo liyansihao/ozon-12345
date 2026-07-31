@@ -765,24 +765,38 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       let scan = null;
       let publish = null;
       const deadlineMs = env.FLOW_B_DEADLINE_AT ? Date.parse(env.FLOW_B_DEADLINE_AT) : Number.POSITIVE_INFINITY;
+      let producerStop = false;
+      let producerError = null;
+      const scanTask = runProducerLoop({
+        deadlineMs,
+        intervalMs: Math.max(1_000, Number(directEnv.FLOW_B_PRODUCER_INTERVAL_MS) || 20_000),
+        idleIntervalsMs: String(directEnv.FLOW_B_EMPTY_SOURCE_BACKOFF_MS || "30000,60000,120000")
+          .split(",")
+          .map(Number),
+        isIdleResult: (result) => Number(result?.activity_count || 0) === 0,
+        shouldStop: () => producerStop || backgroundStop || Boolean(backgroundError),
+        scan: async () => {
+          scan = await scanSources({
+            context,
+            urlsFile: options.urlsFile,
+            outFile: options.outFile,
+            env: directEnv,
+          });
+          return scan;
+        },
+        onError: async (error) => {
+          await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({
+            at: new Date().toISOString(),
+            stage: "direct-source-scan",
+            error: String(error?.message || error),
+          })}\n`);
+          if (isFatalBrowserError(error)) producerError = error;
+        },
+      });
       try {
         while (Date.now() < deadlineMs) {
           if (backgroundError) throw backgroundError;
-          try {
-            scan = await scanSources({
-              context,
-              urlsFile: options.urlsFile,
-              outFile: options.outFile,
-              env: directEnv,
-            });
-          } catch (error) {
-            await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({
-              at: new Date().toISOString(),
-              stage: "direct-source-scan",
-              error: String(error?.message || error),
-            })}\n`);
-            if (isFatalBrowserError(error)) throw error;
-          }
+          if (producerError) throw producerError;
           publish = await publishWithContext(
             context,
             options,
@@ -801,11 +815,16 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         }
         return { scan, publish };
       } finally {
+        producerStop = true;
         backgroundStop = true;
         await closePublishingSession(shared.session);
         shared.session = null;
         await Promise.race([
           backgroundTask,
+          new Promise((resolve) => setTimeout(resolve, 20_000)),
+        ]);
+        await Promise.race([
+          scanTask,
           new Promise((resolve) => setTimeout(resolve, 20_000)),
         ]);
       }
