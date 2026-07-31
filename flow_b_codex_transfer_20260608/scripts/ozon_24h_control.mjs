@@ -64,7 +64,10 @@ export function currentRunRetirementDecision({
   current = {},
   owners = {},
 } = {}) {
-  if (String(status?.status || "") !== "STOPPED") {
+  const statusName = String(status?.status || "");
+  const safelyStopped = statusName === "STOPPED"
+    || (statusName === "FATAL_STOP" && status?.evidence_preserved === true);
+  if (!safelyStopped) {
     return { action: "reject", reason: "current-run-is-not-safely-stopped" };
   }
   if (!current?.run_id || !current?.run_dir || !current?.urls_file) {
@@ -73,7 +76,12 @@ export function currentRunRetirementDecision({
   if (["supervisor", "worker", "profile"].some((name) => Number(owners?.[name] || 0) !== 0)) {
     return { action: "reject", reason: "current-run-still-has-live-owners" };
   }
-  return { action: "retire", reason: "superseded-by-fixed-500-v3" };
+  return {
+    action: "retire",
+    reason: statusName === "FATAL_STOP"
+      ? "superseded-after-evidenced-fatal-stop"
+      : "superseded-by-fixed-500-v3",
+  };
 }
 
 export function globalFlowBWorkerPids(lines = []) {

@@ -84,6 +84,19 @@ test("legacy production run can only be retired after a zero-owner safe stop", (
     current,
     owners: { supervisor: 0, worker: 1, profile: 0 },
   }).action, "reject");
+  assert.deepEqual(currentRunRetirementDecision({
+    status: { status: "FATAL_STOP", evidence_preserved: true },
+    current,
+    owners: { supervisor: 0, worker: 0, profile: 0 },
+  }), {
+    action: "retire",
+    reason: "superseded-after-evidenced-fatal-stop",
+  });
+  assert.equal(currentRunRetirementDecision({
+    status: { status: "FATAL_STOP", evidence_preserved: false },
+    current,
+    owners: { supervisor: 0, worker: 0, profile: 0 },
+  }).action, "reject");
 });
 
 test("control ownership precheck finds flow_b workers from every run", () => {
