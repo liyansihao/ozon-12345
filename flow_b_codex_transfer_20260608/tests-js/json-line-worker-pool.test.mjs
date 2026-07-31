@@ -112,3 +112,42 @@ test("JSON-line worker pool exposes busy and oldest queue wait telemetry", async
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("aborting one active request retires only its worker and the pool recovers", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-worker-abort-"));
+  const workerScript = path.join(dir, "worker.mjs");
+  await fs.writeFile(workerScript, `
+    import readline from "node:readline";
+    const input = readline.createInterface({ input: process.stdin });
+    input.on("line", (line) => {
+      const request = JSON.parse(line);
+      setTimeout(() => process.stdout.write(JSON.stringify({
+        id: request.id,
+        code: 0,
+        stdout: String(request.value),
+        worker_pid: process.pid,
+      }) + "\\n"), Number(request.delay || 0));
+    });
+  `);
+  const pool = createJsonLineWorkerPool({
+    command: process.execPath,
+    args: [workerScript],
+    size: 1,
+  });
+  try {
+    const controller = new AbortController();
+    const active = pool.run({ value: "slow", delay: 500 }, 1_000, {
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(new Error("test deadline")), 30);
+    await assert.rejects(active, (error) => error?.code === "worker-aborted");
+
+    const recovered = await pool.run({ value: "next", delay: 0 }, 1_000);
+    assert.equal(recovered.stdout, "next");
+    assert.equal(pool.stats().created, 2);
+    assert.equal(pool.stats().active, 1);
+  } finally {
+    await pool.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

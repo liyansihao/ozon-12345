@@ -746,6 +746,101 @@ test("1688 total budget includes image download and worker queue time", async ()
   });
 });
 
+test("overlapping debounced cache generations all settle without losing a resolver", async () => {
+  await withTempDir(async (runDir) => {
+    let cacheWrites = 0;
+    const bridge = createCostBridge({
+      totalBudgetMs: 1_000,
+      cacheFlushDebounceMs: 2,
+      workerPool: {
+        run: async ({ image }) => {
+          const index = Number(String(image).match(/generation-(\d+)\.jpg$/)?.[1] || 0);
+          await new Promise((resolve) => setTimeout(resolve, index * 4));
+          return {
+            code: 2,
+            stdout: [
+              "COST_SOURCE search_first_page_p70_similarity_filtered",
+              "REASON no explicit title/model/category semantic same-item matches",
+              "FILTERED_FIRST_PAGE_PRICES []",
+              "P70_COST None",
+            ].join("\n"),
+            stderr: "",
+          };
+        },
+        close: async () => {},
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      writeCache: async (filename, cache) => {
+        cacheWrites += 1;
+        await new Promise((resolve) => setTimeout(resolve, 18));
+        await fs.mkdir(path.dirname(filename), { recursive: true });
+        await fs.writeFile(filename, `${JSON.stringify(cache)}\n`, "utf8");
+      },
+    });
+    const estimates = Array.from({ length: 12 }, (_, index) => bridge.estimate({
+      sku: `generation-${index}`,
+      cover_image: `https://img.example/generation-${index}.jpg`,
+      sell_price: 100,
+    }, runDir));
+    const results = await Promise.race([
+      Promise.all(estimates),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("cache generations did not settle")),
+        1_500,
+      )),
+    ]);
+
+    assert.equal(results.length, 12);
+    assert.ok(results.every((result) => result.ok === false));
+    assert.ok(cacheWrites >= 2);
+    const cache = JSON.parse(await fs.readFile(path.join(runDir, "1688_cache.json"), "utf8"));
+    assert.equal(Object.keys(cache.entries).length, 12);
+    await bridge.close();
+  });
+});
+
+test("the public 1688 deadline releases a hung request and permits the next SKU", async () => {
+  await withTempDir(async (runDir) => {
+    const bridge = createCostBridge({
+      totalBudgetMs: 40,
+      cacheFlushDebounceMs: 0,
+      workerPool: {
+        run: async ({ image }) => {
+          if (/hung-cost\.jpg$/.test(String(image))) return new Promise(() => {});
+          return {
+            code: 0,
+            stdout: [
+              "COST_SOURCE search_first_page_p70_similarity_filtered",
+              "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+              "P70_COST 11",
+            ].join("\n"),
+            stderr: "",
+          };
+        },
+        close: async () => {},
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+    });
+    const started = Date.now();
+    const timedOut = await bridge.estimate({
+      sku: "hung-cost",
+      cover_image: "https://img.example/hung-cost.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(timedOut.ok, false);
+    assert.equal(timedOut.error?.code, "1688-total-timeout");
+    assert.ok(Date.now() - started < 250);
+
+    const next = await bridge.estimate({
+      sku: "next-cost",
+      cover_image: "https://img.example/next-cost.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(next.ok, true);
+    await bridge.close();
+  });
+});
+
 test("semantic match evidence reaches the worker and isolates shared image cache entries", async () => {
   await withTempDir(async (runDir) => {
     const requests = [];

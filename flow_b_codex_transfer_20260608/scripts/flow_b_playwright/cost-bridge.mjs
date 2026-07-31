@@ -174,6 +174,13 @@ async function readableFile(filePath) {
   }
 }
 
+async function defaultWriteCache(filename, cache) {
+  const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  await fs.mkdir(path.dirname(filename), { recursive: true });
+  await fs.writeFile(temporary, `${JSON.stringify(cache)}\n`, "utf8");
+  await fs.rename(temporary, filename);
+}
+
 export function createCostBridge({
   python = "python3",
   scriptPath = path.resolve(import.meta.dirname, "../1688_image_median.py"),
@@ -193,6 +200,7 @@ export function createCostBridge({
   totalBudgetMs = Number(process.env.FLOW_B_1688_TOTAL_BUDGET_MS || 15_000),
   workerFailureThreshold = Number(process.env.FLOW_B_1688_WORKER_FAILURE_THRESHOLD || 3),
   cacheFlushDebounceMs = Number(process.env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS || 150),
+  writeCache = defaultWriteCache,
   now = () => Date.now(),
   downloadAttempts = 2,
   downloadTimeoutMs = 15_000,
@@ -200,13 +208,10 @@ export function createCostBridge({
 } = {}) {
   const inFlight = new Map();
   const cacheByRun = new Map();
+  const cacheLoadsByRun = new Map();
   const crossRunKeysByRun = new Map();
   let cacheWriteChain = Promise.resolve();
-  const pendingCacheWrites = new Map();
-  let cacheFlushTimer = null;
-  let cacheFlushPromise = null;
-  let resolveCacheFlush = null;
-  let rejectCacheFlush = null;
+  let pendingCacheGeneration = null;
   let ownedWorkerPool = null;
   let persistentWorkersDisabled = process.env.FLOW_B_1688_PERSISTENT_POOL === "0";
   let workerInfrastructureFailures = 0;
@@ -266,6 +271,36 @@ export function createCostBridge({
     });
   }
 
+  function totalBudgetResult(total) {
+    const error = totalBudgetError(total);
+    return {
+      ok: false,
+      reason: error.message,
+      error: { code: error.code, message: error.message },
+    };
+  }
+
+  function withinTotalBudget(operation, {
+    deadlineAt,
+    budget,
+    onTimeout = () => {},
+  }) {
+    const remaining = Math.max(0, Number(deadlineAt) - Date.now());
+    if (remaining <= 0) {
+      try { onTimeout(); } catch {}
+      return Promise.resolve(totalBudgetResult(budget));
+    }
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        try { onTimeout(); } catch {}
+        resolve(totalBudgetResult(budget));
+      }, remaining);
+    });
+    return Promise.race([Promise.resolve(operation), timeout])
+      .finally(() => clearTimeout(timer));
+  }
+
   async function downloadImage(url, destinationPath, { deadlineAt, budget } = {}) {
     const attempts = Math.max(1, Number(downloadAttempts) || 1);
     let lastError;
@@ -304,7 +339,7 @@ export function createCostBridge({
     return ownedWorkerPool;
   }
 
-  async function run1688Process(imagePath, timeout, item) {
+  async function run1688Process(imagePath, timeout, item, { signal = null } = {}) {
     const healthProbe = health.circuit === "open";
     const evidence = matchEvidence(item);
     const budget = Math.max(1, Math.min(
@@ -326,11 +361,11 @@ export function createCostBridge({
             image: String(imagePath),
             minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
             ...evidence,
-          }, remaining);
+          }, remaining, { signal });
           workerInfrastructureFailures = 0;
           return { ...result, health_probe: healthProbe };
         } catch (error) {
-          if (["worker-timeout", "worker-queue-timeout"].includes(error?.code)) throw error;
+          if (["worker-timeout", "worker-queue-timeout", "worker-aborted"].includes(error?.code)) throw error;
           workerInfrastructureFailures += 1;
           if (workerInfrastructureFailures >= Math.max(1, Number(workerFailureThreshold) || 1)) {
             persistentWorkersDisabled = true;
@@ -386,95 +421,111 @@ export function createCostBridge({
   async function loadCache(runDir) {
     const root = path.resolve(runDir);
     if (cacheByRun.has(root)) return cacheByRun.get(root);
-    async function readEntries(filename) {
-      try {
-        const parsed = JSON.parse(await fs.readFile(path.resolve(filename), "utf8"));
-        if (!parsed?.entries || typeof parsed.entries !== "object") return {};
-        return Object.fromEntries(Object.entries(parsed.entries).map(([key, entry]) => [key, {
-          ...entry,
-          output: entry?.terminal
-            ? compactTerminalCostOutput(entry?.output)
-            : compactCostOutput(entry?.output),
-        }]));
-      } catch (error) {
-        if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
-        return {};
-      }
-    }
-    const runEntries = await readEntries(path.join(root, "1688_cache.json"));
-    const crossRunEntries = {};
-    for (const filename of [sharedCachePath, ...seedCacheFiles].filter(Boolean)) {
-      Object.assign(crossRunEntries, await readEntries(filename));
-    }
-    const cache = { version: 1, entries: { ...crossRunEntries, ...runEntries } };
-    crossRunKeysByRun.set(root, new Set(Object.keys(crossRunEntries).filter((key) => !(key in runEntries))));
-    cacheByRun.set(root, cache);
-    return cache;
-  }
-
-  function beginCacheFlush() {
-    if (!cacheFlushPromise) return Promise.resolve();
-    clearTimeout(cacheFlushTimer);
-    cacheFlushTimer = null;
-    const operation = cacheWriteChain.then(async () => {
-      while (pendingCacheWrites.size > 0) {
-        const entries = [...pendingCacheWrites.entries()];
-        pendingCacheWrites.clear();
-        for (const [filename, cache] of entries) {
-          const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
-          await fs.mkdir(path.dirname(filename), { recursive: true });
-          await fs.writeFile(temporary, `${JSON.stringify(cache)}\n`, "utf8");
-          await fs.rename(temporary, filename);
+    if (cacheLoadsByRun.has(root)) return cacheLoadsByRun.get(root);
+    const operation = (async () => {
+      async function readEntries(filename) {
+        try {
+          const parsed = JSON.parse(await fs.readFile(path.resolve(filename), "utf8"));
+          if (!parsed?.entries || typeof parsed.entries !== "object") return {};
+          return Object.fromEntries(Object.entries(parsed.entries).map(([key, entry]) => [key, {
+            ...entry,
+            output: entry?.terminal
+              ? compactTerminalCostOutput(entry?.output)
+              : compactCostOutput(entry?.output),
+          }]));
+        } catch (error) {
+          if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+          return {};
         }
       }
+      const runEntries = await readEntries(path.join(root, "1688_cache.json"));
+      const crossRunEntries = {};
+      for (const filename of [sharedCachePath, ...seedCacheFiles].filter(Boolean)) {
+        Object.assign(crossRunEntries, await readEntries(filename));
+      }
+      const cache = { version: 1, entries: { ...crossRunEntries, ...runEntries } };
+      crossRunKeysByRun.set(root, new Set(Object.keys(crossRunEntries).filter((key) => !(key in runEntries))));
+      cacheByRun.set(root, cache);
+      return cache;
+    })();
+    cacheLoadsByRun.set(root, operation);
+    try {
+      return await operation;
+    } finally {
+      if (cacheLoadsByRun.get(root) === operation) cacheLoadsByRun.delete(root);
+    }
+  }
+
+  function createCacheGeneration() {
+    let resolve;
+    let reject;
+    const promise = new Promise((onResolve, onReject) => {
+      resolve = onResolve;
+      reject = onReject;
     });
+    return {
+      writes: new Map(),
+      promise,
+      resolve,
+      reject,
+      timer: null,
+      started: false,
+      operation: null,
+    };
+  }
+
+  function beginCacheFlush(generation = pendingCacheGeneration) {
+    if (!generation) return Promise.resolve();
+    if (generation.started) return generation.operation;
+    generation.started = true;
+    if (pendingCacheGeneration === generation) pendingCacheGeneration = null;
+    clearTimeout(generation.timer);
+    generation.timer = null;
+    const entries = [...generation.writes.entries()];
+    generation.writes.clear();
+    const operation = cacheWriteChain.then(async () => {
+      for (const [filename, cache] of entries) await writeCache(filename, cache);
+    });
+    generation.operation = operation;
     cacheWriteChain = operation.catch(() => {});
-    operation.then(resolveCacheFlush, rejectCacheFlush).finally(() => {
-      cacheFlushPromise = null;
-      resolveCacheFlush = null;
-      rejectCacheFlush = null;
-      if (pendingCacheWrites.size > 0) scheduleCacheFlush();
-    });
+    operation.then(generation.resolve, generation.reject);
     return operation;
   }
 
   function scheduleCacheFlush() {
-    if (!cacheFlushPromise) {
-      cacheFlushPromise = new Promise((resolve, reject) => {
-        resolveCacheFlush = resolve;
-        rejectCacheFlush = reject;
-      });
+    if (!pendingCacheGeneration) pendingCacheGeneration = createCacheGeneration();
+    const generation = pendingCacheGeneration;
+    if (!generation.timer) {
+      generation.timer = setTimeout(() => {
+        beginCacheFlush(generation).catch(() => {});
+      }, Math.max(0, Number(cacheFlushDebounceMs) || 0));
     }
-    if (!cacheFlushTimer) {
-      cacheFlushTimer = setTimeout(
-        () => { void beginCacheFlush(); },
-        Math.max(0, Number(cacheFlushDebounceMs) || 0),
-      );
-    }
-    return cacheFlushPromise;
+    return generation;
   }
 
   function saveCache(runDir, cache) {
     const filenames = [path.join(path.resolve(runDir), "1688_cache.json"), sharedCachePath]
       .filter(Boolean)
       .map((filename) => path.resolve(filename));
+    const generation = scheduleCacheFlush();
     for (const filename of new Set(filenames)) {
-      pendingCacheWrites.set(filename, cache);
+      generation.writes.set(filename, cache);
     }
-    return scheduleCacheFlush();
+    return generation.promise;
   }
 
   async function flushCacheWrites() {
-    if (cacheFlushPromise) {
-      await beginCacheFlush();
-    } else {
-      await cacheWriteChain;
+    while (pendingCacheGeneration) {
+      await beginCacheFlush(pendingCacheGeneration);
     }
+    await cacheWriteChain;
   }
 
-  async function estimateUncached(item, runDir) {
-      const budget = Math.max(1, Number(totalBudgetMs) || 15_000);
-      const deadlineAt = Date.now() + budget;
+  async function estimateUncached(item, runDir, {
+    budget = Math.max(1, Number(totalBudgetMs) || 15_000),
+    deadlineAt = Date.now() + Math.max(1, Number(totalBudgetMs) || 15_000),
+    signal = null,
+  } = {}) {
       let sku;
       try {
         sku = safeSku(item?.sku);
@@ -515,6 +566,7 @@ export function createCostBridge({
           imagePath,
           Math.min(Number(process.env.FLOW_B_1688_ITEM_TIMEOUT || 90) * 1000, remaining),
           item,
+          { signal },
         );
         const stdout = String(result?.stdout || "");
         const stderr = String(result?.stderr || "");
@@ -561,9 +613,14 @@ export function createCostBridge({
       }
   }
 
-  async function estimate(item, runDir) {
+  async function estimateWithinBudget(item, runDir, {
+    budget,
+    deadlineAt,
+    signal,
+    onTimeout,
+  }) {
     const key = cacheKey(item);
-    if (!key) return estimateUncached(item, runDir);
+    if (!key) return estimateUncached(item, runDir, { budget, deadlineAt, signal });
     const root = path.resolve(runDir);
     const compositeKey = `${root}:${key}`;
     const cache = await loadCache(root);
@@ -630,11 +687,11 @@ export function createCostBridge({
       health.probeInFlight = true;
       isHealthProbe = true;
     }
-    const operation = (async () => {
+    const rawOperation = (async () => {
       let result;
       let healthRetryCount = cachedHealthRetryCount;
       try {
-        result = await estimateUncached(item, root);
+        result = await estimateUncached(item, root, { budget, deadlineAt, signal });
         if (isCandidateCollapse(result) || result?.transport_error === true) {
           const transportFailure = result?.transport_error === true;
           health.reason = transportFailure
@@ -719,12 +776,34 @@ export function createCostBridge({
       }
       return { ...result, shared_cache: false, cache_key: key };
     })();
+    const operation = withinTotalBudget(rawOperation, {
+      deadlineAt,
+      budget,
+      onTimeout,
+    });
     inFlight.set(compositeKey, operation);
     try {
       return await operation;
     } finally {
       inFlight.delete(compositeKey);
+      if (isHealthProbe && signal?.aborted) health.probeInFlight = false;
     }
+  }
+
+  async function estimate(item, runDir) {
+    const budget = Math.max(1, Number(totalBudgetMs) || 15_000);
+    const deadlineAt = Date.now() + budget;
+    const controller = new AbortController();
+    const onTimeout = () => controller.abort(totalBudgetError(budget));
+    return withinTotalBudget(
+      estimateWithinBudget(item, runDir, {
+        budget,
+        deadlineAt,
+        signal: controller.signal,
+        onTimeout,
+      }),
+      { deadlineAt, budget, onTimeout },
+    );
   }
 
   return {

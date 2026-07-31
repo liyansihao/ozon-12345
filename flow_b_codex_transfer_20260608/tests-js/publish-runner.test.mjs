@@ -4916,6 +4916,65 @@ test("direct cost rejection skips live Ozon detail, profit, and ERP submission",
   }
 });
 
+test("a hung cost lookup times out without pinning the rolling publish queue", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-cost-watchdog-"));
+  try {
+    const state = fakeState();
+    let detailCalls = 0;
+    let publishCalls = 0;
+    const started = Date.now();
+    const result = await createPublishRunner({
+      client: clientFor([
+        {
+          sku: "hung-cost-stage",
+          title: "Безопасный зависший товар",
+          cover_image: "https://img.example/hung-cost-stage.jpg",
+          sell_price: 100,
+        },
+        {
+          sku: "next-after-timeout",
+          title: "Безопасный следующий товар",
+          cover_image: "https://img.example/next-after-timeout.jpg",
+          sell_price: 100,
+        },
+      ], {
+        getProductDetail: async (sku) => {
+          detailCalls += 1;
+          return { sku, current_price: 100, follow_min: 90 };
+        },
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true, response: { code: 1 } };
+        },
+      }),
+      costBridge: {
+        estimate: async ({ sku }) => (
+          sku === "hung-cost-stage"
+            ? new Promise(() => {})
+            : { ...RELIABLE_COST_RESULT }
+        ),
+      },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      concurrency: 1,
+      costEstimateTimeoutMs: 30,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(state.entryOf("hung-cost-stage").data.reason, "1688-timeout");
+    assert.equal(state.entryOf("hung-cost-stage").data.outcome_status, "skipped_cost");
+    assert.equal(detailCalls, 1);
+    assert.equal(publishCalls, 1);
+    assert.ok(Date.now() - started < 500);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("direct mode fetches one live detail after cost and remaps commission using the lower live price", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-live-price-"));
   try {

@@ -24,6 +24,28 @@ export function createJsonLineWorkerPool({
     });
   }
 
+  function cleanupJob(job) {
+    clearTimeout(job?.queueTimer);
+    clearTimeout(job?.timer);
+    if (job?.signal && job?.abortListener) {
+      job.signal.removeEventListener("abort", job.abortListener);
+    }
+  }
+
+  function resolveJob(job, value) {
+    if (!job || job.settled) return;
+    job.settled = true;
+    cleanupJob(job);
+    job.resolve(value);
+  }
+
+  function rejectJob(job, error) {
+    if (!job || job.settled) return;
+    job.settled = true;
+    cleanupJob(job);
+    job.reject(error);
+  }
+
   function pump() {
     if (closing) return;
     while (queue.length > 0) {
@@ -32,10 +54,11 @@ export function createJsonLineWorkerPool({
       if (!worker) return;
       const job = queue.shift();
       clearTimeout(job.queueTimer);
+      job.queueTimer = null;
       const remaining = job.deadlineAt - Date.now();
       if (remaining <= 0) {
         timedOut += 1;
-        job.reject(Object.assign(
+        rejectJob(job, Object.assign(
           new Error(`persistent worker queue timed out after ${job.timeout}ms`),
           { code: "worker-queue-timeout" },
         ));
@@ -64,11 +87,10 @@ export function createJsonLineWorkerPool({
   function finishJob(worker, response) {
     const job = worker.current;
     if (!job || String(response?.id || "") !== job.id) return;
-    clearTimeout(job.timer);
     worker.current = null;
     worker.busy = false;
     completed += 1;
-    job.resolve(response);
+    resolveJob(job, response);
     pump();
   }
 
@@ -80,8 +102,7 @@ export function createJsonLineWorkerPool({
     worker.current = null;
     worker.busy = false;
     if (job) {
-      clearTimeout(job.timer);
-      job.reject(error || diagnosticError("persistent worker exited", worker));
+      rejectJob(job, error || diagnosticError("persistent worker exited", worker));
     }
     if (worker.child.exitCode === null && !worker.child.killed) worker.child.kill("SIGTERM");
     pump();
@@ -123,8 +144,14 @@ export function createJsonLineWorkerPool({
     return worker;
   }
 
-  function run(payload, timeout = 90_000) {
+  function run(payload, timeout = 90_000, { signal = null } = {}) {
     if (closing) return Promise.reject(Object.assign(new Error("worker pool is closed"), { code: "worker-pool-closed" }));
+    if (signal?.aborted) {
+      return Promise.reject(Object.assign(new Error("persistent worker request aborted"), {
+        code: "worker-aborted",
+        cause: signal.reason,
+      }));
+    }
     return new Promise((resolve, reject) => {
       const budget = Math.max(1, Number(timeout) || 1);
       const job = {
@@ -134,14 +161,33 @@ export function createJsonLineWorkerPool({
         deadlineAt: Date.now() + budget,
         resolve,
         reject,
+        signal,
+        abortListener: null,
+        settled: false,
         queueTimer: null,
       };
+      job.abortListener = () => {
+        const error = Object.assign(new Error("persistent worker request aborted"), {
+          code: "worker-aborted",
+          cause: signal?.reason,
+        });
+        const index = queue.indexOf(job);
+        if (index >= 0) {
+          queue.splice(index, 1);
+          rejectJob(job, error);
+          pump();
+          return;
+        }
+        const worker = [...workers].find((candidate) => candidate.current === job);
+        if (worker) retireWorker(worker, diagnosticError(error.message, worker, error.code));
+      };
+      signal?.addEventListener("abort", job.abortListener, { once: true });
       job.queueTimer = setTimeout(() => {
         const index = queue.indexOf(job);
         if (index < 0) return;
         queue.splice(index, 1);
         timedOut += 1;
-        reject(Object.assign(
+        rejectJob(job, Object.assign(
           new Error(`persistent worker queue timed out after ${budget}ms`),
           { code: "worker-queue-timeout" },
         ));
@@ -156,15 +202,13 @@ export function createJsonLineWorkerPool({
     closing = true;
     const error = Object.assign(new Error("worker pool closed"), { code: "worker-pool-closed" });
     for (const job of queue.splice(0)) {
-      clearTimeout(job.queueTimer);
-      job.reject(error);
+      rejectJob(job, error);
     }
     const active = [...workers];
     for (const worker of active) {
       const job = worker.current;
       if (job) {
-        clearTimeout(job.timer);
-        job.reject(error);
+        rejectJob(job, error);
         worker.current = null;
       }
       worker.retired = true;

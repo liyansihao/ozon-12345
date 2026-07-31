@@ -726,6 +726,7 @@ export function createPublishRunner({
   directMode = false,
   directRunControl = null,
   minimumSameItemMatches = 3,
+  costEstimateTimeoutMs = 15_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -739,10 +740,14 @@ export function createPublishRunner({
     ? directRunControl
     : null;
   const requiredSameItemMatches = Number(minimumSameItemMatches);
+  const configuredCostEstimateTimeoutMs = Number(costEstimateTimeoutMs);
   if (!Number.isInteger(targetCount) || targetCount < 0) throw new TypeError("target must be a non-negative integer");
   if (!Number.isFinite(profitThreshold)) throw new TypeError("threshold must be numeric");
   if (!Number.isInteger(requiredSameItemMatches) || requiredSameItemMatches <= 0) {
     throw new TypeError("minimumSameItemMatches must be a positive integer");
+  }
+  if (!(configuredCostEstimateTimeoutMs > 0)) {
+    throw new TypeError("costEstimateTimeoutMs must be a positive number");
   }
   const workerCount = Number(concurrency);
   if (!Number.isInteger(workerCount) || workerCount <= 0) throw new TypeError("concurrency must be a positive integer");
@@ -900,6 +905,22 @@ export function createPublishRunner({
       recordMetric("stage_timings.jsonl", { sku, stage, duration_ms: Date.now() - started, ok: false, error: String(error?.message || error) });
       throw error;
     }
+  }
+
+  async function boundedCostEstimate(operation) {
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({
+        ok: false,
+        reason: `1688 end-to-end budget exceeded after ${configuredCostEstimateTimeoutMs}ms`,
+        error: {
+          code: "1688-total-timeout",
+          message: `1688 end-to-end budget exceeded after ${configuredCostEstimateTimeoutMs}ms`,
+        },
+      }), configuredCostEstimateTimeoutMs);
+    });
+    return Promise.race([Promise.resolve().then(operation), timeout])
+      .finally(() => clearTimeout(timer));
   }
 
   async function confirmPublication(sku, payload, targetConfig, { attempts: attemptOverride = null } = {}) {
@@ -1723,13 +1744,13 @@ export function createPublishRunner({
         (typeof value === "string" && value.trim() !== "")
         || typeof value === "number"
       ));
-      const cost = await timed(sku, "1688_cost", () => costBridge.estimate({
+      const cost = await timed(sku, "1688_cost", () => boundedCostEstimate(() => costBridge.estimate({
         ...detail,
         sell_price: salePrice,
         expect_title: detail?.title ?? item?.title ?? "",
         expect_model: costModel ?? "",
         expect_category: (category?.labels || []).slice(0, 2).join(" "),
-      }, runDir));
+      }, runDir)));
       if (!cost?.ok && cost?.deferred === true && cost?.terminal === false) {
         if (activeDirectMode) {
           return skip(item, normalizeCostFailureReason(cost), {

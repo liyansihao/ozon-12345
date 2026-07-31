@@ -19,6 +19,10 @@ const collectionRuntimeWriteChains = new Map();
 const jsonLinesFileCache = new Map();
 const jsonArrayFileCache = new Map();
 
+export function isNewFavoriteCollectionResult(result = {}) {
+  return result?.existing !== true;
+}
+
 export function candidateQueueTransitionForCollectionResult(result, {
   nowMs = Date.now(),
   deferMs = 10 * 60_000,
@@ -3726,10 +3730,11 @@ export async function scanSources({
         links: eligibleLinks,
         attempted,
         onResult: (result) => {
-          if (["favorited", "rejected", "failed"].includes(String(result?.status || ""))) {
+          const newlyHandled = isNewFavoriteCollectionResult(result);
+          if (newlyHandled && ["favorited", "rejected", "failed"].includes(String(result?.status || ""))) {
             scanActivityCount += 1;
           }
-          if (result?.status === "favorited") {
+          if (newlyHandled && result?.status === "favorited") {
             candidateActivityCount += 1;
             try { onCandidateActivity(1); } catch {}
           }
@@ -3895,8 +3900,8 @@ export async function scanSources({
         productiveSourceSampleKeys,
         workerPagePool: favoriteWorkerPagePool,
         onResult: (result) => {
-          if (result.sku) retainedAttempted += 1;
-          if (result.status === "favorited") retainedFavorited += 1;
+          if (isNewFavoriteCollectionResult(result) && result.sku) retainedAttempted += 1;
+          if (isNewFavoriteCollectionResult(result) && result.status === "favorited") retainedFavorited += 1;
         },
       });
       if (shouldYieldAfterRetained({
@@ -4068,7 +4073,7 @@ export async function scanSources({
           productiveSourceSampleKeys,
           workerPagePool: favoriteWorkerPagePool,
           onResult: (result) => {
-            if (result.status === "favorited") batchFavorited += 1;
+            if (isNewFavoriteCollectionResult(result) && result.status === "favorited") batchFavorited += 1;
             if (result.status === "failed" && /soft blocked|access denied|captcha|timeout|failed to fetch|network|HTTP 0/i.test(String(result.error?.message || result.error || ""))) {
               collectionSoftBlocked = true;
             }

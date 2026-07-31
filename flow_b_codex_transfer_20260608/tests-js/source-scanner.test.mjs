@@ -78,6 +78,7 @@ import {
   collectionDetailCooldownState,
   sourceBatchCooldownState,
   candidateQueueTransitionForCollectionResult,
+  isNewFavoriteCollectionResult,
   selectRecoveredCandidateTranche,
   sourceInterleavedCandidateDrainLimit,
   sourceInterleavedRetainedReplayLimit,
@@ -779,6 +780,8 @@ test("collection deadline stops an in-flight producer tranche", () => {
 });
 
 test("candidate queue keeps transient collection work retryable and terminal outcomes final", () => {
+  assert.equal(isNewFavoriteCollectionResult({ status: "favorited" }), true);
+  assert.equal(isNewFavoriteCollectionResult({ status: "favorited", existing: true }), false);
   assert.deepEqual(candidateQueueTransitionForCollectionResult({ status: "favorited", sku: "1" }), {
     status: "favorited",
     data: { reason: null },
@@ -793,6 +796,14 @@ test("candidate queue keeps transient collection work retryable and terminal out
   }), {
     status: "deferred",
     data: { reason: "soft blocked", retry_at: "2026-07-17T12:01:00.000Z" },
+  });
+  assert.deepEqual(candidateQueueTransitionForCollectionResult({
+    status: "favorited",
+    sku: "already-present",
+    existing: true,
+  }), {
+    status: "favorited",
+    data: { reason: null },
   });
   assert.equal(candidateQueueTransitionForCollectionResult({ status: "ignored", sku: "4" }), null);
 });

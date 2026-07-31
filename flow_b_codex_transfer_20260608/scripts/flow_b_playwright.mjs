@@ -340,6 +340,7 @@ async function createPublishingSession(context, options, env, shared) {
       directMode: true,
       directRunControl: shared.directRunControl || null,
       minimumSameItemMatches: Math.max(1, Number(env.FLOW_B_1688_MIN_MATCHES) || 1),
+      costEstimateTimeoutMs: Math.max(1, Number(env.FLOW_B_1688_TOTAL_BUDGET_MS) || 15_000),
     });
     return { maoziPage, costBridge, detailProvider, runner, state };
   } catch (error) {
