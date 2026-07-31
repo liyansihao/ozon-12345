@@ -14,11 +14,68 @@ test("detail parser extracts plugin mode, current price, and lowest follow price
   assert.deepEqual(detail, {
     mode: "FBS",
     current_price: 100.5,
+    current_price_rub: null,
     follow_min: 88.2,
+    follow_min_rub: null,
+    observed_cny_rub_rate: null,
     selected_price: 88.2,
     fallback_price: 95,
     current_price_rub_suspect: false,
   });
+});
+
+test("detail parser converts the current ruble price with the paired Maozi follow-price rate", () => {
+  const detail = parseOzonDetailText([
+    "商品标题",
+    "发货模式： FBO",
+    "黑标价：317.5 ₽",
+    "跟卖最低价：₽107.00 ≈ ¥9.07",
+    "选品标签：测试",
+  ].join("\n"), 19.67, "233 ₽\n281 ₽ без Ozon Карты\n400 ₽ обычная цена");
+  assert.equal(detail.current_price_rub, 233);
+  assert.equal(detail.follow_min_rub, 107);
+  assert.equal(detail.observed_cny_rub_rate, 11.797133);
+  assert.equal(detail.current_price, 19.75);
+  assert.equal(detail.follow_min, 9.07);
+  assert.equal(detail.selected_price, 9.07);
+  assert.equal(detail.current_price_rub_suspect, false);
+});
+
+test("detail parser exposes a live ruble price without guessing a stale conversion rate", () => {
+  const detail = parseOzonDetailText(
+    "商品标题\n发货模式： FBO\n黑标价：507.25 ₽",
+    31.7,
+    "374 ₽\nС Ozon Картой",
+  );
+  assert.equal(detail.current_price, null);
+  assert.equal(detail.current_price_rub, 374);
+  assert.equal(detail.observed_cny_rub_rate, null);
+  assert.equal(detail.selected_price, 31.7);
+});
+
+test("detail parser converts a ruble-only current price from the same page sales conversion pair", () => {
+  const detail = parseOzonDetailText([
+    "商品标题",
+    "发货模式： FBO",
+    "月销售额：₽22.11万 ≈ ¥1.87万",
+    "跟卖最低价：无",
+  ].join("\n"), 14.47, "170 ₽\nС Ozon Картой");
+  assert.equal(detail.current_price_rub, 170);
+  assert.equal(detail.follow_min, null);
+  assert.equal(detail.observed_cny_rub_rate, 11.823529);
+  assert.equal(detail.current_price, 14.38);
+  assert.equal(detail.selected_price, 14.38);
+});
+
+test("detail parser rejects an implausible paired conversion rate", () => {
+  const detail = parseOzonDetailText(
+    "发货模式： FBO\n月销售额：₽10 ≈ ¥100\n跟卖最低价：无",
+    15,
+    "180 ₽",
+  );
+  assert.equal(detail.observed_cny_rub_rate, null);
+  assert.equal(detail.current_price, null);
+  assert.equal(detail.selected_price, 15);
 });
 
 test("detail parser ignores a ruble-like current price and supports Russian follow text", () => {

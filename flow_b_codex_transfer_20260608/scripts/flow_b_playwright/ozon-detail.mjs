@@ -20,19 +20,76 @@ function rounded(value) {
   return value === null ? null : Math.round(value * 100) / 100;
 }
 
+function roundedRate(value) {
+  return value === null ? null : Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function currencyMoney(value, symbolPattern) {
+  const source = String(value || "");
+  const horizontalSpace = "[\\t\\u00a0\\u2009\\u202f ]*";
+  const numberPattern = "([0-9][0-9.,\\t\\u00a0\\u2009\\u202f ]*)";
+  const matches = [
+    source.match(new RegExp(`${symbolPattern}${horizontalSpace}${numberPattern}`, "iu")),
+    source.match(new RegExp(`${numberPattern}${horizontalSpace}${symbolPattern}`, "iu")),
+  ].filter(Boolean).sort((left, right) => Number(left.index) - Number(right.index));
+  return money(matches[0]?.[1]);
+}
+
+function scaledMoney(value, unit) {
+  const amount = money(value);
+  if (amount === null) return null;
+  const multiplier = /万/u.test(String(unit || ""))
+    ? 10_000
+    : /^(?:千|k)$/iu.test(String(unit || "").trim())
+      ? 1_000
+      : /^m$/iu.test(String(unit || "").trim())
+        ? 1_000_000
+        : 1;
+  return amount * multiplier;
+}
+
+function plausibleCnyRubRate(value) {
+  const rate = Number(value);
+  return Number.isFinite(rate) && rate >= 5 && rate <= 30 ? rate : null;
+}
+
 export function parseOzonDetailText(text, fallbackPrice, webPriceText = "") {
   const source = String(text || "");
   const mode = source.match(/发货模式：\s*([^\n]+)/)?.[1]?.trim() || null;
 
-  let followMin = money(source.match(/跟卖最低价：\s*¥\s*([0-9.,\s\u00a0\u2009\u202f]+)/)?.[1]);
+  const modernFollow = source.match(
+    /跟卖最低价[：:]\s*₽?\s*([0-9][0-9.,\u00a0\u2009\u202f ]*)\s*₽?\s*(?:≈|~|=)\s*[¥￥]\s*([0-9][0-9.,\u00a0\u2009\u202f ]*)/iu,
+  );
+  const followLine = source.match(/跟卖最低价[：:][^\n]*/u)?.[0] || "";
+  const followRub = money(modernFollow?.[1]) ?? currencyMoney(followLine, "₽");
+  let followMin = money(modernFollow?.[2]) ?? currencyMoney(followLine, "[¥￥]");
   if (followMin === null) {
     followMin = money(source.match(/Есть дешевле или быстрее\s*\nот\s*([0-9.,\s\u00a0\u2009\u202f]+)\s*¥/i)?.[1]);
   }
+  const anyPairedConversion = source.match(
+    /₽\s*([0-9][0-9.,\u00a0\u2009\u202f ]*)\s*(万|千|[km])?\s*(?:≈|~|=)\s*[¥￥]\s*([0-9][0-9.,\u00a0\u2009\u202f ]*)\s*(万|千|[km])?/iu,
+  );
+  const pairedRub = scaledMoney(anyPairedConversion?.[1], anyPairedConversion?.[2]);
+  const pairedCny = scaledMoney(anyPairedConversion?.[3], anyPairedConversion?.[4]);
+  const observedCnyRubRate = plausibleCnyRubRate(
+    followRub !== null && followMin !== null
+      ? followRub / followMin
+      : pairedRub !== null && pairedCny !== null
+        ? pairedRub / pairedCny
+        : null,
+  );
 
   const head = source.split("选品标签：", 1)[0];
-  const visiblePrice = String(webPriceText || "").includes("¥") ? money(webPriceText) : null;
+  const visiblePrice = currencyMoney(webPriceText, "[¥￥]");
+  const currentPriceRub = currencyMoney(webPriceText, "₽");
   const currentPrice = visiblePrice
-    ?? head.split(/\r?\n/).filter((line) => line.includes("¥") && !line.includes("₽")).map(money).find((value) => value !== null)
+    ?? (currentPriceRub !== null && observedCnyRubRate !== null
+      ? currentPriceRub / observedCnyRubRate
+      : null)
+    ?? head.split(/\r?\n/)
+      .filter((line) => /[¥￥]/u.test(line) && !line.includes("₽"))
+      .map((line) => currencyMoney(line, "[¥￥]"))
+      .find((value) => value !== null)
     ?? null;
   const fallback = money(fallbackPrice);
   const rubSuspect = currentPrice !== null && fallback !== null
@@ -43,7 +100,10 @@ export function parseOzonDetailText(text, fallbackPrice, webPriceText = "") {
   return {
     mode,
     current_price: rounded(currentPrice),
+    current_price_rub: rounded(currentPriceRub),
     follow_min: rounded(followMin),
+    follow_min_rub: rounded(followRub),
+    observed_cny_rub_rate: roundedRate(observedCnyRubRate),
     selected_price: selectedValues.length ? rounded(Math.min(...selectedValues)) : null,
     fallback_price: rounded(fallback),
     current_price_rub_suspect: rubSuspect,

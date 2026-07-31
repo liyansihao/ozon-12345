@@ -5112,6 +5112,170 @@ test("direct mode does not accept a snapshot fallback as a confirmed live Ozon p
   }
 });
 
+test("direct mode converts live ruble prices only from an observed page exchange rate", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-live-rub-price-"));
+  try {
+    const profitInputs = [];
+    const client = clientFor([{
+      sku: "live-rub-price",
+      title: "Безопасный товар с живой ценой",
+      cover_image: "https://img.example/live-rub-price.jpg",
+      sell_price: 150,
+    }], {
+      getProductDetail: async () => ({
+        current_price: null,
+        current_price_rub: 1_200,
+        follow_min: 90,
+        follow_min_rub: 900,
+        observed_cny_rub_rate: 10,
+      }),
+      calculateProfit: async (input) => {
+        profitInputs.push(input);
+        return economy(30.01);
+      },
+      publish: async () => ({ ok: true, response: { code: 1 } }),
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state: fakeState(),
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(profitInputs.length, 1);
+    assert.equal(profitInputs[0].sell_price, 90);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode does not convert a ruble-only live price from the stale default rate", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-unrated-rub-price-"));
+  try {
+    let profitCalls = 0;
+    let publishCalls = 0;
+    const state = fakeState();
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "unrated-rub-price",
+        title: "Безопасный товар без курса",
+        cover_image: "https://img.example/unrated-rub-price.jpg",
+        sell_price: 100,
+      }], {
+        getProductDetail: async () => ({
+          current_price: null,
+          current_price_rub: 1_000,
+          follow_min: null,
+          follow_min_rub: null,
+          observed_cny_rub_rate: null,
+        }),
+        calculateProfit: async () => {
+          profitCalls += 1;
+          return economy(45);
+        },
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 0);
+    assert.equal(profitCalls, 0);
+    assert.equal(publishCalls, 0);
+    assert.equal(state.entryOf("unrated-rub-price").data.reason, "missing-live-sale-price");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode never lets an implausible page or ERP rate contaminate the next ruble-only SKU", async (t) => {
+  for (const scenario of [
+    { name: "page rate", observedRate: 0.085, calculatedRate: null },
+    { name: "ERP rate", observedRate: null, calculatedRate: 0.085 },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-invalid-rub-rate-"));
+      try {
+        let profitCalls = 0;
+        let publishCalls = 0;
+        const state = fakeState();
+        const result = await createPublishRunner({
+          client: clientFor([
+            {
+              sku: `rate-seed-${scenario.name}`,
+              title: "Безопасный товар с ценой в юанях",
+              cover_image: "https://img.example/rate-seed.jpg",
+              sell_price: 100,
+            },
+            {
+              sku: `rub-only-after-${scenario.name}`,
+              title: "Безопасный товар только с рублевой ценой",
+              cover_image: "https://img.example/rub-only.jpg",
+              sell_price: 100,
+            },
+          ], {
+            getProductDetail: async (sku) => String(sku).startsWith("rate-seed-")
+              ? {
+                current_price: 100,
+                follow_min: null,
+                observed_cny_rub_rate: scenario.observedRate,
+              }
+              : {
+                current_price: null,
+                current_price_rub: 1_000,
+                follow_min: null,
+                follow_min_rub: null,
+                observed_cny_rub_rate: null,
+              },
+            calculateProfit: async () => {
+              profitCalls += 1;
+              return {
+                ...economy(45),
+                cnyrub_rate: scenario.calculatedRate,
+              };
+            },
+            publish: async () => {
+              publishCalls += 1;
+              return { ok: true, response: { code: 1 } };
+            },
+          }),
+          costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+          state,
+          target: 2,
+          runDir,
+          directMode: true,
+          concurrency: 1,
+          minimumSameItemMatches: 1,
+          requireReliableCostContract: true,
+        }).run();
+
+        assert.equal(result.accepted, 1);
+        assert.equal(profitCalls, 1);
+        assert.equal(publishCalls, 1);
+        assert.equal(
+          state.entryOf(`rub-only-after-${scenario.name}`).data.reason,
+          "missing-live-sale-price",
+        );
+      } finally {
+        await fs.rm(runDir, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("direct mode rejects 30 percent and accepts 30.01 percent", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-profit-boundary-"));
   try {

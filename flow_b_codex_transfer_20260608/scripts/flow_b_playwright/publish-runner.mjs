@@ -479,6 +479,11 @@ function rounded(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
+function plausibleCnyRubRate(value) {
+  const rate = Number(value);
+  return Number.isFinite(rate) && rate >= 5 && rate <= 30 ? rate : null;
+}
+
 function importErrorMessages(log) {
   const messages = [];
   for (const value of [log?.error_msg, ...(Array.isArray(log?.skus) ? log.skus.map((row) => row?.error_msg) : [])]) {
@@ -785,6 +790,7 @@ export function createPublishRunner({
     if (entry.warehouseId !== null && !(entry.warehouseId > 0)) throw new TypeError("store target warehouseId must be positive when configured");
   }
   let cnyRubRate = 10.4672;
+  let cnyRubRateConfirmed = false;
   let publishChain = Promise.resolve();
   let metricsChain = Promise.resolve();
   let haltReason = null;
@@ -1823,6 +1829,26 @@ export function createPublishRunner({
         if (batchControl?.cancelled) {
           return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
         }
+        const observedCnyRubRate = plausibleCnyRubRate(detailResult?.observed_cny_rub_rate);
+        if (observedCnyRubRate !== null) {
+          cnyRubRate = observedCnyRubRate;
+          cnyRubRateConfirmed = true;
+        }
+        const liveCurrentPrice = Number(detailResult?.current_price) > 0
+          ? Number(detailResult.current_price)
+          : cnyRubRateConfirmed && Number(detailResult?.current_price_rub) > 0
+            ? rounded(Number(detailResult.current_price_rub) / cnyRubRate)
+            : null;
+        const liveFollowMin = Number(detailResult?.follow_min) > 0
+          ? Number(detailResult.follow_min)
+          : cnyRubRateConfirmed && Number(detailResult?.follow_min_rub) > 0
+            ? rounded(Number(detailResult.follow_min_rub) / cnyRubRate)
+            : null;
+        detailResult = {
+          ...(detailResult || {}),
+          current_price: liveCurrentPrice,
+          follow_min: liveFollowMin,
+        };
         firstDetail = { ...item, ...(detailResult || {}) };
         observedMode = firstDetail.mode || firstDetail.shipping_mode || item.mode || item.shipping_mode || null;
         detail = {
@@ -1870,7 +1896,10 @@ export function createPublishRunner({
           stage: "live_price_confirmed",
           source_url: item.source_url ?? item.seller_url ?? null,
           current_price: Number(detailResult?.current_price) || null,
+          current_price_rub: Number(detailResult?.current_price_rub) || null,
           follow_min: Number(detailResult?.follow_min) || null,
+          follow_min_rub: Number(detailResult?.follow_min_rub) || null,
+          observed_cny_rub_rate: observedCnyRubRate,
           sale_price: Number(salePrice),
           category: category.mapped,
         });
@@ -1895,7 +1924,11 @@ export function createPublishRunner({
           error: String(error?.message || error),
         });
       }
-      if (Number(calc?.cnyrub_rate) > 0) cnyRubRate = Number(calc.cnyrub_rate);
+      const calculatedCnyRubRate = plausibleCnyRubRate(calc?.cnyrub_rate);
+      if (calculatedCnyRubRate !== null) {
+        cnyRubRate = calculatedCnyRubRate;
+        cnyRubRateConfirmed = true;
+      }
       const economy = economyResult(calc);
       const preflightReason = activeDirectMode
         ? null
