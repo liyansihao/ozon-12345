@@ -31,7 +31,7 @@ function safeBaseOverrides({ favoriteDetailIntervalMs = 4_000, favoriteDetailMin
 
 const SOURCE_PORTFOLIO_WINDOW_MS = 30 * 60_000;
 const SOURCE_BIAS_MIN_DWELL_MS = 20 * 60_000;
-const SOURCE_BIAS_PROFILES = new Set(["seller-fbs-bias", "search-strict-bias"]);
+const SOURCE_BIAS_PROFILES = new Set(["seller-fbs-bias", "search-strict-bias", "dry-search-veto"]);
 
 export function chooseLowTokenIntervention({
   collectionAttempts = 0,
@@ -39,6 +39,7 @@ export function chooseLowTokenIntervention({
   softBlocks = 0,
   strictPerHour = 0,
   sourceTypes = {},
+  lifetimeSourceTypes = {},
 } = {}, safety = {}) {
   const safeBase = safeBaseOverrides(safety);
   const attempts = Math.max(0, Number(collectionAttempts) || 0);
@@ -57,8 +58,8 @@ export function chooseLowTokenIntervention({
   }
   if (attempts < 30) return { profile: "observe", reason: "insufficient-evidence", overrides: {} };
   if (Number(strictPerHour) >= 35) return { profile: "stable", reason: "strict-pace-sustained", overrides: {} };
-  const typeStats = (type) => {
-    const value = sourceTypes?.[type] || {};
+  const typeStatsFrom = (portfolio, type) => {
+    const value = portfolio?.[type] || {};
     const typeAttempts = Math.max(0, Number(value.attempts) || 0);
     const typeFavorites = Math.max(0, Number(value.favorites) || 0);
     const typeStrict = Math.max(0, Number(value.strict) || 0);
@@ -70,6 +71,7 @@ export function chooseLowTokenIntervention({
       strictYield: typeAttempts > 0 ? typeStrict / typeAttempts : 0,
     };
   };
+  const typeStats = (type) => typeStatsFrom(sourceTypes, type);
   const search = typeStats("search");
   const seller = typeStats("seller");
   const highlight = typeStats("highlight");
@@ -108,6 +110,36 @@ export function chooseLowTokenIntervention({
         FLOW_B_TAB_WORKERS: "4",
         FLOW_B_MAX_TAB_WORKERS: "4",
         FLOW_B_FAVORITE_WORKERS: "4",
+        ...safeBase,
+        FLOW_B_DERIVED_SEARCH_SOURCES: "0",
+        FLOW_B_DERIVED_PRIORITY_SOURCES: "0",
+        FLOW_B_PRIORITIZE_DERIVED_SEARCH: "0",
+        FLOW_B_SOURCE_STRICT_WEIGHT: "6",
+        FLOW_B_SOURCE_FBS_WEIGHT: "3",
+        FLOW_B_SOURCE_EXPLORE_WEIGHT: "1",
+      },
+    };
+  }
+  const lifetimeSearch = typeStatsFrom(lifetimeSourceTypes, "search");
+  const lifetimeNonSearch = ["seller", "highlight", "other"]
+    .map((type) => typeStatsFrom(lifetimeSourceTypes, type))
+    .reduce((total, stats) => ({
+      attempts: total.attempts + stats.attempts,
+      favorites: total.favorites + stats.favorites,
+      strict: total.strict + stats.strict,
+    }), { attempts: 0, favorites: 0, strict: 0 });
+  const lifetimeSearchDry = lifetimeSearch.attempts >= 30
+    && lifetimeSearch.yield < 0.02
+    && lifetimeSearch.strict === 0
+    && lifetimeNonSearch.favorites >= 5;
+  if (pureFbsYield < 0.15 && lifetimeSearchDry) {
+    return {
+      profile: "dry-search-veto",
+      reason: "lifetime-search-zero-yield",
+      overrides: {
+        FLOW_B_TAB_WORKERS: "3",
+        FLOW_B_MAX_TAB_WORKERS: "4",
+        FLOW_B_FAVORITE_WORKERS: "3",
         ...safeBase,
         FLOW_B_DERIVED_SEARCH_SOURCES: "0",
         FLOW_B_DERIVED_PRIORITY_SOURCES: "0",
@@ -157,9 +189,19 @@ async function readJsonLines(filename) {
 async function recentMetrics(runDir, nowMs) {
   const collection = await readJsonLines(path.join(runDir, "favorite_collection.jsonl"));
   const published = await readJsonLines(path.join(runDir, "published.jsonl"));
+  let acceptanceWindowStart = nowMs - 24 * 60 * 60_000;
+  try {
+    const window = JSON.parse(await fs.readFile(path.join(runDir, "acceptance_window.json"), "utf8"));
+    const parsed = Date.parse(window?.started_at || "");
+    if (Number.isFinite(parsed)) acceptanceWindowStart = parsed;
+  } catch {}
   const inRecentWindow = (value, durationMs) => {
     const at = Date.parse(value || "");
     return Number.isFinite(at) && at >= nowMs - durationMs && at <= nowMs;
+  };
+  const inAcceptanceWindow = (value) => {
+    const at = Date.parse(value || "");
+    return Number.isFinite(at) && at >= acceptanceWindowStart && at <= nowMs;
   };
   const recentCollection = collection.filter((row) => inRecentWindow(row?.at, SOURCE_PORTFOLIO_WINDOW_MS));
   const recentSoftBlocks = collection.filter((row) => inRecentWindow(row?.at, SOURCE_PORTFOLIO_WINDOW_MS)
@@ -173,38 +215,50 @@ async function recentMetrics(runDir, nowMs) {
     return "other";
   };
   const sourceTypes = {};
-  for (const row of recentCollection) {
-    if (!["favorited", "rejected", "failed"].includes(String(row?.status))) continue;
+  const lifetimeSourceTypes = {};
+  const addCollectionEvidence = (portfolio, row) => {
     const type = sourceType(row?.source_url);
-    const stats = sourceTypes[type] || { attempts: 0, favorites: 0, strict: 0 };
+    const stats = portfolio[type] || { attempts: 0, favorites: 0, strict: 0 };
     stats.attempts += 1;
     if (row?.status === "favorited") stats.favorites += 1;
-    sourceTypes[type] = stats;
+    portfolio[type] = stats;
+  };
+  for (const row of collection) {
+    if (!inAcceptanceWindow(row?.at)
+      || !["favorited", "rejected", "failed"].includes(String(row?.status))) continue;
+    addCollectionEvidence(lifetimeSourceTypes, row);
+  }
+  for (const row of recentCollection) {
+    if (!["favorited", "rejected", "failed"].includes(String(row?.status))) continue;
+    addCollectionEvidence(sourceTypes, row);
   }
   const publicationSku = (row) => String(row?.sku || row?.data?.sku || "").trim();
   const isStrictPublication = (row) => publicationSku(row)
     && publicationSku(row) !== "2815247918"
     && Number(row?.data?.profit_rate) > 30
     && String(row?.data?.online_status || "").toLowerCase() === "selling"
-    && Number(row?.data?.stock) > 0;
+      && Number(row?.data?.stock) > 0;
   const recentStrictSkus = new Set();
+  const lifetimeStrictSkus = new Set();
   for (const row of published) {
     const publishedAt = row?.data?.published_at || row?.timestamp;
-    if (!inRecentWindow(publishedAt, SOURCE_PORTFOLIO_WINDOW_MS) || !isStrictPublication(row)) continue;
+    if (!isStrictPublication(row)) continue;
     const sku = publicationSku(row);
-    if (recentStrictSkus.has(sku)) continue;
-    recentStrictSkus.add(sku);
     const type = sourceType(row?.data?.source_url || row?.source_url);
-    const stats = sourceTypes[type] || { attempts: 0, favorites: 0, strict: 0 };
-    stats.strict += 1;
-    sourceTypes[type] = stats;
+    if (inAcceptanceWindow(publishedAt) && !lifetimeStrictSkus.has(sku)) {
+      lifetimeStrictSkus.add(sku);
+      const lifetimeStats = lifetimeSourceTypes[type] || { attempts: 0, favorites: 0, strict: 0 };
+      lifetimeStats.strict += 1;
+      lifetimeSourceTypes[type] = lifetimeStats;
+    }
+    if (inRecentWindow(publishedAt, SOURCE_PORTFOLIO_WINDOW_MS) && !recentStrictSkus.has(sku)) {
+      recentStrictSkus.add(sku);
+      const stats = sourceTypes[type] || { attempts: 0, favorites: 0, strict: 0 };
+      stats.strict += 1;
+      sourceTypes[type] = stats;
+    }
   }
-  let windowStart = nowMs - 60 * 60_000;
-  try {
-    const window = JSON.parse(await fs.readFile(path.join(runDir, "acceptance_window.json"), "utf8"));
-    const parsed = Date.parse(window?.started_at || "");
-    if (Number.isFinite(parsed)) windowStart = Math.max(windowStart, parsed);
-  } catch {}
+  const windowStart = Math.max(nowMs - 60 * 60_000, acceptanceWindowStart);
   const observedHours = Math.max(1 / 60, Math.min(1, (nowMs - windowStart) / 3_600_000));
   const strictSkus = new Set(published.flatMap((row) => {
     const at = Date.parse(row?.data?.published_at || row?.timestamp || "");
@@ -216,6 +270,7 @@ async function recentMetrics(runDir, nowMs) {
     softBlocks: recentSoftBlocks.length,
     strictPerHour: Number((strictSkus.size / observedHours).toFixed(2)),
     sourceTypes,
+    lifetimeSourceTypes,
   };
 }
 

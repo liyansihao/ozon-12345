@@ -191,6 +191,17 @@ function validateConfig(config) {
   ) {
     throw new Error("candidate buffer must contain at least two hours / 70 fully-qualified SKUs");
   }
+  if (config?.operator_direct_publish?.enabled === true) {
+    if (
+      config.operator_direct_publish.allow_current_day_capacity_shortfall !== true
+      || Number(config.operator_direct_publish.minimum_ready_candidates) !== 3
+      || String(config.operator_direct_publish.authorized_by || "") !== "workspace-user"
+      || !Number.isFinite(Date.parse(String(config.operator_direct_publish.authorized_at || "")))
+      || !String(config.operator_direct_publish.reason || "").trim()
+    ) {
+      throw new Error("operator direct publish requires an explicit audited three-SKU authorization");
+    }
+  }
   if (Number(config?.source_refresh_seconds) !== 7_200) {
     throw new Error("formal source policy refresh interval must equal 7200 seconds");
   }

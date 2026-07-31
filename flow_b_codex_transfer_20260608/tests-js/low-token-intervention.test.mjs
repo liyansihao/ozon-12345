@@ -54,6 +54,29 @@ test("low token intervention exploits strict sources when pure-FBS yield is poor
   assert.equal(result.overrides.FLOW_B_FAVORITE_DETAIL_INTERVAL_MS, "4000");
 });
 
+test("low token intervention does not reopen a lifetime dry search portfolio", () => {
+  const result = chooseLowTokenIntervention({
+    collectionAttempts: 60,
+    favorites: 5,
+    softBlocks: 0,
+    strictPerHour: 0,
+    sourceTypes: {
+      seller: { attempts: 60, favorites: 5, strict: 0 },
+    },
+    lifetimeSourceTypes: {
+      seller: { attempts: 180, favorites: 24, strict: 2 },
+      search: { attempts: 102, favorites: 0, strict: 0 },
+    },
+  });
+
+  assert.equal(result.profile, "dry-search-veto");
+  assert.equal(result.reason, "lifetime-search-zero-yield");
+  assert.equal(result.overrides.FLOW_B_DERIVED_SEARCH_SOURCES, "0");
+  assert.equal(result.overrides.FLOW_B_DERIVED_PRIORITY_SOURCES, "0");
+  assert.equal(result.overrides.FLOW_B_PRIORITIZE_DERIVED_SEARCH, "0");
+  assert.equal(result.overrides.FLOW_B_TAB_WORKERS, "3");
+});
+
 test("low token intervention uses safe four-page collection only with healthy FBS yield", () => {
   const result = chooseLowTokenIntervention({
     collectionAttempts: 60,
@@ -137,6 +160,36 @@ test("controller changes the runtime environment and logs only profile transitio
   await controller.refresh();
   const logs = (await fs.readFile(path.join(runDir, "low_token_interventions.jsonl"), "utf8")).trim().split(/\n/);
   assert.equal(logs.length, 1);
+  await fs.rm(runDir, { recursive: true, force: true });
+});
+
+test("controller remembers dry search evidence outside the recent source window", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-dry-search-memory-"));
+  const now = Date.parse("2026-07-18T04:00:00.000Z");
+  await fs.writeFile(path.join(runDir, "acceptance_window.json"), JSON.stringify({
+    started_at: "2026-07-18T02:00:00.000Z",
+  }));
+  const rows = [
+    ...Array.from({ length: 60 }, (_, index) => ({
+      at: new Date(now - 60 * 60_000 - index * 1000).toISOString(),
+      status: "rejected",
+      source_url: `https://www.ozon.ru/search/dry-${index}`,
+    })),
+    ...Array.from({ length: 40 }, (_, index) => ({
+      at: new Date(now - index * 1000).toISOString(),
+      status: index < 5 ? "favorited" : "rejected",
+      source_url: `https://www.ozon.ru/seller/recent-${index}`,
+    })),
+  ];
+  await fs.writeFile(path.join(runDir, "favorite_collection.jsonl"), rows.map((row) => JSON.stringify(row)).join("\n"));
+  const env = { FLOW_B_LOW_TOKEN_INTERVENTION: "1" };
+  const controller = createLowTokenInterventionController({ runDir, env, now: () => now });
+  const decision = await controller.refresh();
+
+  assert.equal(decision.profile, "dry-search-veto");
+  assert.equal(decision.metrics.sourceTypes.search, undefined);
+  assert.equal(decision.metrics.lifetimeSourceTypes.search.attempts, 60);
+  assert.equal(env.FLOW_B_DERIVED_SEARCH_SOURCES, "0");
   await fs.rm(runDir, { recursive: true, force: true });
 });
 

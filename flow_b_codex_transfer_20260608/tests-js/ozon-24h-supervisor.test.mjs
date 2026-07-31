@@ -157,6 +157,22 @@ test("capacity preflight fatally rejects any capacity below the fixed 500 target
   }).action, "fatal-stop");
 });
 
+test("capacity preflight permits an explicit operator-authorized current-day shortfall without reducing the fixed target", () => {
+  assert.deepEqual(capacityPreflightDecision({
+    all_stores_found: true,
+    all_warehouses_verified: true,
+    all_quotas_verified: true,
+    total_remaining_capacity: 469,
+  }, 500, "fixed", {
+    allowCurrentDayShortfall: true,
+  }), {
+    action: "start-formal-window",
+    reason: "operator-authorized-current-day-capacity-shortfall",
+    total_remaining_capacity: 469,
+    required_capacity: 500,
+  });
+});
+
 test("capacity preflight rejects dynamic target policies", () => {
   assert.deepEqual(
     capacityPreflightDecision({

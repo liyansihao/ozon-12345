@@ -15,6 +15,14 @@
     "minimum_ready_candidates": 110,
     "preparation_max_run_seconds": 600
   },
+  "operator_direct_publish": {
+    "enabled": true,
+    "authorized_by": "workspace-user",
+    "authorized_at": "2026-07-31T00:09:56.000Z",
+    "reason": "User explicitly requested continuous formal collection, follow-sell validation, and immediate publishing without waiting for the two-hour candidate buffer.",
+    "allow_current_day_capacity_shortfall": true,
+    "minimum_ready_candidates": 3
+  },
   "restart_delays_seconds": [
     30,
     60,

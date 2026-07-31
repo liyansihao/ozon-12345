@@ -229,7 +229,12 @@ export function supervisorShouldHonorSafeStop(operationalStatus) {
     .has(String(operationalStatus?.status || ""));
 }
 
-export function capacityPreflightDecision(snapshot, requiredCapacity = 500, targetPolicy = "fixed") {
+export function capacityPreflightDecision(
+  snapshot,
+  requiredCapacity = 500,
+  targetPolicy = "fixed",
+  { allowCurrentDayShortfall = false } = {},
+) {
   if (String(targetPolicy || "") !== "fixed") {
     return { action: "fatal-stop", reason: "acceptance-target-policy-must-be-fixed" };
   }
@@ -239,6 +244,14 @@ export function capacityPreflightDecision(snapshot, requiredCapacity = 500, targ
     return { action: "fatal-stop", reason: "capacity-or-warehouse-verification-failed" };
   }
   if (Number(snapshot?.total_remaining_capacity) < Number(requiredCapacity)) {
+    if (allowCurrentDayShortfall === true) {
+      return {
+        action: "start-formal-window",
+        reason: "operator-authorized-current-day-capacity-shortfall",
+        total_remaining_capacity: Number(snapshot?.total_remaining_capacity) || 0,
+        required_capacity: Number(requiredCapacity),
+      };
+    }
     return {
       action: "fatal-stop",
       reason: "insufficient-current-day-capacity",
@@ -1993,6 +2006,10 @@ export async function supervise(configPath) {
           snapshot,
           config.acceptance.strict_target,
           config.acceptance.target_policy,
+          {
+            allowCurrentDayShortfall:
+              config?.operator_direct_publish?.allow_current_day_capacity_shortfall === true,
+          },
         );
         if (decision.action === "fatal-stop") {
           await updateOperationalState(stateRoot, currentRun, {
@@ -2003,13 +2020,28 @@ export async function supervise(configPath) {
           return 0;
         }
         if (decision.action === "start-formal-window") {
+          const directPublish = config?.operator_direct_publish?.enabled === true;
+          if (decision.reason === "operator-authorized-current-day-capacity-shortfall") {
+            await appendJsonLine(path.join(runDir, "live_gate_evidence.jsonl"), {
+              type: "operator-capacity-override",
+              at: new Date().toISOString(),
+              authorized_by: config.operator_direct_publish.authorized_by,
+              authorized_at: config.operator_direct_publish.authorized_at,
+              reason: config.operator_direct_publish.reason,
+              total_remaining_capacity: decision.total_remaining_capacity,
+              fixed_target: decision.required_capacity,
+              target_reduced: false,
+            });
+          }
           const validationRows = await readJsonLines(path.join(runDir, "validation_gate.jsonl"));
           const bufferBefore = candidateBufferSnapshot(validationRows);
           const bufferDecision = candidateBufferDecision({
             uniqueReady: bufferBefore.unique_ready,
-            targetHours: config.candidate_buffer?.minimum_hours || 2,
-            minimumPerHour: config.candidate_buffer?.minimum_strict_per_hour || 35,
-            minimumReadyCandidates: config.candidate_buffer?.minimum_ready_candidates || 70,
+            targetHours: directPublish ? 0 : (config.candidate_buffer?.minimum_hours || 2),
+            minimumPerHour: directPublish ? 0 : (config.candidate_buffer?.minimum_strict_per_hour || 35),
+            minimumReadyCandidates: directPublish
+              ? Number(config.operator_direct_publish.minimum_ready_candidates)
+              : (config.candidate_buffer?.minimum_ready_candidates || 70),
           });
           if (bufferDecision.action === "ready") {
             await activateFormalWindow({
@@ -2056,10 +2088,13 @@ export async function supervise(configPath) {
           });
           await updateOperationalState(stateRoot, currentRun, {
             status: "PREPARING_CANDIDATE_BUFFER",
-            reason: "two-hour fully-qualified candidate buffer is below the hard gate",
+            reason: directPublish
+              ? "operator-direct-production requires three fully-qualified initial SKUs"
+              : "two-hour fully-qualified candidate buffer is below the hard gate",
             unique_ready: bufferDecision.unique_ready,
             required_ready: bufferDecision.required_ready,
             preparation_started_at: prepareStartedAt.toISOString(),
+            operator_direct_publish: directPublish,
           });
           const prepared = await preparationResult;
           worker = null;
