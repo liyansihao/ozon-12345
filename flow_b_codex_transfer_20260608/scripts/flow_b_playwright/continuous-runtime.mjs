@@ -480,8 +480,11 @@ export async function runProducerLoop({
   shouldStop = () => false,
 } = {}) {
   if (typeof scan !== "function") throw new TypeError("scan is required");
-  const deadline = Number(deadlineMs);
-  if (!Number.isFinite(deadline)) throw new TypeError("deadlineMs must be finite");
+  const requestedDeadline = Number(deadlineMs);
+  const deadline = requestedDeadline === Number.POSITIVE_INFINITY
+    ? Number.MAX_SAFE_INTEGER
+    : requestedDeadline;
+  if (!Number.isFinite(deadline)) throw new TypeError("deadlineMs must be finite or positive infinity");
   let lastResult = null;
   let idleStreak = 0;
   while (now() < deadline && !shouldStop()) {

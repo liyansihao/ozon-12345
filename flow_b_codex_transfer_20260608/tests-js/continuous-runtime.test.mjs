@@ -470,6 +470,24 @@ test("producer loop uses 30/60/120 second quiet backoff when source activity is 
   assert.equal(calls, 4);
 });
 
+test("producer loop accepts an open-ended direct publishing deadline", async () => {
+  let now = 1_000;
+  let calls = 0;
+  const result = await runProducerLoop({
+    deadlineMs: Number.POSITIVE_INFINITY,
+    intervalMs: 10,
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+    shouldStop: () => calls >= 2,
+    scan: async () => {
+      calls += 1;
+      return { round: calls };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(result, { round: 2 });
+});
+
 test("closed Playwright contexts are fatal while individual page timeouts are recoverable", () => {
   assert.equal(isFatalBrowserError(new Error("Target page, context or browser has been closed")), true);
   assert.equal(isFatalBrowserError(new Error("browserContext.newPage: Target page has been closed")), true);
