@@ -11,6 +11,16 @@ import {
   resolveOzonAccessStateFile,
 } from "../scripts/flow_b_playwright/ozon-access-controller.mjs";
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 test("Ozon CAPTCHA text is classified separately from network soft blocks", () => {
   assert.equal(isOzonCaptchaText("CAPTCHA: confirm you are not a robot"), true);
   assert.equal(isOzonCaptchaText("Подтвердите, что вы не робот"), true);
@@ -42,6 +52,122 @@ test("global Ozon controller serializes callers and preserves a quiet interval a
   ]);
   assert.equal(peak, 1);
   assert.deepEqual(starts, [1_000, 1_260, 1_520]);
+});
+
+test("publish detail jumps queued favorite and source work without preempting the running operation", async () => {
+  const releaseFirst = deferred();
+  const firstStarted = deferred();
+  const order = [];
+  const controller = createOzonAccessController({ minIntervalMs: 0 });
+  const run = (kind, label, wait = null) => controller.run({ kind }, async () => {
+    order.push(label);
+    if (wait) {
+      firstStarted.resolve();
+      await wait.promise;
+    }
+  });
+
+  const running = run("source", "running-source", releaseFirst);
+  await firstStarted.promise;
+  const queuedSource = run("source", "queued-source");
+  const queuedFavorite = run("favorite-detail", "favorite");
+  const queuedPublish = run("publish-detail", "publish");
+  releaseFirst.resolve();
+
+  await Promise.all([running, queuedSource, queuedFavorite, queuedPublish]);
+  assert.deepEqual(order, ["running-source", "publish", "favorite", "queued-source"]);
+});
+
+test("same-priority Ozon work remains FIFO and unknown kinds use medium priority", async () => {
+  const releaseFirst = deferred();
+  const firstStarted = deferred();
+  const order = [];
+  const controller = createOzonAccessController({ minIntervalMs: 0 });
+  const running = controller.run({ kind: "source" }, async () => {
+    order.push("running-source");
+    firstStarted.resolve();
+    await releaseFirst.promise;
+  });
+  await firstStarted.promise;
+  const firstFavorite = controller.run({ kind: "favorite-detail" }, async () => { order.push("favorite-1"); });
+  const unknown = controller.run({ kind: "other" }, async () => { order.push("unknown"); });
+  const secondFavorite = controller.run({ kind: "favorite-detail" }, async () => { order.push("favorite-2"); });
+  releaseFirst.resolve();
+
+  await Promise.all([running, firstFavorite, unknown, secondFavorite]);
+  assert.deepEqual(order, ["running-source", "favorite-1", "unknown", "favorite-2"]);
+});
+
+test("queued source work runs after at most eight consecutive non-source operations", async () => {
+  const releaseFirst = deferred();
+  const firstStarted = deferred();
+  const order = [];
+  const controller = createOzonAccessController({ minIntervalMs: 0 });
+  const runningSource = controller.run({ kind: "source" }, async () => {
+    order.push("running-source");
+    firstStarted.resolve();
+    await releaseFirst.promise;
+  });
+  await firstStarted.promise;
+  const queuedSource = controller.run({ kind: "source" }, async () => { order.push("queued-source"); });
+  const publishes = Array.from({ length: 10 }, (_, index) => controller.run(
+    { kind: "publish-detail" },
+    async () => { order.push(`publish-${index + 1}`); },
+  ));
+  releaseFirst.resolve();
+
+  await Promise.all([runningSource, queuedSource, ...publishes]);
+  assert.deepEqual(order, [
+    "running-source",
+    "publish-1",
+    "publish-2",
+    "publish-3",
+    "publish-4",
+    "publish-5",
+    "publish-6",
+    "publish-7",
+    "publish-8",
+    "queued-source",
+    "publish-9",
+    "publish-10",
+  ]);
+});
+
+test("an errored operation preserves the quiet interval and the priority queue continues", async () => {
+  const releaseFirst = deferred();
+  const firstStarted = deferred();
+  let clock = 1_000;
+  const starts = [];
+  const controller = createOzonAccessController({
+    minIntervalMs: 250,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  });
+  const failed = controller.run({ kind: "source" }, async () => {
+    starts.push(["source", clock]);
+    firstStarted.resolve();
+    await releaseFirst.promise;
+    clock += 10;
+    throw new Error("test failure");
+  });
+  const failedAssertion = assert.rejects(failed, /test failure/);
+  await firstStarted.promise;
+  const favorite = controller.run({ kind: "favorite-detail" }, async () => {
+    starts.push(["favorite", clock]);
+    clock += 10;
+  });
+  const publish = controller.run({ kind: "publish-detail" }, async () => {
+    starts.push(["publish", clock]);
+    clock += 10;
+  });
+  releaseFirst.resolve();
+
+  await Promise.all([failedAssertion, favorite, publish]);
+  assert.deepEqual(starts, [
+    ["source", 1_000],
+    ["publish", 1_260],
+    ["favorite", 1_520],
+  ]);
 });
 
 test("ordinary Ozon soft blocks remain retryable and do not require manual clearance", async () => {

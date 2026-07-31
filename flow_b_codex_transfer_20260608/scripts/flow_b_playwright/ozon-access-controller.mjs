@@ -3,10 +3,17 @@ import path from "node:path";
 
 const controllersByContext = new WeakMap();
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const MAX_NON_SOURCE_BURST = 8;
 
 function interval(value, fallback = 15_000) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function queuePriority(kind) {
+  if (kind === "publish-detail") return "high";
+  if (kind === "source") return "low";
+  return "medium";
 }
 
 export function resolveOzonAccessStateFile(env = process.env) {
@@ -75,7 +82,13 @@ export function createOzonAccessController({
   const timelineFilename = logFile ? path.resolve(logFile) : null;
   const minimumInterval = interval(minIntervalMs);
   let state = null;
-  let chain = Promise.resolve();
+  let draining = false;
+  let consecutiveNonSource = 0;
+  const queues = {
+    high: [],
+    medium: [],
+    low: [],
+  };
 
   const load = async () => {
     if (state) return state;
@@ -136,6 +149,100 @@ export function createOzonAccessController({
     await record("stopped", metadata, { reason: state.reason });
     return stoppedError(state.reason, state);
   };
+  const dequeue = () => {
+    if (queues.low.length > 0 && consecutiveNonSource >= MAX_NON_SOURCE_BURST) {
+      consecutiveNonSource = 0;
+      return queues.low.shift();
+    }
+    if (queues.high.length > 0) {
+      consecutiveNonSource += 1;
+      return queues.high.shift();
+    }
+    if (queues.medium.length > 0) {
+      consecutiveNonSource += 1;
+      return queues.medium.shift();
+    }
+    if (queues.low.length > 0) {
+      consecutiveNonSource = 0;
+      return queues.low.shift();
+    }
+    return null;
+  };
+  const execute = async (metadata, operation) => {
+    await load();
+    if (state.requires_manual_clear) throw stoppedError(state.reason, state);
+    const waitMs = Math.max(0, Number(state.next_allowed_at_ms) - now());
+    if (waitMs > 0) await sleep(waitMs);
+    if (state.requires_manual_clear) throw stoppedError(state.reason, state);
+    const startedAt = now();
+    state = {
+      ...state,
+      version: 1,
+      updated_at: new Date(startedAt).toISOString(),
+      last_started_at: new Date(startedAt).toISOString(),
+      next_allowed_at_ms: startedAt + minimumInterval,
+      last_kind: metadata.kind || null,
+      last_url: metadata.url || null,
+      requires_manual_clear: false,
+    };
+    await persist();
+    await record("started", metadata, { next_allowed_at_ms: state.next_allowed_at_ms });
+    try {
+      const result = await operation();
+      await settle();
+      await record("succeeded", metadata);
+      return result;
+    } catch (error) {
+      let failure = error;
+      if (isOzonCaptchaError(failure)) {
+        const detectedAt = now();
+        state = {
+          ...state,
+          version: 1,
+          updated_at: new Date(detectedAt).toISOString(),
+          requires_manual_clear: true,
+          captcha_retry_pending: false,
+          captcha_retry_at: null,
+          captcha_retry_count: Math.max(0, Number(state?.captcha_retry_count) || 0) + 1,
+          reason: String(failure?.message || failure),
+        };
+        await persist();
+        throw await stop(failure?.message || failure, metadata);
+      }
+      if (isOzonCaptchaError(failure)) throw await stop(failure?.message || failure, metadata);
+      if (isOzonAccessStoppedError(failure)) {
+        await record("rejected_stopped", metadata, { reason: String(failure?.message || failure) });
+        throw failure;
+      }
+      if (isOzonSoftBlockError(failure)) {
+        await settle();
+        await record("soft_block", metadata, { reason: String(failure?.message || failure) });
+        throw failure;
+      }
+      await settle();
+      await record("failed", metadata, { reason: String(failure?.message || failure) });
+      throw failure;
+    }
+  };
+  const drain = async () => {
+    while (true) {
+      const task = dequeue();
+      if (!task) {
+        draining = false;
+        return;
+      }
+      try {
+        task.resolve(await execute(task.metadata, task.operation));
+      } catch (error) {
+        task.reject(error);
+      }
+    }
+  };
+  const scheduleDrain = () => {
+    if (draining) return;
+    draining = true;
+    void drain();
+  };
 
   return {
     stateFile: filename,
@@ -144,64 +251,15 @@ export function createOzonAccessController({
     async stop(reason, metadata = {}) { throw await stop(reason, metadata); },
     run(metadata = {}, operation) {
       if (typeof operation !== "function") throw new TypeError("Ozon access operation is required");
-      const task = chain.then(async () => {
-        await load();
-        if (state.requires_manual_clear) throw stoppedError(state.reason, state);
-        const waitMs = Math.max(0, Number(state.next_allowed_at_ms) - now());
-        if (waitMs > 0) await sleep(waitMs);
-        if (state.requires_manual_clear) throw stoppedError(state.reason, state);
-        const startedAt = now();
-        state = {
-          ...state,
-          version: 1,
-          updated_at: new Date(startedAt).toISOString(),
-          last_started_at: new Date(startedAt).toISOString(),
-          next_allowed_at_ms: startedAt + minimumInterval,
-          last_kind: metadata.kind || null,
-          last_url: metadata.url || null,
-          requires_manual_clear: false,
-        };
-        await persist();
-        await record("started", metadata, { next_allowed_at_ms: state.next_allowed_at_ms });
-        try {
-          const result = await operation();
-          await settle();
-          await record("succeeded", metadata);
-          return result;
-        } catch (error) {
-          let failure = error;
-          if (isOzonCaptchaError(failure)) {
-            const detectedAt = now();
-            state = {
-              ...state,
-              version: 1,
-              updated_at: new Date(detectedAt).toISOString(),
-              requires_manual_clear: true,
-              captcha_retry_pending: false,
-              captcha_retry_at: null,
-              captcha_retry_count: Math.max(0, Number(state?.captcha_retry_count) || 0) + 1,
-              reason: String(failure?.message || failure),
-            };
-            await persist();
-            throw await stop(failure?.message || failure, metadata);
-          }
-          if (isOzonCaptchaError(failure)) throw await stop(failure?.message || failure, metadata);
-          if (isOzonAccessStoppedError(failure)) {
-            await record("rejected_stopped", metadata, { reason: String(failure?.message || failure) });
-            throw failure;
-          }
-          if (isOzonSoftBlockError(failure)) {
-            await settle();
-            await record("soft_block", metadata, { reason: String(failure?.message || failure) });
-            throw failure;
-          }
-          await settle();
-          await record("failed", metadata, { reason: String(failure?.message || failure) });
-          throw failure;
-        }
+      return new Promise((resolve, reject) => {
+        queues[queuePriority(metadata.kind)].push({
+          metadata,
+          operation,
+          resolve,
+          reject,
+        });
+        scheduleDrain();
       });
-      chain = task.catch(() => {});
-      return task;
     },
   };
 }

@@ -173,6 +173,7 @@ export async function refreshSourcePortfolio({
   const policy = buildStrictSellerSourcePolicy({
     detailAttempts: attributedDetails,
     publications: attributedPublications,
+    historicalBootstrapRows: historicalYield,
     explorationSellerUrls,
     previousDecision: previousPortfolio?.policy || null,
     windowStartedAt: evidenceWindowStart(acceptanceWindow, now),
@@ -186,23 +187,40 @@ export async function refreshSourcePortfolio({
   }
   const activeSourceText = `${policy.active_urls.join("\n")}\n`;
   const sourceSetSha256 = sha256(activeSourceText);
+  const historicalBootstrapActive = (
+    policy.evidence_mode === "historical-strict-bootstrap"
+  );
+  const metrics = Array.isArray(policy.sellers) ? policy.sellers : [];
 
   const portfolio = {
     schema_version: 2,
     generated_at: policy.generated_at,
-    strategy: "current-2h-unique-strict-per-unique-detail-attempt",
+    strategy: historicalBootstrapActive
+      ? "historical-strict-bootstrap-unique-strict-per-unique-history-detail-attempt"
+      : "current-2h-unique-strict-per-unique-detail-attempt",
+    reason: policy.reason,
+    evidence_mode: policy.evidence_mode || "current-window",
     derived_search_enabled: false,
     active_urls: policy.active_urls,
     source_set_sha256: sourceSetSha256,
     policy,
-    metrics: policy.sellers,
+    metrics,
     disabled: [],
     counts: {
       active_sources: policy.active_urls.length,
-      strict_policy_sellers: policy.sellers.filter((row) => row.unique_strict > 0).length,
+      strict_policy_sellers: metrics.filter((row) => row.unique_strict > 0).length,
       exploration_sources: policy.allocation.explore,
       unique_detail_attempts: policy.unique_detail_attempts,
       unique_strict: policy.unique_strict,
+      current_window_unique_detail_attempts:
+        Number(policy.current_window?.unique_detail_attempts) || 0,
+      current_window_unique_strict:
+        Number(policy.current_window?.unique_strict) || 0,
+      historical_bootstrap_unique_detail_attempts:
+        Number(policy.historical_bootstrap?.unique_detail_attempts) || 0,
+      historical_bootstrap_unique_strict:
+        Number(policy.historical_bootstrap?.unique_strict) || 0,
+      historical_bootstrap_active: historicalBootstrapActive,
       derived_sources: 0,
     },
   };
@@ -229,10 +247,14 @@ export async function refreshSourcePortfolio({
         generated_at: policy.generated_at,
         frozen_until: policy.frozen_until,
         strategy: portfolio.strategy,
+        reason: portfolio.reason,
+        evidence_mode: portfolio.evidence_mode,
         source_set_sha256: sourceSetSha256,
         allocation: policy.allocation,
         unique_detail_attempts: policy.unique_detail_attempts,
         unique_strict: policy.unique_strict,
+        current_window: policy.current_window || null,
+        historical_bootstrap: policy.historical_bootstrap || null,
         active_urls: policy.active_urls,
       })}\n`,
       "utf8",

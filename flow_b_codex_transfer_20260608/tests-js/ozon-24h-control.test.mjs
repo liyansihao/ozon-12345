@@ -132,6 +132,8 @@ test("production config freezes the external 1688 Python runtime", async () => {
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   assert.doesNotThrow(() => validateConfig(config));
   assert.equal(config.operator_direct_publish.minimum_ready_candidates, 0);
+  assert.equal(config.flow_env.FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE, "1");
+  assert.equal(config.flow_env.FLOW_B_PRODUCER_INTERVAL_MS, "60000");
   assert.throws(
     () => validateConfig({
       ...config,
@@ -161,6 +163,26 @@ test("production config freezes the external 1688 Python runtime", async () => {
       },
     }),
     /publish\/refill tranche/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE: "2",
+      },
+    }),
+    /source producer must yield/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_PRODUCER_INTERVAL_MS: "59999",
+      },
+    }),
+    /source producer must yield/u,
   );
   assert.throws(
     () => validateConfig({

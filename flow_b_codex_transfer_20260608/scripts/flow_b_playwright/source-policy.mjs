@@ -78,6 +78,24 @@ function isStrictSellerPublication(row = {}) {
     && value.quality_gate_passed === true;
 }
 
+function isHistoricalStrictBootstrapPublication(row = {}) {
+  const value = row?.data && typeof row.data === "object"
+    ? { ...row, ...row.data }
+    : row;
+  const sku = normalizedSku(value);
+  const shippingMode = String(
+    value.shipping_mode || value.preflight_mode || value.mode || "",
+  ).toUpperCase();
+  return Boolean(sku)
+    && !EXCLUDED_SKUS.has(sku)
+    && String(value.status || "").toLowerCase() === "published"
+    && value.strict_confirmed === true
+    && String(value.online_status || "").toLowerCase() === "selling"
+    && Number(value.stock) > 0
+    && Number(value.profit_rate) > 30
+    && shippingMode === "FBS";
+}
+
 function submissionInWindow(row, startedMs, endedMs) {
   const value = row?.data && typeof row.data === "object"
     ? { ...row, ...row.data }
@@ -115,7 +133,9 @@ function nextPageUrl(root, pageCounters) {
   return sourcePage(root, page);
 }
 
-function frozenDecision(previousDecision, nowMs) {
+function frozenDecision(previousDecision, nowMs, {
+  historicalBootstrapHasStrict = false,
+} = {}) {
   if (!previousDecision || Number(previousDecision.policy_version) !== POLICY_VERSION) return null;
   const previousUrls = [...(previousDecision.active_urls || [])];
   if (previousDecision.derived_search_enabled !== false
@@ -125,10 +145,19 @@ function frozenDecision(previousDecision, nowMs) {
   }
   const frozenUntil = timestamp(previousDecision.frozen_until);
   if (!(frozenUntil !== null && nowMs < frozenUntil)) return null;
+  const previousExploit = Math.max(0, Number(previousDecision?.allocation?.exploit) || 0);
+  if (
+    historicalBootstrapHasStrict
+    && previousExploit === 0
+  ) {
+    return null;
+  }
   return {
     ...previousDecision,
     active_urls: previousUrls,
-    reason: "frozen-policy-reused",
+    reason: previousDecision.evidence_mode === "historical-strict-bootstrap"
+      ? "historical-strict-bootstrap-frozen-reused"
+      : "frozen-policy-reused",
     evaluated_at: new Date(nowMs).toISOString(),
   };
 }
@@ -136,6 +165,7 @@ function frozenDecision(previousDecision, nowMs) {
 export function buildStrictSellerSourcePolicy({
   detailAttempts = [],
   publications = [],
+  historicalBootstrapRows = [],
   explorationSellerUrls = [],
   previousDecision = null,
   windowStartedAt = null,
@@ -147,9 +177,6 @@ export function buildStrictSellerSourcePolicy({
 } = {}) {
   const nowMs = timestamp(now);
   if (nowMs === null) throw new TypeError("source policy now must be a valid timestamp");
-  const reused = frozenDecision(previousDecision, nowMs);
-  if (reused) return reused;
-
   const configuredWindowStart = timestamp(windowStartedAt);
   const startedMs = configuredWindowStart ?? Math.max(0, nowMs - DEFAULT_FREEZE_MS);
   const maximumSlots = Math.max(1, Math.floor(Number(slots) || 10));
@@ -183,28 +210,125 @@ export function buildStrictSellerSourcePolicy({
     if (root) evidenceFor(root).strict_skus.add(sku);
   }
 
-  const sellers = [...sellerEvidence.values()].map((evidence) => {
-    const attempts = evidence.attempt_skus.size;
-    const strict = [...evidence.strict_skus]
-      .filter((sku) => evidence.attempt_skus.has(sku))
-      .length;
-    return {
-      seller_url: evidence.seller_url,
-      unique_detail_attempts: attempts,
-      unique_strict: strict,
-      score: attempts > 0 ? strict / attempts : 0,
+  const historicalSellerEvidence = new Map();
+  const historicalEvidenceFor = (root) => {
+    const evidence = historicalSellerEvidence.get(root) || {
+      seller_url: root,
+      attempt_skus: new Set(),
+      strict_skus: new Set(),
     };
-  }).sort((left, right) => (
-    right.score - left.score
-      || right.unique_strict - left.unique_strict
-      || left.seller_url.localeCompare(right.seller_url)
-  ));
+    historicalSellerEvidence.set(root, evidence);
+    return evidence;
+  };
+  const historicalSellerBySku = new Map();
+  for (const row of historicalBootstrapRows || []) {
+    const sku = normalizedSku(row);
+    const root = rowSeller(row);
+    if (sku && root && !EXCLUDED_SKUS.has(sku)) historicalSellerBySku.set(sku, root);
+  }
+  for (const row of historicalBootstrapRows || []) {
+    const sku = normalizedSku(row);
+    const root = rowSeller(row);
+    if (
+      !sku
+      || !root
+      || EXCLUDED_SKUS.has(sku)
+      || historicalSellerBySku.get(sku) !== root
+    ) {
+      continue;
+    }
+    historicalEvidenceFor(root).attempt_skus.add(sku);
+    if (isHistoricalStrictBootstrapPublication(row)) {
+      historicalEvidenceFor(root).strict_skus.add(sku);
+    }
+  }
 
-  const verified = sellers.filter((row) => row.unique_strict > 0 && row.score > 0);
+  const sellersFor = (evidenceBySeller, evidenceScope) => (
+    [...evidenceBySeller.values()].map((evidence) => {
+      const attempts = evidence.attempt_skus.size;
+      const strict = [...evidence.strict_skus]
+        .filter((sku) => evidence.attempt_skus.has(sku))
+        .length;
+      return {
+        seller_url: evidence.seller_url,
+        unique_detail_attempts: attempts,
+        unique_strict: strict,
+        score: attempts > 0 ? strict / attempts : 0,
+        evidence_scope: evidenceScope,
+      };
+    }).sort((left, right) => (
+      right.score - left.score
+        || right.unique_strict - left.unique_strict
+        || left.seller_url.localeCompare(right.seller_url)
+    ))
+  );
+  const summarize = (sellers, evidenceBySeller) => ({
+    unique_detail_attempts: new Set(sellers.flatMap((row) => (
+      [...(evidenceBySeller.get(row.seller_url)?.attempt_skus || [])]
+    ))).size,
+    unique_strict: new Set(sellers.flatMap((row) => (
+      [...(evidenceBySeller.get(row.seller_url)?.strict_skus || [])]
+        .filter((sku) => evidenceBySeller.get(row.seller_url)?.attempt_skus.has(sku))
+    ))).size,
+    verified_sellers: sellers.filter((row) => row.unique_strict > 0 && row.score > 0).length,
+  });
+  const currentWindowSellers = sellersFor(sellerEvidence, "current-window");
+  const historicalBootstrapSellers = sellersFor(
+    historicalSellerEvidence,
+    "historical-strict-bootstrap",
+  );
+  const currentWindowVerified = currentWindowSellers.filter(
+    (row) => row.unique_strict > 0 && row.score > 0,
+  );
+  const historicalBootstrapVerified = historicalBootstrapSellers.filter(
+    (row) => row.unique_strict > 0 && row.score > 0,
+  );
+  const currentWindowSummary = summarize(currentWindowSellers, sellerEvidence);
+  const historicalBootstrapSummary = summarize(
+    historicalBootstrapSellers,
+    historicalSellerEvidence,
+  );
+  const reused = frozenDecision(previousDecision, nowMs, {
+    historicalBootstrapHasStrict: historicalBootstrapVerified.length > 0,
+  });
+  if (reused) return reused;
+
+  const useHistoricalBootstrap = (
+    currentWindowVerified.length === 0
+    && historicalBootstrapVerified.length > 0
+  );
+  const evidenceMode = useHistoricalBootstrap
+    ? "historical-strict-bootstrap"
+    : "current-window";
+  const effectiveEvidence = useHistoricalBootstrap
+    ? historicalSellerEvidence
+    : sellerEvidence;
+  const sellers = useHistoricalBootstrap
+    ? historicalBootstrapSellers
+    : currentWindowSellers;
+  const verified = useHistoricalBootstrap
+    ? historicalBootstrapVerified
+    : currentWindowVerified;
+  /*
+   * Historical rows rank sellers only. They are never copied into publications,
+   * current-window counters, or per-SKU quality evidence.
+   */
+  const historicalBootstrap = {
+    source: "history/source_yield_history.jsonl",
+    evidence_window: "all-persisted-history",
+    eligibility:
+      "status=published,strict_confirmed=true,online_status=selling,stock>0,"
+      + "profit_rate>30,shipping_mode=FBS",
+    ...historicalBootstrapSummary,
+  };
+
   const verifiedRoots = new Set(verified.map((row) => row.seller_url));
   const exploration = [...new Set([
     ...explorationSellerUrls,
     ...sellers.filter((row) => row.unique_strict === 0).map((row) => row.seller_url),
+    ...currentWindowSellers
+      .filter((row) => row.unique_strict === 0)
+      .map((row) => row.seller_url),
   ].map(sellerRootUrl).filter((root) => root && !verifiedRoots.has(root)))].sort();
 
   const intendedExploit = verified.length > 0
@@ -218,9 +342,11 @@ export function buildStrictSellerSourcePolicy({
     if (!selected) break;
     activeUrls.push(nextPageUrl(selected.seller_url, pageCounters));
   }
+  let remainingExploration = [...exploration];
   for (let index = 0; index < intendedExplore && exploration.length > 0; index += 1) {
-    const selectedIndex = Math.floor(safeRandom(rng) * exploration.length);
-    const selected = exploration[selectedIndex] || exploration[0];
+    if (remainingExploration.length === 0) remainingExploration = [...exploration];
+    const selectedIndex = Math.floor(safeRandom(rng) * remainingExploration.length);
+    const [selected] = remainingExploration.splice(selectedIndex, 1);
     activeUrls.push(nextPageUrl(selected, pageCounters));
   }
 
@@ -233,19 +359,24 @@ export function buildStrictSellerSourcePolicy({
       started_at: new Date(startedMs).toISOString(),
       ended_at: new Date(nowMs).toISOString(),
     },
-    reason: "strict-seller-policy-refreshed",
+    evidence_mode: evidenceMode,
+    reason: useHistoricalBootstrap
+      ? "historical-strict-bootstrap-refreshed"
+      : "strict-seller-policy-refreshed",
     derived_search_enabled: false,
     allocation: {
       exploit: activeUrls.slice(0, intendedExploit).length,
       explore: Math.max(0, activeUrls.length - intendedExploit),
     },
     unique_detail_attempts: new Set(sellers.flatMap((row) => (
-      [...(sellerEvidence.get(row.seller_url)?.attempt_skus || [])]
+      [...(effectiveEvidence.get(row.seller_url)?.attempt_skus || [])]
     ))).size,
     unique_strict: new Set(sellers.flatMap((row) => (
-      [...(sellerEvidence.get(row.seller_url)?.strict_skus || [])]
-        .filter((sku) => sellerEvidence.get(row.seller_url)?.attempt_skus.has(sku))
+      [...(effectiveEvidence.get(row.seller_url)?.strict_skus || [])]
+        .filter((sku) => effectiveEvidence.get(row.seller_url)?.attempt_skus.has(sku))
     ))).size,
+    current_window: currentWindowSummary,
+    historical_bootstrap: historicalBootstrap,
     sellers,
     active_urls: activeUrls,
   };

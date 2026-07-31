@@ -221,6 +221,12 @@ function validateConfig(config) {
     throw new Error("same-worker publish/refill tranche must be frozen at 8/8/24");
   }
   if (
+    Number(config?.flow_env?.FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE) !== 1
+    || Number(config?.flow_env?.FLOW_B_PRODUCER_INTERVAL_MS) < 60_000
+  ) {
+    throw new Error("source producer must yield after one batch for at least 60000ms");
+  }
+  if (
     Number(config?.rate_check_interval_seconds) < 60
     || Number(config?.rate_check_interval_seconds) > 300
   ) {

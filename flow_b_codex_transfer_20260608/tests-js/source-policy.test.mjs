@@ -44,6 +44,41 @@ function strict(sku, sellerUrl, overrides = {}) {
   };
 }
 
+function historicalYield(sku, sellerUrl, overrides = {}) {
+  return {
+    at: "2026-07-28T09:00:00.000Z",
+    sku,
+    source_url: sellerUrl,
+    seller_url: sellerUrl,
+    status: "skipped",
+    reason: "historical-detail-attempt",
+    ...overrides,
+  };
+}
+
+function historicalStrict(sku, sellerUrl, overrides = {}) {
+  return historicalYield(sku, sellerUrl, {
+    status: "published",
+    reason: null,
+    strict_confirmed: true,
+    online_status: "selling",
+    stock: 1,
+    profit_rate: 31,
+    shipping_mode: "FBS",
+    ...overrides,
+  });
+}
+
+async function portfolioFixture(t) {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "strict-seller-policy-"));
+  t.after(() => fs.rm(stateRoot, { recursive: true, force: true }));
+  const runDir = path.join(stateRoot, "runs", "window");
+  const seedFile = path.join(stateRoot, "seed.txt");
+  await fs.mkdir(path.join(stateRoot, "history"), { recursive: true });
+  await fs.mkdir(runDir, { recursive: true });
+  return { stateRoot, runDir, seedFile };
+}
+
 test("seller root normalization rejects search, highlight, and product URLs", () => {
   assert.equal(sellerRootUrl(`${sellerA}?page=12`), sellerA);
   assert.equal(sellerRootUrl("https://www.ozon.ru/search/?text=toy"), null);
@@ -161,6 +196,23 @@ test("ten source slots are nine verified seller exploitation and one new seller 
   assert.equal(policy.active_urls.some((url) => url.includes("/search/")), false);
 });
 
+test("exploration sellers are sampled without replacement while candidates remain", () => {
+  const sellerOther = "https://www.ozon.ru/seller/other-new-seller/";
+  const policy = buildStrictSellerSourcePolicy({
+    detailAttempts: [detail("a", sellerA)],
+    publications: [strict("a", sellerA)],
+    explorationSellerUrls: [sellerNew, sellerOther],
+    windowStartedAt: WINDOW_START,
+    now: NOW,
+    slots: 20,
+    rng: () => 0,
+  });
+  const explorationRoots = policy.active_urls.slice(-2).map(sellerRootUrl);
+
+  assert.deepEqual(policy.allocation, { exploit: 18, explore: 2 });
+  assert.equal(new Set(explorationRoots).size, 2);
+});
+
 test("source decision is deterministic with an injected random sequence", () => {
   const input = {
     detailAttempts: [detail("a", sellerA), detail("b", sellerB)],
@@ -252,13 +304,172 @@ test("without a verified seller every slot explores seller URLs only", () => {
   assert.ok(policy.active_urls.every((url) => sellerRootUrl(url)));
 });
 
+test("portfolio uses verified historical strict yield as a zero-current 90/10 bootstrap", async (t) => {
+  const { stateRoot, runDir, seedFile } = await portfolioFixture(t);
+  await fs.writeFile(seedFile, `${sellerNew}\n`);
+  await fs.writeFile(path.join(stateRoot, "history", "source_yield_history.jsonl"), [
+    historicalStrict("history-strict", sellerA),
+    historicalStrict("history-strict", sellerA),
+    historicalYield("history-attempt-only", sellerA),
+    historicalYield("exploration-attempt", sellerNew),
+  ].map(JSON.stringify).join("\n"));
+  await fs.writeFile(
+    path.join(runDir, "stage_timings.jsonl"),
+    `${JSON.stringify(detail("current-attempt", sellerNew))}\n`,
+  );
+
+  const portfolio = await refreshSourcePortfolio({
+    stateRoot,
+    runDir,
+    seedFile,
+    minimumActiveSources: 10,
+    now: new Date(NOW),
+    rng: () => 0,
+  });
+  const historicalSeller = portfolio.policy.sellers.find(
+    (row) => row.seller_url === sellerA,
+  );
+
+  assert.equal(portfolio.policy.reason, "historical-strict-bootstrap-refreshed");
+  assert.equal(portfolio.policy.evidence_mode, "historical-strict-bootstrap");
+  assert.deepEqual(portfolio.policy.allocation, { exploit: 9, explore: 1 });
+  assert.equal(portfolio.policy.current_window.unique_strict, 0);
+  assert.equal(portfolio.policy.historical_bootstrap.unique_strict, 1);
+  assert.equal(historicalSeller.unique_detail_attempts, 2);
+  assert.equal(historicalSeller.unique_strict, 1);
+  assert.equal(historicalSeller.score, 0.5);
+  assert.equal(portfolio.counts.current_window_unique_strict, 0);
+  assert.equal(portfolio.counts.historical_bootstrap_unique_strict, 1);
+  assert.equal(
+    portfolio.active_urls.slice(0, 9).every((url) => sellerRootUrl(url) === sellerA),
+    true,
+  );
+  assert.equal(sellerRootUrl(portfolio.active_urls.at(-1)), sellerNew);
+
+  await fs.writeFile(
+    path.join(runDir, "stage_timings.jsonl"),
+    `${JSON.stringify(detail(
+      "new-current-strict",
+      sellerB,
+      "2026-07-29T12:30:00.000Z",
+    ))}\n`,
+  );
+  await fs.writeFile(
+    path.join(runDir, "published.jsonl"),
+    `${JSON.stringify(strict("new-current-strict", sellerB, {
+      submitted_at: "2026-07-29T12:31:00.000Z",
+      published_at: "2026-07-29T12:32:00.000Z",
+    }))}\n`,
+  );
+  const frozen = await refreshSourcePortfolio({
+    stateRoot,
+    runDir,
+    seedFile,
+    minimumActiveSources: 10,
+    now: new Date("2026-07-29T13:00:00.000Z"),
+    rng: () => 0.99,
+  });
+  assert.equal(frozen.policy.reason, "historical-strict-bootstrap-frozen-reused");
+  assert.deepEqual(frozen.active_urls, portfolio.active_urls);
+});
+
+test("historical published rows without explicit strict confirmation never bootstrap exploitation", async (t) => {
+  const { stateRoot, runDir, seedFile } = await portfolioFixture(t);
+  await fs.writeFile(seedFile, `${sellerNew}\n`);
+  await fs.writeFile(
+    path.join(stateRoot, "history", "source_yield_history.jsonl"),
+    `${JSON.stringify(historicalStrict("legacy-published", sellerA, {
+      strict_confirmed: undefined,
+    }))}\n`,
+  );
+
+  const portfolio = await refreshSourcePortfolio({
+    stateRoot,
+    runDir,
+    seedFile,
+    minimumActiveSources: 10,
+    now: new Date(NOW),
+    rng: () => 0,
+  });
+
+  assert.equal(portfolio.policy.evidence_mode, "current-window");
+  assert.equal(portfolio.policy.historical_bootstrap.unique_strict, 0);
+  assert.deepEqual(portfolio.policy.allocation, { exploit: 0, explore: 10 });
+});
+
+test("current-window strict evidence takes sole precedence over historical bootstrap sellers", async (t) => {
+  const { stateRoot, runDir, seedFile } = await portfolioFixture(t);
+  await fs.writeFile(seedFile, `${sellerNew}\n`);
+  await fs.writeFile(
+    path.join(stateRoot, "history", "source_yield_history.jsonl"),
+    `${JSON.stringify(historicalStrict("history-strict", sellerA))}\n`,
+  );
+  await fs.writeFile(
+    path.join(runDir, "stage_timings.jsonl"),
+    `${JSON.stringify(detail("current-strict", sellerB))}\n`,
+  );
+  await fs.writeFile(
+    path.join(runDir, "published.jsonl"),
+    `${JSON.stringify(strict("current-strict", sellerB))}\n`,
+  );
+
+  const portfolio = await refreshSourcePortfolio({
+    stateRoot,
+    runDir,
+    seedFile,
+    minimumActiveSources: 10,
+    now: new Date(NOW),
+    rng: () => 0,
+  });
+
+  assert.equal(portfolio.policy.reason, "strict-seller-policy-refreshed");
+  assert.equal(portfolio.policy.evidence_mode, "current-window");
+  assert.equal(portfolio.policy.current_window.unique_strict, 1);
+  assert.equal(portfolio.policy.historical_bootstrap.unique_strict, 1);
+  assert.equal(portfolio.policy.sellers.some((row) => row.seller_url === sellerA), false);
+  assert.equal(
+    portfolio.active_urls.slice(0, 9).every((url) => sellerRootUrl(url) === sellerB),
+    true,
+  );
+});
+
+test("verified bootstrap evidence invalidates a frozen all-exploration decision", async (t) => {
+  const { stateRoot, runDir, seedFile } = await portfolioFixture(t);
+  await fs.writeFile(seedFile, `${sellerNew}\n`);
+  await fs.writeFile(
+    path.join(stateRoot, "history", "source_yield_history.jsonl"),
+    `${JSON.stringify(historicalStrict("history-strict", sellerA))}\n`,
+  );
+  await fs.mkdir(path.join(stateRoot, "sources"), { recursive: true });
+  await fs.writeFile(path.join(stateRoot, "sources", "source_portfolio.json"), JSON.stringify({
+    policy: {
+      policy_version: 1,
+      generated_at: NOW,
+      frozen_until: "2026-07-29T14:00:00.000Z",
+      derived_search_enabled: false,
+      allocation: { exploit: 0, explore: 10 },
+      active_urls: Array.from({ length: 10 }, (_, index) => (
+        `${sellerNew}?page=${index + 1}`
+      )),
+    },
+  }));
+
+  const portfolio = await refreshSourcePortfolio({
+    stateRoot,
+    runDir,
+    seedFile,
+    minimumActiveSources: 10,
+    now: new Date("2026-07-29T12:30:00.000Z"),
+    rng: () => 0,
+  });
+
+  assert.equal(portfolio.policy.reason, "historical-strict-bootstrap-refreshed");
+  assert.deepEqual(portfolio.policy.allocation, { exploit: 9, explore: 1 });
+  assert.equal(portfolio.policy.historical_bootstrap.unique_strict, 1);
+});
+
 test("portfolio refresh persists the frozen seller-only policy and never emits search", async (t) => {
-  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "strict-seller-policy-"));
-  t.after(() => fs.rm(stateRoot, { recursive: true, force: true }));
-  const runDir = path.join(stateRoot, "runs", "window");
-  const seedFile = path.join(stateRoot, "seed.txt");
-  await fs.mkdir(path.join(stateRoot, "history"), { recursive: true });
-  await fs.mkdir(runDir, { recursive: true });
+  const { stateRoot, runDir, seedFile } = await portfolioFixture(t);
   await fs.writeFile(seedFile, [
     sellerA,
     sellerNew,
