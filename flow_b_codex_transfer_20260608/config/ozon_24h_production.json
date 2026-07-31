@@ -2,7 +2,7 @@
   "schema_version": 2,
   "state_schema_version": 3,
   "frozen": true,
-  "system_name": "ozon-five-store-24h-production",
+  "system_name": "ozon-ten-store-24h-production",
   "runtime_mode": "direct",
   "publish_target": 500,
   "minimum_profit_rate_exclusive": 30,
@@ -35,6 +35,12 @@
   },
   "stores": [
     {
+      "id": 104965,
+      "name": "丽丽1号",
+      "warehouse_id": 1020005023597900,
+      "warehouse_evidence": "ERP live verified 2026-07-31: 邮政陆运经济仓"
+    },
+    {
       "id": 106637,
       "name": "丽丽二号",
       "warehouse_id": 1020005023256510,
@@ -59,10 +65,34 @@
       "warehouse_evidence": "ERP-discovered repeatedly in run 20260727_120626_ozon_stable_30h"
     },
     {
-      "id": 104965,
-      "name": "丽丽1号",
-      "warehouse_id": 1020005023597900,
-      "warehouse_evidence": "ERP live preflight 2026-07-27: unique 邮政陆运经济仓 among named ERP warehouses"
+      "id": 113151,
+      "name": "丽丽六号",
+      "warehouse_id": 1020005024854760,
+      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+    },
+    {
+      "id": 113153,
+      "name": "丽丽七号",
+      "warehouse_id": 1020005024855310,
+      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+    },
+    {
+      "id": 113154,
+      "name": "丽丽八号",
+      "warehouse_id": 1020005024855600,
+      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+    },
+    {
+      "id": 113155,
+      "name": "丽丽九号",
+      "warehouse_id": 1020005024855790,
+      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+    },
+    {
+      "id": 113156,
+      "name": "丽丽十号",
+      "warehouse_id": 1020005024856090,
+      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
     }
   ],
   "source_pool": {
@@ -76,6 +106,12 @@
     "FLOW_B_MAOZI_CONTINUE_LOGIN": "1",
     "FLOW_B_PUBLISHED_CSV": "${STATE_ROOT}/dedupe/published_links.csv",
     "FLOW_B_STORE_TARGETS": [
+      {
+        "id": 104965,
+        "needle": "丽丽1号",
+        "warehouseId": 1020005023597900,
+        "requireWarehouse": true
+      },
       {
         "id": 106637,
         "needle": "丽丽二号",
@@ -101,9 +137,33 @@
         "requireWarehouse": true
       },
       {
-        "id": 104965,
-        "needle": "丽丽1号",
-        "warehouseId": 1020005023597900,
+        "id": 113151,
+        "needle": "丽丽六号",
+        "warehouseId": 1020005024854760,
+        "requireWarehouse": true
+      },
+      {
+        "id": 113153,
+        "needle": "丽丽七号",
+        "warehouseId": 1020005024855310,
+        "requireWarehouse": true
+      },
+      {
+        "id": 113154,
+        "needle": "丽丽八号",
+        "warehouseId": 1020005024855600,
+        "requireWarehouse": true
+      },
+      {
+        "id": 113155,
+        "needle": "丽丽九号",
+        "warehouseId": 1020005024855790,
+        "requireWarehouse": true
+      },
+      {
+        "id": 113156,
+        "needle": "丽丽十号",
+        "warehouseId": 1020005024856090,
         "requireWarehouse": true
       }
     ],

@@ -34,11 +34,16 @@ import {
 const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
 const DEFAULT_STORE_TARGETS = Object.freeze([
+  { id: 104965, needle: "丽丽1号", warehouseId: 1020005023597900, requireWarehouse: true },
   { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
   { id: 106640, needle: "丽丽三号", warehouseId: 1020005023616740, requireWarehouse: true },
   { id: 106644, needle: "丽丽四号", warehouseId: 1020005023616380, requireWarehouse: true },
   { id: 106646, needle: "丽丽五号", warehouseId: 1020005023616970, requireWarehouse: true },
-  { id: 104965, needle: "丽丽1号", warehouseId: 1020005023597900, requireWarehouse: true },
+  { id: 113151, needle: "丽丽六号", warehouseId: 1020005024854760, requireWarehouse: true },
+  { id: 113153, needle: "丽丽七号", warehouseId: 1020005024855310, requireWarehouse: true },
+  { id: 113154, needle: "丽丽八号", warehouseId: 1020005024855600, requireWarehouse: true },
+  { id: 113155, needle: "丽丽九号", warehouseId: 1020005024855790, requireWarehouse: true },
+  { id: 113156, needle: "丽丽十号", warehouseId: 1020005024856090, requireWarehouse: true },
 ]);
 
 function required(value, label) {
@@ -56,6 +61,11 @@ function runtimeDefaults(env) {
   if (!storeNeedle) throw new Error("FLOW_B_STORE_NEEDLE is required");
   if (!watermarkNeedle) throw new Error("FLOW_B_WATERMARK_NEEDLE is required");
   return { threshold, target, storeNeedle, watermarkNeedle };
+}
+
+export function allDirectStoresRejected(publish = {}) {
+  return ["daily-product-limit", "store-unavailable"].includes(String(publish?.halt_reason || ""))
+    && publish?.stores_exhausted?.all === true;
 }
 
 export function parseStoreTargets(env = process.env) {
@@ -770,7 +780,16 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         target_metric: "erp_accepted_unique_skus",
         minimum_same_item_matches: 1,
       });
-      const directRunControl = { cancelled: false, fatalError: null };
+      const directRunControl = {
+        cancelled: false,
+        fatalError: null,
+        rejectedStoreIds: new Set(),
+        rejectionReasons: new Map(),
+        storeUsageDay: null,
+        activeStoreId: null,
+        storeSwitchReason: null,
+        storeSwitchRequestedAt: null,
+      };
       const shared = {
         targetConfigCache: {},
         persistent: true,
@@ -886,10 +905,15 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             { attemptLimit: publishAttemptLimit(directEnv) },
           );
           if (Number(publish?.accepted || 0) >= options.target) break;
-          if (["daily-product-limit", "store-unavailable"].includes(String(publish?.halt_reason || ""))) {
+          if (allDirectStoresRejected(publish)) {
             const error = new Error(`all configured stores rejected direct publishing: ${publish.halt_reason}`);
             error.code = "FLOW_B_ALL_STORES_REJECTED";
             throw error;
+          }
+          if (["daily-product-limit", "store-unavailable"].includes(String(publish?.halt_reason || ""))) {
+            idleStreak += 1;
+            await runtimeWake.wait(runtimeIdleDelay(idleStreak, emptyBackoffIntervals));
+            continue;
           }
           if (Number(publish?.direct_target_slots_used || 0) >= options.target) {
             idleStreak += 1;

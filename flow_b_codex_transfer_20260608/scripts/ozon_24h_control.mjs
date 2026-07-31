@@ -40,6 +40,18 @@ const FAILED_WINDOW_STOP_REASONS = new Set([
   "accepted-submission-cannot-reach-strict",
   "live-acceptance-evidence-failed",
 ]);
+const DIRECT_PRODUCTION_STORE_IDS = Object.freeze([
+  104965,
+  106637,
+  106640,
+  106644,
+  106646,
+  113151,
+  113153,
+  113154,
+  113155,
+  113156,
+]);
 
 export function shouldResumeCurrentRun(status, current) {
   if (!current?.run_id || !current?.run_dir || !current?.urls_file) return false;
@@ -215,11 +227,36 @@ function validateConfig(config) {
         throw new Error(`balanced speed contract requires ${name}=${expected}`);
       }
     }
-    const storeIds = (config?.stores || []).map((row) => Number(row?.id));
-    if (storeIds.join(",") !== "106637,106640,106644,106646,104965") {
-      throw new Error("production config must contain the five stores in rotation order");
+    const stores = Array.isArray(config?.stores) ? config.stores : [];
+    const storeTargets = Array.isArray(config?.flow_env?.FLOW_B_STORE_TARGETS)
+      ? config.flow_env.FLOW_B_STORE_TARGETS
+      : [];
+    const storeIds = stores.map((row) => Number(row?.id));
+    const targetIds = storeTargets.map((row) => Number(row?.id));
+    if (storeIds.join(",") !== DIRECT_PRODUCTION_STORE_IDS.join(",")) {
+      throw new Error("direct production config must contain the ten verified stores in rotation order");
     }
-    for (const store of config.stores) {
+    if (targetIds.join(",") !== storeIds.join(",")) {
+      throw new Error("direct store targets must match the ten-store rotation order");
+    }
+    const warehouseIds = stores.map((store) => Number(store?.warehouse_id));
+    const targetWarehouseIds = storeTargets.map((store) => Number(store?.warehouseId));
+    if (warehouseIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new Error("all ten stores require an ERP-verified warehouse mapping");
+    }
+    if (new Set(warehouseIds).size !== DIRECT_PRODUCTION_STORE_IDS.length) {
+      throw new Error("ten-store warehouse mappings must be unique");
+    }
+    if (targetWarehouseIds.join(",") !== warehouseIds.join(",")) {
+      throw new Error("direct store target warehouses must match the verified store mappings");
+    }
+    if (!storeTargets.every((store) => store?.requireWarehouse === true)) {
+      throw new Error("every direct store target must require its verified warehouse");
+    }
+    if (!storeIds.includes(Number(config?.starting_store_id))) {
+      throw new Error("direct starting store must belong to the ten-store rotation");
+    }
+    for (const store of stores) {
       if (!Number.isSafeInteger(Number(store.warehouse_id))) {
         throw new Error(`store ${store.id} is missing an ERP-verified warehouse mapping`);
       }

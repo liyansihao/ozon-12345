@@ -5505,11 +5505,446 @@ test("direct store-limit cancellation leaves queued ERP work durably retryable",
   }
 });
 
+test("a publish response after midnight keeps the store rejection on the request day", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-midnight-response-"));
+  try {
+    let currentTime = new Date("2026-07-31T15:59:59.000Z");
+    const directRunControl = {
+      cancelled: false,
+      fatalError: null,
+      rejectedStoreIds: new Set(),
+      rejectionReasons: new Map(),
+    };
+    const state = fakeState();
+    const client = clientFor([{
+      sku: "midnight-store-limit",
+      title: "Безопасный товар на границе суток",
+      cover_image: "https://img.example/midnight-store-limit.jpg",
+      sell_price: 100,
+    }], {
+      resolvePublishTarget: async ({ storeId }) => ({
+        store: { id: Number(storeId), name: `store-${storeId}` },
+        watermark: { id: 8, name: "lysh" },
+      }),
+      publish: async () => {
+        currentTime = new Date("2026-07-31T16:00:01.000Z");
+        directRunControl.storeUsageDay = "2026-08-01";
+        directRunControl.rejectedStoreIds.clear();
+        directRunControl.rejectionReasons.clear();
+        return {
+          ok: false,
+          response: { message: "вы исчерпали суточный лимит магазина" },
+        };
+      },
+    });
+    await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      now: () => new Date(currentTime),
+      directMode: true,
+      directRunControl,
+      concurrency: 1,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    const rejected = state.entryOf("midnight-store-limit");
+    assert.equal(rejected.status, "failed");
+    assert.equal(rejected.data.store_rejection_day, "2026-07-31");
+    assert.equal(directRunControl.rejectedStoreIds.has(7), false);
+    const rejectionRows = (await fs.readFile(path.join(runDir, "store_rejections.jsonl"), "utf8"))
+      .trim()
+      .split(/\n/u)
+      .map((line) => JSON.parse(line));
+    assert.equal(rejectionRows[0].quota_day, "2026-07-31");
+
+    const restartResult = await createPublishRunner({
+      client: clientFor([], {
+        resolvePublishTarget: async ({ storeId }) => ({
+          store: { id: Number(storeId), name: `store-${storeId}` },
+          watermark: { id: 8, name: "lysh" },
+        }),
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      now: () => new Date("2026-07-31T16:00:02.000Z"),
+      directMode: true,
+      reconciliationOnly: true,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+    assert.equal(restartResult.active_store_id, 7);
+    assert.deepEqual(restartResult.stores_exhausted, {
+      rejected_store_ids: [],
+      all: false,
+    });
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("background daily-limit evidence freezes the foreground ERP queue and rotates stores", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-shared-store-freeze-"));
+  let releaseFirstPublish;
+  let foregroundRun;
+  try {
+    const directRunControl = {
+      cancelled: false,
+      fatalError: null,
+      rejectedStoreIds: new Set(),
+      rejectionReasons: new Map(),
+    };
+    const foregroundState = fakeState();
+    let firstPublishStarted;
+    const firstPublishReady = new Promise((resolve) => { firstPublishStarted = resolve; });
+    const firstPublishRelease = new Promise((resolve) => { releaseFirstPublish = resolve; });
+    const foregroundPublishStoreIds = [];
+    const foreground = createPublishRunner({
+      client: clientFor([
+        {
+          sku: "shared-freeze-inflight",
+          title: "Первый безопасный товар общего лимита",
+          cover_image: "https://img.example/shared-freeze-inflight.jpg",
+          sell_price: 100,
+        },
+        {
+          sku: "shared-freeze-queued",
+          title: "Второй безопасный товар общего лимита",
+          cover_image: "https://img.example/shared-freeze-queued.jpg",
+          sell_price: 100,
+        },
+      ], {
+        resolvePublishTarget: async ({ storeId }) => ({
+          store: { id: Number(storeId), name: `store-${storeId}` },
+          watermark: { id: 8, name: "lysh" },
+        }),
+        publish: async (payload) => {
+          foregroundPublishStoreIds.push(Number(payload.shop_ids[0]));
+          firstPublishStarted();
+          await firstPublishRelease;
+          return { ok: true, response: { code: 1 } };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state: foregroundState,
+      target: 10,
+      runDir,
+      directMode: true,
+      directRunControl,
+      concurrency: 2,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    });
+    foregroundRun = foreground.run();
+    await firstPublishReady;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (foregroundState.entryOf("shared-freeze-queued")?.data?.api_call_started_at) break;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    assert.ok(foregroundState.entryOf("shared-freeze-queued")?.data?.api_call_started_at);
+
+    const backgroundState = fakeState({
+      "shared-limit-evidence": {
+        status: "processing",
+        data: {
+          sku: "shared-limit-evidence",
+          store_id: 7,
+          submitted: true,
+          reconcile_only: true,
+          offer_id: "mz-shared-limit-evidence",
+          profit_rate: 40,
+          cost_verified: true,
+          cost: { ...RELIABLE_COST_RESULT },
+          cost_source: RELIABLE_COST_RESULT.source,
+          cost_evidence: {
+            contract: "1688-same-item-v1",
+            source: RELIABLE_COST_RESULT.source,
+            reliable_source: true,
+            same_item_match: true,
+            match_evidence_key: RELIABLE_COST_RESULT.match_evidence_key,
+            filtered_price_count: RELIABLE_COST_RESULT.prices.length,
+            match_evidence_contract: RELIABLE_COST_RESULT.match_evidence_contract,
+            returned_evidence_verified: true,
+            matched_offer_count: RELIABLE_COST_RESULT.matched_offer_count,
+          },
+        },
+      },
+    });
+    const backgroundResult = await createPublishRunner({
+      client: clientFor([], {
+        resolvePublishTarget: async ({ storeId }) => ({
+          store: { id: Number(storeId), name: `store-${storeId}` },
+          watermark: { id: 8, name: "lysh" },
+        }),
+        findImportLog: async ({ sku, offerId }) => ({
+          sku,
+          offer_id: offerId,
+          import_status: "all_failed",
+          skus: [{ error_msg: "вы исчерпали суточный лимит магазина" }],
+        }),
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state: backgroundState,
+      target: 10,
+      runDir,
+      directMode: true,
+      directRunControl,
+      reconciliationOnly: true,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(directRunControl.cancelled, false);
+    assert.equal(directRunControl.rejectedStoreIds.has(7), true, JSON.stringify({
+      backgroundResult,
+      backgroundEntries: backgroundState.entries(),
+    }));
+    releaseFirstPublish();
+    const result = await foregroundRun;
+
+    assert.deepEqual(foregroundPublishStoreIds, [7]);
+    assert.equal(result.active_store_id, 9);
+    assert.equal(foregroundState.entryOf("shared-freeze-inflight").data.submitted, true);
+    const queued = foregroundState.entryOf("shared-freeze-queued");
+    assert.equal(queued.status, "failed");
+    assert.equal(queued.data.reason, "submission-not-sent-deferred");
+    assert.equal(queued.data.original_reason, "daily-product-limit");
+    assert.equal(queued.data.api_call_started_at, null);
+  } finally {
+    releaseFirstPublish?.();
+    await foregroundRun?.catch(() => {});
+    await new Promise((resolve) => setImmediate(resolve));
+    await fs.rm(runDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 10 });
+  }
+});
+
+test("direct mode restores today's rejected store after a process restart", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-rejected-store-restore-"));
+  try {
+    const state = fakeState({
+      "restored-store-limit": {
+        status: "failed",
+        data: {
+          sku: "restored-store-limit",
+          store_id: 7,
+          reason: "daily-product-limit",
+          submitted: true,
+          reconciled_at: "2026-07-31T10:00:00.000Z",
+        },
+      },
+    });
+    const publishStoreIds = [];
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "after-direct-restart",
+        title: "Безопасный товар после перезапуска",
+        cover_image: "https://img.example/after-direct-restart.jpg",
+        sell_price: 100,
+      }], {
+        resolvePublishTarget: async ({ storeId }) => ({
+          store: { id: Number(storeId), name: `store-${storeId}` },
+          watermark: { id: 8, name: "lysh" },
+        }),
+        publish: async (payload) => {
+          publishStoreIds.push(Number(payload.shop_ids[0]));
+          return { ok: true, response: { code: 1 } };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 10,
+      runDir,
+      now: () => new Date("2026-07-31T11:00:00.000Z"),
+      directMode: true,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.deepEqual(publishStoreIds, [9]);
+    assert.equal(result.active_store_id, 9);
+    assert.deepEqual(result.stores_exhausted, {
+      rejected_store_ids: [7],
+      all: false,
+    });
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode clears a rejected-store circuit on the next local day", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-rejected-store-reset-"));
+  try {
+    const state = fakeState({
+      "yesterday-store-limit": {
+        status: "failed",
+        data: {
+          sku: "yesterday-store-limit",
+          store_id: 7,
+          reason: "daily-product-limit",
+          submitted: true,
+          reconciled_at: "2026-07-31T10:00:00.000Z",
+        },
+      },
+    });
+    const publishStoreIds = [];
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "after-local-day-reset",
+        title: "Безопасный товар после сброса лимита",
+        cover_image: "https://img.example/after-local-day-reset.jpg",
+        sell_price: 100,
+      }], {
+        resolvePublishTarget: async ({ storeId }) => ({
+          store: { id: Number(storeId), name: `store-${storeId}` },
+          watermark: { id: 8, name: "lysh" },
+        }),
+        publish: async (payload) => {
+          publishStoreIds.push(Number(payload.shop_ids[0]));
+          return { ok: true, response: { code: 1 } };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 10,
+      runDir,
+      now: () => new Date("2026-08-01T11:00:00.000Z"),
+      directMode: true,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.deepEqual(publishStoreIds, [7]);
+    assert.equal(result.active_store_id, 7);
+    assert.deepEqual(result.stores_exhausted, {
+      rejected_store_ids: [],
+      all: false,
+    });
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("late prior-day reconciliation does not freeze the new day or overwrite the foreground store", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-prior-day-limit-"));
+  try {
+    const directRunControl = {
+      cancelled: false,
+      fatalError: null,
+      rejectedStoreIds: new Set(),
+      rejectionReasons: new Map(),
+    };
+    const state = fakeState({
+      "prior-day-limit": {
+        status: "processing",
+        data: {
+          sku: "prior-day-limit",
+          store_id: 7,
+          submitted: true,
+          reconcile_only: true,
+          offer_id: "mz-prior-day-limit",
+          submitted_at: "2026-07-31T15:59:50.000Z",
+          api_call_completed_at: "2026-07-31T15:59:50.000Z",
+          profit_rate: 40,
+          cost_verified: true,
+          cost: { ...RELIABLE_COST_RESULT },
+          cost_source: RELIABLE_COST_RESULT.source,
+          cost_evidence: {
+            contract: "1688-same-item-v1",
+            source: RELIABLE_COST_RESULT.source,
+            reliable_source: true,
+            same_item_match: true,
+            match_evidence_key: RELIABLE_COST_RESULT.match_evidence_key,
+            filtered_price_count: RELIABLE_COST_RESULT.prices.length,
+            match_evidence_contract: RELIABLE_COST_RESULT.match_evidence_contract,
+            returned_evidence_verified: true,
+            matched_offer_count: RELIABLE_COST_RESULT.matched_offer_count,
+          },
+        },
+      },
+    });
+    const result = await createPublishRunner({
+      client: clientFor([], {
+        resolvePublishTarget: async ({ storeId }) => ({
+          store: { id: Number(storeId), name: `store-${storeId}` },
+          watermark: { id: 8, name: "lysh" },
+        }),
+        findImportLog: async ({ sku, offerId }) => ({
+          sku,
+          offer_id: offerId,
+          import_status: "all_failed",
+          skus: [{ error_msg: "вы исчерпали суточный лимит магазина" }],
+        }),
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 10,
+      runDir,
+      now: () => new Date("2026-07-31T16:00:10.000Z"),
+      directMode: true,
+      directRunControl,
+      reconciliationOnly: true,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(directRunControl.rejectedStoreIds.has(7), false);
+    assert.equal(result.active_store_id, 7);
+    assert.equal(result.halt_reason, null);
+    assert.equal(state.entryOf("prior-day-limit").status, "failed");
+    assert.equal(state.entryOf("prior-day-limit").data.store_rejection_day, "2026-07-31");
+    await assert.rejects(fs.access(path.join(runDir, "current_store.json")));
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("direct mode stops after every configured store returns a real publish rejection", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-all-stores-rejected-"));
   try {
     const publishStoreIds = [];
-    const items = Array.from({ length: 4 }, (_, index) => ({
+    const storeTargets = Array.from({ length: 10 }, (_, index) => ({
+      id: 101 + index,
+      needle: `store-${101 + index}`,
+      requireWarehouse: false,
+    }));
+    const items = Array.from({ length: 20 }, (_, index) => ({
       sku: `all-stores-rejected-${index}`,
       title: `Безопасный товар для отказа магазина ${index}`,
       cover_image: `https://img.example/all-stores-rejected-${index}.jpg`,
@@ -5535,18 +5970,15 @@ test("direct mode stops after every configured store returns a real publish reje
       runDir,
       directMode: true,
       concurrency: 1,
-      storeTargets: [
-        { id: 7, needle: "store-7", requireWarehouse: false },
-        { id: 9, needle: "store-9", requireWarehouse: false },
-      ],
+      storeTargets,
       minimumSameItemMatches: 1,
       requireReliableCostContract: true,
     }).run();
 
-    assert.deepEqual(publishStoreIds, [7, 9]);
+    assert.deepEqual(publishStoreIds, storeTargets.map((row) => row.id), JSON.stringify(result));
     assert.equal(result.halt_reason, "daily-product-limit");
     assert.deepEqual(result.stores_exhausted, {
-      rejected_store_ids: [7, 9],
+      rejected_store_ids: storeTargets.map((row) => row.id),
       all: true,
     });
   } finally {

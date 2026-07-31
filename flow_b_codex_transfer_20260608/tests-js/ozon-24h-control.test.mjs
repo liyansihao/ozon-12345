@@ -173,6 +173,18 @@ test("production config freezes the direct 500-acceptance runtime and external 1
   assert.equal(config.flow_env.FLOW_B_FAVORITE_CACHE_TTL_MS, "30000");
   assert.equal(config.candidate_buffer, undefined);
   assert.equal(config.acceptance, undefined);
+  assert.deepEqual(config.stores.map((row) => Number(row.id)), [
+    104965, 106637, 106640, 106644, 106646, 113151, 113153, 113154, 113155, 113156,
+  ]);
+  assert.deepEqual(
+    config.flow_env.FLOW_B_STORE_TARGETS.map((row) => Number(row.id)),
+    config.stores.map((row) => Number(row.id)),
+  );
+  assert.equal(new Set(config.stores.map((row) => Number(row.warehouse_id))).size, 10);
+  assert.deepEqual(
+    config.flow_env.FLOW_B_STORE_TARGETS.map((row) => Number(row.warehouseId)),
+    config.stores.map((row) => Number(row.warehouse_id)),
+  );
   assert.throws(
     () => validateConfig({
       ...config,
@@ -209,6 +221,35 @@ test("production config freezes the direct 500-acceptance runtime and external 1
       publish_target: 499,
     }),
     /target must equal 500/u,
+  );
+  assert.throws(
+    () => validateConfig({ ...config, stores: config.stores.slice(0, 9) }),
+    /ten verified stores/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      stores: config.stores.map((row, index) => index === 9
+        ? { ...row, warehouse_id: config.stores[8].warehouse_id }
+        : row),
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_STORE_TARGETS: config.flow_env.FLOW_B_STORE_TARGETS.map((row, index) => index === 9
+          ? { ...row, warehouseId: config.stores[8].warehouse_id }
+          : row),
+      },
+    }),
+    /warehouse mappings must be unique/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_STORE_TARGETS: [...config.flow_env.FLOW_B_STORE_TARGETS].reverse(),
+      },
+    }),
+    /store targets must match/u,
   );
 });
 

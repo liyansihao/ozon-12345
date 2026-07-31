@@ -31,6 +31,7 @@ const ECONOMY_SENTINEL = Object.freeze({
 const observedPublishFeedbackCompositeCache = new Map();
 const MIN_URGENT_ONLINE_SYNC_INTERVAL_MS = 180_000;
 const MAX_ONLINE_SYNC_SERVER_BACKOFF_MS = 24 * 60 * 60 * 1000;
+let currentStoreWriteSequence = 0;
 const FATAL_RUNNER_STATE_CODES = new Set([
   "SUBMISSION_ACCEPTANCE_PERSIST_FAILED",
   "SUBMISSION_GATE_UNAVAILABLE",
@@ -799,7 +800,29 @@ export function createPublishRunner({
   let directActiveStoreId = () => 0;
   let activeTargetIndex = 0;
   const storeSwitches = [];
-  const directRejectedStoreIds = new Set();
+  let directRejectedStoreIds = new Set();
+  let directRejectedStoreReasons = new Map();
+  if (activeDirectMode && sharedDirectRunControl) {
+    if (!(sharedDirectRunControl.rejectedStoreIds instanceof Set)) {
+      sharedDirectRunControl.rejectedStoreIds = new Set(
+        Array.isArray(sharedDirectRunControl.rejectedStoreIds)
+          ? sharedDirectRunControl.rejectedStoreIds.map(Number).filter((id) => id > 0)
+          : [],
+      );
+    }
+    if (!(sharedDirectRunControl.rejectionReasons instanceof Map)) {
+      sharedDirectRunControl.rejectionReasons = new Map(
+        sharedDirectRunControl.rejectionReasons
+          && typeof sharedDirectRunControl.rejectionReasons === "object"
+          ? Object.entries(sharedDirectRunControl.rejectionReasons)
+            .map(([id, reason]) => [Number(id), String(reason || "")])
+            .filter(([id, reason]) => id > 0 && reason)
+          : [],
+      );
+    }
+    directRejectedStoreIds = sharedDirectRunControl.rejectedStoreIds;
+    directRejectedStoreReasons = sharedDirectRunControl.rejectionReasons;
+  }
   const storeDailyUsage = new Map();
   const storeDailyLimits = new Map();
   const storeTotalUsage = new Map();
@@ -872,10 +895,41 @@ export function createPublishRunner({
     });
   }
 
+  function directStoreFreezeReason(storeId) {
+    const normalizedStoreId = Number(storeId || 0);
+    if (!activeDirectMode || !(normalizedStoreId > 0) || !directRejectedStoreIds.has(normalizedStoreId)) {
+      return null;
+    }
+    return String(directRejectedStoreReasons.get(normalizedStoreId) || "daily-product-limit");
+  }
+
+  function freezeDirectStore(storeId, reason, evidence = {}, { record = true } = {}) {
+    const normalizedStoreId = Number(storeId || 0);
+    const normalizedReason = String(reason || "store-unavailable");
+    if (!activeDirectMode || !(normalizedStoreId > 0)) return false;
+    const firstSignal = !directRejectedStoreIds.has(normalizedStoreId);
+    directRejectedStoreIds.add(normalizedStoreId);
+    directRejectedStoreReasons.set(normalizedStoreId, normalizedReason);
+    if (sharedDirectRunControl) {
+      sharedDirectRunControl.storeSwitchReason = normalizedReason;
+      sharedDirectRunControl.storeSwitchRequestedAt = now().toISOString();
+    }
+    if (firstSignal && record) {
+      recordMetric("store_rejections.jsonl", {
+        store_id: normalizedStoreId,
+        reason: normalizedReason,
+        ...evidence,
+      });
+    }
+    return firstSignal;
+  }
+
   function recordCurrentStore(targetConfig, reason = "active") {
+    if (activeDirectMode && reconciliationOnly) return false;
     metricsChain = metricsChain.then(async () => {
       const filename = path.join(runDir, "current_store.json");
-      const temp = `${filename}.${process.pid}.tmp`;
+      currentStoreWriteSequence += 1;
+      const temp = `${filename}.${process.pid}.${currentStoreWriteSequence}.tmp`;
       const value = {
         at: now().toISOString(),
         store_id: Number(targetConfig?.store?.id || 0),
@@ -887,6 +941,7 @@ export function createPublishRunner({
       await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`);
       await fs.rename(temp, filename);
     });
+    return true;
   }
 
   function recordStoreTargetMetric(row) {
@@ -1130,6 +1185,12 @@ export function createPublishRunner({
 
   async function publishSerial(sku, payload, targetConfig, submissionState, batchControl = null) {
     const submission = publishChain.then(async () => {
+      const intendedStoreId = Number(targetConfig?.store?.id || 0);
+      const frozenStoreReason = directStoreFreezeReason(intendedStoreId);
+      if (frozenStoreReason) {
+        if (intendedStoreId === Number(directActiveStoreId() || 0)) haltReason = frozenStoreReason;
+        return { ok: false, reason: frozenStoreReason, not_submitted: true };
+      }
       if (haltReason) return { ok: false, reason: haltReason, not_submitted: true };
       if (batchControl?.cancelled || sharedDirectRunControl?.cancelled) {
         return { ok: false, reason: "batch-fatal-cancelled", not_submitted: true };
@@ -1202,15 +1263,37 @@ export function createPublishRunner({
             && /недоступ|отключ|disabled|unavailable|inactive/iu.test(publishEvidence)
             ? "store-unavailable"
             : null;
+        const storeRejectionDay = directFailureReason
+          ? String(
+            submissionState?.api_call_day
+              || localDateKey(submissionState?.api_call_started_at, dailyStoreTimeZone)
+              || localDateKey(now(), dailyStoreTimeZone)
+              || "",
+          )
+          : null;
         if (activeDirectMode && directFailureReason) {
           const rejectedStoreId = Number(targetConfig?.store?.id || 0);
-          if (rejectedStoreId > 0) directRejectedStoreIds.add(rejectedStoreId);
-          haltReason = directFailureReason;
+          const rejectionEvidence = {
+            sku,
+            source: "publish-response",
+            quota_day: storeRejectionDay,
+          };
+          if (storeRejectionDay === localDateKey(now(), dailyStoreTimeZone)) {
+            freezeDirectStore(rejectedStoreId, directFailureReason, rejectionEvidence);
+            haltReason = directFailureReason;
+          } else {
+            recordMetric("store_rejections.jsonl", {
+              store_id: rejectedStoreId,
+              reason: directFailureReason,
+              ...rejectionEvidence,
+            });
+          }
         }
         return {
           ok: false,
           reason: directFailureReason || publishResult?.reason || "publish-not-confirmed",
           publish_result: publishResult ?? null,
+          ...(storeRejectionDay ? { store_rejection_day: storeRejectionDay } : {}),
           ...(activeDirectMode && !directFailureReason
             ? { uncertain: true }
             : { not_submitted: true }),
@@ -1441,6 +1524,9 @@ export function createPublishRunner({
         submission_pending: false,
         api_call_started_at: null,
         api_call_completed_at: retryAt,
+        ...(finalResult?.store_rejection_day
+          ? { store_rejection_day: finalResult.store_rejection_day }
+          : {}),
         retry_at: retryAt,
         terminal: false,
         final_result: finalResult ?? null,
@@ -2500,7 +2586,17 @@ export function createPublishRunner({
       storeUsageDay = currentUsageDay;
       activeTargetIndex = 0;
       haltReason = null;
-      directRejectedStoreIds.clear();
+      const sharedUsageDay = String(sharedDirectRunControl?.storeUsageDay || "");
+      if (!sharedDirectRunControl || sharedUsageDay !== currentUsageDay) {
+        directRejectedStoreIds.clear();
+        directRejectedStoreReasons.clear();
+        if (sharedDirectRunControl) {
+          sharedDirectRunControl.storeUsageDay = currentUsageDay;
+          sharedDirectRunControl.activeStoreId = null;
+          sharedDirectRunControl.storeSwitchReason = null;
+          sharedDirectRunControl.storeSwitchRequestedAt = null;
+        }
+      }
       storeDailyUsage.clear();
       storeDailyLimits.clear();
       if (dailyStoreUsageSeed?.date === currentUsageDay) {
@@ -2515,12 +2611,37 @@ export function createPublishRunner({
       if (targetConfigCache?.value) delete targetConfigCache.value;
       if (targetConfigCache?.targetResolvedAt) delete targetConfigCache.targetResolvedAt;
     }
+    if (activeDirectMode) {
+      for (const event of await readJsonLinesIncremental(path.join(runDir, "store_rejections.jsonl"))) {
+        const eventReason = String(event?.reason || "");
+        const eventStoreId = Number(event?.store_id || 0);
+        if (!["daily-product-limit", "store-unavailable"].includes(eventReason)) continue;
+        const eventQuotaDay = String(event?.quota_day || localDateKey(event?.at, dailyStoreTimeZone) || "");
+        if (eventQuotaDay !== currentUsageDay) continue;
+        if (!targetPlan.some((entry) => Number(entry.id) === eventStoreId)) continue;
+        freezeDirectStore(eventStoreId, eventReason, {}, { record: false });
+      }
+    }
     for (const entry of restoredEntries) {
       const data = entry?.data || {};
-      if (activeDirectMode) continue;
-      if (data.reason !== "daily-product-limit") continue;
-      const timestamp = data.reconciled_at || data.published_at || data.submitted_at || data.prepared_at;
-      if (localDateKey(timestamp, dailyStoreTimeZone) !== currentUsageDay) continue;
+      const restoredLimitReason = String(
+        data.reason === "submission-not-sent-deferred"
+          ? data.original_reason || ""
+          : data.reason || "",
+      );
+      if (activeDirectMode) {
+        if (!["daily-product-limit", "store-unavailable"].includes(restoredLimitReason)) continue;
+      } else if (restoredLimitReason !== "daily-product-limit") continue;
+      const quotaTimestamp = data.api_call_completed_at
+        || data.submitted_at
+        || data.api_call_started_at
+        || data.prepared_at
+        || data.reconciled_at
+        || data.published_at;
+      const restoredQuotaDay = String(
+        data.store_rejection_day || localDateKey(quotaTimestamp, dailyStoreTimeZone) || "",
+      );
+      if (restoredQuotaDay !== currentUsageDay) continue;
       let exhaustedStoreId = Number(data.store_id || 0);
       if (!(exhaustedStoreId > 0)) {
         const shopName = String(data.import_log?.shop_name || data.store_name || "").trim();
@@ -2531,6 +2652,11 @@ export function createPublishRunner({
         exhaustedStoreId = Number(matched?.id || 0);
       }
       if (exhaustedStoreId > 0) {
+        if (activeDirectMode) {
+          freezeDirectStore(exhaustedStoreId, restoredLimitReason, {
+            source: "restored-state",
+          }, { record: false });
+        }
         storeDailyUsage.set(exhaustedStoreId, Math.max(
           Number(storeDailyUsage.get(exhaustedStoreId) || 0),
           configuredDailyStoreLimit,
@@ -2783,6 +2909,11 @@ export function createPublishRunner({
           storeSwitches.push({ from_store_id: fromStoreId, to_store_id: Number(nextConfig.store.id), reason });
           recordMetric("store_switches.jsonl", storeSwitches.at(-1));
           recordCurrentStore(nextConfig, reason);
+          if (sharedDirectRunControl) {
+            sharedDirectRunControl.activeStoreId = Number(nextConfig.store.id);
+            sharedDirectRunControl.storeSwitchReason = null;
+            sharedDirectRunControl.storeSwitchRequestedAt = null;
+          }
           haltReason = null;
           return nextConfig;
         } catch (error) {
@@ -2828,6 +2959,20 @@ export function createPublishRunner({
     let freshSubmissionsPaused = false;
     let initialPauseReason = null;
     let targetConfig;
+    if (activeDirectMode) {
+      const preferredStoreId = Number(sharedDirectRunControl?.activeStoreId || 0);
+      const preferredIndex = preferredStoreId > 0
+        ? targetPlan.findIndex((entry) => Number(entry.id) === preferredStoreId)
+        : -1;
+      if (preferredIndex >= 0 && !directRejectedStoreIds.has(preferredStoreId)) {
+        activeTargetIndex = preferredIndex;
+      } else {
+        const firstAvailableIndex = targetPlan.findIndex(
+          (entry) => !directRejectedStoreIds.has(Number(entry.id)),
+        );
+        if (firstAvailableIndex >= 0) activeTargetIndex = firstAvailableIndex;
+      }
+    }
     try {
       targetConfig = await resolveTargetConfig(activeTargetIndex);
     } catch (error) {
@@ -2844,6 +2989,16 @@ export function createPublishRunner({
         } catch {
           throw error;
         }
+      }
+    }
+    if (activeDirectMode) {
+      const initialFreezeReason = directStoreFreezeReason(targetConfig.store.id);
+      if (initialFreezeReason) {
+        haltReason = initialFreezeReason;
+        const nextConfig = await advanceStore(initialFreezeReason, targetConfig);
+        if (nextConfig) targetConfig = nextConfig;
+      } else if (sharedDirectRunControl) {
+        sharedDirectRunControl.activeStoreId = Number(targetConfig.store.id);
       }
     }
     while (!activeDirectMode && !activeValidationOnly && !freshSubmissionsPaused) {
@@ -3289,11 +3444,26 @@ export function createPublishRunner({
               });
               return { status: "ignored", sku, source_url: item.source_url ?? null, reason };
             }
+            let storeRejectionDay = null;
             if (reason === "daily-product-limit") {
               const exhaustedStoreId = Number(reconciliationTarget.store.id);
-              const exhaustedStoreLimit = Number(storeDailyLimits.get(exhaustedStoreId) || configuredDailyStoreLimit);
-              storeDailyUsage.set(exhaustedStoreId, exhaustedStoreLimit);
-              if (exhaustedStoreId === Number(targetConfig.store.id)) haltReason = reason;
+              const quotaTimestamp = item.api_call_completed_at
+                || item.submitted_at
+                || item.api_call_started_at
+                || item.prepared_at
+                || now();
+              storeRejectionDay = localDateKey(quotaTimestamp, dailyStoreTimeZone);
+              const currentDay = localDateKey(now(), dailyStoreTimeZone);
+              if (storeRejectionDay === currentDay) {
+                const exhaustedStoreLimit = Number(storeDailyLimits.get(exhaustedStoreId) || configuredDailyStoreLimit);
+                storeDailyUsage.set(exhaustedStoreId, exhaustedStoreLimit);
+                freezeDirectStore(exhaustedStoreId, reason, {
+                  sku,
+                  source: "background-import-log",
+                  quota_day: storeRejectionDay,
+                });
+                if (exhaustedStoreId === Number(targetConfig.store.id)) haltReason = reason;
+              }
             }
             await state.transition(sku, "failed", {
               ...item,
@@ -3308,6 +3478,7 @@ export function createPublishRunner({
                 stock_updated: false,
                 rejected: true,
               } : item.background_status,
+              ...(storeRejectionDay ? { store_rejection_day: storeRejectionDay } : {}),
               reconciled_at: now().toISOString(),
             });
             if (activeDirectMode) {
@@ -3634,6 +3805,10 @@ export function createPublishRunner({
       }
 
       if (!activeValidationOnly) {
+        if (activeDirectMode) {
+          const frozenStoreReason = directStoreFreezeReason(targetConfig?.store?.id);
+          if (frozenStoreReason) haltReason = frozenStoreReason;
+        }
         const switchableHalt = activeDirectMode
           ? ["daily-product-limit", "store-unavailable"].includes(haltReason)
           : ["daily-product-limit", "store-total-limit"].includes(haltReason);
@@ -3658,6 +3833,13 @@ export function createPublishRunner({
 
       let launched = false;
       while (cursor < candidates.length && inFlight.size < adaptive.current) {
+        if (activeDirectMode) {
+          const frozenStoreReason = directStoreFreezeReason(targetConfig?.store?.id);
+          if (frozenStoreReason) {
+            haltReason = frozenStoreReason;
+            continue schedulerLoop;
+          }
+        }
         if (schedulerControl.cancelled) break;
         if (activeAttemptLimit > 0 && attempted + inFlight.size >= activeAttemptLimit) break;
         if (dryLimit > 0 && dryCandidates + inFlight.size >= dryLimit) break;

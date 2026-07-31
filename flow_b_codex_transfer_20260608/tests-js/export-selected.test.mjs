@@ -11,7 +11,7 @@ import { exportConfirmedStoreSkus } from "../scripts/export_confirmed_store_skus
 
 const execFileAsync = promisify(execFile);
 
-test("selected export deduplicates assignments and always writes all five store files", async () => {
+test("selected export deduplicates assignments and always writes all ten store files", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-selected-export-"));
   const runA = path.join(root, "a");
   const runB = path.join(root, "b");
@@ -33,6 +33,8 @@ test("selected export deduplicates assignments and always writes all five store 
   assert.match(storeTwo, /106637,丽丽二号,101/);
   assert.doesNotMatch(storeTwo, /2815247918/);
   assert.equal((await fs.readFile(path.join(out, "selected_store_106646.csv"), "utf8")).trim().split("\n").length, 1);
+  assert.equal((await fs.readFile(path.join(out, "selected_store_113156.csv"), "utf8")).trim().split("\n").length, 1);
+  assert.equal(Object.keys(summary.stores).length, 10);
 });
 
 test("selected export refuses to overwrite a live run directory", async () => {

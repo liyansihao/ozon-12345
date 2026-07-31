@@ -13,11 +13,16 @@
     "watermark_name_contains": "lysh",
     "daily_store_limit": 100,
     "rotation": [
+      { "id": 104965, "name_contains": "丽丽1号", "warehouse_id": 1020005023597900 },
       { "id": 106637, "name_contains": "丽丽二号", "warehouse_id": 1020005023256510 },
       { "id": 106640, "name_contains": "丽丽三号", "warehouse_id": 1020005023616740 },
       { "id": 106644, "name_contains": "丽丽四号", "warehouse_id": 1020005023616380 },
       { "id": 106646, "name_contains": "丽丽五号", "warehouse_id": 1020005023616970 },
-      { "id": 104965, "name_contains": "丽丽1号", "warehouse_id": 1020005023597900 }
+      { "id": 113151, "name_contains": "丽丽六号", "warehouse_id": 1020005024854760 },
+      { "id": 113153, "name_contains": "丽丽七号", "warehouse_id": 1020005024855310 },
+      { "id": 113154, "name_contains": "丽丽八号", "warehouse_id": 1020005024855600 },
+      { "id": 113155, "name_contains": "丽丽九号", "warehouse_id": 1020005024855790 },
+      { "id": 113156, "name_contains": "丽丽十号", "warehouse_id": 1020005024856090 }
     ]
   },
   "source": {

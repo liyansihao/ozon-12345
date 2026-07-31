@@ -10,6 +10,11 @@ const STORES = [
   { id: 106640, name: "丽丽三号" },
   { id: 106644, name: "丽丽四号" },
   { id: 106646, name: "丽丽五号" },
+  { id: 113151, name: "丽丽六号" },
+  { id: 113153, name: "丽丽七号" },
+  { id: 113154, name: "丽丽八号" },
+  { id: 113155, name: "丽丽九号" },
+  { id: 113156, name: "丽丽十号" },
 ];
 const EXCLUDED_SKUS = new Set(["2815247918"]);
 const HEADERS = [
