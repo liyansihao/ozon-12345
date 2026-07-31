@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import {
+  acceptanceSourceConfig,
   acceptanceRoundPlan,
   parseCli,
   parseDailyStoreUsageSeed,
@@ -13,6 +14,16 @@ import {
   resumedAcceptanceWindow,
   sourceScanOutputFile,
 } from "../scripts/flow_b_playwright.mjs";
+
+test("formal worker persists current-window-only source scope for restart", () => {
+  assert.deepEqual(acceptanceSourceConfig({
+    mode: "continuous-acceptance",
+    current_window_only: false,
+  }), {
+    mode: "continuous-acceptance",
+    current_window_only: true,
+  });
+});
 
 test("formal accept freezes one same-worker publish/refill tranche", () => {
   assert.deepEqual(acceptanceRoundPlan({

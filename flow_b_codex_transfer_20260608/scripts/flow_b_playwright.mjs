@@ -219,6 +219,13 @@ async function createRunDir(runDir, sourceConfig) {
   if (sourceConfig) await fs.writeFile(path.join(runDir, "source_config.json"), `${JSON.stringify(sourceConfig, null, 2)}\n`);
 }
 
+export function acceptanceSourceConfig(value = {}) {
+  return {
+    ...value,
+    current_window_only: true,
+  };
+}
+
 async function closePublishingSession(session) {
   if (!session) return;
   await session.detailProvider?.close?.().catch(() => {});
@@ -544,7 +551,7 @@ async function runAcceptance(context, options, env) {
     FLOW_B_LOG_LEVEL: env.FLOW_B_LOG_LEVEL || "summary",
   };
   const storeTargets = parseStoreTargets(env);
-  await createRunDir(options.runDir, {
+  await createRunDir(options.runDir, acceptanceSourceConfig({
     mode: "continuous-acceptance",
     urls_file: options.urlsFile,
     scan_output: options.outFile,
@@ -564,7 +571,7 @@ async function runAcceptance(context, options, env) {
     daily_store_timezone: env.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
     initial_concurrency: Number(env.FLOW_B_PUBLISH_WORKERS || 8),
     max_concurrency: Number(env.FLOW_B_MAX_PUBLISH_WORKERS || 12),
-  });
+  }));
   await fs.writeFile(windowPath, `${JSON.stringify(resumedAcceptanceWindow(existingWindow, {
     startedAt,
     endedAt,
