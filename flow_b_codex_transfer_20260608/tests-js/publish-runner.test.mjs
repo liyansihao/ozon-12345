@@ -4720,6 +4720,59 @@ test("direct mode excludes historical ERP acceptances without current-run owners
   }
 });
 
+test("direct mode permits a different SKU with a title already used by another store", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-title-variant-"));
+  try {
+    const title = "Одинаковое название, но другой SKU товара";
+    const state = fakeState({
+      historical: {
+        status: "published",
+        data: {
+          sku: "historical",
+          title,
+          store_id: 9,
+        },
+      },
+    });
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([
+        {
+          sku: "new-sku",
+          title,
+          cover_image: "https://img.example/new-sku.jpg",
+        },
+      ], {
+        getProductDetail: async (sku) => ({
+          sku,
+          mode: "FBO",
+          title,
+          cover_image: "https://img.example/new-sku.jpg",
+          current_price: 100,
+          follow_min: 90,
+        }),
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true, response: { code: 1 } };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(publishCalls, 1);
+    assert.equal(result.accepted, 1);
+    assert.equal(state.entryOf("new-sku").data.submitted, true);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("accepted ERP response safely stops when submitted state cannot be persisted", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-accepted-cas-fail-"));
   try {

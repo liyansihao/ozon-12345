@@ -2875,7 +2875,7 @@ export function createPublishRunner({
       }
       const blocked = await attemptBlock(sku);
       if (blocked) return { ...blocked, source_url: inputItem.source_url ?? null };
-      if (!isReconciliationCandidate(item)) {
+      if (!activeDirectMode && !isReconciliationCandidate(item)) {
         const duplicateOwner = crossStoreDuplicateOwner(item?.title, sku, targetConfig.store.id);
         if (duplicateOwner) {
           return {
