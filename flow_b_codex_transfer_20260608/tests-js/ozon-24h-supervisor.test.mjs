@@ -26,6 +26,7 @@ import {
   processOwnershipSnapshot,
   productionRunContractDecision,
   readAppendedTail,
+  readWorkerGenerationEvidence,
   resolveProductionLayout,
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
@@ -931,6 +932,38 @@ test("worker recovery ignores browser errors left by an earlier worker generatio
   await fs.appendFile(errors, "page.goto: Target page, context or browser has been closed\n");
   assert.deepEqual(classifyWorkerFailure({
     message: await readAppendedTail(errors, nextOffset),
+    profileOwnerCount: 1,
+  }), {
+    action: "restart-browser-and-worker",
+    reason: "browser-or-network-recoverable",
+  });
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("direct supervisor preserves current worker browser evidence", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-direct-worker-evidence-"));
+  const stderrPath = path.join(root, "stderr.log");
+  const runtimeErrorsPath = path.join(root, "runtime_errors.jsonl");
+  await fs.writeFile(stderrPath, "historical stderr\n");
+  await fs.writeFile(runtimeErrorsPath, "historical runtime error\n");
+  const stderrOffset = Buffer.byteLength("historical stderr\n");
+  const runtimeErrorsOffset = Buffer.byteLength("historical runtime error\n");
+  await fs.appendFile(stderrPath, "worker exited with code 1\n");
+  await fs.appendFile(
+    runtimeErrorsPath,
+    "browserContext.newPage: Target page, context or browser has been closed\n",
+  );
+
+  const evidence = await readWorkerGenerationEvidence({
+    stderrPath,
+    runtimeErrorsPath,
+    stderrOffset,
+    runtimeErrorsOffset,
+  });
+  assert.doesNotMatch(evidence, /historical/);
+  assert.match(evidence, /Target page, context or browser has been closed/);
+  assert.deepEqual(classifyWorkerFailure({
+    message: evidence,
     profileOwnerCount: 1,
   }), {
     action: "restart-browser-and-worker",

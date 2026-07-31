@@ -1054,6 +1054,20 @@ export async function readAppendedTail(filename, offset = 0, maxBytes = 64 * 102
   }
 }
 
+export async function readWorkerGenerationEvidence({
+  stderrPath,
+  runtimeErrorsPath,
+  stderrOffset = 0,
+  runtimeErrorsOffset = 0,
+  error = null,
+} = {}) {
+  return [
+    await readAppendedTail(stderrPath, stderrOffset),
+    await readAppendedTail(runtimeErrorsPath, runtimeErrorsOffset),
+    error?.message || "",
+  ].join("\n");
+}
+
 async function updateOperationalState(stateRoot, currentRun, patch) {
   const event = {
     run_id: currentRun.run_id,
@@ -1931,6 +1945,7 @@ async function superviseDirectPublishing({
       const stderrOffset = await fileSize(stderrPath);
       const runtimeErrorsOffset = await fileSize(runtimeErrorsPath);
       const stderrFd = fs.openSync(stderrPath, "a");
+      const startedAt = Date.now();
       const persistedStore = await readJson(path.join(runDir, "current_store.json"), {});
       const runtimeRun = {
         ...currentRun,
@@ -1971,11 +1986,13 @@ async function superviseDirectPublishing({
       if (result.browser_unhealthy) await stopOwnedWorker(activeWorker);
       worker = null;
       await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid, workerPid: null });
-      const evidence = [
-        (await readAppendedTail(stderrPath, stderrOffset)).text,
-        (await readAppendedTail(runtimeErrorsPath, runtimeErrorsOffset)).text,
-        result.error?.message || "",
-      ].join("\n");
+      const evidence = await readWorkerGenerationEvidence({
+        stderrPath,
+        runtimeErrorsPath,
+        stderrOffset,
+        runtimeErrorsOffset,
+        error: result.error,
+      });
       if (shuttingDown) break;
       if (result.code === 0 && !result.browser_unhealthy) {
         await updateOperationalState(stateRoot, currentRun, {
@@ -2004,6 +2021,7 @@ async function superviseDirectPublishing({
         });
         return 0;
       }
+      if (Date.now() - startedAt >= 10 * 60_000) restartAttempt = 0;
       const seconds = nextRestartDelaySeconds(restartAttempt++, config.restart_delays_seconds);
       await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
         at: new Date().toISOString(),

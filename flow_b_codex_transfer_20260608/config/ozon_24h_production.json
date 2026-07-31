@@ -15,9 +15,9 @@
   "rate_check_interval_seconds": 300,
   "source_refresh_seconds": 7200,
   "restart_delays_seconds": [
-    30,
-    60,
-    120
+    5,
+    10,
+    20
   ],
   "minimum_free_disk_kb": 5242880,
   "browser": {
