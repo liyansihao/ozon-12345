@@ -4503,6 +4503,182 @@ test("ERP acceptance is durable before capacity, sync, or confirmation work", as
   }
 });
 
+test("direct mode counts ERP acceptance and does not wait for import or online confirmation", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-accepted-"));
+  try {
+    const state = fakeState();
+    let confirmationChecks = 0;
+    let publishCalls = 0;
+    const client = clientFor([
+      {
+        sku: "direct-fbo-apparel",
+        title: "Одежда для дома",
+        cover_image: "https://img.example/direct.jpg",
+      },
+    ], {
+      resolvePublishTarget: async () => ({
+        store: {
+          id: 7,
+          name: "丽丽1号",
+          product_limit: { daily_create: { usage: 100, limit: 100 } },
+        },
+        watermark: { id: 8, name: "lysh" },
+      }),
+      getProductDetail: async (sku) => ({
+        sku,
+        mode: "FBO",
+        title: "Одежда для дома",
+        cover_image: "https://img.example/direct.jpg",
+        current_price: 100,
+        follow_min: 90,
+      }),
+      publish: async () => {
+        publishCalls += 1;
+        return { ok: true, response: { code: 1 } };
+      },
+      findImportLog: async () => {
+        confirmationChecks += 1;
+        throw new Error("direct submission must not wait for import logs");
+      },
+      findOnlineProduct: async () => {
+        confirmationChecks += 1;
+        throw new Error("direct submission must not wait for online products");
+      },
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(publishCalls, 1);
+    assert.equal(confirmationChecks, 0);
+    assert.equal(result.accepted, 1);
+    assert.equal(result.remaining, 0);
+    assert.equal(state.entryOf("direct-fbo-apparel").data.submitted, true);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode rejects 30 percent and accepts 30.01 percent", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-profit-boundary-"));
+  try {
+    const state = fakeState();
+    const publishedSkus = [];
+    const client = clientFor([
+      { sku: "profit-30", title: "Товар ровно тридцать", cover_image: "https://img.example/30.jpg" },
+      { sku: "profit-30-01", title: "Товар выше тридцати", cover_image: "https://img.example/3001.jpg" },
+    ], {
+      getProductDetail: async (sku) => ({
+        sku,
+        mode: "FBO",
+        title: sku === "profit-30" ? "Товар ровно тридцать" : "Товар выше тридцати",
+        cover_image: `https://img.example/${sku}.jpg`,
+        current_price: 100,
+        follow_min: 90,
+      }),
+      calculateProfit: async ({ sku }) => economy(sku === "profit-30" ? 30 : 30.01),
+      publish: async (payload) => {
+        publishedSkus.push(payload.rows[0].sku);
+        return { ok: true, response: { code: 1 } };
+      },
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      threshold: 30,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.deepEqual(publishedSkus, ["profit-30-01"]);
+    assert.equal(result.accepted, 1);
+    assert.equal(state.entryOf("profit-30").data.outcome_status, "skipped_profit");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct background reconciliation records online state without changing ERP acceptance count", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-"));
+  try {
+    const state = fakeState({
+      "direct-background": {
+        status: "processing",
+        data: {
+          sku: "direct-background",
+          submitted: true,
+          reconcile_only: true,
+          store_id: 7,
+          offer_id: "mz-direct-background",
+          profit_rate: 40,
+          cost_verified: true,
+          cost: { ...RELIABLE_COST_RESULT },
+          cost_source: RELIABLE_COST_RESULT.source,
+          cost_evidence: {
+            contract: "1688-same-item-v1",
+            source: RELIABLE_COST_RESULT.source,
+            reliable_source: true,
+            same_item_match: true,
+            match_evidence_key: RELIABLE_COST_RESULT.match_evidence_key,
+            filtered_price_count: RELIABLE_COST_RESULT.prices.length,
+            match_evidence_contract: RELIABLE_COST_RESULT.match_evidence_contract,
+            returned_evidence_verified: true,
+            matched_offer_count: RELIABLE_COST_RESULT.matched_offer_count,
+          },
+        },
+      },
+    });
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([], {
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true };
+        },
+        findImportLog: async () => ({
+          sku: "direct-background",
+          offer_id: "mz-direct-background",
+          import_status: "all_imported",
+        }),
+        findOnlineProduct: async () => ({
+          sku: 900001,
+          offer_id: "mz-direct-background",
+          online_status: "selling",
+          stock: 1,
+        }),
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      directMode: true,
+      reconciliationOnly: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(publishCalls, 0);
+    assert.equal(result.accepted, 1);
+    assert.equal(state.entryOf("direct-background").data.outcome_status, "online");
+    assert.equal(state.entryOf("direct-background").data.background_status.online, true);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("accepted ERP response safely stops when submitted state cannot be persisted", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-accepted-cas-fail-"));
   try {

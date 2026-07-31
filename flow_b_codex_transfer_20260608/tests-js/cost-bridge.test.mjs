@@ -94,6 +94,24 @@ test("verifies returned offer identities, semantics, prices, source and selected
   assert.match(result.match_evidence_key, /^[a-f0-9]{64}$/u);
 });
 
+test("direct publishing accepts one verified same-item offer", () => {
+  const request = { expect_title: "same product lamp" };
+  const output = returnedSameItemOutput({
+    request,
+    prices: [18],
+    selectedCost: 18,
+  });
+  const result = parseCostOutput(output, 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+    minimumSameItemMatches: 1,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.cost, 18);
+  assert.equal(result.matched_offer_count, 1);
+  assert.equal(result.same_item_match, true);
+});
+
 test("a request hash plus prices can no longer self-prove a same-item match", () => {
   const request = { expect_title: "детская кепка миньон" };
   const result = parseCostOutput([
@@ -743,6 +761,7 @@ test("persistent worker infrastructure failure falls back to the one-shot proces
           "--expect-title", "OMODA S5 уплотнитель",
           "--expect-model", "S5",
           "--expect-category", "Автомобильные аксессуары",
+          "--min-matches", "3",
         ]);
         return {
           code: 0,

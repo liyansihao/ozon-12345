@@ -57,6 +57,7 @@ def analyze(module, session, request: dict) -> dict:
         expect_model=str(request.get("expect_model") or ""),
         expect_category=str(request.get("expect_category") or ""),
         page_size=max(1, int(request.get("top") or 10)),
+        minimum_matches=max(1, int(request.get("minimum_same_item_matches") or 3)),
     )
     top3 = rows[:3]
     result["top3_prices"] = [row["price"] for row in top3]

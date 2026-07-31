@@ -178,10 +178,6 @@ export function parseCli(argv, env = process.env) {
     const runDir = required(rest[0], "RUN_DIR");
     return { command, runDir, urlsFile: required(rest[1], "URLS.txt"), outFile: sourceScanOutputFile(runDir, env), ...defaults };
   }
-  if (command === "accept") {
-    const runDir = required(rest[0], "RUN_DIR");
-    return { command, runDir, urlsFile: required(rest[1], "URLS.txt"), outFile: sourceScanOutputFile(runDir, env), ...defaults };
-  }
   throw new Error(`unknown command: ${command}`);
 }
 
@@ -262,6 +258,7 @@ async function createPublishingSession(context, options, env, shared) {
       scriptPath: env.FLOW_B_1688_SCRIPT || path.join(ROOT, "scripts/1688_image_median.py"),
       sharedCachePath: env.FLOW_B_1688_SHARED_CACHE || path.join(ROOT, "data/flow_b/1688_cache.json"),
       seedCacheFiles: String(env.FLOW_B_1688_CACHE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
+      minimumSameItemMatches: Math.max(1, Number(env.FLOW_B_1688_MIN_MATCHES) || 1),
     });
     const detailProvider = createOzonDetailProvider({
       context,
@@ -284,8 +281,8 @@ async function createPublishingSession(context, options, env, shared) {
       watermarkId: Number(env.FLOW_B_WATERMARK_ID || 60822),
       storeTargets: parseStoreTargets(env),
       reconciliationOnly: env.FLOW_B_RECONCILIATION_ONLY === "1",
-      validationOnly: env.FLOW_B_VALIDATION_ONLY === "1",
-      validationTarget: Math.max(1, Number(env.FLOW_B_VALIDATION_TARGET) || 3),
+      validationOnly: false,
+      validationTarget: 1,
       concurrency: Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 8),
       maxConcurrency: Math.max(1, Number(env.FLOW_B_MAX_PUBLISH_WORKERS) || 12),
       dryCandidateLimit: Math.max(0, Number(env.FLOW_B_MAX_DRY_CANDIDATES) || 0),
@@ -316,9 +313,11 @@ async function createPublishingSession(context, options, env, shared) {
       pendingStoreStallMs: Math.max(0, Number(env.FLOW_B_PENDING_STORE_STALL_MS) || 300_000),
       pendingStoreStallCount: Math.max(1, Number(env.FLOW_B_PENDING_STORE_STALL_COUNT) || 3),
       pendingStoreRetryMs: Math.max(0, Number(env.FLOW_B_PENDING_STORE_RETRY_MS) || 300_000),
-      probeInactiveStores: env.FLOW_B_PROBE_INACTIVE_STORES !== "0",
-      submissionGateFile: env.FLOW_B_SUBMISSION_GATE_FILE || null,
+      probeInactiveStores: false,
+      submissionGateFile: null,
       requireReliableCostContract: true,
+      directMode: true,
+      minimumSameItemMatches: Math.max(1, Number(env.FLOW_B_1688_MIN_MATCHES) || 1),
     });
     return { maoziPage, costBridge, detailProvider, runner, state };
   } catch (error) {
@@ -682,10 +681,9 @@ function printHelp() {
   flow_b_playwright.mjs scan URLS.txt OUT.json
   flow_b_playwright.mjs publish RUN_DIR
   flow_b_playwright.mjs run RUN_DIR URLS.txt
-  flow_b_playwright.mjs accept RUN_DIR URLS.txt
 
 Required for browser commands: FLOW_B_EXTENSION_DIR=/path/to/unpacked/maozi-plugin
-Defaults: profit_rate > 30, target 500, five verified stores with a 100/store/day cap, watermark contains lysh`);
+Defaults: one verified 1688 same-item match, profit_rate > 30, 500 ERP-accepted unique SKUs, watermark contains lysh`);
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
@@ -709,27 +707,109 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   }
   if (options.command === "run") {
     return withContext(env, async (context) => {
+      const directEnv = {
+        ...env,
+        FLOW_B_DIRECT_PUBLISH: "1",
+        FLOW_B_1688_MIN_MATCHES: String(Math.max(1, Number(env.FLOW_B_1688_MIN_MATCHES) || 1)),
+        FLOW_B_VALIDATION_ONLY: "0",
+      };
       await createRunDir(options.runDir, {
-        mode: "playwright-run",
+        mode: "direct-publish",
         browser: "playwright-chrome-for-testing",
         urls_file: options.urlsFile,
         scan_output: options.outFile,
         profit_threshold: options.threshold,
         publish_target: options.target,
+        target_metric: "erp_accepted_unique_skus",
+        minimum_same_item_matches: 1,
       });
-      const scan = await scanSources({ context, urlsFile: options.urlsFile, outFile: options.outFile, env });
-      const publish = await publishWithContext(
-        context,
-        options,
-        env,
-        {},
-        { attemptLimit: publishAttemptLimit(env) },
-      );
-      return { scan, publish };
+      const shared = { targetConfigCache: {}, persistent: true, session: null };
+      let backgroundStop = false;
+      let backgroundError = null;
+      const backgroundEnv = {
+        ...directEnv,
+        FLOW_B_RECONCILIATION_ONLY: "1",
+        FLOW_B_CONFIRMATION_ATTEMPTS: "1",
+        FLOW_B_CONFIRMATION_INTERVAL_MS: "0",
+      };
+      const backgroundTask = (async () => {
+        while (!backgroundStop) {
+          let backgroundSession = null;
+          try {
+            backgroundSession = await createPublishingSession(
+              context,
+              options,
+              backgroundEnv,
+              { targetConfigCache: {} },
+            );
+            await backgroundSession.runner.run();
+          } catch (error) {
+            await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({
+              at: new Date().toISOString(),
+              stage: "background-reconciliation",
+              error: String(error?.message || error),
+            })}\n`);
+            if (isFatalBrowserError(error)
+              || /captcha|验证码|mfa|verification required|login|登录/iu.test(String(error?.message || error))) {
+              backgroundError = error;
+              return;
+            }
+          } finally {
+            await closePublishingSession(backgroundSession);
+          }
+          if (!backgroundStop) {
+            await new Promise((resolve) => setTimeout(resolve, 15_000));
+          }
+        }
+      })();
+      let scan = null;
+      let publish = null;
+      const deadlineMs = env.FLOW_B_DEADLINE_AT ? Date.parse(env.FLOW_B_DEADLINE_AT) : Number.POSITIVE_INFINITY;
+      try {
+        while (Date.now() < deadlineMs) {
+          if (backgroundError) throw backgroundError;
+          try {
+            scan = await scanSources({
+              context,
+              urlsFile: options.urlsFile,
+              outFile: options.outFile,
+              env: directEnv,
+            });
+          } catch (error) {
+            await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({
+              at: new Date().toISOString(),
+              stage: "direct-source-scan",
+              error: String(error?.message || error),
+            })}\n`);
+            if (isFatalBrowserError(error)) throw error;
+          }
+          publish = await publishWithContext(
+            context,
+            options,
+            directEnv,
+            shared,
+            { attemptLimit: publishAttemptLimit(directEnv) },
+          );
+          if (Number(publish?.accepted || 0) >= options.target) break;
+          if (["daily-product-limit", "store-unavailable"].includes(String(publish?.halt_reason || ""))) {
+            const error = new Error(`all configured stores rejected direct publishing: ${publish.halt_reason}`);
+            error.code = "FLOW_B_ALL_STORES_REJECTED";
+            throw error;
+          }
+          const wait = Math.max(1_000, Number(directEnv.FLOW_B_POLL_INTERVAL_MS) || 10_000);
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
+        return { scan, publish };
+      } finally {
+        backgroundStop = true;
+        await closePublishingSession(shared.session);
+        shared.session = null;
+        await Promise.race([
+          backgroundTask,
+          new Promise((resolve) => setTimeout(resolve, 20_000)),
+        ]);
+      }
     });
-  }
-  if (options.command === "accept") {
-    return withContext(env, (context) => runAcceptance(context, options, env));
   }
   throw new Error(`unsupported command: ${options.command}`);
 }

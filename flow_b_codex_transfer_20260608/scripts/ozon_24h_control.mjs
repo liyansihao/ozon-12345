@@ -160,6 +160,45 @@ export function deploymentIdentityValid(deployment, configText) {
 
 function validateConfig(config) {
   if (config?.frozen !== true) throw new Error("production config must be frozen");
+  if (config?.runtime_mode === "direct") {
+    if (Number(config?.publish_target) !== 500) throw new Error("direct publish target must equal 500");
+    if (Number(config?.minimum_profit_rate_exclusive) !== 30) {
+      throw new Error("direct profit rate must be exclusively greater than 30");
+    }
+    if (String(config?.flow_env?.FLOW_B_DIRECT_PUBLISH || "") !== "1") {
+      throw new Error("direct publishing must be enabled");
+    }
+    if (Number(config?.flow_env?.FLOW_B_1688_MIN_MATCHES) !== 1) {
+      throw new Error("direct publishing requires one verified 1688 same-item match");
+    }
+    if (Number(config?.flow_env?.FLOW_B_TARGET_PUBLISH_COUNT) !== 500) {
+      throw new Error("direct ERP-accepted target must equal 500");
+    }
+    const storeIds = (config?.stores || []).map((row) => Number(row?.id));
+    if (storeIds.join(",") !== "106637,106640,106644,106646,104965") {
+      throw new Error("production config must contain the five stores in rotation order");
+    }
+    for (const store of config.stores) {
+      if (!Number.isSafeInteger(Number(store.warehouse_id))) {
+        throw new Error(`store ${store.id} is missing an ERP-verified warehouse mapping`);
+      }
+    }
+    if (Number(config?.state_schema_version) !== 3
+      || Number(config?.flow_env?.FLOW_B_RUNTIME_STATE_SCHEMA_VERSION) !== 3
+      || !String(config?.flow_env?.FLOW_B_RUNTIME_STATE_DB || "").endsWith(".sqlite")) {
+      throw new Error("external SQLite state schema must equal version 3");
+    }
+    if (
+      String(config?.flow_env?.FLOW_B_PYTHON || "")
+      !== "${HOME}/.ozon-24h-production/python-1688-v1/bin/python"
+    ) {
+      throw new Error("production 1688 runtime must use the frozen external Python environment");
+    }
+    if (String(config?.browser?.cdp_endpoint) !== "http://127.0.0.1:9223") {
+      throw new Error("production CDP endpoint must be the unique localhost owner on port 9223");
+    }
+    return config;
+  }
   if (Number(config?.acceptance?.duration_seconds) !== 86400) throw new Error("acceptance duration must be 86400 seconds");
   const targetPolicy = String(config?.acceptance?.target_policy || "fixed");
   if (targetPolicy !== "fixed") throw new Error("acceptance target policy must equal fixed");
@@ -699,20 +738,22 @@ async function start(config) {
       error.code = "OZON_PRODUCTION_STATE_PATH_INVALID";
       throw error;
     }
-    const contract = productionRunContractDecision({
-      currentRun: current,
-      pendingManifest: await readJson(path.join(runDir, "pending_manifest.json"), {}),
-      acceptanceWindow: await readJson(path.join(runDir, "acceptance_window.json"), {}),
-      sourceConfig: await readJson(path.join(runDir, "source_config.json"), {}),
-      frozenManifest: await readJson(path.join(runDir, "frozen_manifest.json"), {}),
-      expectedConfigHash: releaseConfigHash,
-      expectedCommitSha: deployment.source_commit,
-    });
-    if (contract.action !== "continue") {
-      const error = new Error(`${contract.reason}: ${contract.issues.join(",")}`);
-      error.code = "OZON_PRODUCTION_RUN_CONTRACT";
-      error.contract = contract;
-      throw error;
+    if (config.runtime_mode !== "direct") {
+      const contract = productionRunContractDecision({
+        currentRun: current,
+        pendingManifest: await readJson(path.join(runDir, "pending_manifest.json"), {}),
+        acceptanceWindow: await readJson(path.join(runDir, "acceptance_window.json"), {}),
+        sourceConfig: await readJson(path.join(runDir, "source_config.json"), {}),
+        frozenManifest: await readJson(path.join(runDir, "frozen_manifest.json"), {}),
+        expectedConfigHash: releaseConfigHash,
+        expectedCommitSha: deployment.source_commit,
+      });
+      if (contract.action !== "continue") {
+        const error = new Error(`${contract.reason}: ${contract.issues.join(",")}`);
+        error.code = "OZON_PRODUCTION_RUN_CONTRACT";
+        error.contract = contract;
+        throw error;
+      }
     }
     const mode = resumeMode(status, current);
     const resumedCurrent = mode === "restart-current-run" && current.formal_started === false
@@ -759,28 +800,48 @@ async function start(config) {
   await fsp.mkdir(runDir, { recursive: true });
   const requestedAt = new Date();
   const configText = await fsp.readFile(path.join(paths.appLink, "config", "ozon_24h_production.json"), "utf8");
-  await writeJsonAtomic(path.join(runDir, "pending_manifest.json"), {
+  const directMode = config.runtime_mode === "direct";
+  await writeJsonAtomic(path.join(runDir, directMode ? "direct_manifest.json" : "pending_manifest.json"), {
     run_id: runId,
     requested_at: requestedAt.toISOString(),
     config_sha256: sha256(configText),
     source_sha256: sha256(sourceText),
     source_set_sha256: sha256(sourceText),
     state_schema_version: Number(config.state_schema_version || 3),
-    formal_window_started: false,
+    runtime_mode: directMode ? "direct" : "strict-acceptance",
+    target_metric: directMode ? "erp_accepted_unique_skus" : "strict_online_skus",
+    publish_target: directMode ? Number(config.publish_target || 500) : undefined,
+    current_store_id: directMode ? Number(config.starting_store_id || 0) || undefined : undefined,
+    formal_window_started: directMode,
   });
+  if (directMode) {
+    await writeJsonAtomic(path.join(runDir, "source_config.json"), {
+      mode: "direct-publish",
+      urls_file: sources,
+      target_metric: "erp_accepted_unique_skus",
+      publish_target: Number(config.publish_target || 500),
+      minimum_profit_rate_exclusive: Number(config.minimum_profit_rate_exclusive || 30),
+      minimum_same_item_matches: 1,
+      store_targets: config.flow_env?.FLOW_B_STORE_TARGETS || [],
+    });
+  }
   await writeJsonAtomic(path.join(paths.stateRoot, "current_run.json"), {
     run_id: runId,
     run_dir: runDir,
     urls_file: sources,
     requested_at: requestedAt.toISOString(),
-    formal_started: false,
+    formal_started: directMode,
+    runtime_mode: directMode ? "direct" : "strict-acceptance",
+    target_metric: directMode ? "erp_accepted_unique_skus" : "strict_online_skus",
+    publish_target: directMode ? Number(config.publish_target || 500) : undefined,
+    current_store_id: directMode ? Number(config.starting_store_id || 0) || undefined : undefined,
     config_sha256: sha256(configText),
     source_sha256: sha256(sourceText),
     source_set_sha256: sha256(sourceText),
     state_schema_version: Number(config.state_schema_version || 3),
   });
   await writeJsonAtomic(path.join(paths.stateRoot, "operational_status.json"), {
-    status: "PREFLIGHTING_CAPACITY",
+    status: directMode ? "STARTING" : "PREFLIGHTING_CAPACITY",
     observed_at: new Date().toISOString(),
     run_id: runId,
     run_dir: runDir,
@@ -998,6 +1059,48 @@ async function status(config) {
   const checkpoint = current?.run_dir
     ? await readJson(path.join(current.run_dir, "compact_checkpoint.json"), {})
     : {};
+  if (config.runtime_mode === "direct" && current?.run_dir) {
+    const [funnel, acceptedRows, backgroundRows] = await Promise.all([
+      readJsonLines(path.join(current.run_dir, "direct_funnel.jsonl")),
+      readJsonLines(path.join(current.run_dir, "erp_accepted.jsonl")),
+      readJsonLines(path.join(current.run_dir, "background_status.jsonl")),
+    ]);
+    const stageCount = (stage) => uniqueSkuCount(funnel.filter((row) => row?.stage === stage));
+    const accepted = uniqueSkuCount(acceptedRows);
+    const byStore = {};
+    for (const row of acceptedRows) {
+      const key = String(Number(row?.store_id) || "unknown");
+      byStore[key] = Number(byStore[key] || 0) + 1;
+    }
+    return {
+      at: operational.observed_at || new Date().toISOString(),
+      status: operational.status || "UNKNOWN",
+      reason: shortText(operational.reason || "", 160) || null,
+      run_id: current.run_id || null,
+      runtime_mode: "direct",
+      target_metric: "erp_accepted_unique_skus",
+      target: Number(config.publish_target) || 500,
+      remaining: Math.max(0, (Number(config.publish_target) || 500) - accepted),
+      funnel: {
+        candidate_required_fields_passed: stageCount("candidate_required_fields_passed"),
+        cost_passed: stageCount("cost_passed"),
+        profit_passed: stageCount("profit_passed"),
+        erp_accepted: accepted,
+        online: uniqueSkuCount(backgroundRows.filter((row) => row?.online === true)),
+      },
+      by_store: byStore,
+      owners: {
+        supervisor: Number(owners?.counts?.supervisor || 0),
+        worker: Number(owners?.counts?.worker || 0),
+        profile: Number(owners?.counts?.profile_owner || 0),
+      },
+      identity: {
+        config_sha256: current.config_sha256 || null,
+        source_set_sha256: current.source_set_sha256 || current.source_sha256 || null,
+        state_schema_version: Number(current.state_schema_version || 3),
+      },
+    };
+  }
   return compactProductionStatus({ current, operational, owners, checkpoint });
 }
 

@@ -744,7 +744,8 @@ export function sourceSampleStatsFromEvents(events = []) {
   return stats;
 }
 
-export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
+export function favoritePriceSkipReason(productInfo, maxPrice = 1000, { directMode = false } = {}) {
+  if (directMode) return null;
   const currency = String(productInfo?.price_info?.currency || "").toUpperCase();
   if (currency === "CNY" && Number(productInfo?.price_info?.sell_price) > Math.max(0, Number(maxPrice) || 0)) {
     return "source-price-above-limit";
@@ -752,7 +753,8 @@ export function favoritePriceSkipReason(productInfo, maxPrice = 1000) {
   return null;
 }
 
-export function favoriteTitleSkipReason(value) {
+export function favoriteTitleSkipReason(value, { directMode = false } = {}) {
+  if (directMode) return null;
   const title = String(value || "");
   const prohibitedReason = prohibitedCategorySkipReason(title);
   if (prohibitedReason) return prohibitedReason;
@@ -770,12 +772,14 @@ export function effectiveFavoriteTotal({ claimedTotal, observedTotal, target }) 
   return Number(observedTotal);
 }
 
-export function favoriteModeSkipReason(mode) {
+export function favoriteModeSkipReason(mode, { directMode = false } = {}) {
+  if (directMode) return null;
   if (!String(mode || "").trim()) return "missing-shipping-mode";
   return isPureFbs(mode) ? null : "non-pure-fbs";
 }
 
-export function listingModeSkipReason(cardText) {
+export function listingModeSkipReason(cardText, { directMode = false } = {}) {
+  if (directMode) return null;
   const mode = String(cardText || "")
     .match(/(?:^|\n)\s*发货模式\s*[：:]\s*([^\n]+)/i)?.[1]?.trim() || "";
   if (!mode) return null;
@@ -2462,7 +2466,7 @@ export function pruneAttemptedSourceLinks(records, attempted = new Set()) {
   }));
 }
 
-export function parseFavoriteProductSnapshot({ url, title, ogTitle, ogImage, priceText, sellerUrl }) {
+export function parseFavoriteProductSnapshot({ url, title, ogTitle, ogImage, priceText, sellerUrl, mode }) {
   const sku = skuFromProductUrl(url);
   if (!sku) throw new Error("Ozon product SKU is missing");
   const coverImage = String(ogImage || "").trim();
@@ -2486,10 +2490,10 @@ export function parseFavoriteProductSnapshot({ url, title, ogTitle, ogImage, pri
   };
 }
 
-export function parseListingFavoriteSnapshot(link) {
+export function parseListingFavoriteSnapshot(link, { directMode = false } = {}) {
   const cardText = String(link?.card_text || "");
   const mode = cardText.match(/(?:^|\n)\s*发货模式\s*[：:]\s*([^\n]+)/i)?.[1]?.trim() || "";
-  if (!isPureFbs(mode)) return null;
+  if (!directMode && !isPureFbs(mode)) return null;
   const sku = skuFromProductUrl(link?.href);
   const coverImage = String(link?.image_url || "").trim();
   const title = String(link?.text || "").trim();
@@ -2510,8 +2514,8 @@ export function parseListingFavoriteSnapshot(link) {
   };
 }
 
-export function reusableListingFavoriteSnapshot(link, { verifyDetail = false } = {}) {
-  return verifyDetail ? null : parseListingFavoriteSnapshot(link);
+export function reusableListingFavoriteSnapshot(link, { verifyDetail = false, directMode = false } = {}) {
+  return verifyDetail ? null : parseListingFavoriteSnapshot(link, { directMode });
 }
 
 async function favoriteCount(page) {
@@ -2565,7 +2569,7 @@ async function favoriteProduct(page, productInfo) {
   }, productInfo);
 }
 
-async function extractFavoriteProduct(page, url, timeout) {
+async function extractFavoriteProduct(page, url, timeout, { directMode = false } = {}) {
   await page.goto(url, { waitUntil: "domcontentloaded", timeout: Math.max(10_000, Math.min(30_000, timeout * 2)) });
   const deadline = Date.now() + timeout;
   let snapshot;
@@ -2591,17 +2595,18 @@ async function extractFavoriteProduct(page, url, timeout) {
     if (/доступ ограничен|access denied/i.test(diagnostic)) {
       throw new Error(`Ozon detail is blocked: ${url}`);
     }
-    if (snapshot?.ogImage && snapshot?.priceText && snapshot?.mode) break;
+    if (snapshot?.ogImage && snapshot?.priceText && (directMode || snapshot?.mode)) break;
     if (Date.now() >= deadline) break;
     await sleep(500);
   } while (true);
-  const modeReason = favoriteModeSkipReason(snapshot?.mode);
+  const modeReason = favoriteModeSkipReason(snapshot?.mode, { directMode });
   if (modeReason) throw new Error(`${modeReason}: SKU ${skuFromProductUrl(snapshot?.url || url)}`);
   return parseFavoriteProductSnapshot(snapshot || { url });
 }
 
 async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, productiveSourceSampleKeys = new Set(), onResult = () => {}, workerPagePool = null, accessController = null }) {
   if (currentTotal >= target || !links.length || isCollectionDeadlineReached(env)) return currentTotal;
+  const directMode = String(env.FLOW_B_DIRECT_PUBLISH || "") === "1";
   let existing = new Set();
   try {
     existing = new Set(await readFavoriteSkusWithTimeout(
@@ -2615,7 +2620,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const queue = [];
   const eligibleLinks = filterListingFbsEvidenceLinks(
     links,
-    env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1",
+    !directMode && env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1",
   );
   for (const link of prioritizeFavoriteLinks(eligibleLinks, familyScores)) {
     const href = typeof link === "string" ? link : link?.href;
@@ -2653,7 +2658,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const nonFbsDeferredSources = new Set();
   const sourceOutcomeStats = sourceSampleStatsFromEvents(await readJsonLinesIncremental(logFile));
   const nonFbsSampleLimit = Math.max(0, envNumber(env, "FLOW_B_SOURCE_NON_FBS_SAMPLE_LIMIT", 6));
-  for (const [sourceSampleKey, stats] of sourceOutcomeStats) {
+  for (const [sourceSampleKey, stats] of directMode ? [] : sourceOutcomeStats) {
     const sourceSampleLimit = adaptiveNonFbsSampleLimit(
       nonFbsSampleLimit,
       productiveSourceSampleKeys.has(sourceSampleKey),
@@ -2740,9 +2745,9 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         const result = accessController
           ? await accessController.run(
             { kind: "favorite-detail", url: item.href },
-            () => extractFavoriteProduct(page, item.href, timeout),
+            () => extractFavoriteProduct(page, item.href, timeout, { directMode }),
           )
-          : await extractFavoriteProduct(page, item.href, timeout);
+          : await extractFavoriteProduct(page, item.href, timeout, { directMode });
         if (updateDetailPacing("success")) {
           await queueCollectionRuntimeStatePersist(collectionPacingFile, runtime);
         }
@@ -2839,16 +2844,21 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         collection.attempted += 1;
         inFlight += 1;
         try {
-          const listingModeReason = listingModeSkipReason(item.card_text);
+          const listingModeReason = listingModeSkipReason(item.card_text, { directMode });
           if (listingModeReason) throw new Error(`${listingModeReason}: SKU ${item.sku}`);
-          const titleReason = favoriteTitleSkipReason(item.text);
+          const titleReason = favoriteTitleSkipReason(item.text, { directMode });
           if (titleReason) throw new Error(`${titleReason}: SKU ${item.sku}`);
           const productInfo = reusableListingFavoriteSnapshot(item, {
             verifyDetail: env.FLOW_B_VERIFY_LISTING_FBS_DETAIL === "1",
+            directMode,
           }) || await loadProduct(page, item);
-          const detailTitleReason = favoriteTitleSkipReason(productInfo.title);
+          const detailTitleReason = favoriteTitleSkipReason(productInfo.title, { directMode });
           if (detailTitleReason) throw new Error(`${detailTitleReason}: SKU ${item.sku}`);
-          const priceReason = favoritePriceSkipReason(productInfo, envNumber(env, "FLOW_B_MAX_SOURCE_PRICE_CNY", 1000));
+          const priceReason = favoritePriceSkipReason(
+            productInfo,
+            envNumber(env, "FLOW_B_MAX_SOURCE_PRICE_CNY", 1000),
+            { directMode },
+          );
           if (priceReason) throw new Error(`${priceReason}: SKU ${item.sku}`);
           const favoritePayload = { ...productInfo };
           delete favoritePayload.seller_url;
@@ -2858,8 +2868,8 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           const observedTotal = total;
           await record({
             status: "favorited",
-            preflight_mode: "FBS",
-            shipping_mode: "FBS",
+            preflight_mode: productInfo.mode || null,
+            shipping_mode: productInfo.mode || null,
             sku: productInfo.sku,
             url: item.href,
             source_url_product: item.href,
@@ -3126,7 +3136,9 @@ export function completedSourceUrls(records = [], {
 
 export async function scanSources({ context, urlsFile, outFile, env = process.env, log = console.log }) {
   const emit = createScannerLogger(log, env.FLOW_B_LOG_LEVEL || "verbose");
-  const strictSourcePortfolio = String(env.FLOW_B_STRICT_SOURCE_PORTFOLIO || "") === "1";
+  const directMode = String(env.FLOW_B_DIRECT_PUBLISH || "") === "1";
+  const strictSourcePortfolio = !directMode
+    && String(env.FLOW_B_STRICT_SOURCE_PORTFOLIO || "") === "1";
   const inputPath = path.resolve(urlsFile);
   const outputPath = path.resolve(outFile);
   const inputRevision = await fs.stat(inputPath).then((stat) => (
@@ -3155,7 +3167,9 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       ...configuredInputUrls,
       ...expandedFreshInputUrls,
     ])];
-  const allowlistFile = String(env.FLOW_B_SOURCE_ALLOWLIST_FILE || "").trim();
+  const allowlistFile = directMode
+    ? ""
+    : String(env.FLOW_B_SOURCE_ALLOWLIST_FILE || "").trim();
   const allowlistUrls = strictSourcePortfolio
     ? inputUrls
     : allowlistFile

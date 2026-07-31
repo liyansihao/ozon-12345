@@ -953,6 +953,29 @@ export function workerEnvironment(config, currentRun) {
   environment.FLOW_B_CDP_ENDPOINT = config.browser.cdp_endpoint;
   environment.FLOW_B_EXTENSION_DIR = absolute(config.browser.extension_dir);
   environment.FLOW_B_CHROMIUM_EXECUTABLE = absolute(config.browser.executable);
+  if (config.runtime_mode === "direct") {
+    const configuredTargets = Array.isArray(config.flow_env?.FLOW_B_STORE_TARGETS)
+      ? config.flow_env.FLOW_B_STORE_TARGETS
+      : [];
+    const startingStoreId = Number(currentRun.current_store_id || config.starting_store_id || 0);
+    const startingIndex = configuredTargets.findIndex((row) => Number(row?.id) === startingStoreId);
+    if (startingIndex > 0) {
+      environment.FLOW_B_STORE_TARGETS = JSON.stringify([
+        ...configuredTargets.slice(startingIndex),
+        ...configuredTargets.slice(0, startingIndex),
+      ]);
+    }
+    environment.FLOW_B_DIRECT_PUBLISH = "1";
+    environment.FLOW_B_1688_MIN_MATCHES = "1";
+    environment.FLOW_B_VALIDATION_ONLY = "0";
+    environment.FLOW_B_TARGET_PUBLISH_COUNT = String(Number(config.publish_target) || 500);
+    environment.FLOW_B_PROFIT_THRESHOLD = String(Number(config.minimum_profit_rate_exclusive) || 30);
+    delete environment.FLOW_B_SUBMISSION_GATE_FILE;
+    delete environment.FLOW_B_SUBMISSION_GATE_RUN_ID;
+    delete environment.FLOW_B_SUBMISSION_GATE_RUN_DIR;
+    delete environment.FLOW_B_RESUME_WINDOW;
+    return environment;
+  }
   environment.FLOW_B_RESUME_WINDOW = "1";
   environment.FLOW_B_CAPACITY_STORES = JSON.stringify(config.stores || []);
   environment.FLOW_B_ACCEPTANCE_TARGET = "500";
@@ -1821,6 +1844,208 @@ async function evaluateDueLiveGates({
   return { action: "continue", gate: null, status: "healthy" };
 }
 
+async function superviseDirectPublishing({
+  config,
+  appRoot,
+  stateRoot,
+  currentRun,
+  runDir,
+  urlsFile,
+  stopFile,
+  releaseLock,
+}) {
+  let worker = null;
+  let shuttingDown = false;
+  let restartAttempt = 0;
+  const stopWorker = async () => {
+    await stopOwnedWorker(worker);
+    worker = null;
+  };
+  const onSignal = () => {
+    shuttingDown = true;
+    void stopWorker();
+  };
+  process.on("SIGTERM", onSignal);
+  process.on("SIGINT", onSignal);
+  process.on("SIGHUP", onSignal);
+  try {
+    await fsp.mkdir(runDir, { recursive: true });
+    while (!shuttingDown) {
+      if (fs.existsSync(stopFile)) {
+        await stopWorker();
+        await fsp.unlink(stopFile).catch(() => {});
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "STOPPED",
+          reason: "safe stop requested",
+        });
+        return 0;
+      }
+      let browserOwner;
+      try {
+        await assertProcessOwnership({
+          phase: "before-worker",
+          runDir,
+          profileDir: config.browser.profile_dir,
+        });
+        browserOwner = await ensureBrowserOwner({ config, stateRoot, runDir });
+      } catch (error) {
+        const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
+        const decision = classifyWorkerFailure({
+          message: error?.message,
+          profileOwnerCount: owners.length,
+        });
+        if (decision.action === "fatal-stop") {
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "FATAL_STOP",
+            reason: decision.reason,
+            error: String(error?.message || error),
+          });
+          return 0;
+        }
+        const seconds = nextRestartDelaySeconds(restartAttempt++, config.restart_delays_seconds);
+        await updateOperationalState(stateRoot, currentRun, {
+          status: decision.action === "wait-for-verification"
+            ? "WAITING_FOR_VERIFICATION"
+            : "RECOVERING",
+          reason: decision.reason,
+          retry_in_seconds: seconds,
+        });
+        if (decision.action === "wait-for-verification") {
+          await waitForVerification({
+            stateRoot,
+            currentRun,
+            appRoot,
+            runDir,
+            stopFile,
+            checkpointEnv: workerEnvironment(config, currentRun),
+          });
+        } else {
+          await delay(seconds * 1000);
+        }
+        continue;
+      }
+
+      const stdoutFd = fs.openSync(path.join(runDir, "console.log"), "a");
+      const stderrPath = path.join(runDir, "stderr.log");
+      const runtimeErrorsPath = path.join(runDir, "runtime_errors.jsonl");
+      const stderrOffset = await fileSize(stderrPath);
+      const runtimeErrorsOffset = await fileSize(runtimeErrorsPath);
+      const stderrFd = fs.openSync(stderrPath, "a");
+      const persistedStore = await readJson(path.join(runDir, "current_store.json"), {});
+      const runtimeRun = {
+        ...currentRun,
+        current_store_id: Number(persistedStore?.store_id || currentRun.current_store_id || config.starting_store_id || 0),
+      };
+      worker = spawn(process.execPath, [
+        path.join(appRoot, "scripts", "flow_b_playwright.mjs"),
+        "run",
+        runDir,
+        urlsFile,
+      ], {
+        cwd: appRoot,
+        env: workerEnvironment(config, runtimeRun),
+        stdio: ["ignore", stdoutFd, stderrFd],
+      });
+      fs.closeSync(stdoutFd);
+      fs.closeSync(stderrFd);
+      await writeProcessOwners({
+        stateRoot,
+        currentRun,
+        browserPid: browserOwner.pid,
+        workerPid: worker.pid,
+      });
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "RUNNING",
+        reason: null,
+        target_metric: "erp_accepted_unique_skus",
+        target: Number(config.publish_target) || 500,
+        worker_pid: Number(worker.pid) || null,
+      });
+      const activeWorker = worker;
+      const result = await waitForWorkerOrBrowserFailure(activeWorker, {
+        cdpEndpoint: config.browser.cdp_endpoint,
+        probeIntervalMs: config.browser.cdp_health_interval_ms,
+        probeTimeoutMs: config.browser.cdp_health_timeout_ms,
+        failureThreshold: config.browser.cdp_health_failure_threshold,
+      });
+      if (result.browser_unhealthy) await stopOwnedWorker(activeWorker);
+      worker = null;
+      await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid, workerPid: null });
+      const evidence = [
+        (await readAppendedTail(stderrPath, stderrOffset)).text,
+        (await readAppendedTail(runtimeErrorsPath, runtimeErrorsOffset)).text,
+        result.error?.message || "",
+      ].join("\n");
+      if (shuttingDown) break;
+      if (result.code === 0 && !result.browser_unhealthy) {
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "TARGET_COMPLETE",
+          reason: "erp-accepted-target-reached",
+          target_metric: "erp_accepted_unique_skus",
+          target: Number(config.publish_target) || 500,
+        });
+        return 0;
+      }
+      if (/FLOW_B_ALL_STORES_REJECTED|all configured stores rejected direct publishing/iu.test(evidence)) {
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "FATAL_STOP",
+          reason: "all-configured-stores-rejected",
+          evidence_preserved: true,
+        });
+        return 0;
+      }
+      const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
+      const decision = classifyWorkerFailure({ message: evidence, profileOwnerCount: owners.length });
+      if (decision.action === "fatal-stop") {
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "FATAL_STOP",
+          reason: decision.reason,
+          evidence_preserved: true,
+        });
+        return 0;
+      }
+      const seconds = nextRestartDelaySeconds(restartAttempt++, config.restart_delays_seconds);
+      await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+        at: new Date().toISOString(),
+        run_dir: runDir,
+        action: decision.action,
+        reason: decision.reason,
+        delay_seconds: seconds,
+      });
+      await updateOperationalState(stateRoot, currentRun, {
+        status: decision.action === "wait-for-verification"
+          ? "WAITING_FOR_VERIFICATION"
+          : "RECOVERING",
+        reason: decision.reason,
+        retry_in_seconds: seconds,
+      });
+      if (decision.action === "wait-for-verification") {
+        await waitForVerification({
+          stateRoot,
+          currentRun,
+          appRoot,
+          runDir,
+          stopFile,
+          checkpointEnv: workerEnvironment(config, currentRun),
+        });
+      } else {
+        await delay(seconds * 1000);
+      }
+    }
+    await updateOperationalState(stateRoot, currentRun, {
+      status: "STOPPED",
+      reason: "supervisor signal received",
+    });
+    return 0;
+  } finally {
+    process.off("SIGTERM", onSignal);
+    process.off("SIGINT", onSignal);
+    process.off("SIGHUP", onSignal);
+    await stopWorker();
+    await releaseLock();
+  }
+}
+
 export async function supervise(configPath) {
   const config = expandedConfig(await readJson(configPath));
   // Node resolves an invoked symlink to the real release path for import.meta.
@@ -1892,6 +2117,18 @@ export async function supervise(configPath) {
     });
     await releaseLock();
     return 0;
+  }
+  if (config.runtime_mode === "direct") {
+    return superviseDirectPublishing({
+      config,
+      appRoot,
+      stateRoot,
+      currentRun,
+      runDir,
+      urlsFile,
+      stopFile,
+      releaseLock,
+    });
   }
   const runContract = productionRunContractDecision({
     currentRun,

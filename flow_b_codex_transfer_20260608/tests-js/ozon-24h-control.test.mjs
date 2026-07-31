@@ -124,26 +124,28 @@ test("doctor release identity requires exact commit, config hash, source hash, a
   assert.equal(deploymentIdentityValid({ ...valid, state_schema_version: 2 }, configText), false);
 });
 
-test("production config freezes the external 1688 Python runtime", async () => {
+test("production config freezes the direct 500-acceptance runtime and external 1688 Python", async () => {
   const configPath = path.resolve(
     import.meta.dirname,
     "../config/ozon_24h_production.json",
   );
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   assert.doesNotThrow(() => validateConfig(config));
-  assert.equal(config.operator_direct_publish.minimum_ready_candidates, 0);
-  assert.equal(config.flow_env.FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE, "1");
-  assert.equal(config.flow_env.FLOW_B_PRODUCER_INTERVAL_MS, "60000");
-  assert.equal(config.flow_env.FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS, "30000");
+  assert.equal(config.runtime_mode, "direct");
+  assert.equal(config.publish_target, 500);
+  assert.equal(config.flow_env.FLOW_B_DIRECT_PUBLISH, "1");
+  assert.equal(config.flow_env.FLOW_B_1688_MIN_MATCHES, "1");
+  assert.equal(config.candidate_buffer, undefined);
+  assert.equal(config.acceptance, undefined);
   assert.throws(
     () => validateConfig({
       ...config,
-      operator_direct_publish: {
-        ...config.operator_direct_publish,
-        minimum_ready_candidates: 3,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_1688_MIN_MATCHES: "3",
       },
     }),
-    /zero-buffer authorization/u,
+    /one verified 1688/u,
   );
   assert.throws(
     () => validateConfig({
@@ -158,49 +160,9 @@ test("production config freezes the external 1688 Python runtime", async () => {
   assert.throws(
     () => validateConfig({
       ...config,
-      flow_env: {
-        ...config.flow_env,
-        FLOW_B_BUFFER_REFILL_TARGET: "7",
-      },
+      publish_target: 499,
     }),
-    /publish\/refill tranche/u,
-  );
-  assert.throws(
-    () => validateConfig({
-      ...config,
-      flow_env: {
-        ...config.flow_env,
-        FLOW_B_MAX_SOURCE_BATCHES_PER_TRANCHE: "2",
-      },
-    }),
-    /source producer must yield/u,
-  );
-  assert.throws(
-    () => validateConfig({
-      ...config,
-      flow_env: {
-        ...config.flow_env,
-        FLOW_B_PRODUCER_INTERVAL_MS: "59999",
-      },
-    }),
-    /source producer must yield/u,
-  );
-  assert.throws(
-    () => validateConfig({
-      ...config,
-      flow_env: {
-        ...config.flow_env,
-        FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS: "10000",
-      },
-    }),
-    /page creation timeout/u,
-  );
-  assert.throws(
-    () => validateConfig({
-      ...config,
-      source_refresh_seconds: 3_600,
-    }),
-    /refresh interval/u,
+    /target must equal 500/u,
   );
 });
 

@@ -110,16 +110,13 @@ test("CLI accepts setup, scan, and run shapes", () => {
   assert.equal(run.outFile, "/tmp/run/source_deep_scan.json");
 });
 
-test("run and accept can rotate to a safe gate-specific scan checkpoint", () => {
+test("run can rotate to a safe scan checkpoint and the strict accept command is removed", () => {
   const env = { FLOW_B_SOURCE_SCAN_STATE_FILE: "source_deep_scan_detail_verified.json" };
   assert.equal(
     sourceScanOutputFile("/tmp/run", env),
     "/tmp/run/source_deep_scan_detail_verified.json",
   );
-  assert.equal(
-    parseCli(["accept", "/tmp/run", "urls.txt"], env).outFile,
-    "/tmp/run/source_deep_scan_detail_verified.json",
-  );
+  assert.throws(() => parseCli(["accept", "/tmp/run", "urls.txt"], env), /unknown command/u);
   assert.throws(
     () => sourceScanOutputFile("/tmp/run", { FLOW_B_SOURCE_SCAN_STATE_FILE: "../outside.json" }),
     /safe JSON filename/,

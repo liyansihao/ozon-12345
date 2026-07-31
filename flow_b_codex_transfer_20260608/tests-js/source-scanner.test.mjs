@@ -2521,6 +2521,16 @@ test("favorite preflight accepts only an explicit pure FBS mode", () => {
   assert.equal(favoriteModeSkipReason(null), "missing-shipping-mode");
 });
 
+test("direct discovery does not reject shipping mode, category, title family, or source price", () => {
+  assert.equal(favoriteModeSkipReason("FBO", { directMode: true }), null);
+  assert.equal(favoriteModeSkipReason(null, { directMode: true }), null);
+  assert.equal(listingModeSkipReason("商品\n发货模式：FBO\n库存", { directMode: true }), null);
+  assert.equal(favoriteTitleSkipReason("Одежда и обувь", { directMode: true }), null);
+  assert.equal(favoritePriceSkipReason({
+    price_info: { currency: "CNY", sell_price: 99999 },
+  }, 1000, { directMode: true }), null);
+});
+
 test("listing cards reject explicit non-pure modes and deterministic missing placeholders before opening product details", () => {
   assert.equal(listingModeSkipReason("商品\n发货模式：FBS\n库存"), null);
   assert.equal(listingModeSkipReason("商品\n发货模式：FBO\n库存"), "non-pure-fbs");

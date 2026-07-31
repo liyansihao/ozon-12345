@@ -45,7 +45,9 @@ export function verifyReturnedSameItemEvidence({
   filteredPrices = [],
   costSource,
   selectedCost,
+  minimumMatches = 3,
 } = {}) {
+  const requiredMatches = Math.max(1, Number(minimumMatches) || 1);
   const encoded = String(encodedEvidence || "").trim();
   const key = String(evidenceKey || "").trim();
   if (!encoded) return { ok: false, reason: "missing returned same-item evidence" };
@@ -79,7 +81,9 @@ export function verifyReturnedSameItemEvidence({
   }
 
   const rows = Array.isArray(evidence?.rows) ? evidence.rows : [];
-  if (rows.length < 3) return { ok: false, reason: `returned semantic matches insufficient ${rows.length}` };
+  if (rows.length < requiredMatches) {
+    return { ok: false, reason: `returned semantic matches insufficient ${rows.length}` };
+  }
   const offerIds = new Set();
   const evidencePrices = [];
   for (const row of rows) {
@@ -131,7 +135,7 @@ export function verifyReturnedSameItemEvidence({
     return { ok: false, reason: "returned evidence price set does not match filtered prices" };
   }
   const selectedCluster = Array.isArray(evidence?.selected_cluster) ? evidence.selected_cluster : [];
-  if (selectedCluster.length < 3) {
+  if (selectedCluster.length < requiredMatches) {
     return { ok: false, reason: `selected returned cluster insufficient ${selectedCluster.length}` };
   }
   const selectedIds = new Set();
@@ -158,7 +162,8 @@ export function verifyReturnedSameItemEvidence({
   };
 }
 
-export function sameItemCostEvidence(cost = {}) {
+export function sameItemCostEvidence(cost = {}, { minimumMatches = 3 } = {}) {
+  const requiredMatches = Math.max(1, Number(minimumMatches) || 1);
   const source = String(cost?.source || "").trim();
   const matchEvidenceKey = String(cost?.match_evidence_key || "").trim();
   const prices = Array.isArray(cost?.prices)
@@ -171,8 +176,8 @@ export function sameItemCostEvidence(cost = {}) {
     && cost?.same_item_match === true
     && cost?.returned_evidence_verified === true
     && cost?.match_evidence_contract === "1688-returned-same-item-v2"
-    && Number(cost?.matched_offer_count) >= 3
-    && prices.length >= 3;
+    && Number(cost?.matched_offer_count) >= requiredMatches
+    && prices.length >= requiredMatches;
   return {
     contract: "1688-same-item-v1",
     source,
@@ -186,7 +191,8 @@ export function sameItemCostEvidence(cost = {}) {
   };
 }
 
-export function hasReliableSameItemCostEvidence(data = {}) {
+export function hasReliableSameItemCostEvidence(data = {}, { minimumMatches = 3 } = {}) {
+  const requiredMatches = Math.max(1, Number(minimumMatches) || 1);
   const cost = data?.cost || {};
   const evidence = data?.cost_evidence || {};
   const source = String(data?.cost_source || cost?.source || "").trim();
@@ -201,7 +207,7 @@ export function hasReliableSameItemCostEvidence(data = {}) {
     && evidence?.same_item_match === true
     && evidence?.returned_evidence_verified === true
     && evidence?.match_evidence_contract === "1688-returned-same-item-v2"
-    && Number(evidence?.matched_offer_count) >= 3
+    && Number(evidence?.matched_offer_count) >= requiredMatches
     && isReliable1688CostSource(source)
     && String(evidence?.source || "") === source
     && isValid1688MatchEvidenceKey(evidence?.match_evidence_key)
@@ -210,6 +216,6 @@ export function hasReliableSameItemCostEvidence(data = {}) {
     && cost?.returned_evidence_verified === true
     && cost?.match_evidence_contract === evidence.match_evidence_contract
     && Number(cost?.matched_offer_count) === Number(evidence?.matched_offer_count)
-    && Number(evidence?.filtered_price_count) >= 3
-    && prices.length >= 3;
+    && Number(evidence?.filtered_price_count) >= requiredMatches
+    && prices.length >= requiredMatches;
 }

@@ -74,6 +74,19 @@ class FirstPageClusterCostTest(unittest.TestCase):
         self.assertEqual(result["decision"], "REVIEW")
         self.assertIn("main price cluster fewer than 3", result["reason"])
 
+    def test_direct_mode_accepts_one_strong_same_item_offer(self):
+        result = image_median_1688.first_page_p70_cost(
+            rows([18]),
+            expect_title="same product lamp",
+            page_size=10,
+            minimum_matches=1,
+        )
+
+        self.assertEqual(result["decision"], "LIGHT_ACCEPT")
+        self.assertEqual(result["p70_cost"], 18.0)
+        self.assertEqual(result["filtered_first_page_prices"], [18.0])
+        self.assertEqual(result["selected_price_cluster"]["count"], 1)
+
     def test_extreme_spread_requires_strong_cluster(self):
         result = image_median_1688.first_page_p70_cost(
             rows([10, 18, 35, 70, 200, 210, 220, 230]),

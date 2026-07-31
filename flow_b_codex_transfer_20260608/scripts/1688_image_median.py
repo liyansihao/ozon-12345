@@ -363,7 +363,9 @@ def first_page_p70_cost(
     expect_model: str = "",
     expect_category: str = "",
     page_size: int = 10,
+    minimum_matches: int = 3,
 ) -> dict:
+    required_matches = max(1, int(minimum_matches))
     first_page = scored_similarity_rows(rows, expect_title, expect_model, expect_category, page_size)
     first_page_prices = [row["price"] for row in first_page if row.get("price") is not None]
     allowed_levels = {"strong"} if any(row["level"] == "strong" for row in first_page) else set()
@@ -424,11 +426,11 @@ def first_page_p70_cost(
             filtered_rows.append(row)
 
     filtered_prices = sorted(float(row["price"]) for row in filtered_rows if row.get("price") is not None)
-    if len(filtered_prices) < 3:
+    if len(filtered_prices) < required_matches:
         shortage_reason = (
             "no explicit title/model/category semantic same-item matches"
             if not candidate_rows
-            else "filtered first-page 1688 candidates fewer than 3"
+            else f"filtered first-page 1688 candidates fewer than {required_matches}"
         )
         return {
             "decision": "REVIEW",
@@ -447,10 +449,10 @@ def first_page_p70_cost(
     all_median = median_number(filtered_prices)
     price_clusters = build_price_clusters(filtered_rows)
     selected_cluster = choose_price_cluster(price_clusters, all_median)
-    if not selected_cluster or selected_cluster["count"] < 3:
+    if not selected_cluster or selected_cluster["count"] < required_matches:
         return {
             "decision": "REVIEW",
-            "reason": f"main price cluster fewer than 3 {filtered_prices}",
+            "reason": f"main price cluster fewer than {required_matches} {filtered_prices}",
             "p70_cost": None,
             "selected_offer_id": None,
             "first_page_prices": first_page_prices,
@@ -630,6 +632,7 @@ def main() -> int:
     parser.add_argument("--expect-model", default="", help="Product model/article/SKU-like text for strong matching")
     parser.add_argument("--expect-category", default="", help="Ozon/Maozi category text for fast match screening")
     parser.add_argument("--match-top", type=int, default=10, help="How many high-sales rows to scan for title/model matches")
+    parser.add_argument("--min-matches", type=int, default=3, help="Minimum trustworthy same-item offers required")
     args = parser.parse_args()
 
     image_path = Path(args.image).expanduser().resolve()
@@ -649,6 +652,7 @@ def main() -> int:
         expect_model=args.expect_model,
         expect_category=args.expect_category,
         page_size=args.top,
+        minimum_matches=max(1, args.min_matches),
     )
 
     payload = {

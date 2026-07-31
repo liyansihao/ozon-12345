@@ -48,7 +48,9 @@ function parsePrices(value) {
 export function parseCostOutput(text, sellPrice, {
   expectedMatchEvidence = null,
   requireSameItemEvidence = false,
+  minimumSameItemMatches = 3,
 } = {}) {
+  const requiredMatches = Math.max(1, Number(minimumSameItemMatches) || 1);
   const cost = Number(lineValue(text, "P70_COST"));
   const source = lineValue(text, "COST_SOURCE");
   const matchEvidenceKey = lineValue(text, "MATCH_EVIDENCE_KEY");
@@ -59,7 +61,9 @@ export function parseCostOutput(text, sellPrice, {
 
   if (!Number.isFinite(cost) || cost <= 0) return { ok: false, reason: explicitReason || "missing or invalid P70 cost" };
   if (!isReliable1688CostSource(source)) return { ok: false, reason: `unreliable cost source: ${source || "missing"}` };
-  if (prices.length < 3) return { ok: false, reason: `filtered first-page insufficient ${prices.length}` };
+  if (prices.length < requiredMatches) {
+    return { ok: false, reason: `filtered first-page insufficient ${prices.length}` };
+  }
   if (prices.some((price) => !Number.isFinite(price) || price <= 0)) return { ok: false, reason: "invalid filtered first-page prices" };
   if (source === "search_first_page_p70_similarity_filtered" && Math.max(...prices) / Math.min(...prices) > 5) {
     return { ok: false, reason: "filtered first-page price spread greater than five" };
@@ -74,6 +78,7 @@ export function parseCostOutput(text, sellPrice, {
     filteredPrices: prices,
     costSource: source,
     selectedCost: cost,
+    minimumMatches: requiredMatches,
   });
   if (requireSameItemEvidence && !sameItemProof.ok) {
     return { ok: false, reason: `same-item evidence rejected: ${sameItemProof.reason}` };
@@ -184,6 +189,7 @@ export function createCostBridge({
   healthDeferredTtlMs = Number(process.env.FLOW_B_1688_HEALTH_DEFERRED_TTL_MS || 300_000),
   healthProbeBackoffMs = Number(process.env.FLOW_B_1688_HEALTH_PROBE_BACKOFF_MS || 30_000),
   healthSkuRetryLimit = Number(process.env.FLOW_B_1688_HEALTH_SKU_RETRY_LIMIT || 1),
+  minimumSameItemMatches = Number(process.env.FLOW_B_1688_MIN_MATCHES || 3),
   now = () => Date.now(),
   downloadAttempts = 3,
   downloadTimeoutMs = 15_000,
@@ -218,6 +224,7 @@ export function createCostBridge({
     return {
       expectedMatchEvidence,
       requireSameItemEvidence: Object.values(expectedMatchEvidence).some(Boolean),
+      minimumSameItemMatches: Math.max(1, Number(minimumSameItemMatches) || 1),
     };
   }
 
@@ -280,7 +287,11 @@ export function createCostBridge({
     const pool = activeWorkerPool();
     if (pool) {
       try {
-        const result = await pool.run({ image: String(imagePath), ...evidence }, timeout);
+        const result = await pool.run({
+          image: String(imagePath),
+          minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
+          ...evidence,
+        }, timeout);
         return { ...result, health_probe: healthProbe };
       } catch (error) {
         if (error?.code === "worker-timeout") throw error;
@@ -299,6 +310,7 @@ export function createCostBridge({
     ]) {
       if (evidence[key]) evidenceArgs.push(flag, evidence[key]);
     }
+    evidenceArgs.push("--min-matches", String(Math.max(1, Number(minimumSameItemMatches) || 1)));
     const result = await runProcess({
       command: python,
       args: [path.resolve(scriptPath), imagePath, ...evidenceArgs],
@@ -313,7 +325,14 @@ export function createCostBridge({
     if (!imageUrl) return null;
     const evidence = matchEvidence(item);
     const hasEvidence = Object.values(evidence).some(Boolean);
-    const payload = hasEvidence ? JSON.stringify({ version: 3, image_url: imageUrl, ...evidence }) : imageUrl;
+    const payload = hasEvidence
+      ? JSON.stringify({
+        version: 4,
+        image_url: imageUrl,
+        minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
+        ...evidence,
+      })
+      : `${imageUrl}:min-matches=${Math.max(1, Number(minimumSameItemMatches) || 1)}`;
     return crypto.createHash("sha256").update(payload).digest("hex");
   }
 
