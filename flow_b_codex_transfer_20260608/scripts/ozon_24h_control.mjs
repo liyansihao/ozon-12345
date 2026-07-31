@@ -226,6 +226,9 @@ function validateConfig(config) {
   ) {
     throw new Error("source producer must yield after one batch for at least 60000ms");
   }
+  if (Number(config?.flow_env?.FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS) !== 30_000) {
+    throw new Error("favorite worker page creation timeout must equal 30000ms");
+  }
   if (
     Number(config?.rate_check_interval_seconds) < 60
     || Number(config?.rate_check_interval_seconds) > 300
