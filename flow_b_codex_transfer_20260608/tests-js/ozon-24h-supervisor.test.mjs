@@ -396,6 +396,27 @@ test("candidate buffer inflow counts only newly qualified unconsumed unique SKUs
   assert.equal(result.added_unique, 1);
 });
 
+test("candidate buffer evidence accepts durable consumed SKU sets", () => {
+  const row = {
+    sku: "consumed",
+    status: "validated",
+    validation_mode: "buffer",
+    shipping_mode: "FBS",
+    profit_rate: 31,
+    purchase_price: 2,
+    ...RELIABLE_COST,
+    fbs_evidence: { verified: true },
+    quality_gate_passed: true,
+  };
+  assert.deepEqual(candidateBufferSnapshot([row], {
+    consumedSkus: new Set(["consumed"]),
+  }), {
+    unique_ready: 0,
+    ready_skus: [],
+    rejected_or_invalid: 1,
+  });
+});
+
 test("process ownership snapshot rejects a worker from any old run", () => {
   const rows = [
     { pid: 10, command: "/usr/bin/node /app/scripts/ozon_24h_supervisor.mjs supervise /app/config.json" },

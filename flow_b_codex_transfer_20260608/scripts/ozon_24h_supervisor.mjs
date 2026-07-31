@@ -377,7 +377,10 @@ function isQualifiedCandidateBufferRow(row) {
 
 export function candidateBufferSnapshot(rows = [], { consumedSkus = [] } = {}) {
   const latest = new Map();
-  const consumed = new Set((consumedSkus || []).map((value) => String(value || "").trim()).filter(Boolean));
+  const consumedValues = consumedSkus && typeof consumedSkus[Symbol.iterator] === "function"
+    ? [...consumedSkus]
+    : [];
+  const consumed = new Set(consumedValues.map((value) => String(value || "").trim()).filter(Boolean));
   for (const row of rows || []) {
     const sku = String(row?.sku || "").trim();
     if (sku) latest.set(sku, row);
