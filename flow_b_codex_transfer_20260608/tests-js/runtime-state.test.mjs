@@ -486,6 +486,51 @@ test("submission reservations and strict publications atomically claim canonical
   });
 });
 
+test("direct submission reservations deduplicate by SKU without enforcing historical title claims", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "runtime.sqlite");
+    const strictOwner = createRuntimeState({
+      dbPath,
+      ownerId: "strict-worker",
+      generationId: "strict-generation",
+    });
+    const directOwner = createRuntimeState({
+      dbPath,
+      ownerId: "direct-worker",
+      generationId: "direct-generation",
+      enforceTitleUniqueness: false,
+    });
+    const title = "Reusable Product Title Model ZX-900";
+
+    assert.equal(strictOwner.reserveSubmission("strict-title-sku", {
+      reason: "submission-intent",
+      data: { title },
+    }).recorded, true);
+    assert.equal(strictOwner.recordStrictPublication("strict-title-sku", {
+      reason: "strict-confirmed",
+      data: { ...strictData, title },
+    }).recorded, true);
+
+    const directReservation = directOwner.reserveSubmission("direct-title-sku", {
+      reason: "submission-intent",
+      data: { title },
+    });
+    assert.equal(directReservation.recorded, true);
+    assert.equal(directReservation.reservation.titleKey, null);
+    assert.equal(directOwner.reserveSubmission("direct-title-sku", {
+      reason: "same-sku-reentry",
+      data: { title, api_call_started_at: "2026-07-31T04:00:00.000Z" },
+    }).recorded, true);
+    assert.equal(
+      directOwner.submissionReservation("direct-title-sku").data.api_call_started_at,
+      "2026-07-31T04:00:00.000Z",
+    );
+
+    strictOwner.close();
+    directOwner.close();
+  });
+});
+
 test("deterministic and invariant failures are terminal", async () => {
   await withTempDir(async (dir) => {
     const state = createRuntimeState({ dbPath: path.join(dir, "runtime.sqlite") });

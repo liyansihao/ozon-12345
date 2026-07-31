@@ -172,6 +172,7 @@ export function createPublishState({
   publishedCsv,
   pendingStateFiles = [],
   runtimeStateDbPath = null,
+  enforceTitleUniqueness = true,
 }) {
   if (!runDir) throw new TypeError("runDir is required");
   if (!publishedCsv) throw new TypeError("publishedCsv is required");
@@ -189,7 +190,7 @@ export function createPublishState({
   const summaryPath = path.join(resolvedRunDir, "summary.json");
   const runtimeAuditPath = path.join(resolvedRunDir, "runtime_state_audit.jsonl");
   const runtimeState = runtimeStateDbPath
-    ? createRuntimeState({ dbPath: runtimeStateDbPath })
+    ? createRuntimeState({ dbPath: runtimeStateDbPath, enforceTitleUniqueness })
     : null;
   const states = new Map();
   const publishedSkus = new Set();

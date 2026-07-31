@@ -730,6 +730,7 @@ export function createRuntimeState({
   ownerId = process.env.FLOW_B_SUBMISSION_OWNER || `pid:${process.pid}`,
   generationId = process.env.FLOW_B_WORKER_GENERATION || crypto.randomUUID(),
   submissionLeaseMs = 5 * 60_000,
+  enforceTitleUniqueness = true,
   requiredSubmissionGateRunId = process.env.FLOW_B_SUBMISSION_GATE_RUN_ID || null,
   requiredSubmissionGateRunDir = process.env.FLOW_B_SUBMISSION_GATE_RUN_DIR || null,
 } = {}) {
@@ -744,6 +745,7 @@ export function createRuntimeState({
   if (!normalizedOwnerId) throw new TypeError("ownerId is required");
   if (!normalizedGenerationId) throw new TypeError("generationId is required");
   const normalizedSubmissionLeaseMs = Number(submissionLeaseMs);
+  const titleUniquenessEnabled = enforceTitleUniqueness !== false;
   if (!Number.isFinite(normalizedSubmissionLeaseMs) || normalizedSubmissionLeaseMs < 1_000) {
     throw new TypeError("submissionLeaseMs must be at least 1000 milliseconds");
   }
@@ -1490,7 +1492,7 @@ export function createRuntimeState({
           same_generation_reentry: true,
         } : {}),
       };
-      const titleKey = canonicalTitleKey(mergedData);
+      const titleKey = titleUniquenessEnabled ? canonicalTitleKey(mergedData) : null;
       if (titleKey) mergedData.title_key = titleKey;
       const strictTitleClaim = titleKey ? selectStrictTitleClaim.get(titleKey) : null;
       if (strictTitleClaim && strictTitleClaim.sku !== sku) {

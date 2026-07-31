@@ -252,6 +252,7 @@ async function createPublishingSession(context, options, env, shared) {
       publishedCsv: publishedCsvPath(env),
       pendingStateFiles: String(env.FLOW_B_PENDING_STATE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
       runtimeStateDbPath: resolvedRuntimeStateDbPath,
+      enforceTitleUniqueness: env.FLOW_B_DIRECT_PUBLISH !== "1",
     });
     const costBridge = createCostBridge({
       python: env.FLOW_B_PYTHON || "python3",
