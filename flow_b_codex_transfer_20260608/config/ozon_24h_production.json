@@ -44,7 +44,7 @@
   "browser": {
     "cdp_endpoint": "http://127.0.0.1:9223",
     "executable": "${HOME}/.ozon-24h-production/browser/playwright-1.62.0/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-    "profile_dir": "${HOME}/.ozon-24h-acceptance-v70/flow_b_codex_transfer_20260608/runs/flow_b/playwright_setup/playwright_profile_v2",
+    "profile_dir": "${HOME}/.ozon-24h-production/state/profiles/production-playwright-151-v1",
     "extension_dir": "${HOME}/Downloads/maozi-plugin-3.0.9/maozi-plugin-3.0.9",
     "start_timeout_ms": 60000,
     "cdp_health_interval_ms": 15000,
