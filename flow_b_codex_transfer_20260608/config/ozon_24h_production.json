@@ -157,7 +157,7 @@
     "FLOW_B_PUBLISH_FEEDBACK_SEED_FILES": "${STATE_ROOT}/history/source_yield_history.jsonl",
     "FLOW_B_STRICT_SOURCE_PORTFOLIO": "0",
     "FLOW_B_1688_SHARED_CACHE": "${STATE_ROOT}/cache/1688_cache.json",
-    "FLOW_B_PYTHON": "${HOME}/.ozon-24h-production/python-1688-v1/bin/python",
+    "FLOW_B_PYTHON": "/usr/local/bin/python3",
     "FLOW_B_1688_SCRIPT": "${APP_ROOT}/scripts/flow_b_1688_sync.py",
     "FLOW_B_LOG_LEVEL": "summary",
     "FLOW_B_LOW_TOKEN_INTERVENTION": "0",

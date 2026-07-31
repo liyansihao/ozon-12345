@@ -155,7 +155,7 @@ test("production config freezes the direct 500-acceptance runtime and external 1
         FLOW_B_PYTHON: "python3",
       },
     }),
-    /frozen external Python environment/u,
+    /absolute external Python executable/u,
   );
   assert.throws(
     () => validateConfig({

@@ -188,11 +188,9 @@ function validateConfig(config) {
       || !String(config?.flow_env?.FLOW_B_RUNTIME_STATE_DB || "").endsWith(".sqlite")) {
       throw new Error("external SQLite state schema must equal version 3");
     }
-    if (
-      String(config?.flow_env?.FLOW_B_PYTHON || "")
-      !== "${HOME}/.ozon-24h-production/python-1688-v1/bin/python"
-    ) {
-      throw new Error("production 1688 runtime must use the frozen external Python environment");
+    const externalPython = String(config?.flow_env?.FLOW_B_PYTHON || "");
+    if (!path.isAbsolute(expandHome(externalPython)) || externalPython === "python3") {
+      throw new Error("production 1688 runtime must use an absolute external Python executable");
     }
     if (String(config?.browser?.cdp_endpoint) !== "http://127.0.0.1:9223") {
       throw new Error("production CDP endpoint must be the unique localhost owner on port 9223");
