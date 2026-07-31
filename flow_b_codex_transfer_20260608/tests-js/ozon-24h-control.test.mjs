@@ -10,6 +10,7 @@ import {
   compactProductionStatus,
   currentRunRetirementDecision,
   deploymentIdentityValid,
+  directCompletionEvidenceDecision,
   doctor,
   globalFlowBWorkerPids,
   refreshCurrentRunSources,
@@ -58,6 +59,29 @@ test("resume restarts the same checkpoint after an intentional safe stop", () =>
   assert.equal(resumeMode({ status: "WAITING_FOR_VERIFICATION" }, current), "verification");
   assert.equal(resumeMode({ status: "RUNNING" }, current), "wake-supervisor");
   assert.equal(resumeMode({ status: "STOPPED" }, { run_id: "partial" }), "wake-supervisor");
+});
+
+test("direct target completion is resumable when current-run ERP evidence is below 500", () => {
+  assert.deepEqual(directCompletionEvidenceDecision({
+    status: { status: "TARGET_COMPLETE" },
+    current,
+    acceptedCount: 0,
+    target: 500,
+  }), {
+    action: "resume-current-run",
+    accepted: 0,
+    target: 500,
+  });
+  assert.deepEqual(directCompletionEvidenceDecision({
+    status: { status: "TARGET_COMPLETE" },
+    current,
+    acceptedCount: 500,
+    target: 500,
+  }), {
+    action: "complete",
+    accepted: 500,
+    target: 500,
+  });
 });
 
 test("legacy production run can only be retired after a zero-owner safe stop", () => {

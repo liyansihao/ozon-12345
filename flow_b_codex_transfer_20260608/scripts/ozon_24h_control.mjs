@@ -59,6 +59,21 @@ export function resumeMode(status, current) {
   return "wake-supervisor";
 }
 
+export function directCompletionEvidenceDecision({
+  status = {},
+  current = {},
+  acceptedCount = 0,
+  target = 500,
+} = {}) {
+  if (String(status?.status || "") !== "TARGET_COMPLETE") return { action: "unchanged" };
+  if (!current?.run_id || !current?.run_dir || !current?.urls_file) return { action: "unchanged" };
+  const required = Math.max(1, Number(target) || 500);
+  const accepted = Math.max(0, Number(acceptedCount) || 0);
+  return accepted >= required
+    ? { action: "complete", accepted, target: required }
+    : { action: "resume-current-run", accepted, target: required };
+}
+
 export function currentRunRetirementDecision({
   status = {},
   current = {},
@@ -699,6 +714,30 @@ async function kickstart(config) {
   if (!result.ok) throw new Error(`launchd kickstart failed: ${result.stderr || result.error}`);
 }
 
+async function normalizeDirectCompletionStatus(config, paths, status, current) {
+  if (config.runtime_mode !== "direct") return status;
+  const acceptedRows = current?.run_dir
+    ? await readJsonLines(path.join(current.run_dir, "erp_accepted.jsonl"))
+    : [];
+  const decision = directCompletionEvidenceDecision({
+    status,
+    current,
+    acceptedCount: uniqueSkuCount(acceptedRows),
+    target: config.publish_target,
+  });
+  if (decision.action !== "resume-current-run") return status;
+  const repaired = {
+    ...status,
+    status: "STOPPED",
+    reason: "direct-target-completion-evidence-missing",
+    observed_at: new Date().toISOString(),
+    accepted: decision.accepted,
+    target: decision.target,
+  };
+  await writeJsonAtomic(path.join(paths.stateRoot, "operational_status.json"), repaired);
+  return repaired;
+}
+
 async function start(config) {
   const paths = deploymentPaths(config);
   const processResult = await run("/bin/ps", ["-axo", "pid=,command="]);
@@ -714,8 +753,9 @@ async function start(config) {
     error.worker_pids = existingWorkerPids;
     throw error;
   }
-  const status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
+  let status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
+  status = await normalizeDirectCompletionStatus(config, paths, status, current);
   if (shouldResumeCurrentRun(status, current)) {
     const [releaseConfigText, deployment] = await Promise.all([
       fsp.readFile(path.join(paths.appLink, "config", "ozon_24h_production.json"), "utf8"),
@@ -945,8 +985,9 @@ async function retireCurrentRun(config) {
 
 async function resume(config) {
   const paths = deploymentPaths(config);
-  const status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
+  let status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
+  status = await normalizeDirectCompletionStatus(config, paths, status, current);
   if (resumeMode(status, current) === "restart-current-run") return start(config);
   await fsp.writeFile(path.join(paths.stateRoot, "resume.request"), `${new Date().toISOString()}\n`, "utf8");
   await kickstart(config);
