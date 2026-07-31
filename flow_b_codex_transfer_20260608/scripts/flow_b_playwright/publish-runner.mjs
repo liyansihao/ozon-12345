@@ -2719,12 +2719,26 @@ export function createPublishRunner({
       if (batchControl?.cancelled) {
         return { status: "ignored", sku, source_url: inputItem.source_url ?? null, reason: "batch-fatal-cancelled" };
       }
-      const latestEntry = typeof state.entryOf === "function"
+      let latestEntry = typeof state.entryOf === "function"
         ? state.entryOf(sku)
         : typeof state.entries === "function"
           ? state.entries().find((entry) => String(entry.sku) === String(sku))
           : null;
-      let restoredStatus = latestEntry?.status ?? state.statusOf?.(sku);
+      let reopenedLegacyPolicy = false;
+      if (
+        activeDirectMode
+        && ["failed", "skipped"].includes(String(latestEntry?.status || ""))
+        && typeof state.reopenDirectCandidate === "function"
+      ) {
+        const reopen = await state.reopenDirectCandidate(sku);
+        if (reopen?.reopened === true) {
+          reopenedLegacyPolicy = true;
+          latestEntry = state.entryOf?.(sku) || latestEntry;
+        }
+      }
+      let restoredStatus = reopenedLegacyPolicy
+        ? null
+        : latestEntry?.status ?? state.statusOf?.(sku);
       const restoredEntry = latestEntry || restoredBySku.get(String(sku));
       let item = latestEntry
         ? mergeCandidateFacts({ ...inputItem, ...(latestEntry.data || {}), sku }, facts.get(String(sku)) || {})

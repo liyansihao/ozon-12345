@@ -27,6 +27,40 @@ const STAGE_PRIORITY = new Map([
   ["skipped", 5],
   ["published", 6],
 ]);
+const DIRECT_FINAL_OUTCOMES = new Set([
+  "submitted",
+  "imported",
+  "online",
+  "stock_updated",
+  "rejected",
+  "skipped_cost",
+  "skipped_profit",
+]);
+
+export function directCandidateReopenDecision(state) {
+  if (!state?.terminal) return { allowed: true, reason: "already-nonterminal" };
+  const data = state.data || {};
+  if (state.stage === "published" || state.strict === true) {
+    return { allowed: false, reason: "historical-publication" };
+  }
+  if (
+    data.submitted === true
+    || data.submission_pending === true
+    || data.submission_intent === true
+    || data.api_call_started_at
+    || data.api_call_completed_at
+    || data.erp_accepted_at
+  ) {
+    return { allowed: false, reason: "submission-state-preserved" };
+  }
+  if (DIRECT_FINAL_OUTCOMES.has(String(data.outcome_status || ""))) {
+    return { allowed: false, reason: "direct-final-outcome" };
+  }
+  if (!["failed", "skipped"].includes(String(state.stage || ""))) {
+    return { allowed: false, reason: "unsupported-terminal-stage" };
+  }
+  return { allowed: true, reason: "legacy-policy-terminal" };
+}
 
 function normalizeSku(value) {
   const sku = value === null || value === undefined ? "" : String(value).trim();
@@ -1820,6 +1854,51 @@ export function createRuntimeState({
     return { allowed: true, reason: "eligible", attempts, state };
   }
 
+  function reopenDirectCandidate(rawSku) {
+    assertOpen();
+    const sku = normalizeSku(rawSku);
+    return transaction(() => {
+      const existing = getState(sku);
+      const decision = directCandidateReopenDecision(existing);
+      if (!decision.allowed || decision.reason === "already-nonterminal") {
+        return { reopened: false, ...decision, state: existing };
+      }
+      const occurredAt = currentTimestamp();
+      const data = {
+        ...(existing.data || {}),
+        reason: "direct-policy-reopened",
+        terminal: false,
+        failure_class: null,
+        skip_intent: false,
+        skip_reason: null,
+        outcome_status: null,
+        migrated_from_reason: existing.reason || existing.data?.reason || null,
+        direct_policy_reopened: true,
+        reopened_at: occurredAt,
+      };
+      const spec = {
+        sku,
+        stage: "processing",
+        reason: "direct-policy-reopened",
+        failureClass: null,
+        terminal: false,
+        strict: false,
+        nextEligibleAt: null,
+        data,
+        occurredAt,
+        source: "runtime",
+      };
+      const eventId = addEvent(spec);
+      writeState(spec);
+      return {
+        reopened: true,
+        reason: decision.reason,
+        eventId,
+        state: rowToState(selectState.get(sku)),
+      };
+    });
+  }
+
   function applyImported(spec, eventKey, source) {
     return transaction(() => {
       let normalizedSpec = spec;
@@ -2067,6 +2146,7 @@ export function createRuntimeState({
     recordDelay,
     recordStrictPublication,
     canAttempt,
+    reopenDirectCandidate,
     get,
     strictCount,
     strictPublications,

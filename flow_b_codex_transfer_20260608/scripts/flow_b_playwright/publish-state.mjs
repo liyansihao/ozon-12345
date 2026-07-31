@@ -930,6 +930,47 @@ export function createPublishState({
     return { allowed: true, reason: "eligible", attempts: 0, state: entryOf(sku) };
   }
 
+  function reopenDirectCandidate(skuValue) {
+    return trackOperation(() => {
+      const sku = normalizeSku(skuValue);
+      if (sku === null) return { reopened: false, reason: "sku-required", state: null };
+      if (runtimeState) {
+        const result = runtimeState.reopenDirectCandidate(sku);
+        syncRuntimeSku(sku);
+        return result;
+      }
+      const current = states.get(sku);
+      const data = current?.data || {};
+      const protectedSubmission = publishedSkus.has(sku)
+        || current?.status === "published"
+        || data.submitted === true
+        || data.submission_pending === true
+        || data.submission_intent === true
+        || data.api_call_started_at
+        || data.api_call_completed_at
+        || ["submitted", "imported", "online", "stock_updated", "rejected", "skipped_cost", "skipped_profit"]
+          .includes(String(data.outcome_status || ""));
+      if (protectedSubmission || !["failed", "skipped"].includes(String(current?.status || ""))) {
+        return { reopened: false, reason: protectedSubmission ? "submission-state-preserved" : "not-reopenable", state: entryOf(sku) };
+      }
+      states.set(sku, {
+        status: "processing",
+        data: {
+          ...data,
+          reason: "direct-policy-reopened",
+          terminal: false,
+          skip_intent: false,
+          skip_reason: null,
+          outcome_status: null,
+          migrated_from_reason: data.reason || null,
+          direct_policy_reopened: true,
+          reopened_at: new Date().toISOString(),
+        },
+      });
+      return { reopened: true, reason: "legacy-policy-terminal", state: entryOf(sku) };
+    });
+  }
+
   function runPublishedCount() {
     return runPublishedSkus.size;
   }
@@ -1049,6 +1090,7 @@ export function createPublishState({
     hasPublished,
     statusOf,
     canAttempt,
+    reopenDirectCandidate,
     entryOf,
     entries,
     runPublishedCount,

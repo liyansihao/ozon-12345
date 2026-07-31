@@ -221,6 +221,39 @@ test("submission, failure, skip, and delay transitions always require a durable 
   });
 });
 
+test("direct mode reopens legacy policy skips but preserves accepted, unknown, and direct-final SKU states", async () => {
+  await withTempDir(async (dir) => {
+    const state = createRuntimeState({ dbPath: path.join(dir, "runtime.sqlite") });
+    state.recordSkip("legacy-fbs", {
+      reason: "non-pure-fbs",
+      data: { title: "legacy candidate" },
+    });
+    state.recordSkip("direct-cost", {
+      reason: "no-reliable-1688-cost",
+      data: { outcome_status: "skipped_cost" },
+    });
+    state.recordFailure("unknown-request", {
+      reason: "publish-response-lost",
+      kind: "deterministic",
+      data: { submission_intent: true, api_call_started_at: "2026-07-31T01:00:00.000Z" },
+    });
+    state.recordSubmission("accepted", {
+      reason: "erp-submission-accepted",
+      data: { submitted: true, outcome_status: "submitted" },
+    });
+
+    assert.equal(state.reopenDirectCandidate("legacy-fbs").reopened, true);
+    assert.equal(state.get("legacy-fbs").terminal, false);
+    assert.equal(state.get("legacy-fbs").reason, "direct-policy-reopened");
+    assert.equal(state.canAttempt("legacy-fbs").allowed, true);
+    assert.equal(state.reopenDirectCandidate("direct-cost").reason, "direct-final-outcome");
+    assert.equal(state.reopenDirectCandidate("unknown-request").reason, "submission-state-preserved");
+    assert.equal(state.reopenDirectCandidate("accepted").reopened, false);
+    assert.equal(state.get("accepted").stage, "submitted");
+    state.close();
+  });
+});
+
 test("submission reservations use an owner generation lease and become permanently submitted", async () => {
   await withTempDir(async (dir) => {
     const dbPath = path.join(dir, "runtime.sqlite");
