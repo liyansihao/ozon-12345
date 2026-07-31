@@ -976,6 +976,31 @@ export function createPublishState({
     return runPublishedSkus.size;
   }
 
+  function directTargetUsage(targetRunDir = resolvedRunDir) {
+    const normalizedRunDir = path.resolve(String(targetRunDir || resolvedRunDir));
+    if (runtimeState) return runtimeState.directTargetUsage(normalizedRunDir);
+    if (normalizedRunDir !== resolvedRunDir) return 0;
+    return [...states].filter(([, value]) => {
+      const data = value?.data || {};
+      return value?.status === "published"
+        || data.submitted === true
+        || data.submission_pending === true
+        || data.submission_intent === true;
+    }).length;
+  }
+
+  function directAcceptedCount(targetRunDir = resolvedRunDir) {
+    const normalizedRunDir = path.resolve(String(targetRunDir || resolvedRunDir));
+    if (runtimeState) return runtimeState.directAcceptedCount(normalizedRunDir);
+    if (normalizedRunDir !== resolvedRunDir) return 0;
+    return [...states].filter(([, value]) => {
+      const data = value?.data || {};
+      return value?.status === "published"
+        || data.submitted === true
+        || data.submission_pending === true;
+    }).length;
+  }
+
   function entries() {
     if (runtimeState) {
       for (const sku of [...states.keys()]) syncRuntimeSku(sku);
@@ -1095,6 +1120,8 @@ export function createPublishState({
     entryOf,
     entries,
     runPublishedCount,
+    directTargetUsage,
+    directAcceptedCount,
     summary,
     recordPublished,
     recordSelected,

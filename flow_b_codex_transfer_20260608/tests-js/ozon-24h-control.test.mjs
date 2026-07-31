@@ -159,6 +159,18 @@ test("production config freezes the direct 500-acceptance runtime and external 1
   assert.equal(config.publish_target, 500);
   assert.equal(config.flow_env.FLOW_B_DIRECT_PUBLISH, "1");
   assert.equal(config.flow_env.FLOW_B_1688_MIN_MATCHES, "1");
+  assert.equal(config.flow_env.FLOW_B_1688_TOTAL_BUDGET_MS, "15000");
+  assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "15");
+  assert.equal(config.flow_env.FLOW_B_1688_TRANSIENT_RETRIES, "1");
+  assert.equal(config.flow_env.FLOW_B_1688_WORKERS, "4");
+  assert.equal(config.flow_env.FLOW_B_TAB_WORKERS, "3");
+  assert.equal(config.flow_env.FLOW_B_FAVORITE_WORKERS, "3");
+  assert.equal(config.flow_env.FLOW_B_OZON_WARMUP_INTERVAL_MS, "4000");
+  assert.equal(config.flow_env.FLOW_B_OZON_BASE_INTERVAL_MS, "3000");
+  assert.equal(config.flow_env.FLOW_B_OZON_MAX_INTERVAL_MS, "8000");
+  assert.equal(config.flow_env.FLOW_B_SOURCE_PRODUCTIVE_WEIGHT, "3");
+  assert.equal(config.flow_env.FLOW_B_SOURCE_EXPLORATION_WEIGHT, "1");
+  assert.equal(config.flow_env.FLOW_B_FAVORITE_CACHE_TTL_MS, "30000");
   assert.equal(config.candidate_buffer, undefined);
   assert.equal(config.acceptance, undefined);
   assert.throws(
@@ -180,6 +192,16 @@ test("production config freezes the direct 500-acceptance runtime and external 1
       },
     }),
     /absolute external Python executable/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_1688_TOTAL_BUDGET_MS: "45000",
+      },
+    }),
+    /balanced speed contract/u,
   );
   assert.throws(
     () => validateConfig({

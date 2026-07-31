@@ -468,14 +468,75 @@ export function summarizeConsumerRound(previous, round = {}) {
   };
 }
 
+export function runtimeEmptyBackoffIntervals(env = {}) {
+  const values = String(env.FLOW_B_RUNTIME_EMPTY_BACKOFF_MS || "1000,3000,10000")
+    .split(",")
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  return values.length > 0 ? values : [1_000, 3_000, 10_000];
+}
+
+export function runtimeRoundHasActivity(result = {}) {
+  return [
+    "activity_count",
+    "published",
+    "submitted_pending",
+    "validated",
+    "attempted",
+  ].some((key) => Number(result?.[key] || 0) > 0);
+}
+
+export function runtimeIdleDelay(idleStreak, intervals = [1_000, 3_000, 10_000]) {
+  const values = (intervals || []).map(Number).filter((value) => Number.isFinite(value) && value > 0);
+  if (values.length === 0) return 0;
+  const streak = Math.max(1, Math.floor(Number(idleStreak) || 1));
+  return values[Math.min(streak - 1, values.length - 1)];
+}
+
+export function createRuntimeWakeSignal({
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+} = {}) {
+  let pending = false;
+  const waiters = new Set();
+  return {
+    wake() {
+      if (waiters.size === 0) {
+        pending = true;
+        return;
+      }
+      for (const waiter of [...waiters]) waiter(true);
+    },
+    wait(timeoutMs) {
+      if (pending) {
+        pending = false;
+        return Promise.resolve(true);
+      }
+      const delay = Math.max(0, Number(timeoutMs) || 0);
+      if (delay === 0) return Promise.resolve(false);
+      return new Promise((resolve) => {
+        let timer = null;
+        const finish = (woken) => {
+          if (!waiters.delete(finish)) return;
+          if (timer !== null) clearTimer(timer);
+          resolve(woken);
+        };
+        waiters.add(finish);
+        timer = setTimer(() => finish(false), delay);
+      });
+    },
+  };
+}
+
 export async function runProducerLoop({
   scan,
   deadlineMs,
   intervalMs = 10_000,
-  idleIntervalsMs = [30_000, 60_000, 120_000],
-  isIdleResult = () => false,
+  idleIntervalsMs = [1_000, 3_000, 10_000],
+  isIdleResult = null,
   now = () => Date.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  onActivity = async () => {},
   onError = async () => {},
   shouldStop = () => false,
 } = {}) {
@@ -488,18 +549,25 @@ export async function runProducerLoop({
   let lastResult = null;
   let idleStreak = 0;
   while (now() < deadline && !shouldStop()) {
+    let failed = false;
+    let idle = false;
     try {
       lastResult = await scan();
-      idleStreak = isIdleResult(lastResult) ? idleStreak + 1 : 0;
+      idle = typeof isIdleResult === "function" && isIdleResult(lastResult);
+      idleStreak = idle ? idleStreak + 1 : 0;
+      if (typeof isIdleResult === "function" && !idle) await onActivity(lastResult);
     } catch (error) {
       await onError(error);
+      failed = true;
       idleStreak = 0;
     }
     if (shouldStop()) break;
     const idleDelays = (idleIntervalsMs || []).map(Number).filter((value) => Number.isFinite(value) && value > 0);
-    const requestedWait = idleStreak > 0 && idleDelays.length > 0
-      ? idleDelays[Math.min(idleStreak - 1, idleDelays.length - 1)]
-      : Math.max(1, Number(intervalMs) || 1);
+    const requestedWait = failed || typeof isIdleResult !== "function"
+      ? Math.max(1, Number(intervalMs) || 1)
+      : idle
+        ? runtimeIdleDelay(idleStreak, idleDelays)
+        : 0;
     const wait = Math.min(requestedWait, deadline - now());
     if (wait > 0) await sleep(wait);
   }

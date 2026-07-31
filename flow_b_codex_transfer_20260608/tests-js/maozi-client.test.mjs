@@ -159,6 +159,23 @@ test("client validates endpoint request shapes for category and profit lookups",
   );
 });
 
+test("client preserves HTTP authentication status on failed ERP requests", async () => {
+  const client = createMaoziClient({
+    transport: makeTransport({
+      "/api.tool/get_category_by_sku": {
+        status: 401,
+        json: { msg: "Unauthenticated." },
+      },
+    }),
+  });
+  await assert.rejects(
+    client.getCategoryBySku("401"),
+    (error) => error?.status === 401
+      && error?.response?.msg === "Unauthenticated."
+      && /category request failed/i.test(error.message),
+  );
+});
+
 test("client updates one imported product in the verified FBS warehouse", async () => {
   const transport = makeTransport({
     "/api.product.online/batch_update_stock": {

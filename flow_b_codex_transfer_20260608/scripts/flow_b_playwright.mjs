@@ -15,7 +15,21 @@ import { createPublishRunner } from "./flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "./flow_b_playwright/publish-state.mjs";
 import { scanSources } from "./flow_b_playwright/source-scanner.mjs";
 import { runReadOnlyVerification } from "./flow_b_playwright/verification.mjs";
-import { acceptanceSummary, collectionErrorSummary, isFatalBrowserError, operationalErrorSummary, perStoreAcceptanceTarget, rankSourcesByYield, runProducerLoop, summarizeConsumerRound, withRuntimeCleanup } from "./flow_b_playwright/continuous-runtime.mjs";
+import {
+  acceptanceSummary,
+  collectionErrorSummary,
+  createRuntimeWakeSignal,
+  isFatalBrowserError,
+  operationalErrorSummary,
+  perStoreAcceptanceTarget,
+  rankSourcesByYield,
+  runProducerLoop,
+  runtimeEmptyBackoffIntervals,
+  runtimeIdleDelay,
+  runtimeRoundHasActivity,
+  summarizeConsumerRound,
+  withRuntimeCleanup,
+} from "./flow_b_playwright/continuous-runtime.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
@@ -260,6 +274,12 @@ async function createPublishingSession(context, options, env, shared) {
       sharedCachePath: env.FLOW_B_1688_SHARED_CACHE || path.join(ROOT, "data/flow_b/1688_cache.json"),
       seedCacheFiles: String(env.FLOW_B_1688_CACHE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
       minimumSameItemMatches: Math.max(1, Number(env.FLOW_B_1688_MIN_MATCHES) || 1),
+      totalBudgetMs: Math.max(1, Number(env.FLOW_B_1688_TOTAL_BUDGET_MS) || 15_000),
+      workerCount: Math.max(1, Number(env.FLOW_B_1688_WORKERS) || 4),
+      workerFailureThreshold: Math.max(1, Number(env.FLOW_B_1688_WORKER_FAILURE_THRESHOLD) || 3),
+      cacheFlushDebounceMs: String(env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS || "").trim()
+        ? Math.max(0, Number(env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS) || 0)
+        : 150,
     });
     const detailProvider = createOzonDetailProvider({
       context,
@@ -318,6 +338,7 @@ async function createPublishingSession(context, options, env, shared) {
       submissionGateFile: null,
       requireReliableCostContract: true,
       directMode: true,
+      directRunControl: shared.directRunControl || null,
       minimumSameItemMatches: Math.max(1, Number(env.FLOW_B_1688_MIN_MATCHES) || 1),
     });
     return { maoziPage, costBridge, detailProvider, runner, state };
@@ -585,15 +606,21 @@ async function runAcceptance(context, options, env) {
     runDir: options.runDir,
     env: runtimeEnv,
   });
+  const runtimeWake = createRuntimeWakeSignal();
+  const emptyBackoffIntervals = runtimeEmptyBackoffIntervals(runtimeEnv);
   let producerFatalError = null;
   const scanTask = runProducerLoop({
     deadlineMs: endedAt.getTime(),
-    intervalMs: Math.max(1_000, Number(env.FLOW_B_PRODUCER_INTERVAL_MS || 20_000)),
-    idleIntervalsMs: String(env.FLOW_B_EMPTY_SOURCE_BACKOFF_MS || "30000,60000,120000")
-      .split(",")
-      .map(Number),
-    isIdleResult: (result) => Number(result?.activity_count || 0) === 0,
+    intervalMs: Math.max(
+      1_000,
+      Number(runtimeEnv.FLOW_B_PRODUCER_INTERVAL_MS) || 60_000,
+    ),
+    idleIntervalsMs: emptyBackoffIntervals,
+    isIdleResult: (result) => Number(
+      result?.candidate_activity_count ?? result?.activity_count ?? 0,
+    ) === 0,
     shouldStop: () => Boolean(producerFatalError),
+    onActivity: async () => { runtimeWake.wake(); },
     scan: async () => {
       try {
         await lowTokenController.refresh();
@@ -604,7 +631,13 @@ async function runAcceptance(context, options, env) {
           error: String(error?.message || error),
         })}\n`);
       }
-      return scanSources({ context, urlsFile: options.urlsFile, outFile: options.outFile, env: runtimeEnv });
+      return scanSources({
+        context,
+        urlsFile: options.urlsFile,
+        outFile: options.outFile,
+        env: runtimeEnv,
+        onCandidateActivity: () => runtimeWake.wake(),
+      });
     },
     onError: async (error) => {
       await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), stage: "producer", error: String(error?.message || error) })}\n`);
@@ -615,8 +648,10 @@ async function runAcceptance(context, options, env) {
   });
   return withRuntimeCleanup(async () => {
     let roundSummary;
+    let idleStreak = 0;
     while (Date.now() < endedAt.getTime()) {
       if (producerFatalError) throw producerFatalError;
+      let roundActive = false;
       try {
         const publishRound = await publishWithContext(
           context,
@@ -628,6 +663,7 @@ async function runAcceptance(context, options, env) {
             attemptLimit: roundPlan.publish_attempt_limit,
           },
         );
+        roundActive ||= runtimeRoundHasActivity(publishRound);
         roundSummary = summarizeConsumerRound(roundSummary, publishRound);
         if (Date.now() < endedAt.getTime() && !producerFatalError) {
           const refillRound = await publishWithContext(
@@ -641,6 +677,7 @@ async function runAcceptance(context, options, env) {
               attemptLimit: roundPlan.refill_attempt_limit,
             },
           );
+          roundActive ||= runtimeRoundHasActivity(refillRound);
           await fs.appendFile(path.join(options.runDir, "candidate_replenishment.jsonl"), `${JSON.stringify({
             at: new Date().toISOString(),
             mode: "same-worker-validation-only",
@@ -659,8 +696,16 @@ async function runAcceptance(context, options, env) {
           break;
         }
       }
-      const wait = Math.min(Math.max(1_000, Number(env.FLOW_B_POLL_INTERVAL_MS || 10_000)), endedAt.getTime() - Date.now());
-      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      if (roundActive) {
+        idleStreak = 0;
+        continue;
+      }
+      idleStreak += 1;
+      const wait = Math.min(
+        runtimeIdleDelay(idleStreak, emptyBackoffIntervals),
+        endedAt.getTime() - Date.now(),
+      );
+      if (wait > 0) await runtimeWake.wait(wait);
     }
     const scan = await scanTask;
     if (producerFatalError) throw producerFatalError;
@@ -724,9 +769,21 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         target_metric: "erp_accepted_unique_skus",
         minimum_same_item_matches: 1,
       });
-      const shared = { targetConfigCache: {}, persistent: true, session: null };
+      const directRunControl = { cancelled: false, fatalError: null };
+      const shared = {
+        targetConfigCache: {},
+        persistent: true,
+        session: null,
+        directRunControl,
+      };
       let backgroundStop = false;
       let backgroundError = null;
+      const runtimeWake = createRuntimeWakeSignal();
+      const stopDirectRun = (error) => {
+        directRunControl.cancelled = true;
+        directRunControl.fatalError ||= error;
+        runtimeWake.wake();
+      };
       const backgroundEnv = {
         ...directEnv,
         FLOW_B_RECONCILIATION_ONLY: "1",
@@ -741,9 +798,13 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
               context,
               options,
               backgroundEnv,
-              { targetConfigCache: {} },
+              {
+                targetConfigCache: {},
+                directRunControl,
+              },
             );
-            await backgroundSession.runner.run();
+            const backgroundResult = await backgroundSession.runner.run();
+            if (runtimeRoundHasActivity(backgroundResult)) runtimeWake.wake();
           } catch (error) {
             await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({
               at: new Date().toISOString(),
@@ -753,6 +814,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             if (isFatalBrowserError(error)
               || /captcha|验证码|mfa|verification required|login|登录/iu.test(String(error?.message || error))) {
               backgroundError = error;
+              stopDirectRun(error);
               return;
             }
           } finally {
@@ -766,22 +828,33 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       let scan = null;
       let publish = null;
       const deadlineMs = env.FLOW_B_DEADLINE_AT ? Date.parse(env.FLOW_B_DEADLINE_AT) : Number.POSITIVE_INFINITY;
+      const emptyBackoffIntervals = runtimeEmptyBackoffIntervals(directEnv);
       let producerStop = false;
       let producerError = null;
       const scanTask = runProducerLoop({
         deadlineMs,
-        intervalMs: Math.max(1_000, Number(directEnv.FLOW_B_PRODUCER_INTERVAL_MS) || 20_000),
-        idleIntervalsMs: String(directEnv.FLOW_B_EMPTY_SOURCE_BACKOFF_MS || "30000,60000,120000")
-          .split(",")
-          .map(Number),
-        isIdleResult: (result) => Number(result?.activity_count || 0) === 0,
-        shouldStop: () => producerStop || backgroundStop || Boolean(backgroundError),
+        intervalMs: Math.max(
+          1_000,
+          Number(directEnv.FLOW_B_PRODUCER_INTERVAL_MS) || 60_000,
+        ),
+        idleIntervalsMs: emptyBackoffIntervals,
+        isIdleResult: (result) => Number(
+          result?.candidate_activity_count ?? result?.activity_count ?? 0,
+        ) === 0,
+        shouldStop: () => (
+          producerStop
+          || backgroundStop
+          || Boolean(backgroundError)
+          || Boolean(directRunControl.cancelled)
+        ),
+        onActivity: async () => { runtimeWake.wake(); },
         scan: async () => {
           scan = await scanSources({
             context,
             urlsFile: options.urlsFile,
             outFile: options.outFile,
             env: directEnv,
+            onCandidateActivity: () => runtimeWake.wake(),
           });
           return scan;
         },
@@ -791,13 +864,19 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             stage: "direct-source-scan",
             error: String(error?.message || error),
           })}\n`);
-          if (isFatalBrowserError(error)) producerError = error;
+          if (isFatalBrowserError(error)
+            || /captcha|验证码|mfa|verification required|login|登录/iu.test(String(error?.message || error))) {
+            producerError = error;
+            stopDirectRun(error);
+          }
         },
       });
       try {
+        let idleStreak = 0;
         while (Date.now() < deadlineMs) {
           if (backgroundError) throw backgroundError;
           if (producerError) throw producerError;
+          if (directRunControl.fatalError) throw directRunControl.fatalError;
           publish = await publishWithContext(
             context,
             options,
@@ -811,13 +890,24 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             error.code = "FLOW_B_ALL_STORES_REJECTED";
             throw error;
           }
-          const wait = Math.max(1_000, Number(directEnv.FLOW_B_POLL_INTERVAL_MS) || 10_000);
-          await new Promise((resolve) => setTimeout(resolve, wait));
+          if (Number(publish?.direct_target_slots_used || 0) >= options.target) {
+            idleStreak += 1;
+            await runtimeWake.wait(runtimeIdleDelay(idleStreak, emptyBackoffIntervals));
+            continue;
+          }
+          if (runtimeRoundHasActivity(publish)) {
+            idleStreak = 0;
+            continue;
+          }
+          idleStreak += 1;
+          await runtimeWake.wait(runtimeIdleDelay(idleStreak, emptyBackoffIntervals));
         }
         return { scan, publish };
       } finally {
         producerStop = true;
         backgroundStop = true;
+        directRunControl.cancelled = true;
+        runtimeWake.wake();
         await closePublishingSession(shared.session);
         shared.session = null;
         await Promise.race([

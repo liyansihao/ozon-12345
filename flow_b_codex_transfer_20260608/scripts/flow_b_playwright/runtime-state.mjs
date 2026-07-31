@@ -1233,6 +1233,42 @@ export function createRuntimeState({
     SET status = 'closed', lease_expires_at = NULL, updated_at = ?
     WHERE sku = ? AND status <> 'closed'
   `);
+  const countDirectTargetUsage = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT sku
+      FROM submission_reservations
+      WHERE status IN ('reserved', 'submitted')
+        AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
+      UNION
+      SELECT sku
+      FROM sku_state
+      WHERE CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
+        AND (
+          stage = 'published'
+          OR coalesce(CAST(json_extract(data_json, '$.submitted') AS INTEGER), 0) = 1
+          OR coalesce(CAST(json_extract(data_json, '$.submission_pending') AS INTEGER), 0) = 1
+        )
+    )
+  `);
+  const countDirectAccepted = database.prepare(`
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT sku
+      FROM submission_reservations
+      WHERE status = 'submitted'
+        AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
+      UNION
+      SELECT sku
+      FROM sku_state
+      WHERE CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
+        AND (
+          stage = 'published'
+          OR coalesce(CAST(json_extract(data_json, '$.submitted') AS INTEGER), 0) = 1
+          OR coalesce(CAST(json_extract(data_json, '$.submission_pending') AS INTEGER), 0) = 1
+        )
+    )
+  `);
   const selectStrictPublications = database.prepare(`
     SELECT sku, event_id, published_at, data_json
     FROM strict_publications
@@ -1286,6 +1322,29 @@ export function createRuntimeState({
 
   function getReservation(sku) {
     return rowToReservation(selectReservation.get(sku));
+  }
+
+  function normalizedDirectRunDir(value) {
+    const configured = String(value ?? "").trim();
+    return configured ? path.resolve(configured) : null;
+  }
+
+  function directTargetUsage(runDir) {
+    assertOpen();
+    const normalizedRunDir = normalizedDirectRunDir(runDir);
+    if (!normalizedRunDir) return 0;
+    return Number(
+      countDirectTargetUsage.get(normalizedRunDir, normalizedRunDir)?.count ?? 0,
+    );
+  }
+
+  function directAcceptedCount(runDir) {
+    assertOpen();
+    const normalizedRunDir = normalizedDirectRunDir(runDir);
+    if (!normalizedRunDir) return 0;
+    return Number(
+      countDirectAccepted.get(normalizedRunDir, normalizedRunDir)?.count ?? 0,
+    );
   }
 
   function addEvent(spec, { eventKey = `runtime:${crypto.randomUUID()}`, idempotent = false } = {}) {
@@ -1380,6 +1439,7 @@ export function createRuntimeState({
   function reserveSubmission(rawSku, options = {}) {
     const sku = normalizeSku(rawSku);
     const reason = requireReason(options.reason);
+    const requestedData = asData(options.data);
     const occurredAt = currentTimestamp();
     const leaseExpiresAt = new Date(
       Date.parse(occurredAt) + normalizedSubmissionLeaseMs,
@@ -1461,6 +1521,33 @@ export function createRuntimeState({
           state: existing,
         };
       }
+      const directRunDir = normalizedDirectRunDir(requestedData.runtime_run_dir);
+      const directTarget = Number(requestedData.direct_target_count);
+      if (directRunDir) requestedData.runtime_run_dir = directRunDir;
+      if (
+        directRunDir
+        && Number.isInteger(directTarget)
+        && directTarget >= 0
+      ) {
+        const reservationRunDir = normalizedDirectRunDir(
+          reservation?.data?.runtime_run_dir,
+        );
+        const alreadyHoldsTargetSlot = (
+          reservation
+          && ["reserved", "submitted"].includes(reservation.status)
+          && reservationRunDir === directRunDir
+        );
+        const targetUsage = directTargetUsage(directRunDir);
+        if (!alreadyHoldsTargetSlot && targetUsage >= directTarget) {
+          return {
+            recorded: false,
+            reason: "direct-target-capacity-reached",
+            directTarget,
+            targetUsage,
+            state: existing,
+          };
+        }
+      }
 
       const takeover = Boolean(
         reservation &&
@@ -1474,7 +1561,7 @@ export function createRuntimeState({
       const mergedData = {
         ...(existing?.data || {}),
         ...(reservation?.data || {}),
-        ...asData(options.data),
+        ...requestedData,
         submission_intent: true,
         submitted: false,
         submission_pending: false,
@@ -2153,6 +2240,8 @@ export function createRuntimeState({
     strictCount,
     strictPublications,
     submissionReservation,
+    directTargetUsage,
+    directAcceptedCount,
     auditEvents,
     importLegacy,
     exportAuditJsonl,

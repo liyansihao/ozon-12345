@@ -189,6 +189,32 @@ function validateConfig(config) {
     if (Number(config?.flow_env?.FLOW_B_TARGET_PUBLISH_COUNT) !== 500) {
       throw new Error("direct ERP-accepted target must equal 500");
     }
+    const balancedSpeedContract = {
+      FLOW_B_1688_TOTAL_BUDGET_MS: "15000",
+      FLOW_B_1688_ITEM_TIMEOUT: "15",
+      FLOW_B_1688_TRANSIENT_RETRIES: "1",
+      FLOW_B_1688_RETRY_BUDGET_SECONDS: "15",
+      FLOW_B_1688_WORKERS: "4",
+      FLOW_B_TAB_WORKERS: "3",
+      FLOW_B_FAVORITE_WORKERS: "3",
+      FLOW_B_OZON_BASE_INTERVAL_MS: "3000",
+      FLOW_B_OZON_WARMUP_INTERVAL_MS: "4000",
+      FLOW_B_OZON_MAX_INTERVAL_MS: "8000",
+      FLOW_B_OZON_WARMUP_DURATION_MS: "1800000",
+      FLOW_B_OZON_WARMUP_SUCCESS_COUNT: "20",
+      FLOW_B_OZON_STABLE_SUCCESS_COUNT: "20",
+      FLOW_B_OZON_INTERVAL_STEP_MS: "500",
+      FLOW_B_OZON_SOFT_BLOCK_STEP_MS: "1500",
+      FLOW_B_SOURCE_PRODUCTIVE_WEIGHT: "3",
+      FLOW_B_SOURCE_EXPLORATION_WEIGHT: "1",
+      FLOW_B_FAVORITE_CACHE_TTL_MS: "30000",
+      FLOW_B_RUNTIME_EMPTY_BACKOFF_MS: "1000,3000,10000",
+    };
+    for (const [name, expected] of Object.entries(balancedSpeedContract)) {
+      if (String(config?.flow_env?.[name] ?? "") !== expected) {
+        throw new Error(`balanced speed contract requires ${name}=${expected}`);
+      }
+    }
     const storeIds = (config?.stores || []).map((row) => Number(row?.id));
     if (storeIds.join(",") !== "106637,106640,106644,106646,104965") {
       throw new Error("production config must contain the five stores in rotation order");
@@ -1122,7 +1148,9 @@ async function status(config) {
       remaining: Math.max(0, (Number(config.publish_target) || 500) - accepted),
       funnel: {
         candidate_required_fields_passed: stageCount("candidate_required_fields_passed"),
+        snapshot_category_passed: stageCount("snapshot_category_passed"),
         cost_passed: stageCount("cost_passed"),
+        live_price_confirmed: stageCount("live_price_confirmed"),
         profit_passed: stageCount("profit_passed"),
         erp_accepted: accepted,
         online: uniqueSkuCount(backgroundRows.filter((row) => row?.online === true)),

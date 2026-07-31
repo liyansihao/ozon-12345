@@ -324,6 +324,61 @@ test("submission reservations use an owner generation lease and become permanent
   });
 });
 
+test("direct target slots are atomic across main and background runtime-state owners", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "runtime.sqlite");
+    const runDir = path.join(dir, "active-run");
+    const main = createRuntimeState({
+      dbPath,
+      ownerId: "main-publisher",
+      generationId: "main-generation",
+    });
+    const background = createRuntimeState({
+      dbPath,
+      ownerId: "background-reconciliation",
+      generationId: "background-generation",
+    });
+
+    const unknown = main.reserveSubmission("unknown-at-boundary", {
+      reason: "submission-api-call-started",
+      data: {
+        runtime_run_dir: runDir,
+        direct_target_count: 1,
+        api_call_started_at: "2026-07-31T01:00:00.000Z",
+      },
+    });
+    assert.equal(unknown.recorded, true);
+    assert.equal(main.directTargetUsage(runDir), 1);
+    assert.equal(background.directTargetUsage(runDir), 1);
+    assert.equal(main.directAcceptedCount(runDir), 0);
+
+    const overTarget = background.reserveSubmission("must-not-be-501", {
+      reason: "submission-intent",
+      data: {
+        runtime_run_dir: runDir,
+        direct_target_count: 1,
+      },
+    });
+    assert.equal(overTarget.recorded, false);
+    assert.equal(overTarget.reason, "direct-target-capacity-reached");
+    assert.equal(overTarget.targetUsage, 1);
+
+    assert.equal(main.confirmSubmission("unknown-at-boundary", {
+      reason: "erp-submission-accepted",
+      data: {
+        runtime_run_dir: runDir,
+        direct_target_count: 1,
+        submitted: true,
+      },
+    }).recorded, true);
+    assert.equal(background.directAcceptedCount(runDir), 1);
+    assert.equal(background.directTargetUsage(runDir), 1);
+
+    main.close();
+    background.close();
+  });
+});
+
 test("formal prefix gate atomically permits only its three frozen distinct SKUs until release", async () => {
   await withTempDir(async (dir) => {
     const dbPath = path.join(dir, "runtime.sqlite");

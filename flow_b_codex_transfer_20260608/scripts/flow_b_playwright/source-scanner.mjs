@@ -4,7 +4,12 @@ import { ensureMaoziLogin, ensureMaoziPluginLogin, openMaoziPage } from "./brows
 import { createCandidateQueue } from "./candidate-queue.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError } from "./continuous-runtime.mjs";
 import { isPureFbs, prohibitedCategorySkipReason } from "./publish-policy.mjs";
-import { isOzonAccessStoppedError, isOzonCaptchaText, ozonAccessControllerFor } from "./ozon-access-controller.mjs";
+import {
+  isOzonAccessStoppedError,
+  isOzonAuthenticationText,
+  isOzonCaptchaText,
+  ozonAccessControllerFor,
+} from "./ozon-access-controller.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_SOURCE_YIELD_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/source_yield_history.jsonl");
@@ -280,6 +285,59 @@ export function collectionRuntimeState(key) {
   return collectionRuntimeStates.get(normalized);
 }
 
+export function createFavoriteTelemetryCache({
+  ttlMs = 30_000,
+  now = () => Date.now(),
+} = {}) {
+  const ttl = Math.max(0, Number(ttlMs) || 0);
+  let countEntry = null;
+  let skusEntry = null;
+  const fresh = (entry) => Boolean(entry) && Number(now()) - Number(entry.loadedAt) < ttl;
+  return {
+    ttlMs: ttl,
+    async readCount(load) {
+      if (fresh(countEntry)) return { ...countEntry.value };
+      const value = await load();
+      countEntry = { loadedAt: now(), value: { ...value } };
+      return { ...countEntry.value };
+    },
+    async readSkus(load) {
+      if (fresh(skusEntry)) return [...skusEntry.value];
+      const value = [...await load()].map(String);
+      skusEntry = { loadedAt: now(), value: new Set(value) };
+      return [...skusEntry.value];
+    },
+    recordFavorite(sku, total = null) {
+      const normalizedSku = String(sku || "").trim();
+      const timestamp = now();
+      if (normalizedSku && fresh(skusEntry)) {
+        skusEntry.value.add(normalizedSku);
+        skusEntry.loadedAt = timestamp;
+      }
+      if (Number.isFinite(Number(total)) && Number(total) >= 0) {
+        countEntry = {
+          loadedAt: timestamp,
+          value: { total: Number(total), authenticated: true },
+        };
+      }
+    },
+    snapshot() {
+      return {
+        count: countEntry ? { ...countEntry.value } : null,
+        skus: skusEntry ? [...skusEntry.value] : null,
+      };
+    },
+  };
+}
+
+function favoriteTelemetryForRuntime(runtime, env = {}) {
+  const ttlMs = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_CACHE_TTL_MS", 30_000));
+  if (!runtime.favoriteTelemetryCache || runtime.favoriteTelemetryCache.ttlMs !== ttlMs) {
+    runtime.favoriteTelemetryCache = createFavoriteTelemetryCache({ ttlMs });
+  }
+  return runtime.favoriteTelemetryCache;
+}
+
 export async function persistCollectionRuntimeState(filename, state = {}) {
   const absolute = path.resolve(filename);
   const payload = {
@@ -424,7 +482,8 @@ export function isCollectionDeadlineReached(env = process.env, now = Date.now())
   return Number(now) >= collectionDeadlineMs(env);
 }
 
-export function remainingCollectionCooldown(state = {}, now = Date.now()) {
+export function remainingCollectionCooldown(state = {}, now = Date.now(), { controllerManaged = false } = {}) {
+  if (controllerManaged) return 0;
   return Math.max(0, (Number(state?.detailBlockedUntil) || 0) - Number(now));
 }
 
@@ -817,17 +876,23 @@ export function softBlockCooldownState({ streak = 0, lastBlockedAt = 0, now = Da
 }
 
 export function collectionDetailCooldownState(options = {}) {
-  const state = softBlockCooldownState(options);
+  const { controllerManaged = false, ...cooldownOptions } = options;
+  const state = softBlockCooldownState(cooldownOptions);
   return {
     ...state,
-    delay: [60_000, 180_000, 600_000][Math.min(2, Math.max(0, state.streak - 1))],
+    delay: controllerManaged
+      ? 0
+      : [60_000, 180_000, 600_000][Math.min(2, Math.max(0, state.streak - 1))],
   };
 }
 
-export function sourceBatchCooldownState(rows, state, now = Date.now()) {
+export function sourceBatchCooldownState(rows, state, now = Date.now(), { controllerManaged = false } = {}) {
   const batch = rows || [];
   const blockedCount = batch.filter((row) => row?.blocked || isOzonSoftBlock(`${row?.title || ""} ${row?.stop_reason || ""}`)).length;
   const blocked = blockedCount >= Math.floor(batch.length / 2) + 1;
+  if (controllerManaged) {
+    return { blocked, globalBlocked: false, delay: 0 };
+  }
   if (!blocked) {
     state.sourceSoftBlockStreak = 0;
     state.lastSourceSoftBlockAt = 0;
@@ -1735,6 +1800,136 @@ export function fullFunnelSourceScores(rows) {
   }));
 }
 
+export function sourceProductivityStats(rows = []) {
+  const sources = new Map();
+  for (const row of rows || []) {
+    const key = sourceYieldKey(row?.source_url);
+    const sku = String(row?.sku || "").trim();
+    if (!key || !sku) continue;
+    const value = sources.get(key) || {
+      attemptedSkus: new Set(),
+      costPassedSkus: new Set(),
+      acceptedSkus: new Set(),
+    };
+    const status = String(row?.status || "");
+    const stage = String(row?.stage || row?.funnel_stage || "");
+    const reason = String(row?.reason || "");
+    value.attemptedSkus.add(sku);
+    const accepted = ["submitted", "published"].includes(status)
+      || stage === "erp_accepted"
+      || row?.erp_accepted === true;
+    const costPassed = accepted
+      || row?.cost_passed === true
+      || stage === "cost_passed"
+      || ["skipped_profit", "profit_passed"].includes(String(row?.outcome_status || ""))
+      || /profit(?:_rate|-calculation)|missing-live-sale-price/i.test(reason);
+    if (costPassed) value.costPassedSkus.add(sku);
+    if (accepted) value.acceptedSkus.add(sku);
+    sources.set(key, value);
+  }
+  return new Map([...sources].map(([key, value]) => {
+    const attempted = value.attemptedSkus.size;
+    const costPassed = value.costPassedSkus.size;
+    const accepted = value.acceptedSkus.size;
+    return [key, {
+      attempted,
+      cost_passed: costPassed,
+      accepted,
+      cost_rate: attempted ? costPassed / attempted : 0,
+      acceptance_rate: attempted ? accepted / attempted : 0,
+    }];
+  }));
+}
+
+export function interleaveProductiveSourceExploration(urls, yieldRows = [], {
+  productiveWeight = 3,
+  explorationWeight = 1,
+  scanRows = [],
+} = {}) {
+  const ordered = [...new Set((urls || []).filter(Boolean))];
+  const stats = sourceProductivityStats(yieldRows);
+  const decorate = (url, index) => {
+    const value = stats.get(sourceYieldKey(url)) || {
+      attempted: 0,
+      cost_passed: 0,
+      accepted: 0,
+      cost_rate: 0,
+      acceptance_rate: 0,
+    };
+    return { url, index, ...value };
+  };
+  const compareProductive = (left, right) => (
+    right.acceptance_rate - left.acceptance_rate
+    || right.cost_rate - left.cost_rate
+    || right.accepted - left.accepted
+    || right.cost_passed - left.cost_passed
+    || left.index - right.index
+  );
+  const compareExploration = (left, right) => (
+    left.attempted - right.attempted
+    || right.acceptance_rate - left.acceptance_rate
+    || right.cost_rate - left.cost_rate
+    || left.index - right.index
+  );
+  const decorated = ordered.map(decorate);
+  const productive = decorated
+    .filter((row) => row.cost_passed > 0 || row.accepted > 0)
+    .sort(compareProductive);
+  const exploration = decorated
+    .filter((row) => row.cost_passed === 0 && row.accepted === 0)
+    .sort(compareExploration);
+  const productiveBurst = Math.max(0, Math.floor(Number(productiveWeight) || 0));
+  const explorationBurst = Math.max(0, Math.floor(Number(explorationWeight) || 0));
+  if (productiveBurst === 0 && explorationBurst === 0) return ordered;
+  if (productive.length === 0 || exploration.length === 0) {
+    return [...productive, ...exploration].map((row) => row.url);
+  }
+  const productiveKeys = new Set(productive.map((row) => sourceYieldKey(row.url)));
+  const priorProductiveAttempts = (scanRows || []).filter(
+    (row) => productiveKeys.has(sourceYieldKey(row?.source_url)),
+  ).length;
+  const priorExplorationAttempts = Math.max(
+    0,
+    (scanRows || []).filter((row) => row?.source_url).length - priorProductiveAttempts,
+  );
+  const rotate = (values, offset) => {
+    if (values.length === 0) return values;
+    const start = Math.max(0, Number(offset) || 0) % values.length;
+    return [...values.slice(start), ...values.slice(0, start)];
+  };
+  const productiveQueue = rotate(productive, priorProductiveAttempts);
+  const explorationQueue = rotate(exploration, priorExplorationAttempts);
+  if (productiveBurst === 0) {
+    return [...explorationQueue, ...productiveQueue].map((row) => row.url);
+  }
+  if (explorationBurst === 0) {
+    return [...productiveQueue, ...explorationQueue].map((row) => row.url);
+  }
+  const result = [];
+  let productiveIndex = 0;
+  let explorationIndex = 0;
+  while (
+    productiveIndex < productiveQueue.length
+    || explorationIndex < explorationQueue.length
+  ) {
+    for (
+      let offset = 0;
+      offset < productiveBurst && productiveIndex < productiveQueue.length;
+      offset += 1
+    ) {
+      result.push(productiveQueue[productiveIndex++].url);
+    }
+    for (
+      let offset = 0;
+      offset < explorationBurst && explorationIndex < explorationQueue.length;
+      offset += 1
+    ) {
+      result.push(explorationQueue[explorationIndex++].url);
+    }
+  }
+  return result;
+}
+
 export function interleaveStrictSuccessExploration(urls, yieldRows, exploitBurst = 6) {
   const ordered = [...new Set((urls || []).filter(Boolean))];
   const burst = Math.floor(Number(exploitBurst) || 0);
@@ -2589,6 +2784,9 @@ async function extractFavoriteProduct(page, url, timeout, { directMode = false }
     if (isOzonCaptchaText(diagnostic)) {
       throw new Error(`Ozon CAPTCHA required: ${url}`);
     }
+    if (isOzonAuthenticationText(diagnostic)) {
+      throw new Error(`Ozon authentication required: ${url}`);
+    }
     if (isOzonSoftBlock(diagnostic)) {
       throw new Error(`Ozon detail soft blocked: ${url}`);
     }
@@ -2604,13 +2802,15 @@ async function extractFavoriteProduct(page, url, timeout, { directMode = false }
   return parseFavoriteProductSnapshot(snapshot || { url });
 }
 
-async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, productiveSourceSampleKeys = new Set(), onResult = () => {}, workerPagePool = null, accessController = null }) {
+async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, productiveSourceSampleKeys = new Set(), onResult = () => {}, workerPagePool = null, accessController = null, favoriteTelemetry = null }) {
   if (currentTotal >= target || !links.length || isCollectionDeadlineReached(env)) return currentTotal;
   const directMode = String(env.FLOW_B_DIRECT_PUBLISH || "") === "1";
   let existing = new Set();
   try {
     existing = new Set(await readFavoriteSkusWithTimeout(
-      () => favoriteSkus(maozi),
+      () => favoriteTelemetry
+        ? favoriteTelemetry.readSkus(() => favoriteSkus(maozi))
+        : favoriteSkus(maozi),
       envNumber(env, "FLOW_B_FAVORITE_TELEMETRY_TIMEOUT_MS", 10_000),
     ));
   } catch (error) {
@@ -2651,6 +2851,17 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const runtime = collectionRuntimeState(path.resolve(logFile));
   const collectionPacingFile = runtime.collectionPacingFile
     || path.join(path.dirname(path.resolve(logFile)), "collection_pacing.json");
+  const controllerOwnsDirectPacing = directMode && Boolean(accessController);
+  if (controllerOwnsDirectPacing && (
+    Number(runtime.detailBlockedUntil) > 0
+    || Number(runtime.detailSoftBlockStreak) > 0
+    || Number(runtime.lastDetailSoftBlockAt) > 0
+  )) {
+    runtime.detailBlockedUntil = 0;
+    runtime.detailSoftBlockStreak = 0;
+    runtime.lastDetailSoftBlockAt = 0;
+    await queueCollectionRuntimeStatePersist(collectionPacingFile, runtime);
+  }
   const acceptanceDeadline = collectionDeadlineMs(env);
   let apiChain = Promise.resolve();
   let detailGate = Promise.resolve();
@@ -2705,13 +2916,21 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
   const detailRetries = Math.max(0, envNumber(env, "FLOW_B_FAVORITE_DETAIL_RETRIES", 3));
   const reserveDetailSlot = () => {
     const operation = detailGate.then(async () => {
-      await waitForMovingDeadline({ getDeadline: () => Math.min(Math.max(runtime.nextDetailAt, runtime.detailBlockedUntil), acceptanceDeadline) });
+      await waitForMovingDeadline({
+        getDeadline: () => Math.min(
+          Math.max(
+            accessController ? 0 : runtime.nextDetailAt,
+            controllerOwnsDirectPacing ? 0 : runtime.detailBlockedUntil,
+          ),
+          acceptanceDeadline,
+        ),
+      });
       if (isCollectionDeadlineReached(env)) {
         const error = new Error("collection deadline reached");
         error.code = "FLOW_B_DEADLINE_REACHED";
         throw error;
       }
-      runtime.nextDetailAt = Date.now() + runtime.detailIntervalMs;
+      if (!accessController) runtime.nextDetailAt = Date.now() + runtime.detailIntervalMs;
     });
     detailGate = operation.catch(() => {});
     return operation;
@@ -2766,12 +2985,19 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
         const cooldownState = collectionDetailCooldownState({
           streak: runtime.detailSoftBlockStreak,
           lastBlockedAt: runtime.lastDetailSoftBlockAt,
+          controllerManaged: controllerOwnsDirectPacing,
         });
         const cooldown = cooldownState.delay;
-        runtime.detailSoftBlockStreak = cooldownState.streak;
-        runtime.lastDetailSoftBlockAt = cooldownState.lastBlockedAt;
-        runtime.detailBlockedUntil = Math.max(runtime.detailBlockedUntil, Date.now() + cooldown);
+        runtime.detailSoftBlockStreak = controllerOwnsDirectPacing ? 0 : cooldownState.streak;
+        runtime.lastDetailSoftBlockAt = controllerOwnsDirectPacing ? 0 : cooldownState.lastBlockedAt;
+        runtime.detailBlockedUntil = controllerOwnsDirectPacing
+          ? 0
+          : Math.max(runtime.detailBlockedUntil, Date.now() + cooldown);
         await queueCollectionRuntimeStatePersist(collectionPacingFile, runtime);
+        if (controllerOwnsDirectPacing) {
+          log(`Ozon detail soft block deferred source=${sourceBlockKey || "unknown"}`);
+          throw error;
+        }
         if (!policy.retry) throw error;
         log(`Ozon detail retry SKU ${item.sku} attempt=${attempt + 1} wait=${cooldown}ms`);
       }
@@ -2865,6 +3091,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
           await callFavorite(favoritePayload);
           existing.add(productInfo.sku);
           total += 1;
+          favoriteTelemetry?.recordFavorite(productInfo.sku, total);
           const observedTotal = total;
           await record({
             status: "favorited",
@@ -3017,6 +3244,7 @@ async function scanOne(page, url, { steps, ratio, delay, initialWait, maxNoNewSt
     const diagnostic = `${title} ${state.text}`;
     blockKind = isOzonCaptchaText(diagnostic)
       ? "captcha"
+      : isOzonAuthenticationText(diagnostic) ? "authentication"
       : /доступ ограничен|access denied|похоже, нет/i.test(diagnostic) ? "soft-block" : null;
     blocked = Boolean(blockKind);
     for (const link of state.links) {
@@ -3087,6 +3315,7 @@ export async function scanSourceWithPage({
       const result = await scan(createdPage, url, options);
       if (result?.blocked) {
         if (result?.block_kind === "captcha") throw new Error(`Ozon CAPTCHA required: ${url}`);
+        if (result?.block_kind === "authentication") throw new Error(`Ozon authentication required: ${url}`);
         throw new Error(`Ozon source soft blocked: ${url}`);
       }
       return result;
@@ -3134,7 +3363,14 @@ export function completedSourceUrls(records = [], {
   }).map((row) => row.source_url));
 }
 
-export async function scanSources({ context, urlsFile, outFile, env = process.env, log = console.log }) {
+export async function scanSources({
+  context,
+  urlsFile,
+  outFile,
+  env = process.env,
+  log = console.log,
+  onCandidateActivity = () => {},
+}) {
   const emit = createScannerLogger(log, env.FLOW_B_LOG_LEVEL || "verbose");
   const directMode = String(env.FLOW_B_DIRECT_PUBLISH || "") === "1";
   const strictSourcePortfolio = !directMode
@@ -3178,6 +3414,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       : [];
   const yieldFiles = [...new Set([
     path.join(path.dirname(outputPath), "source_yield.jsonl"),
+    path.join(path.dirname(outputPath), "direct_funnel.jsonl"),
     path.join(path.dirname(outputPath), "favorite_collection.jsonl"),
     env.FLOW_B_SOURCE_YIELD_HISTORY || DEFAULT_SOURCE_YIELD_HISTORY,
     env.FLOW_B_FBS_SOURCE_HISTORY || DEFAULT_FBS_SOURCE_HISTORY,
@@ -3261,30 +3498,34 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const allowlistMatch = strictSourcePortfolio
     ? "exact"
     : String(env.FLOW_B_SOURCE_ALLOWLIST_MATCH || "family").toLowerCase();
+  const expandedSourceUrls = [...new Set([
+    ...publishedSourcePages,
+    ...nextPublishedDiscoveryPages,
+    ...repeatedPublishedDiscoveryPageFour,
+    ...expandHighYieldSourceUrls([
+      ...inputUrls,
+      ...verifiedSellerUrls,
+      ...deepVerifiedSellerVariants,
+      ...submittedSellerSourceVariants,
+      ...pureFbsSellerVariants,
+      ...derivedSearchUrls,
+    ], yieldRows),
+  ])];
   const urls = strictSourcePortfolio
     ? filterSourceUrlsByAllowlist(
       inputUrls,
       allowlistUrls.length > 0 ? allowlistUrls : inputUrls,
       { match: "exact" },
     )
-    : filterSourceUrlsByAllowlist(filterProductiveSourceVariants(
-      [...new Set([
-        ...publishedSourcePages,
-        ...nextPublishedDiscoveryPages,
-        ...repeatedPublishedDiscoveryPageFour,
-        ...expandHighYieldSourceUrls([
-          ...inputUrls,
-          ...verifiedSellerUrls,
-          ...deepVerifiedSellerVariants,
-          ...submittedSellerSourceVariants,
-          ...pureFbsSellerVariants,
-          ...derivedSearchUrls,
-        ], yieldRows),
-      ])],
-      yieldRows,
-    ), allowlistUrls, {
+    : filterSourceUrlsByAllowlist(
+      directMode
+        ? expandedSourceUrls
+        : filterProductiveSourceVariants(expandedSourceUrls, yieldRows),
+      allowlistUrls,
+      {
       match: allowlistMatch,
-    });
+      },
+    );
   const allowlistOptions = {
     match: allowlistMatch,
   };
@@ -3293,9 +3534,11 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     allowlistUrls,
     allowlistOptions,
   );
-  const done = completedSourceUrls(records, {
-    transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
-  });
+  const done = directMode
+    ? new Set()
+    : completedSourceUrls(records, {
+      transientRetryMs: envNumber(env, "FLOW_B_SOURCE_RETRY_DELAY_MS", 10 * 60_000),
+    });
   const highYieldSources = yieldRows.filter((row) => row?.status === "published").map((row) => row.source_url);
   const uncompletedUrls = excludeCompletedSourceFamilies(urls, done, allowlistOptions);
   const prioritizedPending = strictSourcePortfolio
@@ -3336,17 +3579,25 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   );
   const pending = strictSourcePortfolio
     ? deduplicatedPending
-    : interleaveSourcePortfolio(deduplicatedPending, yieldRows, {
-      strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
-      fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
-      exploreWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORE_WEIGHT", 1),
-      scanRows: records,
-    });
+    : directMode
+      ? interleaveProductiveSourceExploration(deduplicatedPending, yieldRows, {
+        productiveWeight: envNumber(env, "FLOW_B_SOURCE_PRODUCTIVE_WEIGHT", 3),
+        explorationWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORATION_WEIGHT", 1),
+        scanRows: records,
+      })
+      : interleaveSourcePortfolio(deduplicatedPending, yieldRows, {
+        strictWeight: envNumber(env, "FLOW_B_SOURCE_STRICT_WEIGHT", 7),
+        fbsWeight: envNumber(env, "FLOW_B_SOURCE_FBS_WEIGHT", 2),
+        exploreWeight: envNumber(env, "FLOW_B_SOURCE_EXPLORE_WEIGHT", 1),
+        scanRows: records,
+      });
   const favoriteLog = path.join(path.dirname(outputPath), "favorite_collection.jsonl");
   const workers = Math.max(1, envNumber(env, "FLOW_B_TAB_WORKERS", 4));
   const adaptiveWorkers = sourceAdaptiveConcurrency(favoriteLog, {
     initial: workers,
-    max: Math.max(workers, envNumber(env, "FLOW_B_MAX_TAB_WORKERS", 12)),
+    max: directMode
+      ? workers
+      : Math.max(workers, envNumber(env, "FLOW_B_MAX_TAB_WORKERS", 12)),
     stableWindow: sourceAdaptiveStableWindow(env),
   });
   const perSourceLinkLimit = envNumber(env, "FLOW_B_MAX_LINKS_PER_SOURCE", 24);
@@ -3369,6 +3620,16 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
   const candidateQueue = createCandidateQueue(path.join(path.dirname(outputPath), "candidate_queue.jsonl"));
   await candidateQueue.load();
   let scanActivityCount = 0;
+  let candidateActivityCount = 0;
+  const recordCandidateActivity = (count) => {
+    const value = Math.max(0, Number(count) || 0);
+    scanActivityCount += value;
+    candidateActivityCount += value;
+    if (value > 0) {
+      try { onCandidateActivity(value); } catch {}
+    }
+    return value;
+  };
   const candidateDrainLimit = sourceInterleavedCandidateDrainLimit({
     configuredLimit: envNumber(env, "FLOW_B_CANDIDATE_QUEUE_DRAIN_LIMIT", 48),
     pendingSourceCount: pending.length,
@@ -3397,10 +3658,18 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     },
   ), env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1");
   if (!pending.length && !recoveredCandidates.length) {
-    return { outFile: outputPath, records: records.length, pending: 0, activity_count: 0 };
+    return {
+      outFile: outputPath,
+      records: records.length,
+      pending: 0,
+      activity_count: 0,
+      candidate_activity_count: 0,
+    };
   }
   const runtime = collectionRuntimeState(favoriteLog);
+  const favoriteTelemetry = favoriteTelemetryForRuntime(runtime, env);
   const accessController = ozonAccessControllerFor(context, env);
+  const controllerOwnsDirectPacing = directMode && Boolean(accessController);
   const collectionPacingFile = path.join(path.dirname(outputPath), "collection_pacing.json");
   if (runtime.collectionPacingFile !== collectionPacingFile) {
     const detailPacing = favoriteDetailPacingOptions(env);
@@ -3410,6 +3679,25 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     });
     runtime.collectionPacingFile = collectionPacingFile;
   }
+  if (controllerOwnsDirectPacing && (
+    Number(runtime.detailBlockedUntil) > 0
+    || Number(runtime.detailSoftBlockStreak) > 0
+    || Number(runtime.lastDetailSoftBlockAt) > 0
+    || Number(runtime.sourceSoftBlockStreak) > 0
+    || Number(runtime.lastSourceSoftBlockAt) > 0
+  )) {
+    runtime.detailBlockedUntil = 0;
+    runtime.detailSoftBlockStreak = 0;
+    runtime.lastDetailSoftBlockAt = 0;
+    runtime.sourceSoftBlockStreak = 0;
+    runtime.lastSourceSoftBlockAt = 0;
+    await queueCollectionRuntimeStatePersist(collectionPacingFile, runtime);
+  }
+  const currentCollectionCooldown = () => remainingCollectionCooldown(
+    runtime,
+    Date.now(),
+    { controllerManaged: controllerOwnsDirectPacing },
+  );
   emit(`favorite exclusions loaded: ${attempted.size}`);
   const maozi = await openMaoziPage(context, { forceNew: true });
   const reusablePools = await runtimeReusablePagePools(
@@ -3429,7 +3717,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       const sku = skuFromProductUrl(href);
       return sku && !attempted.has(sku);
     });
-    scanActivityCount += await candidateQueue.discover(discoveries);
+    recordCandidateActivity(await candidateQueue.discover(discoveries));
     const transitions = [];
     let total;
     try {
@@ -3441,6 +3729,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           if (["favorited", "rejected", "failed"].includes(String(result?.status || ""))) {
             scanActivityCount += 1;
           }
+          if (result?.status === "favorited") {
+            candidateActivityCount += 1;
+            try { onCandidateActivity(1); } catch {}
+          }
           onResult(result);
           const transition = candidateQueueTransitionForCollectionResult(result, {
             deferMs: envNumber(env, "FLOW_B_CANDIDATE_DEFER_MS", 10 * 60_000),
@@ -3450,6 +3742,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           }
         },
         accessController,
+        favoriteTelemetry,
       });
     } finally {
       await Promise.allSettled(transitions);
@@ -3468,7 +3761,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     let favoriteState;
     try {
       favoriteState = await readFavoriteCountWithTimeout(
-        () => favoriteCount(maozi),
+        () => favoriteTelemetry.readCount(() => favoriteCount(maozi)),
         envNumber(env, "FLOW_B_FAVORITE_TELEMETRY_TIMEOUT_MS", 10_000),
       );
     } catch (error) {
@@ -3478,7 +3771,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     if (requiresFavoriteSession(env) && !favoriteState.authenticated) throw new Error("Maozi profile token is stale or the session is not logged in");
     let favoriteBefore = favoriteState.authenticated ? favoriteState.total : null;
 
-    const cooldownRemaining = remainingCollectionCooldown(runtime);
+    const cooldownRemaining = currentCollectionCooldown();
     if (cooldownRemaining > 0 && favoriteBefore !== null && favoriteBefore < targetFavorites) {
       const cooldownFallbackLinks = cachedExactFbsFallbackLinks(records, {
         attempted,
@@ -3492,7 +3785,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           const sku = skuFromProductUrl(link?.href);
           return sku && !attempted.has(sku);
         }));
-        scanActivityCount += queued;
+        recordCandidateActivity(queued);
         emit(`Ozon detail cooldown queue-only cached=${queued} remaining=${cooldownRemaining}ms`);
       }
       const readyCandidateCount = candidateQueue.pending({
@@ -3513,11 +3806,12 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           candidate_backlog: readyCandidateCount,
           cooldown_remaining_ms: cooldownRemaining,
           activity_count: scanActivityCount,
+          candidate_activity_count: candidateActivityCount,
         };
       }
     }
 
-    if (remainingCollectionCooldown(runtime) === 0
+    if (currentCollectionCooldown() === 0
       && favoriteBefore !== null && favoriteBefore < targetFavorites && recoveredCandidates.length) {
       emit(`resuming ${recoveredCandidates.length} persisted product candidates`);
       favoriteBefore = await collectWithCandidateQueue({
@@ -3535,7 +3829,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       });
     }
 
-    if (remainingCollectionCooldown(runtime) === 0
+    if (currentCollectionCooldown() === 0
       && favoriteBefore !== null && favoriteBefore < targetFavorites && records.length) {
       const baseLinkLimit = perSourceLinkLimit;
       const retainedRows = orderRowsBySourceYield(retainedRowsForCollection(records, {
@@ -3618,6 +3912,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           retained_attempted: retainedLinks.length,
           retained_favorited: retainedFavorited,
           activity_count: scanActivityCount,
+          candidate_activity_count: candidateActivityCount,
         };
       }
     }
@@ -3661,7 +3956,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
     for (let start = 0; prefetchedBatch || start < pending.length;) {
       if (isCollectionDeadlineReached(env)) break;
       if (favoriteBefore !== null && favoriteBefore >= targetFavorites) break;
-      const loopCooldownRemaining = remainingCollectionCooldown(runtime);
+      const loopCooldownRemaining = currentCollectionCooldown();
       if (loopCooldownRemaining > 0) {
         const readyCandidateCount = candidateQueue.pending({
           ...pendingCandidateOptions,
@@ -3688,7 +3983,13 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         runtime.lastSourceSoftBlockAt,
         runtime.detailBlockedUntil,
       ];
-      const sourceCooldown = sourceBatchCooldownState(batchRows, runtime);
+      const sourceCooldown = sourceBatchCooldownState(
+        batchRows,
+        runtime,
+        Date.now(),
+        { controllerManaged: controllerOwnsDirectPacing },
+      );
+      const sourceGloballyBlocked = sourceCooldown.globalBlocked ?? sourceCooldown.blocked;
       const currentSourceCooldownState = [
         runtime.sourceSoftBlockStreak,
         runtime.lastSourceSoftBlockAt,
@@ -3697,8 +3998,10 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       if (previousSourceCooldownState.some((value, index) => value !== currentSourceCooldownState[index])) {
         await queueCollectionRuntimeStatePersist(collectionPacingFile, runtime);
       }
-      if (sourceCooldown.blocked && !isCollectionDeadlineReached(env)) {
+      if (sourceGloballyBlocked && !isCollectionDeadlineReached(env)) {
         emit(`source soft block cooldown defer=${sourceCooldown.delay}ms`);
+      } else if (sourceCooldown.blocked && controllerOwnsDirectPacing) {
+        emit("source soft block deferred affected sources; dynamic controller remains active");
       }
       for (const row of batchRows) {
         if (row.blocked || /soft block|access denied|captcha|timeout|error:/i.test(String(row.stop_reason || ""))) {
@@ -3712,7 +4015,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(liveYieldFile)),
       );
       if (sourceBatchPrefetchAllowed({
-        sourceBlocked: sourceCooldown.blocked,
+        sourceBlocked: sourceGloballyBlocked,
         deadlineReached: isCollectionDeadlineReached(env),
         completedBatches: completedSourceBatches,
         maximumBatches: maximumSourceBatches,
@@ -3738,15 +4041,15 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       const collectionMode = sourceBatchCollectionMode({
         favoriteTotal: favoriteBefore,
         target: targetFavorites,
-        cooldownRemainingMs: remainingCollectionCooldown(runtime),
-        sourceBlocked: sourceCooldown.blocked,
+        cooldownRemainingMs: currentCollectionCooldown(),
+        sourceBlocked: sourceGloballyBlocked,
       });
       if (collectionMode === "queue-only") {
         const queued = await candidateQueue.discover(eligibleCollectionLinks.filter((link) => {
           const sku = skuFromProductUrl(link?.href);
           return sku && !attempted.has(sku);
         }));
-        scanActivityCount += queued;
+        recordCandidateActivity(queued);
         if (queued > 0) emit(`queued ${queued} source candidates without detail during cooldown`);
       } else if (collectionMode === "collect") {
         let collectionSoftBlocked = false;
@@ -3780,7 +4083,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
           });
         }
       }
-      const afterWait = sourceCooldown.blocked ? 0 : sourceAfterScanWaitMs(
+      const afterWait = sourceGloballyBlocked || directMode ? 0 : sourceAfterScanWaitMs(
         env,
         runtime,
         Math.max(0, collectionDeadlineMs(env) - Date.now()),
@@ -3789,7 +4092,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       let observedFavoriteAfter = favoriteBefore;
       try {
         favoriteState = await readFavoriteCountWithTimeout(
-          () => favoriteCount(maozi),
+          () => favoriteTelemetry.readCount(() => favoriteCount(maozi)),
           envNumber(env, "FLOW_B_FAVORITE_TELEMETRY_TIMEOUT_MS", 10_000),
         );
         observedFavoriteAfter = favoriteState.authenticated ? favoriteState.total : null;
@@ -3821,7 +4124,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       }
       emit(`favorite ${batchFavoriteBefore} -> ${favoriteAfter} delta=${delta}`);
       favoriteBefore = favoriteAfter;
-      if (sourceCooldown.blocked) break;
+      if (sourceGloballyBlocked) break;
       if (favoriteAfter !== null && favoriteAfter >= targetFavorites) break;
       if (lowDeltaBatchLimit > 0 && lowDeltaBatches >= lowDeltaBatchLimit) break;
       const strictFeedbackChanged = strictFeedbackChangedBeforeCollection
@@ -3865,7 +4168,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
         const sku = skuFromProductUrl(link?.href);
         return sku && !attempted.has(sku);
       }));
-      scanActivityCount += queued;
+      recordCandidateActivity(queued);
       const eligibleCounts = eligibleLinkCountsBySource(prefetchedLinks, attempted, {
         requireListingFbsEvidence,
       });
@@ -3891,6 +4194,7 @@ export async function scanSources({ context, urlsFile, outFile, env = process.en
       records: records.length,
       pending: pending.length,
       activity_count: scanActivityCount,
+      candidate_activity_count: candidateActivityCount,
     };
   } catch (error) {
     keepReusablePages = false;

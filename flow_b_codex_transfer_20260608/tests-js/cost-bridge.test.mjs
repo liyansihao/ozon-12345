@@ -552,7 +552,7 @@ test("estimate rejects path traversal attempts structurally", async () => {
   });
 });
 
-test("transient image downloads retry with bounded backoff before running 1688", async () => {
+test("transient image downloads retry at most once before running 1688", async () => {
   await withTempDir(async (runDir) => {
     let downloads = 0;
     let runs = 0;
@@ -560,7 +560,7 @@ test("transient image downloads retry with bounded backoff before running 1688",
     const bridge = createCostBridge({
       download: async (_url, destinationPath) => {
         downloads += 1;
-        if (downloads < 3) throw new Error("image download HTTP 503");
+        if (downloads < 2) throw new Error("image download HTTP 503");
         await fs.writeFile(destinationPath, "image");
       },
       sleep: async (ms) => { delays.push(ms); },
@@ -585,9 +585,9 @@ test("transient image downloads retry with bounded backoff before running 1688",
     }, runDir);
 
     assert.equal(result.ok, true);
-    assert.equal(downloads, 3);
+    assert.equal(downloads, 2);
     assert.equal(runs, 1);
-    assert.deepEqual(delays, [500, 1000]);
+    assert.deepEqual(delays, [500]);
   });
 });
 
@@ -702,6 +702,47 @@ test("uncached 1688 estimates use and close an injected long-lived worker pool",
     assert.equal(workerRuns, 1);
     await bridge.close();
     assert.equal(closes, 1);
+  });
+});
+
+test("1688 total budget includes image download and worker queue time", async () => {
+  await withTempDir(async (runDir) => {
+    let downloadTimeout = 0;
+    let workerTimeout = 0;
+    const bridge = createCostBridge({
+      totalBudgetMs: 120,
+      cacheFlushDebounceMs: 0,
+      workerPool: {
+        run: async (_request, timeout) => {
+          workerTimeout = timeout;
+          return {
+            code: 0,
+            stdout: [
+              "COST_SOURCE search_first_page_p70_similarity_filtered",
+              "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+              "P70_COST 11",
+            ].join("\n"),
+            stderr: "",
+          };
+        },
+        close: async () => {},
+      },
+      download: async (_url, destinationPath, options) => {
+        downloadTimeout = options.timeout;
+        await new Promise((resolve) => setTimeout(resolve, 35));
+        await fs.writeFile(destinationPath, "image");
+      },
+    });
+    const result = await bridge.estimate({
+      sku: "budget-1",
+      cover_image: "https://img.example/budget.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, true);
+    assert.ok(downloadTimeout <= 120);
+    assert.ok(workerTimeout > 0);
+    assert.ok(workerTimeout < downloadTimeout);
+    await bridge.close();
   });
 });
 

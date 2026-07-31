@@ -36,8 +36,22 @@ const FATAL_RUNNER_STATE_CODES = new Set([
   "SUBMISSION_GATE_UNAVAILABLE",
 ]);
 
+function isFatalAuthenticationError(error) {
+  const status = Number(
+    error?.status
+    ?? error?.statusCode
+    ?? error?.response?.status
+    ?? error?.response?.statusCode,
+  );
+  if ([401, 403].includes(status)) return true;
+  return /(?:maozi|毛子)[^\n]{0,100}(?:not logged in|login required|access\s*token|unauthenticated|unauthori[sz]ed|forbidden|authentication required|(?:HTTP\s*)?(?:401|403))|access\s*token[^\n]{0,80}(?:empty|expired|invalid|missing)|(?:\bmfa\b|multi[- ]factor|two[- ]factor|2fa|unauthenticated|authentication required|login required|session (?:has )?expired)|(?:HTTP\s*)?(?:401|403)[^\n]{0,80}(?:unauthenticated|unauthori[sz]ed|forbidden|auth|token|login)|(?:unauthenticated|unauthori[sz]ed|forbidden)[^\n]{0,80}(?:auth|token|login)/iu
+    .test(String(error?.message || error || ""));
+}
+
 function isFatalRunnerError(error) {
-  return isFatalBrowserError(error) || FATAL_RUNNER_STATE_CODES.has(String(error?.code || ""));
+  return isFatalBrowserError(error)
+    || isFatalAuthenticationError(error)
+    || FATAL_RUNNER_STATE_CODES.has(String(error?.code || ""));
 }
 
 function boundedBackoffMs(value, maximumMs = MAX_ONLINE_SYNC_SERVER_BACKOFF_MS) {
@@ -357,6 +371,7 @@ function isDeferredCandidateReason(reason) {
     "ozon-detail-soft-block-deferred",
     "category-data-missing",
     "category-mapping-unavailable",
+    "submission-not-sent-deferred",
   ].includes(String(reason || ""));
 }
 
@@ -709,6 +724,7 @@ export function createPublishRunner({
   submissionGateFile = null,
   requireReliableCostContract = false,
   directMode = false,
+  directRunControl = null,
   minimumSameItemMatches = 3,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
@@ -719,6 +735,9 @@ export function createPublishRunner({
   const targetCount = Number(target);
   const profitThreshold = Number(threshold);
   const activeDirectMode = Boolean(directMode);
+  const sharedDirectRunControl = directRunControl && typeof directRunControl === "object"
+    ? directRunControl
+    : null;
   const requiredSameItemMatches = Number(minimumSameItemMatches);
   if (!Number.isInteger(targetCount) || targetCount < 0) throw new TypeError("target must be a non-negative integer");
   if (!Number.isFinite(profitThreshold)) throw new TypeError("threshold must be numeric");
@@ -764,8 +783,12 @@ export function createPublishRunner({
   let publishChain = Promise.resolve();
   let metricsChain = Promise.resolve();
   let haltReason = null;
+  let directAcceptedCount = () => 0;
+  let markDirectAccepted = () => {};
+  let directActiveStoreId = () => 0;
   let activeTargetIndex = 0;
   const storeSwitches = [];
+  const directRejectedStoreIds = new Set();
   const storeDailyUsage = new Map();
   const storeDailyLimits = new Map();
   const storeTotalUsage = new Map();
@@ -779,7 +802,19 @@ export function createPublishRunner({
   const lastStoreTargetMetrics = new Map();
   const selectedTitleOwners = new Map();
   let lastAllStoresStalledAt = 0;
-  const adaptive = new AdaptiveConcurrency({ initial: workerCount, max: Math.max(workerCount, Number(maxConcurrency) || workerCount) });
+  const adaptive = new AdaptiveConcurrency({
+    initial: workerCount,
+    max: activeDirectMode
+      ? workerCount
+      : Math.max(workerCount, Number(maxConcurrency) || workerCount),
+  });
+
+  function cancelDirectRun(error, batchControl = null) {
+    for (const control of new Set([batchControl, sharedDirectRunControl].filter(Boolean))) {
+      control.cancelled = true;
+      control.fatalError ||= error;
+    }
+  }
 
   async function activeSubmissionGate() {
     if (activeDirectMode) return { phase: "released", allowed_skus: null };
@@ -1040,6 +1075,7 @@ export function createPublishRunner({
       error.sku = sku;
       throw error;
     }
+    if (activeDirectMode) markDirectAccepted(sku);
 
     const submittedStoreId = Number(targetConfig.store.id);
     storeDailyUsage.set(submittedStoreId, Number(storeDailyUsage.get(submittedStoreId) || 0) + 1);
@@ -1068,10 +1104,48 @@ export function createPublishRunner({
   async function publishSerial(sku, payload, targetConfig, submissionState, batchControl = null) {
     const submission = publishChain.then(async () => {
       if (haltReason) return { ok: false, reason: haltReason, not_submitted: true };
-      if (batchControl?.cancelled) {
+      if (batchControl?.cancelled || sharedDirectRunControl?.cancelled) {
         return { ok: false, reason: "batch-fatal-cancelled", not_submitted: true };
       }
-      const publishResult = await client.publish(payload);
+      if (activeDirectMode) {
+        if (directAcceptedCount() >= targetCount) {
+          return { ok: false, reason: "target-already-reached", not_submitted: true };
+        }
+        const activeStoreId = Number(directActiveStoreId() || 0);
+        if (activeStoreId > 0 && Number(targetConfig?.store?.id || 0) !== activeStoreId) {
+          return { ok: false, reason: "publish-target-changed", not_submitted: true };
+        }
+        const currentEntry = typeof state.entryOf === "function" ? state.entryOf(sku) : null;
+        const currentData = currentEntry?.data || {};
+        if (currentEntry?.status === "published"
+          || currentData.submitted === true
+          || currentData.submission_pending === true) {
+          return { ok: false, reason: "submission-already-recorded", not_submitted: true };
+        }
+        if (currentData.reconcile_only === true && currentData.previous_api_call_started_at) {
+          return { ok: false, reason: "submission-api-status-unknown", not_submitted: true };
+        }
+        if (submissionState?.api_call_started_at
+          && currentData.api_call_started_at
+          && currentData.api_call_started_at !== submissionState.api_call_started_at) {
+          return { ok: false, reason: "submission-api-call-reservation-lost", not_submitted: true };
+        }
+      }
+      let publishResult;
+      try {
+        publishResult = await client.publish(payload);
+      } catch (error) {
+        if (!activeDirectMode || isFatalRunnerError(error)) {
+          if (isFatalRunnerError(error)) cancelDirectRun(error, batchControl);
+          throw error;
+        }
+        return {
+          ok: false,
+          reason: "submission-api-status-unknown",
+          error: String(error?.message || error),
+          uncertain: true,
+        };
+      }
       if (!publishResult?.ok) {
         const publishEvidence = [
           publishResult?.reason,
@@ -1079,18 +1153,40 @@ export function createPublishRunner({
           publishResult?.response?.msg,
           publishResult?.response?.error,
         ].filter(Boolean).join(" ");
+        const publishStatus = Number(
+          publishResult?.status
+          ?? publishResult?.statusCode
+          ?? publishResult?.response?.status
+          ?? publishResult?.response?.statusCode,
+        );
+        const authenticationError = Object.assign(
+          new Error(
+            `Maozi publish request failed: ${publishEvidence || (Number.isFinite(publishStatus) ? `HTTP ${publishStatus}` : "unknown response")}`,
+          ),
+          Number.isFinite(publishStatus) ? { status: publishStatus } : {},
+        );
+        if (activeDirectMode && isFatalAuthenticationError(authenticationError)) {
+          cancelDirectRun(authenticationError, batchControl);
+          throw authenticationError;
+        }
         const directFailureReason = /суточн(?:ый|ого)\s+лимит|daily\s+(?:product\s+)?limit/iu.test(publishEvidence)
           ? "daily-product-limit"
           : /магазин|store|shop/iu.test(publishEvidence)
             && /недоступ|отключ|disabled|unavailable|inactive/iu.test(publishEvidence)
             ? "store-unavailable"
             : null;
-        if (activeDirectMode && directFailureReason) haltReason = directFailureReason;
+        if (activeDirectMode && directFailureReason) {
+          const rejectedStoreId = Number(targetConfig?.store?.id || 0);
+          if (rejectedStoreId > 0) directRejectedStoreIds.add(rejectedStoreId);
+          haltReason = directFailureReason;
+        }
         return {
           ok: false,
           reason: directFailureReason || publishResult?.reason || "publish-not-confirmed",
           publish_result: publishResult ?? null,
-          not_submitted: true,
+          ...(activeDirectMode && !directFailureReason
+            ? { uncertain: true }
+            : { not_submitted: true }),
         };
       }
       const acceptedState = await persistAcceptedSubmission(
@@ -1158,7 +1254,10 @@ export function createPublishRunner({
     try {
       await client.deleteFavorite(item);
     } catch (error) {
-      if (isFatalRunnerError(error)) throw error;
+      if (isFatalRunnerError(error)) {
+        cancelDirectRun(error);
+        throw error;
+      }
       await state.transition(sku, "failed", {
         ...intentState,
         reason: "favorite-delete-failed",
@@ -1197,6 +1296,43 @@ export function createPublishRunner({
     };
   }
 
+  async function contentQualityFailure(item, sku, quality) {
+    if (quality.ok) return null;
+    if (["category-data-missing", "category-mapping-unavailable"].includes(quality.reason)) {
+      const retry = boundedTransientFailure({
+        reason: quality.reason,
+        now: now(),
+        previousAttempts: activeValidationOnly ? 0 : item?.transient_attempts,
+        previousDay: activeValidationOnly ? null : item?.retry_day,
+        backoffMs: 300_000,
+      });
+      if (!activeValidationOnly) {
+        await state.transition(sku, "failed", {
+          ...item,
+          ...retry,
+          submitted: false,
+          submission_pending: false,
+          quality_gate_passed: false,
+          quality_checks: quality.checks,
+          quality_evidence: quality.evidence,
+        });
+      }
+      return {
+        status: retry.terminal ? "failed" : "deferred",
+        sku,
+        source_url: item.source_url ?? null,
+        reason: retry.reason,
+        retry_at: retry.retry_at,
+      };
+    }
+    return skip(item, quality.reason, {
+      outcome_status: activeDirectMode ? "rejected" : undefined,
+      quality_gate_passed: false,
+      quality_checks: quality.checks,
+      quality_evidence: quality.evidence,
+    });
+  }
+
   async function finalizePublicationAttempt({
     item,
     submissionState,
@@ -1232,6 +1368,7 @@ export function createPublishRunner({
         recordMetric("direct_funnel.jsonl", {
           sku,
           stage: "erp_accepted",
+          source_url: submissionState.source_url ?? submissionState.seller_url ?? null,
           store_id: Number(submissionState.store_id),
           outcome_status: "submitted",
         });
@@ -1256,6 +1393,58 @@ export function createPublishRunner({
           source_url: item?.source_url ?? submissionState.source_url ?? null,
           reason: "erp-submission-accepted",
         };
+    }
+    if (activeDirectMode && finalResult?.not_submitted === true) {
+      const reason = finalResult?.reason || "submission-not-sent";
+      if (["submission-already-recorded", "submission-api-call-reservation-lost"].includes(reason)) {
+        return {
+          status: "ignored",
+          sku,
+          source_url: item?.source_url ?? submissionState.source_url ?? null,
+          reason,
+        };
+      }
+      const retryAt = now().toISOString();
+      await state.transition(sku, "failed", {
+        ...submissionState,
+        reason: "submission-not-sent-deferred",
+        original_reason: reason,
+        submission_intent: false,
+        submitted: false,
+        submission_pending: false,
+        api_call_started_at: null,
+        api_call_completed_at: retryAt,
+        retry_at: retryAt,
+        terminal: false,
+        final_result: finalResult ?? null,
+      });
+      return {
+        status: "deferred",
+        sku,
+        source_url: item?.source_url ?? submissionState.source_url ?? null,
+        reason: "submission-not-sent-deferred",
+        retry_at: retryAt,
+      };
+    }
+    if (activeDirectMode && finalResult?.uncertain === true) {
+      const nextReconcileAt = new Date(now().getTime() + 30_000).toISOString();
+      await state.transition(sku, "processing", {
+        ...submissionState,
+        reason: "submission-api-status-unknown",
+        submission_intent: true,
+        submitted: false,
+        submission_pending: false,
+        reconcile_only: true,
+        next_reconcile_at: nextReconcileAt,
+        final_result: finalResult ?? null,
+      });
+      return {
+        status: "ignored",
+        sku,
+        source_url: item?.source_url ?? submissionState.source_url ?? null,
+        reason: "submission-api-status-unknown",
+        retry_at: nextReconcileAt,
+      };
     }
     if (!finalResult?.ok) {
       const reason = finalResult?.reason || "publish-not-confirmed";
@@ -1374,154 +1563,153 @@ export function createPublishRunner({
           };
         }
       }
-      const [detailResult, categoryData] = await timed(sku, "ozon_detail_and_category", () => Promise.all([
-        detailProvider.getProductDetail(sku, item),
-        client.getCategoryBySku(sku),
-      ]));
-      if (batchControl?.cancelled) {
-        return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
-      }
-      const firstDetail = { ...item, ...(detailResult || {}) };
-      const firstReason = activeDirectMode
-        ? null
-        : policy.preflightSkipReason({ ...firstDetail, economy: ECONOMY_SENTINEL });
-      if (firstReason) return skip(item, firstReason);
-      const confirmationResult = activeDirectMode
-        ? null
-        : await timed(sku, "ozon_fbs_confirmation", () => (
+      let detailResult = null;
+      let confirmationResult = null;
+      let categoryData = null;
+      let firstDetail = null;
+      let detail = null;
+      let salePrice = null;
+      let productInfo = {};
+      let category = null;
+      let contentQuality = null;
+      let observedMode = null;
+      let fbsEvidence = null;
+
+      if (activeDirectMode) {
+        const snapshotTitle = normalizedContentText(item?.title);
+        const snapshotImage = normalizedContentText(item?.cover_image);
+        if (!snapshotTitle) return skip(item, "missing-title", { outcome_status: "rejected" });
+        if (!/[\p{L}\p{N}]/u.test(snapshotTitle)) {
+          return skip(item, "invalid-title", { outcome_status: "rejected" });
+        }
+        if (!snapshotImage) return skip(item, "missing-cover-image", { outcome_status: "rejected" });
+        if (!validHttpImageUrl(snapshotImage)) {
+          return skip(item, "invalid-cover-image-url", { outcome_status: "rejected" });
+        }
+        salePrice = policy.selectSalePrice(item);
+        if (!(Number(salePrice) > 0)) {
+          return skip(item, "missing-snapshot-sale-price", { outcome_status: "rejected" });
+        }
+        recordMetric("direct_funnel.jsonl", {
+          sku,
+          stage: "candidate_required_fields_passed",
+          source_url: item.source_url ?? item.seller_url ?? null,
+          snapshot_sale_price: Number(salePrice),
+        });
+
+        categoryData = await timed(sku, "erp_category_and_specs", () => client.getCategoryBySku(sku));
+        if (batchControl?.cancelled) {
+          return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
+        }
+        productInfo = categoryData?.product_info || {};
+        category = mapOzonCategory(
+          categoryData?.cate,
+          targetConfig.commissionTree,
+          salePrice,
+          cnyRubRate,
+        );
+        contentQuality = preSubmitTechnicalQuality({
+          item,
+          detail: {},
+          categoryData,
+          category,
+          commissionTree: targetConfig.commissionTree,
+        });
+        const qualityFailure = await contentQualityFailure(item, sku, contentQuality);
+        if (qualityFailure) return qualityFailure;
+        recordMetric("direct_funnel.jsonl", {
+          sku,
+          stage: "snapshot_category_passed",
+          source_url: item.source_url ?? item.seller_url ?? null,
+          snapshot_sale_price: Number(salePrice),
+          category: category.mapped,
+        });
+        detail = { ...item };
+      } else {
+        [detailResult, categoryData] = await timed(sku, "ozon_detail_and_category", () => Promise.all([
+          detailProvider.getProductDetail(sku, item),
+          client.getCategoryBySku(sku),
+        ]));
+        if (batchControl?.cancelled) {
+          return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
+        }
+        firstDetail = { ...item, ...(detailResult || {}) };
+        const firstReason = policy.preflightSkipReason({ ...firstDetail, economy: ECONOMY_SENTINEL });
+        if (firstReason) return skip(item, firstReason);
+        confirmationResult = await timed(sku, "ozon_fbs_confirmation", () => (
           detailProvider.getProductDetail(sku, {
             ...item,
             link: firstDetail.detail_url || firstDetail.link || item.link,
           })
         ));
-      const fbsEvidence = {
-        verified: activeDirectMode
-          ? null
-          : policy.isPureFbs(firstDetail.mode) && policy.isPureFbs(confirmationResult?.mode),
-        rule: activeDirectMode
-          ? "shipping mode is observed for telemetry only"
-          : "two independent live Ozon detail observations must both be exact FBS",
-        observations: (activeDirectMode ? [
-          {
-            observed_at: now().toISOString(),
-            mode: firstDetail.mode ?? null,
-            detail_url: firstDetail.detail_url || firstDetail.link || null,
-          },
-        ] : [
-          {
-            observed_at: now().toISOString(),
-            mode: firstDetail.mode ?? null,
-            detail_url: firstDetail.detail_url || firstDetail.link || null,
-          },
-          {
-            observed_at: now().toISOString(),
-            mode: confirmationResult?.mode ?? null,
-            detail_url: confirmationResult?.detail_url || confirmationResult?.link || null,
-          },
-        ]),
-      };
-      if (!activeDirectMode && !fbsEvidence.verified) {
-        return skip(item, "fbs-confirmation-inconsistent", { fbs_evidence: fbsEvidence });
-      }
-      const observedMode = firstDetail.mode || firstDetail.shipping_mode || item.mode || item.shipping_mode || null;
-      const detail = activeDirectMode
-        ? {
-          ...firstDetail,
-          mode: observedMode,
-          shipping_mode: firstDetail.shipping_mode || observedMode,
+        fbsEvidence = {
+          verified: policy.isPureFbs(firstDetail.mode) && policy.isPureFbs(confirmationResult?.mode),
+          rule: "two independent live Ozon detail observations must both be exact FBS",
+          observations: [
+            {
+              observed_at: now().toISOString(),
+              mode: firstDetail.mode ?? null,
+              detail_url: firstDetail.detail_url || firstDetail.link || null,
+            },
+            {
+              observed_at: now().toISOString(),
+              mode: confirmationResult?.mode ?? null,
+              detail_url: confirmationResult?.detail_url || confirmationResult?.link || null,
+            },
+          ],
+        };
+        if (!fbsEvidence.verified) {
+          return skip(item, "fbs-confirmation-inconsistent", { fbs_evidence: fbsEvidence });
         }
-        : { ...firstDetail, ...(confirmationResult || {}), mode: "FBS", shipping_mode: "FBS" };
-      if (!item.seller_url && detail.seller_url) item.seller_url = detail.seller_url;
-
-      // Reuse the central policy for mode/category checks before paying the 1688 cost.
-      const earlyReason = activeDirectMode
-        ? null
-        : policy.preflightSkipReason({ ...detail, economy: ECONOMY_SENTINEL });
-      if (earlyReason) return skip(item, earlyReason);
-
-      const salePrice = policy.selectSalePrice(detail);
-      if (!(Number(salePrice) > 0)) return skip(item, "missing-sale-price");
-
-      const productInfo = categoryData?.product_info || {};
-      const category = mapOzonCategory(
-        categoryData?.cate,
-        targetConfig.commissionTree,
-        salePrice,
-        cnyRubRate,
-      );
-      const contentQuality = (activeDirectMode ? preSubmitTechnicalQuality : preSubmitContentQuality)({
-        item,
-        detail: { ...(detailResult || {}), ...(confirmationResult || {}) },
-        categoryData,
-        category,
-        commissionTree: targetConfig.commissionTree,
-      });
-      if (!contentQuality.ok) {
-        if (["category-data-missing", "category-mapping-unavailable"].includes(contentQuality.reason)) {
-          const retry = boundedTransientFailure({
-            reason: contentQuality.reason,
-            now: now(),
-            previousAttempts: activeValidationOnly ? 0 : item?.transient_attempts,
-            previousDay: activeValidationOnly ? null : item?.retry_day,
-            backoffMs: 300_000,
-          });
-          if (!activeValidationOnly) {
-            await state.transition(sku, "failed", {
-              ...item,
-              ...retry,
-              submitted: false,
-              submission_pending: false,
-              quality_gate_passed: false,
-              quality_checks: contentQuality.checks,
-              quality_evidence: contentQuality.evidence,
-            });
-          }
-          return {
-            status: retry.terminal ? "failed" : "deferred",
-            sku,
-            source_url: item.source_url ?? null,
-            reason: retry.reason,
-            retry_at: retry.retry_at,
-          };
-        }
-        return skip(item, contentQuality.reason, {
-          outcome_status: activeDirectMode ? "rejected" : undefined,
-          quality_gate_passed: false,
-          quality_checks: contentQuality.checks,
-          quality_evidence: contentQuality.evidence,
-        });
-      }
-      if (activeDirectMode) {
-        recordMetric("direct_funnel.jsonl", {
-          sku,
-          stage: "candidate_required_fields_passed",
-        });
-      }
-      let optimisticCalc = null;
-      try {
-        optimisticCalc = await timed(sku, "profit_upper_bound", () => client.calculateProfit(profitCalculationInput({
-          sku,
+        observedMode = firstDetail.mode || firstDetail.shipping_mode || item.mode || item.shipping_mode || null;
+        detail = { ...firstDetail, ...(confirmationResult || {}), mode: "FBS", shipping_mode: "FBS" };
+        if (!item.seller_url && detail.seller_url) item.seller_url = detail.seller_url;
+        const earlyReason = policy.preflightSkipReason({ ...detail, economy: ECONOMY_SENTINEL });
+        if (earlyReason) return skip(item, earlyReason);
+        salePrice = policy.selectSalePrice(detail);
+        if (!(Number(salePrice) > 0)) return skip(item, "missing-sale-price");
+        productInfo = categoryData?.product_info || {};
+        category = mapOzonCategory(
+          categoryData?.cate,
+          targetConfig.commissionTree,
           salePrice,
-          purchasePrice: 0.01,
-          productInfo,
-          detail,
+          cnyRubRate,
+        );
+        contentQuality = preSubmitContentQuality({
+          item,
+          detail: { ...(detailResult || {}), ...(confirmationResult || {}) },
+          categoryData,
           category,
-          profitThreshold,
-        })));
-      } catch {
-        // This fast-path must never replace the original exact calculation on transient ERP failures.
-      }
-      const optimisticEconomy = economyResult(optimisticCalc);
-      const optimisticRateValue = optimisticEconomy?.price_list?.profit_rate;
-      const optimisticRate = optimisticRateValue === null || optimisticRateValue === undefined || optimisticRateValue === ""
-        ? Number.NaN
-        : Number(optimisticRateValue);
-      if (Number.isFinite(optimisticRate) && optimisticRate <= profitThreshold) {
-        return skip(item, `profit-upper-bound<=${profitThreshold}`, {
-          outcome_status: activeDirectMode ? "skipped_profit" : undefined,
-          profit_upper_bound: optimisticEconomy.price_list,
-          optimistic_purchase_price: 0.01,
+          commissionTree: targetConfig.commissionTree,
         });
+        const qualityFailure = await contentQualityFailure(item, sku, contentQuality);
+        if (qualityFailure) return qualityFailure;
+
+        let optimisticCalc = null;
+        try {
+          optimisticCalc = await timed(sku, "profit_upper_bound", () => client.calculateProfit(profitCalculationInput({
+            sku,
+            salePrice,
+            purchasePrice: 0.01,
+            productInfo,
+            detail,
+            category,
+            profitThreshold,
+          })));
+        } catch {
+          // This fast-path must never replace the original exact calculation on transient ERP failures.
+        }
+        const optimisticEconomy = economyResult(optimisticCalc);
+        const optimisticRateValue = optimisticEconomy?.price_list?.profit_rate;
+        const optimisticRate = optimisticRateValue === null || optimisticRateValue === undefined || optimisticRateValue === ""
+          ? Number.NaN
+          : Number(optimisticRateValue);
+        if (Number.isFinite(optimisticRate) && optimisticRate <= profitThreshold) {
+          return skip(item, `profit-upper-bound<=${profitThreshold}`, {
+            profit_upper_bound: optimisticEconomy.price_list,
+            optimistic_purchase_price: 0.01,
+          });
+        }
       }
 
       const costModel = [
@@ -1543,6 +1731,12 @@ export function createPublishRunner({
         expect_category: (category?.labels || []).slice(0, 2).join(" "),
       }, runDir));
       if (!cost?.ok && cost?.deferred === true && cost?.terminal === false) {
+        if (activeDirectMode) {
+          return skip(item, normalizeCostFailureReason(cost), {
+            cost,
+            outcome_status: "skipped_cost",
+          });
+        }
         const retry = boundedTransientFailure({
           reason: "1688-health-deferred",
           now: now(),
@@ -1597,7 +1791,67 @@ export function createPublishRunner({
         recordMetric("direct_funnel.jsonl", {
           sku,
           stage: "cost_passed",
+          source_url: item.source_url ?? item.seller_url ?? null,
           purchase_price: Number(cost.cost),
+        });
+
+        if (batchControl?.cancelled) {
+          return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
+        }
+        detailResult = await timed(sku, "ozon_live_price", () => detailProvider.getProductDetail(sku, item));
+        if (batchControl?.cancelled) {
+          return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
+        }
+        firstDetail = { ...item, ...(detailResult || {}) };
+        observedMode = firstDetail.mode || firstDetail.shipping_mode || item.mode || item.shipping_mode || null;
+        detail = {
+          ...firstDetail,
+          mode: observedMode,
+          shipping_mode: firstDetail.shipping_mode || observedMode,
+        };
+        if (!item.seller_url && detail.seller_url) item.seller_url = detail.seller_url;
+        const confirmedLivePrices = [
+          detailResult?.current_price,
+          detailResult?.follow_min,
+        ].map(Number).filter((value) => value > 0);
+        salePrice = confirmedLivePrices.length
+          ? Math.min(...confirmedLivePrices)
+          : null;
+        if (!(Number(salePrice) > 0)) {
+          return skip(item, "missing-live-sale-price", { outcome_status: "skipped_profit" });
+        }
+        category = mapOzonCategory(
+          categoryData?.cate,
+          targetConfig.commissionTree,
+          salePrice,
+          cnyRubRate,
+        );
+        contentQuality = preSubmitTechnicalQuality({
+          item,
+          detail: detailResult || {},
+          categoryData,
+          category,
+          commissionTree: targetConfig.commissionTree,
+        });
+        const qualityFailure = await contentQualityFailure(item, sku, contentQuality);
+        if (qualityFailure) return qualityFailure;
+        fbsEvidence = {
+          verified: null,
+          rule: "shipping mode is observed for telemetry only",
+          observations: [{
+            observed_at: now().toISOString(),
+            mode: observedMode,
+            detail_url: firstDetail.detail_url || firstDetail.link || null,
+          }],
+        };
+        recordMetric("direct_funnel.jsonl", {
+          sku,
+          stage: "live_price_confirmed",
+          source_url: item.source_url ?? item.seller_url ?? null,
+          current_price: Number(detailResult?.current_price) || null,
+          follow_min: Number(detailResult?.follow_min) || null,
+          sale_price: Number(salePrice),
+          category: category.mapped,
         });
       }
 
@@ -1613,6 +1867,7 @@ export function createPublishRunner({
           profitThreshold,
         })));
       } catch (error) {
+        if (isFatalRunnerError(error)) throw error;
         if (!activeDirectMode) throw error;
         return skip(item, "profit-calculation-failed", {
           outcome_status: "skipped_profit",
@@ -1649,6 +1904,7 @@ export function createPublishRunner({
         recordMetric("direct_funnel.jsonl", {
           sku,
           stage: "profit_passed",
+          source_url: item.source_url ?? item.seller_url ?? null,
           profit_rate: Number(profit.profit_rate),
         });
       }
@@ -1681,6 +1937,7 @@ export function createPublishRunner({
         submission_payload: payload,
         prepared_at: preparedAt,
         selected_at: preparedAt,
+        ...(activeDirectMode ? { direct_target_count: targetCount } : {}),
       };
       const duplicateOwner = activeDirectMode
         ? null
@@ -1788,7 +2045,10 @@ export function createPublishRunner({
         finalResult,
       });
     } catch (error) {
-      if (isFatalRunnerError(error)) throw error;
+      if (isFatalRunnerError(error)) {
+        cancelDirectRun(error, batchControl);
+        throw error;
+      }
       const deterministicReason = deterministicProfitFailureReason(error);
       if (deterministicReason) {
         return skip(item, deterministicReason, { error: String(error?.message || error) });
@@ -1950,6 +2210,27 @@ export function createPublishRunner({
           accepted_state: acceptedState,
         },
       });
+    }
+
+    if (activeDirectMode && item?.api_call_started_at) {
+      const nextReconcileAt = new Date(now().getTime() + 30_000).toISOString();
+      await state.transition(sku, "processing", {
+        ...item,
+        reason: "submission-api-status-unknown",
+        submission_intent: true,
+        submitted: false,
+        submission_pending: false,
+        reconcile_only: true,
+        verification_completed_at: now().toISOString(),
+        next_reconcile_at: nextReconcileAt,
+      });
+      return {
+        status: "ignored",
+        sku,
+        source_url: item.source_url ?? null,
+        reason: "submission-api-status-unknown",
+        retry_at: nextReconcileAt,
+      };
     }
 
     const callDay = localDateKey(now(), dailyStoreTimeZone);
@@ -2165,6 +2446,7 @@ export function createPublishRunner({
       storeUsageDay = currentUsageDay;
       activeTargetIndex = 0;
       haltReason = null;
+      directRejectedStoreIds.clear();
       storeDailyUsage.clear();
       storeDailyLimits.clear();
       if (dailyStoreUsageSeed?.date === currentUsageDay) {
@@ -2434,9 +2716,13 @@ export function createPublishRunner({
     async function advanceStore(reason, currentConfig, { excludedStoreIds = new Set() } = {}) {
       const fromStoreId = Number(currentConfig?.store?.id || targetPlan[activeTargetIndex]?.id);
       const startingIndex = activeTargetIndex;
+      const blockedStoreIds = new Set([
+        ...excludedStoreIds,
+        ...(activeDirectMode ? directRejectedStoreIds : []),
+      ].map(Number));
       for (let offset = 1; offset < targetPlan.length; offset += 1) {
         const candidateIndex = (startingIndex + offset) % targetPlan.length;
-        if (excludedStoreIds.has(Number(targetPlan[candidateIndex].id))) continue;
+        if (blockedStoreIds.has(Number(targetPlan[candidateIndex].id))) continue;
         activeTargetIndex = candidateIndex;
         try {
           const nextConfig = await resolveTargetConfig(activeTargetIndex);
@@ -2668,7 +2954,24 @@ export function createPublishRunner({
       : 0;
     let dryCandidates = 0;
     let validated = 0;
-    const acceptedCount = () => (activeDirectMode ? acceptedSkus.size : published);
+    const durableDirectAcceptedCount = () => (
+      activeDirectMode && typeof state.directAcceptedCount === "function"
+        ? Math.max(0, Number(state.directAcceptedCount(resolvedRunDir)) || 0)
+        : 0
+    );
+    const directTargetUsage = () => (
+      activeDirectMode && typeof state.directTargetUsage === "function"
+        ? Math.max(0, Number(state.directTargetUsage(resolvedRunDir)) || 0)
+        : acceptedSkus.size
+    );
+    const acceptedCount = () => (
+      activeDirectMode
+        ? Math.max(acceptedSkus.size, durableDirectAcceptedCount())
+        : published
+    );
+    directAcceptedCount = acceptedCount;
+    markDirectAccepted = (sku) => acceptedSkus.add(String(sku));
+    directActiveStoreId = () => Number(targetConfig?.store?.id || 0);
 
     async function recordDirectBackgroundOnline(item, existing, importLog, reconciliationTarget, extra = {}) {
       const sku = asSku(item);
@@ -3163,158 +3466,222 @@ export function createPublishRunner({
       };
     }
 
-    let cursor = 0;
-    while (cursor < candidates.length
-      && !haltReason
-      && (!deadlineAt || Date.now() < Date.parse(deadlineAt))
-      && (!activeValidationOnly || validated < activeValidationTarget)
-      && (activeAttemptLimit === 0 || attempted < activeAttemptLimit)
-      && (dryLimit === 0 || dryCandidates < dryLimit)) {
-      const activeStoreId = Number(targetConfig.store.id);
-      const nextCandidate = candidates[cursor];
-      const nextIsReconciliation = nextCandidate?.reconcile_only === true
-        || nextCandidate?.submitted === true
-        || nextCandidate?.submission_pending === true
-        || nextCandidate?.submission_intent === true;
-      if (!activeValidationOnly && !nextIsReconciliation && acceptedCount() >= targetCount) {
-        cursor += 1;
-        continue;
+    function recordCandidateResult(item, result) {
+      if (activeValidationOnly
+        && result.attempted
+        && ["deferred", "failed"].includes(result.status)) {
+        const used = Number(validationTransientAttempts.get(result.sku) || 0);
+        const transientAttempts = used + 1;
+        validationTransientAttempts.set(result.sku, transientAttempts);
+        const explicitRetryAt = Date.parse(String(result.retry_at || ""));
+        const retryAt = Number.isFinite(explicitRetryAt) && explicitRetryAt > now().getTime()
+          ? new Date(explicitRetryAt).toISOString()
+          : new Date(now().getTime() + transientCandidateBackoffMs(transientAttempts)).toISOString();
+        const event = {
+          sku: result.sku,
+          status: result.status,
+          reason: result.reason ?? "validation-transient-failure",
+          retry_at: retryAt,
+          retry_day: validationDay,
+          transient_attempts: transientAttempts,
+          validation_mode: "buffer",
+        };
+        latestValidation.set(result.sku, event);
+        recordMetric("validation_gate.jsonl", event);
       }
-      if (!activeDirectMode
-        && !activeValidationOnly
-        && !nextIsReconciliation
-        && stalledPendingForStore(activeStoreId).length >= Math.max(1, Number(pendingStoreStallCount) || 1)) {
-        stalledStoresThisRun.add(activeStoreId);
-        const nextConfig = await advanceStore("submission-stall", targetConfig, {
-          excludedStoreIds: stalledStoresThisRun,
+      if (result.status !== "ignored") {
+        recordMetric("source_yield.jsonl", {
+          sku: result.sku,
+          source_url: result.source_url ?? item?.source_url ?? null,
+          seller_url: item?.seller_url ?? null,
+          title: item?.title ?? null,
+          title_family: productTitleFamily(item?.title),
+          status: result.status,
+          reason: result.reason ?? null,
+          ...(result.source_yield_evidence || {}),
         });
-        if (nextConfig) {
-          unavailableStoreUntil.set(activeStoreId, now().getTime() + Math.max(0, Number(pendingStoreRetryMs) || 0));
-          targetConfig = nextConfig;
-          continue;
-        }
-        freshSubmissionsPaused = true;
-        break;
       }
-      const remainingDailyStoreQuota = activeDirectMode
-        ? Number.POSITIVE_INFINITY
-        : Number(storeDailyLimits.get(activeStoreId) || configuredDailyStoreLimit)
-          - Number(storeDailyUsage.get(activeStoreId) || 0);
-      const remainingTotalStoreQuota = activeDirectMode
-        ? Number.POSITIVE_INFINITY
-        : configuredTotalStoreLimit - Number(storeTotalUsage.get(activeStoreId) || 0);
-      const remainingStoreQuota = Math.min(remainingDailyStoreQuota, remainingTotalStoreQuota);
-      if (!activeValidationOnly && !nextIsReconciliation && remainingStoreQuota <= 0) {
-        haltReason = remainingTotalStoreQuota <= 0 ? "store-total-limit" : "daily-product-limit";
-        const nextConfig = await advanceStore(haltReason, targetConfig);
-        if (nextConfig) {
-          targetConfig = nextConfig;
-          continue;
-        }
-        break;
+      if (result.status === "failed") adaptive.recordFailure(result.error || new Error(result.reason || "publish-failed"));
+      else if (["published", "submitted"].includes(result.status)) adaptive.recordSuccess();
+      if (result.attempted) attempted += 1;
+      if (result.status === "published") {
+        published += 1;
+        if (activeDirectMode) acceptedSkus.add(String(result.sku));
+        dryCandidates = 0;
+      } else if (result.status === "submitted") {
+        if (!activeDirectMode || !acceptedSkus.has(String(result.sku))) submittedPending += 1;
+        if (activeDirectMode) acceptedSkus.add(String(result.sku));
+        dryCandidates = 0;
+      } else if (result.status === "validated") {
+        validated += 1;
+        dryCandidates = 0;
+      } else {
+        if (result.attempted) dryCandidates += 1;
+        if (result.status === "failed") failed += 1;
+        else if (result.status === "skipped") skipped += 1;
       }
-      const nearTarget = acceptedCount() >= targetCount - (adaptive.current - 1);
-      const width = nextIsReconciliation
-        ? Math.min(
-          nearTarget ? 1 : adaptive.current,
-          activeAttemptLimit > 0 ? activeAttemptLimit - attempted : Number.POSITIVE_INFINITY,
-        )
-        : Math.min(
-          activeValidationOnly ? Number.POSITIVE_INFINITY : remainingStoreQuota,
-          nearTarget ? 1 : adaptive.current,
-          activeValidationOnly ? activeValidationTarget - validated : Number.POSITIVE_INFINITY,
-          activeAttemptLimit > 0 ? activeAttemptLimit - attempted : Number.POSITIVE_INFINITY,
-      );
-      const batch = candidates.slice(cursor, cursor + width);
-      cursor += batch.length;
-      const batchControl = { cancelled: false, fatalError: null };
-      const settled = await Promise.allSettled(batch.map(async (item) => {
+    }
+
+    let cursor = 0;
+    const schedulerControl = sharedDirectRunControl || {
+      cancelled: false,
+      fatalError: null,
+    };
+    schedulerControl.cancelled = Boolean(schedulerControl.cancelled);
+    schedulerControl.fatalError ||= null;
+    const inFlight = new Set();
+    const freshInFlightByStore = new Map();
+
+    function inFlightFreshCount(storeId = null) {
+      if (storeId !== null) return Number(freshInFlightByStore.get(Number(storeId)) || 0);
+      return [...freshInFlightByStore.values()].reduce((sum, count) => sum + Number(count || 0), 0);
+    }
+
+    function launchCandidate(item, candidateTarget, reconciliation) {
+      const storeKey = Number(candidateTarget.store.id);
+      if (!reconciliation) {
+        freshInFlightByStore.set(storeKey, inFlightFreshCount(storeKey) + 1);
+      }
+      let task;
+      task = (async () => {
         try {
-          return await handleCandidate(item, batchControl);
+          const result = await handleCandidate(item, schedulerControl);
+          recordCandidateResult(item, result);
         } catch (error) {
-          if (isFatalRunnerError(error)) {
-            batchControl.cancelled = true;
-            batchControl.fatalError ||= error;
+          cancelDirectRun(error, schedulerControl);
+        } finally {
+          if (!reconciliation) {
+            const remaining = Math.max(0, inFlightFreshCount(storeKey) - 1);
+            if (remaining > 0) freshInFlightByStore.set(storeKey, remaining);
+            else freshInFlightByStore.delete(storeKey);
           }
-          throw error;
+          inFlight.delete(task);
         }
-      }));
-      const rejected = settled.filter((result) => result.status === "rejected");
-      if (rejected.length > 0) {
-        batchControl.cancelled = true;
-        await Promise.allSettled([publishChain, metricsChain]);
-        throw batchControl.fatalError || rejected[0].reason;
+      })();
+      inFlight.add(task);
+    }
+
+    schedulerLoop:
+    while (cursor < candidates.length || inFlight.size > 0) {
+      if (schedulerControl.fatalError) break;
+      const deadlineReached = deadlineAt && Date.now() >= Date.parse(deadlineAt);
+      const attemptLimitReached = activeAttemptLimit > 0
+        && attempted + inFlight.size >= activeAttemptLimit;
+      const dryLimitReached = dryLimit > 0
+        && dryCandidates + inFlight.size >= dryLimit;
+      const validationLimitReached = activeValidationOnly
+        && validated + inFlight.size >= activeValidationTarget;
+      if (deadlineReached || attemptLimitReached || dryLimitReached || validationLimitReached) {
+        if (inFlight.size > 0) {
+          await Promise.race([...inFlight]);
+          continue;
+        }
+        break;
       }
-      const results = settled.map((result) => result.value);
-      for (const [index, result] of results.entries()) {
-        const item = batch[index];
-        if (activeValidationOnly
-          && result.attempted
-          && ["deferred", "failed"].includes(result.status)) {
-          const used = Number(validationTransientAttempts.get(result.sku) || 0);
-          const transientAttempts = used + 1;
-          validationTransientAttempts.set(result.sku, transientAttempts);
-          const explicitRetryAt = Date.parse(String(result.retry_at || ""));
-          const retryAt = Number.isFinite(explicitRetryAt) && explicitRetryAt > now().getTime()
-            ? new Date(explicitRetryAt).toISOString()
-            : new Date(now().getTime() + transientCandidateBackoffMs(transientAttempts)).toISOString();
-          const event = {
-            sku: result.sku,
-            status: result.status,
-            reason: result.reason ?? "validation-transient-failure",
-            retry_at: retryAt,
-            retry_day: validationDay,
-            transient_attempts: transientAttempts,
-            validation_mode: "buffer",
-          };
-          latestValidation.set(result.sku, event);
-          recordMetric("validation_gate.jsonl", event);
-        }
-        if (result.status !== "ignored") {
-          recordMetric("source_yield.jsonl", {
-            sku: result.sku,
-            source_url: result.source_url ?? item?.source_url ?? null,
-            seller_url: item?.seller_url ?? null,
-            title: item?.title ?? null,
-            title_family: productTitleFamily(item?.title),
-            status: result.status,
-            reason: result.reason ?? null,
-            ...(result.source_yield_evidence || {}),
-          });
-        }
-        if (result.status === "failed") adaptive.recordFailure(result.error || new Error(result.reason || "publish-failed"));
-        else if (["published", "submitted"].includes(result.status)) adaptive.recordSuccess();
-        if (result.attempted) attempted += 1;
-        if (result.status === "published") {
-          published += 1;
-          if (activeDirectMode) acceptedSkus.add(String(result.sku));
-          dryCandidates = 0;
-        } else if (result.status === "submitted") {
-          if (!activeDirectMode || !acceptedSkus.has(String(result.sku))) submittedPending += 1;
-          if (activeDirectMode) acceptedSkus.add(String(result.sku));
-          dryCandidates = 0;
-        } else if (result.status === "validated") {
-          validated += 1;
-          dryCandidates = 0;
-        } else {
-          if (result.attempted) dryCandidates += 1;
-          if (result.status === "failed") failed += 1;
-          else if (result.status === "skipped") skipped += 1;
-        }
-      }
-      if (activeDirectMode && ["daily-product-limit", "store-unavailable"].includes(haltReason)) {
-        const nextConfig = await advanceStore(haltReason, targetConfig);
-        if (nextConfig) targetConfig = nextConfig;
-      } else if (!activeValidationOnly) {
-        const currentStoreId = Number(targetConfig.store.id);
-        const currentStoreLimit = Number(storeDailyLimits.get(currentStoreId) || configuredDailyStoreLimit);
-        if (Number(storeDailyUsage.get(currentStoreId) || 0) >= currentStoreLimit) haltReason = "daily-product-limit";
-        else if (Number(storeTotalUsage.get(currentStoreId) || 0) >= configuredTotalStoreLimit) haltReason = "store-total-limit";
-        if (["daily-product-limit", "store-total-limit"].includes(haltReason)) {
+
+      if (!activeValidationOnly) {
+        const switchableHalt = activeDirectMode
+          ? ["daily-product-limit", "store-unavailable"].includes(haltReason)
+          : ["daily-product-limit", "store-total-limit"].includes(haltReason);
+        if (switchableHalt) {
+          if (inFlight.size > 0) {
+            await Promise.race([...inFlight]);
+            continue;
+          }
           const nextConfig = await advanceStore(haltReason, targetConfig);
-          if (nextConfig) targetConfig = nextConfig;
+          if (!nextConfig) break;
+          targetConfig = nextConfig;
+          continue;
+        }
+        if (haltReason) {
+          if (inFlight.size > 0) {
+            await Promise.race([...inFlight]);
+            continue;
+          }
+          break;
         }
       }
+
+      let launched = false;
+      while (cursor < candidates.length && inFlight.size < adaptive.current) {
+        if (schedulerControl.cancelled) break;
+        if (activeAttemptLimit > 0 && attempted + inFlight.size >= activeAttemptLimit) break;
+        if (dryLimit > 0 && dryCandidates + inFlight.size >= dryLimit) break;
+        if (activeValidationOnly && validated + inFlight.size >= activeValidationTarget) break;
+
+        const item = candidates[cursor];
+        const reconciliation = item?.reconcile_only === true
+          || item?.submitted === true
+          || item?.submission_pending === true
+          || item?.submission_intent === true;
+        if (!activeValidationOnly
+          && inFlightFreshCount() > 0
+          && acceptedCount() + inFlightFreshCount() >= targetCount) {
+          break;
+        }
+        if (!activeValidationOnly && !reconciliation && acceptedCount() >= targetCount) {
+          cursor += 1;
+          continue;
+        }
+
+        const activeStoreId = Number(targetConfig.store.id);
+        if (!activeDirectMode
+          && !activeValidationOnly
+          && !reconciliation
+          && stalledPendingForStore(activeStoreId).length >= Math.max(1, Number(pendingStoreStallCount) || 1)) {
+          if (inFlight.size > 0) break;
+          stalledStoresThisRun.add(activeStoreId);
+          const nextConfig = await advanceStore("submission-stall", targetConfig, {
+            excludedStoreIds: stalledStoresThisRun,
+          });
+          if (nextConfig) {
+            unavailableStoreUntil.set(activeStoreId, now().getTime() + Math.max(0, Number(pendingStoreRetryMs) || 0));
+            targetConfig = nextConfig;
+            continue schedulerLoop;
+          }
+          freshSubmissionsPaused = true;
+          break schedulerLoop;
+        }
+
+        const remainingDailyStoreQuota = activeDirectMode
+          ? Number.POSITIVE_INFINITY
+          : Number(storeDailyLimits.get(activeStoreId) || configuredDailyStoreLimit)
+            - Number(storeDailyUsage.get(activeStoreId) || 0);
+        const remainingTotalStoreQuota = activeDirectMode
+          ? Number.POSITIVE_INFINITY
+          : configuredTotalStoreLimit - Number(storeTotalUsage.get(activeStoreId) || 0);
+        const remainingStoreQuota = Math.min(remainingDailyStoreQuota, remainingTotalStoreQuota)
+          - inFlightFreshCount(activeStoreId);
+        if (!activeValidationOnly && !reconciliation && remainingStoreQuota <= 0) {
+          if (inFlight.size > 0) break;
+          haltReason = remainingDailyStoreQuota <= 0 ? "daily-product-limit" : "store-total-limit";
+          const nextConfig = await advanceStore(haltReason, targetConfig);
+          if (!nextConfig) break schedulerLoop;
+          targetConfig = nextConfig;
+          continue schedulerLoop;
+        }
+
+        if (!reconciliation) {
+          const remainingTarget = targetCount - acceptedCount() - inFlightFreshCount();
+          if (!activeValidationOnly && remainingTarget <= 0) break;
+        }
+        cursor += 1;
+        launchCandidate(item, targetConfig, reconciliation);
+        launched = true;
+      }
+
+      if (inFlight.size === 0) break;
+      if (!launched || inFlight.size >= adaptive.current || cursor >= candidates.length) {
+        await Promise.race([...inFlight]);
+      }
+    }
+
+    schedulerControl.cancelled ||= Boolean(schedulerControl.fatalError);
+    await Promise.allSettled([...inFlight, publishChain, metricsChain]);
+    if (schedulerControl.fatalError) throw schedulerControl.fatalError;
+    if (activeDirectMode && ["daily-product-limit", "store-unavailable"].includes(haltReason)) {
+      const nextConfig = await advanceStore(haltReason, targetConfig);
+      if (nextConfig) targetConfig = nextConfig;
     }
 
     await probeInactiveTargetConfigs();
@@ -3336,6 +3703,11 @@ export function createPublishRunner({
       deadline_reached: Boolean(deadlineAt && Date.now() >= Date.parse(deadlineAt)),
       target: targetCount,
       halt_reason: haltReason,
+      direct_target_slots_used: activeDirectMode ? directTargetUsage() : null,
+      stores_exhausted: activeDirectMode ? {
+        rejected_store_ids: [...directRejectedStoreIds].sort((left, right) => left - right),
+        all: targetPlan.every((entry) => directRejectedStoreIds.has(Number(entry.id))),
+      } : null,
       fresh_submissions_paused: freshSubmissionsPaused,
       active_store_id: Number(targetConfig?.store?.id || 0),
       store_switches: storeSwitches,

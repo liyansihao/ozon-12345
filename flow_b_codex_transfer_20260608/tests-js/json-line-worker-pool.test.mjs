@@ -44,3 +44,71 @@ test("JSON-line worker pool reuses a bounded set of long-lived processes", async
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("JSON-line worker pool counts queue wait against the total deadline", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-worker-deadline-"));
+  const workerScript = path.join(dir, "worker.mjs");
+  await fs.writeFile(workerScript, `
+    import readline from "node:readline";
+    const input = readline.createInterface({ input: process.stdin });
+    input.on("line", (line) => {
+      const request = JSON.parse(line);
+      setTimeout(() => process.stdout.write(JSON.stringify({
+        id: request.id,
+        code: 0,
+        stdout: String(request.value),
+      }) + "\\n"), Number(request.delay || 0));
+    });
+  `);
+  const pool = createJsonLineWorkerPool({
+    command: process.execPath,
+    args: [workerScript],
+    size: 1,
+  });
+  try {
+    const slow = pool.run({ value: "slow", delay: 80 }, 500);
+    const queued = pool.run({ value: "never-sent", delay: 0 }, 25);
+    await assert.rejects(queued, (error) => error?.code === "worker-queue-timeout");
+    assert.equal((await slow).stdout, "slow");
+    assert.equal(pool.stats().timed_out, 1);
+  } finally {
+    await pool.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("JSON-line worker pool exposes busy and oldest queue wait telemetry", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-worker-stats-"));
+  const workerScript = path.join(dir, "worker.mjs");
+  await fs.writeFile(workerScript, `
+    import readline from "node:readline";
+    const input = readline.createInterface({ input: process.stdin });
+    input.on("line", (line) => {
+      const request = JSON.parse(line);
+      setTimeout(() => process.stdout.write(JSON.stringify({
+        id: request.id,
+        code: 0,
+        stdout: "ok",
+      }) + "\\n"), 40);
+    });
+  `);
+  const pool = createJsonLineWorkerPool({
+    command: process.execPath,
+    args: [workerScript],
+    size: 1,
+  });
+  try {
+    const first = pool.run({ value: 1 }, 500);
+    const second = pool.run({ value: 2 }, 500);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const stats = pool.stats();
+    assert.equal(stats.busy, 1);
+    assert.equal(stats.queued, 1);
+    assert.ok(stats.oldest_wait_ms >= 0);
+    await Promise.all([first, second]);
+    assert.equal(pool.stats().completed, 2);
+  } finally {
+    await pool.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

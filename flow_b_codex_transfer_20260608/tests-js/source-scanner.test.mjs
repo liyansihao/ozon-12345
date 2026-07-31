@@ -27,6 +27,7 @@ import {
   prioritizeSourceUrls,
   interleaveStrictSuccessExploration,
   interleaveSourcePortfolio,
+  interleaveProductiveSourceExploration,
   appendFavoriteEvidence,
   parseFavoriteProductSnapshot,
   parseListingFavoriteSnapshot,
@@ -82,6 +83,7 @@ import {
   sourceInterleavedRetainedReplayLimit,
   sourceCollectionBlockKey,
   collectionRuntimeState,
+  createFavoriteTelemetryCache,
   persistCollectionRuntimeState,
   restoreCollectionRuntimeState,
   remainingCollectionCooldown,
@@ -117,6 +119,7 @@ import {
   expandNextPublishedDiscoveryPages,
   expandRepeatedPublishedDiscoveryPageFour,
   fullFunnelSourceScores,
+  sourceProductivityStats,
   filterSourceUrlsByAllowlist,
   filterSourceRowsByAllowlist,
   strictSourcePortfolioUrls,
@@ -414,6 +417,155 @@ test("source portfolio schedules strict, pure-FBS, and exploration sources at 70
     explore[0],
   ]);
   assert.deepEqual(new Set(ordered), new Set([...strict, ...pureFbs, ...explore]));
+});
+
+test("direct source portfolio schedules productive and exploration sources at 75/25", () => {
+  const productive = Array.from({ length: 6 }, (_, index) => `https://www.ozon.ru/seller/productive-${index}/`);
+  const exploration = Array.from({ length: 3 }, (_, index) => `https://www.ozon.ru/seller/explore-${index}/`);
+  const rows = productive.flatMap((source_url, index) => [
+    {
+      source_url,
+      sku: `cost-${index}`,
+      stage: "cost_passed",
+    },
+    ...(index < 3 ? [{
+      source_url,
+      sku: `accepted-${index}`,
+      status: "submitted",
+    }] : []),
+  ]);
+
+  const ordered = interleaveProductiveSourceExploration(
+    [...exploration, ...productive],
+    rows,
+  );
+  assert.deepEqual(ordered.slice(0, 4), [
+    productive[0],
+    productive[1],
+    productive[2],
+    exploration[0],
+  ]);
+  assert.equal(ordered.length, 9);
+  assert.equal(new Set(ordered).size, 9);
+  assert.equal(ordered.filter((url) => productive.includes(url)).length, 6);
+  assert.equal(ordered.filter((url) => exploration.includes(url)).length, 3);
+  assert.equal(ordered.slice(0, 8).filter((url) => productive.includes(url)).length, 6);
+  assert.equal(ordered.slice(0, 8).filter((url) => exploration.includes(url)).length, 2);
+  const rotated = interleaveProductiveSourceExploration(
+    [...exploration, ...productive],
+    rows,
+    {
+      scanRows: [
+        { source_url: productive[0] },
+        { source_url: exploration[0] },
+      ],
+    },
+  );
+  assert.equal(rotated[0], productive[1]);
+  assert.equal(rotated[3], exploration[1]);
+  assert.deepEqual(new Set(rotated), new Set([...productive, ...exploration]));
+});
+
+test("direct source portfolio retains every source when productive and exploration pools are imbalanced", () => {
+  const oneProductive = "https://www.ozon.ru/seller/one-productive/";
+  const manyExploration = Array.from(
+    { length: 100 },
+    (_, index) => `https://www.ozon.ru/seller/exploration-${index}/`,
+  );
+  const productiveRows = [{
+    source_url: oneProductive,
+    sku: "productive-cost",
+    stage: "cost_passed",
+  }];
+  const explorationHeavy = interleaveProductiveSourceExploration(
+    [oneProductive, ...manyExploration],
+    productiveRows,
+  );
+  assert.equal(explorationHeavy.length, 101);
+  assert.equal(new Set(explorationHeavy).size, 101);
+  assert.deepEqual(
+    new Set(explorationHeavy),
+    new Set([oneProductive, ...manyExploration]),
+  );
+
+  const manyProductive = Array.from(
+    { length: 100 },
+    (_, index) => `https://www.ozon.ru/seller/productive-heavy-${index}/`,
+  );
+  const oneExploration = "https://www.ozon.ru/seller/one-exploration/";
+  const productiveHeavyRows = manyProductive.map((source_url, index) => ({
+    source_url,
+    sku: `productive-heavy-${index}`,
+    stage: "cost_passed",
+  }));
+  const productiveHeavy = interleaveProductiveSourceExploration(
+    [...manyProductive, oneExploration],
+    productiveHeavyRows,
+  );
+  assert.equal(productiveHeavy.length, 101);
+  assert.equal(new Set(productiveHeavy).size, 101);
+  assert.deepEqual(
+    new Set(productiveHeavy),
+    new Set([...manyProductive, oneExploration]),
+  );
+});
+
+test("source productivity ranks ERP acceptance before cost-only yield and retains zero-yield exploration", () => {
+  const accepted = "https://www.ozon.ru/seller/accepted/";
+  const costOnly = "https://www.ozon.ru/seller/cost-only/";
+  const zeroYield = "https://www.ozon.ru/seller/zero/";
+  const untried = "https://www.ozon.ru/seller/untried/";
+  const rows = [
+    { source_url: accepted, sku: "a", stage: "erp_accepted" },
+    { source_url: accepted, sku: "a2", status: "skipped", reason: "1688-no-reliable-match" },
+    { source_url: costOnly, sku: "b", status: "skipped", reason: "profit_rate<=30" },
+    { source_url: zeroYield, sku: "c", status: "skipped", reason: "1688-no-reliable-match" },
+  ];
+  assert.deepEqual(sourceProductivityStats(rows).get(accepted), {
+    attempted: 2,
+    cost_passed: 1,
+    accepted: 1,
+    cost_rate: 0.5,
+    acceptance_rate: 0.5,
+  });
+  const ordered = interleaveProductiveSourceExploration(
+    [zeroYield, costOnly, untried, accepted],
+    rows,
+    { productiveWeight: 1, explorationWeight: 1 },
+  );
+  assert.deepEqual(ordered, [accepted, untried, costOnly, zeroYield]);
+});
+
+test("favorite telemetry cache reuses a round for 30 seconds and updates after toggle success", async () => {
+  let clock = 0;
+  let countLoads = 0;
+  let skuLoads = 0;
+  const cache = createFavoriteTelemetryCache({
+    ttlMs: 30_000,
+    now: () => clock,
+  });
+  const loadCount = async () => {
+    countLoads += 1;
+    return { total: 10, authenticated: true };
+  };
+  const loadSkus = async () => {
+    skuLoads += 1;
+    return ["one"];
+  };
+
+  assert.equal((await cache.readCount(loadCount)).total, 10);
+  assert.deepEqual(await cache.readSkus(loadSkus), ["one"]);
+  cache.recordFavorite("two", 11);
+  assert.equal((await cache.readCount(loadCount)).total, 11);
+  assert.deepEqual((await cache.readSkus(loadSkus)).sort(), ["one", "two"]);
+  assert.equal(countLoads, 1);
+  assert.equal(skuLoads, 1);
+
+  clock = 30_001;
+  await cache.readCount(loadCount);
+  await cache.readSkus(loadSkus);
+  assert.equal(countLoads, 2);
+  assert.equal(skuLoads, 2);
 });
 
 test("strict product recommendation pages lead the exploration tranche", () => {
@@ -770,6 +922,14 @@ test("collection cooldown exposes only its remaining bounded wait", () => {
   assert.equal(remainingCollectionCooldown({ detailBlockedUntil: 10_000 }, 4_000), 6_000);
   assert.equal(remainingCollectionCooldown({ detailBlockedUntil: 10_000 }, 10_000), 0);
   assert.equal(remainingCollectionCooldown({}, 10_000), 0);
+  assert.equal(
+    remainingCollectionCooldown(
+      { detailBlockedUntil: 100_000 },
+      4_000,
+      { controllerManaged: true },
+    ),
+    0,
+  );
 });
 
 test("detail cooldown keeps source discovery running in queue-only mode", () => {
@@ -2724,6 +2884,16 @@ test("collection detail cooldown probes before using the ten-minute safety ceili
   assert.deepEqual(persistentIncident, { streak: 3, lastBlockedAt: 400_000, delay: 600_000 });
 });
 
+test("controller-managed direct detail pacing does not add legacy minute cooldowns", () => {
+  const result = collectionDetailCooldownState({
+    streak: 2,
+    lastBlockedAt: 100_000,
+    now: 200_000,
+    controllerManaged: true,
+  });
+  assert.equal(result.delay, 0);
+});
+
 test("collection soft blocks quarantine only the affected source price band", () => {
   const pageTwo = "https://www.ozon.ru/seller/example/?currency_price=500.000%3B&page=2";
   const pageThree = "https://www.ozon.ru/seller/example/?currency_price=500.000%3B&page=3";
@@ -2750,6 +2920,22 @@ test("blocked source batches probe with short backoff before escalating", () => 
   assert.equal(state.detailBlockedUntil, 260_000);
   sourceBatchCooldownState([{ blocked: false, stop_reason: "max_steps" }], state, 270_000);
   assert.equal(state.sourceSoftBlockStreak, 0);
+});
+
+test("controller-managed source blocks do not mutate or activate global cooldown", () => {
+  const state = {
+    sourceSoftBlockStreak: 2,
+    lastSourceSoftBlockAt: 5_000,
+    detailBlockedUntil: 80_000,
+  };
+  const before = { ...state };
+  const result = sourceBatchCooldownState([
+    { blocked: true },
+    { blocked: true },
+    { blocked: false },
+  ], state, 10_000, { controllerManaged: true });
+  assert.deepEqual(result, { blocked: true, globalBlocked: false, delay: 0 });
+  assert.deepEqual(state, before);
 });
 
 test("a first source-page block cannot escalate an existing detail streak to ten minutes", () => {

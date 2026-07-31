@@ -102,3 +102,29 @@ test("detail provider never treats an untyped favorite fallback as CNY revenue",
   assert.equal(detail.selected_price, null);
   await provider.close();
 });
+
+test("detail provider rejects an Ozon login page before using the favorite price fallback", async () => {
+  const page = {
+    goto: async () => {},
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/login/",
+      title: "Ozon ID",
+      text: "Войти в аккаунт",
+      webPriceText: "",
+    }),
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    timeout: 1,
+    pollInterval: 1,
+  });
+  await assert.rejects(
+    provider.getProductDetail("login-page", {
+      source_currency: "CNY",
+      sell_price: 99,
+    }),
+    /authentication or MFA required/i,
+  );
+  await provider.close();
+});

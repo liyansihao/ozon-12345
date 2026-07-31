@@ -95,18 +95,24 @@ class WorkerTransientRecoveryTests(unittest.TestCase):
 
     def test_non_transient_matching_error_is_not_retried(self):
         loads = 0
+        sessions = []
 
         class Session:
+            def __init__(self):
+                self.closed = False
+
             def search_by_image(self, _image):
                 raise ValueError("invalid image payload")
 
             def close(self):
-                pass
+                self.closed = True
 
         def load_session():
             nonlocal loads
             loads += 1
-            return Session()
+            session = Session()
+            sessions.append(session)
+            return session
 
         with tempfile.TemporaryDirectory() as temp_name:
             image = pathlib.Path(temp_name) / "image.jpg"
@@ -122,6 +128,28 @@ class WorkerTransientRecoveryTests(unittest.TestCase):
                 )
 
         self.assertEqual(loads, 1)
+        self.assertFalse(sessions[0].closed)
+
+    def test_non_transient_error_preserves_session_for_the_next_request(self):
+        session = object()
+
+        def fail(_module, current_session, _request):
+            self.assertIs(current_session, session)
+            raise ValueError("bad match payload")
+
+        original = self.module.analyze
+        self.module.analyze = fail
+        try:
+            with self.assertRaises(ValueError) as raised:
+                self.module.analyze_with_transient_recovery(
+                    self.fake_module(),
+                    session,
+                    {"image": "unused"},
+                    load_session=lambda: self.fail("healthy session must be reused"),
+                )
+            self.assertIs(raised.exception.flow_b_session, session)
+        finally:
+            self.module.analyze = original
 
     def test_total_budget_prevents_another_retry(self):
         clock = iter([0.0, 4.8])

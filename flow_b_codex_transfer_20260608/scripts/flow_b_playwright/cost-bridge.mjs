@@ -108,7 +108,7 @@ function safeSku(value) {
 
 async function defaultDownload(url, destinationPath, { timeout = 15_000 } = {}) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.max(1_000, Number(timeout) || 15_000));
+  const timer = setTimeout(() => controller.abort(), Math.max(1, Number(timeout) || 15_000));
   try {
     const response = await fetch(url, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -190,8 +190,11 @@ export function createCostBridge({
   healthProbeBackoffMs = Number(process.env.FLOW_B_1688_HEALTH_PROBE_BACKOFF_MS || 30_000),
   healthSkuRetryLimit = Number(process.env.FLOW_B_1688_HEALTH_SKU_RETRY_LIMIT || 1),
   minimumSameItemMatches = Number(process.env.FLOW_B_1688_MIN_MATCHES || 3),
+  totalBudgetMs = Number(process.env.FLOW_B_1688_TOTAL_BUDGET_MS || 15_000),
+  workerFailureThreshold = Number(process.env.FLOW_B_1688_WORKER_FAILURE_THRESHOLD || 3),
+  cacheFlushDebounceMs = Number(process.env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS || 150),
   now = () => Date.now(),
-  downloadAttempts = 3,
+  downloadAttempts = 2,
   downloadTimeoutMs = 15_000,
   sleep: wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
@@ -199,8 +202,14 @@ export function createCostBridge({
   const cacheByRun = new Map();
   const crossRunKeysByRun = new Map();
   let cacheWriteChain = Promise.resolve();
+  const pendingCacheWrites = new Map();
+  let cacheFlushTimer = null;
+  let cacheFlushPromise = null;
+  let resolveCacheFlush = null;
+  let rejectCacheFlush = null;
   let ownedWorkerPool = null;
   let persistentWorkersDisabled = process.env.FLOW_B_1688_PERSISTENT_POOL === "0";
+  let workerInfrastructureFailures = 0;
   const health = {
     circuit: "closed",
     consecutiveFailures: 0,
@@ -251,17 +260,31 @@ export function createCostBridge({
     await stale.close().catch(() => {});
   }
 
-  async function downloadImage(url, destinationPath) {
+  function totalBudgetError(total) {
+    return Object.assign(new Error(`1688 end-to-end budget exceeded after ${total}ms`), {
+      code: "1688-total-timeout",
+    });
+  }
+
+  async function downloadImage(url, destinationPath, { deadlineAt, budget } = {}) {
     const attempts = Math.max(1, Number(downloadAttempts) || 1);
     let lastError;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const remaining = Number.isFinite(deadlineAt) ? deadlineAt - Date.now() : Number(downloadTimeoutMs);
+      if (remaining <= 0) throw totalBudgetError(budget);
       try {
-        await download(url, destinationPath, { timeout: Math.max(1_000, Number(downloadTimeoutMs) || 15_000) });
+        await download(url, destinationPath, {
+          timeout: Math.max(1, Math.min(Number(downloadTimeoutMs) || 15_000, remaining)),
+        });
         return;
       } catch (error) {
         lastError = error;
         if (!isTransientDownloadError(error) || attempt + 1 >= attempts) throw error;
-        await wait(500 * (attempt + 1));
+        const delay = 500 * (attempt + 1);
+        if (Number.isFinite(deadlineAt) && Date.now() + delay >= deadlineAt) {
+          throw totalBudgetError(budget);
+        }
+        await wait(delay);
       }
     }
     throw lastError;
@@ -284,21 +307,39 @@ export function createCostBridge({
   async function run1688Process(imagePath, timeout, item) {
     const healthProbe = health.circuit === "open";
     const evidence = matchEvidence(item);
+    const budget = Math.max(1, Math.min(
+      Number(timeout) || Number.POSITIVE_INFINITY,
+      Math.max(1, Number(totalBudgetMs) || 15_000),
+    ));
+    const deadlineAt = Date.now() + budget;
     const pool = activeWorkerPool();
     if (pool) {
-      try {
-        const result = await pool.run({
-          image: String(imagePath),
-          minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
-          ...evidence,
-        }, timeout);
-        return { ...result, health_probe: healthProbe };
-      } catch (error) {
-        if (error?.code === "worker-timeout") throw error;
-        persistentWorkersDisabled = true;
-        if (ownedWorkerPool) {
-          await ownedWorkerPool.close().catch(() => {});
-          ownedWorkerPool = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) {
+          throw Object.assign(new Error(`1688 total budget exceeded after ${budget}ms`), {
+            code: "worker-queue-timeout",
+          });
+        }
+        try {
+          const result = await pool.run({
+            image: String(imagePath),
+            minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
+            ...evidence,
+          }, remaining);
+          workerInfrastructureFailures = 0;
+          return { ...result, health_probe: healthProbe };
+        } catch (error) {
+          if (["worker-timeout", "worker-queue-timeout"].includes(error?.code)) throw error;
+          workerInfrastructureFailures += 1;
+          if (workerInfrastructureFailures >= Math.max(1, Number(workerFailureThreshold) || 1)) {
+            persistentWorkersDisabled = true;
+            if (ownedWorkerPool) {
+              await ownedWorkerPool.close().catch(() => {});
+              ownedWorkerPool = null;
+            }
+            break;
+          }
         }
       }
     }
@@ -311,11 +352,17 @@ export function createCostBridge({
       if (evidence[key]) evidenceArgs.push(flag, evidence[key]);
     }
     evidenceArgs.push("--min-matches", String(Math.max(1, Number(minimumSameItemMatches) || 1)));
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) {
+      throw Object.assign(new Error(`1688 total budget exceeded after ${budget}ms`), {
+        code: "worker-queue-timeout",
+      });
+    }
     const result = await runProcess({
       command: python,
       args: [path.resolve(scriptPath), imagePath, ...evidenceArgs],
       cwd: path.resolve(process.cwd()),
-      timeout,
+      timeout: remaining,
     });
     return { ...result, health_probe: healthProbe };
   }
@@ -365,23 +412,69 @@ export function createCostBridge({
     return cache;
   }
 
-  function saveCache(runDir, cache) {
+  function beginCacheFlush() {
+    if (!cacheFlushPromise) return Promise.resolve();
+    clearTimeout(cacheFlushTimer);
+    cacheFlushTimer = null;
     const operation = cacheWriteChain.then(async () => {
-      const filenames = [path.join(path.resolve(runDir), "1688_cache.json"), sharedCachePath]
-        .filter(Boolean)
-        .map((filename) => path.resolve(filename));
-      for (const filename of new Set(filenames)) {
-        const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
-        await fs.mkdir(path.dirname(filename), { recursive: true });
-        await fs.writeFile(temporary, `${JSON.stringify(cache)}\n`, "utf8");
-        await fs.rename(temporary, filename);
+      while (pendingCacheWrites.size > 0) {
+        const entries = [...pendingCacheWrites.entries()];
+        pendingCacheWrites.clear();
+        for (const [filename, cache] of entries) {
+          const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
+          await fs.mkdir(path.dirname(filename), { recursive: true });
+          await fs.writeFile(temporary, `${JSON.stringify(cache)}\n`, "utf8");
+          await fs.rename(temporary, filename);
+        }
       }
     });
     cacheWriteChain = operation.catch(() => {});
+    operation.then(resolveCacheFlush, rejectCacheFlush).finally(() => {
+      cacheFlushPromise = null;
+      resolveCacheFlush = null;
+      rejectCacheFlush = null;
+      if (pendingCacheWrites.size > 0) scheduleCacheFlush();
+    });
     return operation;
   }
 
+  function scheduleCacheFlush() {
+    if (!cacheFlushPromise) {
+      cacheFlushPromise = new Promise((resolve, reject) => {
+        resolveCacheFlush = resolve;
+        rejectCacheFlush = reject;
+      });
+    }
+    if (!cacheFlushTimer) {
+      cacheFlushTimer = setTimeout(
+        () => { void beginCacheFlush(); },
+        Math.max(0, Number(cacheFlushDebounceMs) || 0),
+      );
+    }
+    return cacheFlushPromise;
+  }
+
+  function saveCache(runDir, cache) {
+    const filenames = [path.join(path.resolve(runDir), "1688_cache.json"), sharedCachePath]
+      .filter(Boolean)
+      .map((filename) => path.resolve(filename));
+    for (const filename of new Set(filenames)) {
+      pendingCacheWrites.set(filename, cache);
+    }
+    return scheduleCacheFlush();
+  }
+
+  async function flushCacheWrites() {
+    if (cacheFlushPromise) {
+      await beginCacheFlush();
+    } else {
+      await cacheWriteChain;
+    }
+  }
+
   async function estimateUncached(item, runDir) {
+      const budget = Math.max(1, Number(totalBudgetMs) || 15_000);
+      const deadlineAt = Date.now() + budget;
       let sku;
       try {
         sku = safeSku(item?.sku);
@@ -411,14 +504,16 @@ export function createCostBridge({
         if (!(await readableFile(imagePath))) {
           const imageUrl = String(item?.cover_image || "").trim();
           if (!/^https?:\/\//i.test(imageUrl)) throw Object.assign(new Error("valid cover image URL is required"), { code: "invalid-cover-image" });
-          await downloadImage(imageUrl, imagePath);
+          await downloadImage(imageUrl, imagePath, { deadlineAt, budget });
           if (!(await readableFile(imagePath))) throw Object.assign(new Error("cover image download produced no file"), { code: "empty-image" });
         }
 
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) throw totalBudgetError(budget);
         processStarted = true;
         const result = await run1688Process(
           imagePath,
-          Number(process.env.FLOW_B_1688_ITEM_TIMEOUT || 90) * 1000,
+          Math.min(Number(process.env.FLOW_B_1688_ITEM_TIMEOUT || 90) * 1000, remaining),
           item,
         );
         const stdout = String(result?.stdout || "");
@@ -635,6 +730,7 @@ export function createCostBridge({
   return {
     estimate,
     async close() {
+      await flushCacheWrites();
       await workerPool?.close?.().catch(() => {});
       await ownedWorkerPool?.close?.().catch(() => {});
       ownedWorkerPool = null;

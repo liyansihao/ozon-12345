@@ -13,6 +13,8 @@ export function createJsonLineWorkerPool({
   let closing = false;
   let sequence = 0;
   let created = 0;
+  let completed = 0;
+  let timedOut = 0;
 
   function diagnosticError(message, worker, code = "worker-failed") {
     return Object.assign(new Error(message), {
@@ -29,17 +31,28 @@ export function createJsonLineWorkerPool({
       if (!worker && workers.size < maximum) worker = startWorker();
       if (!worker) return;
       const job = queue.shift();
+      clearTimeout(job.queueTimer);
+      const remaining = job.deadlineAt - Date.now();
+      if (remaining <= 0) {
+        timedOut += 1;
+        job.reject(Object.assign(
+          new Error(`persistent worker queue timed out after ${job.timeout}ms`),
+          { code: "worker-queue-timeout" },
+        ));
+        continue;
+      }
       worker.busy = true;
       worker.current = job;
       const id = String(++sequence);
       job.id = id;
       job.timer = setTimeout(() => {
+        timedOut += 1;
         retireWorker(worker, diagnosticError(
-          `persistent worker timed out after ${job.timeout}ms`,
+          `persistent worker timed out after ${job.timeout}ms total budget`,
           worker,
           "worker-timeout",
         ));
-      }, job.timeout);
+      }, remaining);
       worker.child.stdin.write(`${JSON.stringify({ ...job.payload, id })}\n`, (error) => {
         if (error && worker.current === job) {
           retireWorker(worker, diagnosticError(error.message, worker, "worker-stdin-failed"));
@@ -54,6 +67,7 @@ export function createJsonLineWorkerPool({
     clearTimeout(job.timer);
     worker.current = null;
     worker.busy = false;
+    completed += 1;
     job.resolve(response);
     pump();
   }
@@ -112,12 +126,27 @@ export function createJsonLineWorkerPool({
   function run(payload, timeout = 90_000) {
     if (closing) return Promise.reject(Object.assign(new Error("worker pool is closed"), { code: "worker-pool-closed" }));
     return new Promise((resolve, reject) => {
-      queue.push({
+      const budget = Math.max(1, Number(timeout) || 1);
+      const job = {
         payload: payload && typeof payload === "object" ? payload : {},
-        timeout: Math.max(1, Number(timeout) || 1),
+        timeout: budget,
+        enqueuedAt: Date.now(),
+        deadlineAt: Date.now() + budget,
         resolve,
         reject,
-      });
+        queueTimer: null,
+      };
+      job.queueTimer = setTimeout(() => {
+        const index = queue.indexOf(job);
+        if (index < 0) return;
+        queue.splice(index, 1);
+        timedOut += 1;
+        reject(Object.assign(
+          new Error(`persistent worker queue timed out after ${budget}ms`),
+          { code: "worker-queue-timeout" },
+        ));
+      }, budget);
+      queue.push(job);
       pump();
     });
   }
@@ -126,7 +155,10 @@ export function createJsonLineWorkerPool({
     if (closing) return;
     closing = true;
     const error = Object.assign(new Error("worker pool closed"), { code: "worker-pool-closed" });
-    for (const job of queue.splice(0)) job.reject(error);
+    for (const job of queue.splice(0)) {
+      clearTimeout(job.queueTimer);
+      job.reject(error);
+    }
     const active = [...workers];
     for (const worker of active) {
       const job = worker.current;
@@ -155,6 +187,16 @@ export function createJsonLineWorkerPool({
   return {
     run,
     close,
-    stats: () => ({ created, active: workers.size, queued: queue.length }),
+    stats: () => ({
+      created,
+      active: workers.size,
+      busy: [...workers].filter((worker) => worker.busy && !worker.retired).length,
+      queued: queue.length,
+      oldest_wait_ms: queue.length > 0
+        ? Math.max(0, Date.now() - Math.min(...queue.map((job) => job.enqueuedAt)))
+        : 0,
+      completed,
+      timed_out: timedOut,
+    }),
   };
 }

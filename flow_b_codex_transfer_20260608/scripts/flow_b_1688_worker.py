@@ -96,10 +96,10 @@ def analyze_with_transient_recovery(
     request: dict,
     *,
     load_session,
-    max_retries: int = 2,
+    max_retries: int = 1,
     base_delay_seconds: float = 0.5,
     max_jitter_seconds: float = 0.25,
-    total_budget_seconds: float = 45.0,
+    total_budget_seconds: float = 15.0,
     sleep=time.sleep,
     jitter=random.uniform,
     monotonic=time.monotonic,
@@ -123,6 +123,16 @@ def analyze_with_transient_recovery(
                 "session_rebuilt": bool(intervals_ms),
             }
         except Exception as exc:
+            transient = is_transient_transport_error(exc)
+            if not transient:
+                exc.flow_b_session = current_session
+                exc.flow_b_recovery = {
+                    "retry_count": len(intervals_ms),
+                    "retry_intervals_ms": intervals_ms,
+                    "session_rebuilt": bool(intervals_ms),
+                    "budget_exhausted": False,
+                }
+                raise
             if current_session is not None:
                 try:
                     current_session.close()
@@ -132,8 +142,7 @@ def analyze_with_transient_recovery(
             delay = base_delay * (2 ** attempt) + jitter(0.0, jitter_limit)
             elapsed = monotonic() - started
             can_retry = (
-                is_transient_transport_error(exc)
-                and attempt < retry_limit
+                attempt < retry_limit
                 and elapsed + delay <= budget
             )
             if not can_retry:
@@ -155,10 +164,10 @@ def main() -> int:
     args = parser.parse_args()
     module = load_module(str(Path(args.script).expanduser().resolve()))
     session = None
-    max_retries = max(0, int(os.environ.get("FLOW_B_1688_TRANSIENT_RETRIES", "2")))
+    max_retries = max(0, int(os.environ.get("FLOW_B_1688_TRANSIENT_RETRIES", "1")))
     base_delay_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_RETRY_BASE_SECONDS", "0.5")))
     max_jitter_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_RETRY_JITTER_SECONDS", "0.25")))
-    total_budget_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_RETRY_BUDGET_SECONDS", "45")))
+    total_budget_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_RETRY_BUDGET_SECONDS", "15")))
     for line in sys.stdin:
         request = {}
         try:
@@ -181,7 +190,7 @@ def main() -> int:
                 **recovery,
             }
         except Exception as exc:  # One bad image/session must not terminate the worker loop.
-            session = None
+            session = getattr(exc, "flow_b_session", None)
             recovery = getattr(exc, "flow_b_recovery", {
                 "retry_count": 0,
                 "retry_intervals_ms": [],

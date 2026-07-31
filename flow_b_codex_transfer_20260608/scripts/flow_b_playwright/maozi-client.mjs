@@ -32,7 +32,10 @@ function successResponse(response) {
 function requireSuccess(response, label) {
   if (!successResponse(response)) {
     const message = response?.json?.msg || response?.json?.message || `HTTP ${response?.status ?? "unknown"}`;
-    throw new Error(`Maozi ${label} request failed: ${message}`);
+    const error = new Error(`Maozi ${label} request failed: ${message}`);
+    error.status = response?.status;
+    error.response = response?.json ?? null;
+    throw error;
   }
   return response.json.data;
 }

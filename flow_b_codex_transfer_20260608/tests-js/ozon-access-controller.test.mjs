@@ -6,8 +6,10 @@ import path from "node:path";
 
 import {
   createOzonAccessController,
+  isOzonAuthenticationText,
   isOzonCaptchaText,
   isOzonAccessStoppedError,
+  ozonAccessControllerFor,
   resolveOzonAccessStateFile,
 } from "../scripts/flow_b_playwright/ozon-access-controller.mjs";
 
@@ -26,6 +28,112 @@ test("Ozon CAPTCHA text is classified separately from network soft blocks", () =
   assert.equal(isOzonCaptchaText("Подтвердите, что вы не робот"), true);
   assert.equal(isOzonCaptchaText("请完成人机验证"), true);
   assert.equal(isOzonCaptchaText("Похоже, нет соединения"), false);
+  assert.equal(isOzonAuthenticationText("Ozon login required; session expired"), true);
+  assert.equal(isOzonAuthenticationText("Товар временно недоступен"), false);
+});
+
+test("dynamic pacing holds warmup until both safety gates pass and then uses the baseline", async () => {
+  let clock = 0;
+  const starts = [];
+  const controller = createOzonAccessController({
+    minIntervalMs: 400,
+    baselineIntervalMs: 300,
+    warmupIntervalMs: 400,
+    maxIntervalMs: 800,
+    warmupDurationMs: 1_000,
+    warmupSuccessCount: 2,
+    stableSuccessCount: 2,
+    intervalStepMs: 50,
+    softBlockStepMs: 150,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  });
+  const run = () => controller.run({ kind: "publish-detail" }, async () => {
+    starts.push(clock);
+  });
+
+  await run();
+  await run();
+  clock = 1_000;
+  await run();
+  await run();
+
+  assert.deepEqual(starts, [0, 400, 1_000, 1_300]);
+  assert.equal((await controller.snapshot()).warmup_complete, true);
+  assert.equal((await controller.snapshot()).current_interval_ms, 300);
+});
+
+test("legacy access state enters the new safe warmup instead of skipping to baseline", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-legacy-state-"));
+  const stateFile = path.join(dir, "ozon_access_state.json");
+  await fs.writeFile(stateFile, `${JSON.stringify({
+    version: 1,
+    next_allowed_at_ms: 0,
+    requires_manual_clear: false,
+  })}\n`);
+  const controller = createOzonAccessController({
+    stateFile,
+    minIntervalMs: 4_000,
+    baselineIntervalMs: 3_000,
+    warmupIntervalMs: 4_000,
+    maxIntervalMs: 8_000,
+    warmupDurationMs: 30 * 60_000,
+    warmupSuccessCount: 20,
+  });
+  const state = await controller.snapshot();
+  assert.equal(state.version, 2);
+  assert.equal(state.warmup_complete, false);
+  assert.equal(state.current_interval_ms, 4_000);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("soft blocks raise the persisted interval and configured success windows lower it toward baseline", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-dynamic-"));
+  const stateFile = path.join(dir, "ozon_access_state.json");
+  let clock = 0;
+  const options = {
+    stateFile,
+    minIntervalMs: 400,
+    baselineIntervalMs: 300,
+    warmupIntervalMs: 400,
+    maxIntervalMs: 800,
+    warmupDurationMs: 0,
+    warmupSuccessCount: 1,
+    stableSuccessCount: 2,
+    intervalStepMs: 50,
+    softBlockStepMs: 150,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  };
+  const controller = createOzonAccessController(options);
+  await controller.run({}, async () => {});
+  await assert.rejects(
+    controller.run({}, async () => { throw new Error("Ozon access denied"); }),
+    /access denied/i,
+  );
+  assert.equal((await controller.snapshot()).current_interval_ms, 450);
+
+  const resumed = createOzonAccessController(options);
+  await resumed.run({}, async () => {});
+  await resumed.run({}, async () => {});
+  const saved = await resumed.snapshot();
+  assert.equal(saved.current_interval_ms, 400);
+  assert.equal(saved.stable_successes, 0);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("login loss and MFA errors persist the same immediate manual stop as CAPTCHA", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-auth-stop-"));
+  const stateFile = path.join(dir, "ozon_access_state.json");
+  const controller = createOzonAccessController({ stateFile, minIntervalMs: 0 });
+  await assert.rejects(
+    controller.run({}, async () => { throw new Error("Ozon MFA verification required"); }),
+    isOzonAccessStoppedError,
+  );
+  const saved = JSON.parse(await fs.readFile(stateFile, "utf8"));
+  assert.equal(saved.requires_manual_clear, true);
+  assert.match(saved.reason, /MFA/i);
+  await fs.rm(dir, { recursive: true, force: true });
 });
 
 test("global Ozon controller serializes callers and preserves a quiet interval after completion", async () => {
@@ -278,4 +386,18 @@ test("profile siblings share one account-level Ozon access state file", () => {
   const root = path.resolve("/tmp/flow-b-profile-parent");
   assert.equal(resolveOzonAccessStateFile({ FLOW_B_PW_PROFILE: path.join(root, "playwright_profile") }), path.join(root, "ozon_access_state.json"));
   assert.equal(resolveOzonAccessStateFile({ FLOW_B_PW_PROFILE: path.join(root, "playwright_profile_v2") }), path.join(root, "ozon_access_state.json"));
+});
+
+test("context controllers expose the production 4s warmup, 3s baseline, and 8s ceiling defaults", () => {
+  const controller = ozonAccessControllerFor({}, {});
+  assert.deepEqual(controller.pacing, {
+    baselineIntervalMs: 3_000,
+    warmupIntervalMs: 4_000,
+    maxIntervalMs: 8_000,
+    warmupDurationMs: 30 * 60_000,
+    warmupSuccessCount: 20,
+    stableSuccessCount: 20,
+    intervalStepMs: 500,
+    softBlockStepMs: 1_500,
+  });
 });

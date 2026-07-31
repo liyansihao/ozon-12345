@@ -4250,6 +4250,291 @@ test("resumed skipped candidates are terminal and are not recalculated", async (
   assert.ok(deleted.includes("20"));
 });
 
+test("rolling workers start the next candidate before an unrelated slow candidate settles", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-rolling-workers-"));
+  try {
+    let releaseSlow;
+    let signalRefill;
+    let slowSettled = false;
+    const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+    const refillStarted = new Promise((resolve) => { signalRefill = resolve; });
+    const starts = [];
+    const items = [
+      {
+        sku: "rolling-slow",
+        title: "Безопасный товар slow",
+        cover_image: "https://img.example/rolling-slow.jpg",
+        sell_price: 100,
+      },
+      {
+        sku: "rolling-fast",
+        title: "Безопасный товар fast",
+        cover_image: "https://img.example/rolling-fast.jpg",
+        sell_price: 100,
+      },
+      {
+        sku: "rolling-refill",
+        title: "Безопасный товар refill",
+        cover_image: "https://img.example/rolling-refill.jpg",
+        sell_price: 100,
+      },
+    ];
+    const running = createPublishRunner({
+      client: clientFor(items),
+      costBridge: {
+        estimate: async (input) => {
+          starts.push(input.sku);
+          if (input.sku === "rolling-slow") {
+            await slowGate;
+            slowSettled = true;
+          }
+          if (input.sku === "rolling-refill") signalRefill();
+          return { ok: false, reason: "no reliable same-item match" };
+        },
+      },
+      state: fakeState(),
+      target: 10,
+      runDir,
+      directMode: true,
+      concurrency: 2,
+    }).run();
+
+    await Promise.race([
+      refillStarted,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("rolling worker did not refill before timeout")),
+        500,
+      )),
+    ]);
+    assert.equal(slowSettled, false);
+    assert.deepEqual(starts.slice(0, 3), [
+      "rolling-slow",
+      "rolling-fast",
+      "rolling-refill",
+    ]);
+    releaseSlow();
+    await running;
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct rolling queue does not grow beyond its configured worker count", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-fixed-direct-workers-"));
+  try {
+    const items = Array.from({ length: 13 }, (_, index) => ({
+      sku: `fixed-worker-${index + 1}`,
+      title: `Безопасный товар fixed worker ${index + 1}`,
+      cover_image: `https://img.example/fixed-worker-${index + 1}.jpg`,
+      sell_price: 100,
+    }));
+    const result = await createPublishRunner({
+      client: clientFor(items),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state: fakeState(),
+      target: items.length,
+      runDir,
+      directMode: true,
+      concurrency: 2,
+      maxConcurrency: 12,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, items.length);
+    assert.equal(result.final_concurrency, 2);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("an external fatal stop cancels an in-flight direct candidate before ERP publish", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-external-fatal-stop-"));
+  try {
+    let releaseCost;
+    let signalCostStarted;
+    const costGate = new Promise((resolve) => { releaseCost = resolve; });
+    const costStarted = new Promise((resolve) => { signalCostStarted = resolve; });
+    const directRunControl = { cancelled: false, fatalError: null };
+    let detailCalls = 0;
+    let publishCalls = 0;
+    const running = createPublishRunner({
+      client: clientFor([{
+        sku: "external-fatal-in-flight",
+        title: "Безопасный товар при внешней остановке",
+        cover_image: "https://img.example/external-fatal.jpg",
+        sell_price: 100,
+      }], {
+        getProductDetail: async () => {
+          detailCalls += 1;
+          return { current_price: 100, follow_min: 90 };
+        },
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true };
+        },
+      }),
+      costBridge: {
+        estimate: async () => {
+          signalCostStarted();
+          await costGate;
+          return { ...RELIABLE_COST_RESULT };
+        },
+      },
+      state: fakeState(),
+      target: 1,
+      runDir,
+      directMode: true,
+      directRunControl,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    await costStarted;
+    const fatal = new Error("Ozon access stopped after CAPTCHA");
+    fatal.code = "FLOW_B_OZON_ACCESS_STOPPED";
+    directRunControl.cancelled = true;
+    directRunControl.fatalError = fatal;
+    releaseCost();
+    await assert.rejects(running, /CAPTCHA/);
+    assert.equal(detailCalls, 0);
+    assert.equal(publishCalls, 0);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("Maozi authentication loss is fatal and cancels queued direct ERP requests", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-maozi-auth-fatal-"));
+  try {
+    let publishCalls = 0;
+    const items = [
+      {
+        sku: "maozi-auth-first",
+        title: "Безопасный товар авторизация один",
+        cover_image: "https://img.example/maozi-auth-first.jpg",
+        sell_price: 100,
+      },
+      {
+        sku: "maozi-auth-queued",
+        title: "Безопасный товар авторизация два",
+        cover_image: "https://img.example/maozi-auth-second.jpg",
+        sell_price: 100,
+      },
+    ];
+    const running = createPublishRunner({
+      client: clientFor(items, {
+        publish: async () => {
+          publishCalls += 1;
+          return {
+            ok: false,
+            status: 401,
+            response: { message: "Unauthenticated" },
+          };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state: fakeState(),
+      target: 2,
+      runDir,
+      directMode: true,
+      concurrency: 2,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    await assert.rejects(running, /authentication|Unauthenticated|401/i);
+    assert.equal(publishCalls, 1);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode treats category and profit ERP authentication loss as fatal", async (t) => {
+  const item = {
+    sku: "maozi-auth-stage",
+    title: "Безопасный товар авторизация этап",
+    cover_image: "https://img.example/maozi-auth-stage.jpg",
+    sell_price: 100,
+  };
+  const authenticationError = (stage) => Object.assign(
+    new Error(`Maozi ${stage} request failed: Unauthenticated.`),
+    { status: 401, response: { msg: "Unauthenticated." } },
+  );
+
+  await t.test("category", async () => {
+    const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-maozi-category-auth-"));
+    try {
+      let costCalls = 0;
+      let detailCalls = 0;
+      let publishCalls = 0;
+      const running = createPublishRunner({
+        client: clientFor([item], {
+          getCategoryBySku: async () => { throw authenticationError("category"); },
+          getProductDetail: async () => { detailCalls += 1; return {}; },
+          publish: async () => { publishCalls += 1; return { ok: true }; },
+        }),
+        costBridge: {
+          estimate: async () => {
+            costCalls += 1;
+            return { ...RELIABLE_COST_RESULT };
+          },
+        },
+        state: fakeState(),
+        target: 1,
+        runDir,
+        directMode: true,
+        minimumSameItemMatches: 1,
+        requireReliableCostContract: true,
+      }).run();
+
+      await assert.rejects(running, /Unauthenticated/i);
+      assert.equal(costCalls, 0);
+      assert.equal(detailCalls, 0);
+      assert.equal(publishCalls, 0);
+    } finally {
+      await fs.rm(runDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("profit", async () => {
+    const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-maozi-profit-auth-"));
+    try {
+      let detailCalls = 0;
+      let publishCalls = 0;
+      const running = createPublishRunner({
+        client: clientFor([item], {
+          calculateProfit: async () => { throw authenticationError("profit calculation"); },
+          getProductDetail: async (sku) => {
+            detailCalls += 1;
+            return {
+              sku,
+              title: item.title,
+              cover_image: item.cover_image,
+              current_price: 100,
+              follow_min: 90,
+            };
+          },
+          publish: async () => { publishCalls += 1; return { ok: true }; },
+        }),
+        costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+        state: fakeState(),
+        target: 1,
+        runDir,
+        directMode: true,
+        minimumSameItemMatches: 1,
+        requireReliableCostContract: true,
+      }).run();
+
+      await assert.rejects(running, /Unauthenticated/i);
+      assert.equal(detailCalls, 1);
+      assert.equal(publishCalls, 0);
+    } finally {
+      await fs.rm(runDir, { recursive: true, force: true });
+    }
+  });
+});
+
 test("parallel preflight serializes publishing and never exceeds the exact target", async () => {
   const state = fakeState();
   let activePublishes = 0;
@@ -4514,6 +4799,7 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
         sku: "direct-fbo-apparel",
         title: "Одежда для дома",
         cover_image: "https://img.example/direct.jpg",
+        sell_price: 100,
       },
     ], {
       resolvePublishTarget: async () => ({
@@ -4566,14 +4852,215 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
   }
 });
 
+test("direct cost rejection skips live Ozon detail, profit, and ERP submission", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-cost-first-"));
+  try {
+    const state = fakeState();
+    let detailCalls = 0;
+    let profitCalls = 0;
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "cost-rejected",
+        title: "Надёжный снимок товара",
+        cover_image: "https://img.example/cost-rejected.jpg",
+        sell_price: 120,
+        source_url: "https://www.ozon.ru/seller/cost-first/",
+      }], {
+        getProductDetail: async () => {
+          detailCalls += 1;
+          return {};
+        },
+        calculateProfit: async () => {
+          profitCalls += 1;
+          return economy(45);
+        },
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true };
+        },
+      }),
+      costBridge: {
+        estimate: async () => ({
+          ok: false,
+          deferred: true,
+          terminal: false,
+          reason: "worker timed out after 15000ms",
+        }),
+      },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 0);
+    assert.equal(detailCalls, 0);
+    assert.equal(profitCalls, 0);
+    assert.equal(publishCalls, 0);
+    const rejected = state.entryOf("cost-rejected");
+    assert.equal(rejected.status, "skipped");
+    assert.equal(rejected.data.reason, "1688-timeout");
+    assert.equal(rejected.data.outcome_status, "skipped_cost");
+    const funnel = (await fs.readFile(path.join(runDir, "direct_funnel.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.deepEqual(funnel.map((row) => row.stage), [
+      "candidate_required_fields_passed",
+      "snapshot_category_passed",
+    ]);
+    assert.ok(funnel.every((row) => row.source_url === "https://www.ozon.ru/seller/cost-first/"));
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode fetches one live detail after cost and remaps commission using the lower live price", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-live-price-"));
+  try {
+    const events = [];
+    const profitInputs = [];
+    let detailCalls = 0;
+    const sourceUrl = "https://www.ozon.ru/seller/live-price/";
+    const client = clientFor([{
+      sku: "live-price-remap",
+      title: "Игровой безопасный аксессуар",
+      cover_image: "https://img.example/live-price.jpg",
+      sell_price: 200,
+      source_url: sourceUrl,
+    }], {
+      getCategoryBySku: async () => {
+        events.push("category");
+        return {
+          cate: [11, 22, "high"],
+          product_info: { weight: 100, depth: 20, width: 10, height: 5 },
+        };
+      },
+      listCategoryCommissions: async () => [{
+        cate_id: 11,
+        label: "Игрушки",
+        children: [{
+          cate_id: 22,
+          label: "Настольные игры",
+          children: [
+            { label: "售价 ≤ 1000₽", value: "low" },
+            { label: "售价 > 1000₽", value: "high" },
+          ],
+        }],
+      }],
+      getProductDetail: async (sku) => {
+        events.push("detail");
+        detailCalls += 1;
+        return {
+          sku,
+          mode: "FBO",
+          current_price: 100,
+          follow_min: 90,
+        };
+      },
+      calculateProfit: async (input) => {
+        events.push("profit");
+        profitInputs.push(input);
+        return economy(30.01);
+      },
+      publish: async () => {
+        events.push("publish");
+        return { ok: true, response: { code: 1 } };
+      },
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: {
+        estimate: async (input) => {
+          events.push("cost");
+          assert.equal(input.sell_price, 200);
+          return { ...RELIABLE_COST_RESULT };
+        },
+      },
+      state: fakeState(),
+      target: 1,
+      threshold: 30,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(detailCalls, 1);
+    assert.deepEqual(events, ["category", "cost", "detail", "profit", "publish"]);
+    assert.equal(profitInputs.length, 1);
+    assert.equal(profitInputs[0].sell_price, 90);
+    assert.deepEqual(profitInputs[0].cate, [11, 22, "low"]);
+    const funnel = (await fs.readFile(path.join(runDir, "direct_funnel.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.ok(funnel.some((row) => row.stage === "snapshot_category_passed"));
+    assert.ok(funnel.some((row) => row.stage === "live_price_confirmed"
+      && row.sale_price === 90
+      && row.current_price === 100
+      && row.follow_min === 90));
+    assert.ok(funnel.every((row) => row.source_url === sourceUrl));
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode does not accept a snapshot fallback as a confirmed live Ozon price", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-live-price-required-"));
+  try {
+    let profitCalls = 0;
+    let publishCalls = 0;
+    const state = fakeState();
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "snapshot-price-only",
+        title: "Безопасный товар только со снимком",
+        cover_image: "https://img.example/snapshot-price-only.jpg",
+        sell_price: 100,
+      }], {
+        getProductDetail: async () => ({
+          current_price: null,
+          follow_min: null,
+          selected_price: 80,
+          fallback_price: 80,
+        }),
+        calculateProfit: async () => {
+          profitCalls += 1;
+          return economy(45);
+        },
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 0);
+    assert.equal(profitCalls, 0);
+    assert.equal(publishCalls, 0);
+    assert.equal(state.entryOf("snapshot-price-only").data.reason, "missing-live-sale-price");
+    assert.equal(state.entryOf("snapshot-price-only").data.outcome_status, "skipped_profit");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("direct mode rejects 30 percent and accepts 30.01 percent", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-profit-boundary-"));
   try {
     const state = fakeState();
     const publishedSkus = [];
     const client = clientFor([
-      { sku: "profit-30", title: "Товар ровно тридцать", cover_image: "https://img.example/30.jpg" },
-      { sku: "profit-30-01", title: "Товар выше тридцати", cover_image: "https://img.example/3001.jpg" },
+      { sku: "profit-30", title: "Товар ровно тридцать", cover_image: "https://img.example/30.jpg", sell_price: 100 },
+      { sku: "profit-30-01", title: "Товар выше тридцати", cover_image: "https://img.example/3001.jpg", sell_price: 100 },
     ], {
       getProductDetail: async (sku) => ({
         sku,
@@ -4604,6 +5091,241 @@ test("direct mode rejects 30 percent and accepts 30.01 percent", async () => {
     assert.deepEqual(publishedSkus, ["profit-30-01"]);
     assert.equal(result.accepted, 1);
     assert.equal(state.entryOf("profit-30").data.outcome_status, "skipped_profit");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode keeps an unknown prior API request in reconciliation without resubmitting", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-unknown-submit-"));
+  try {
+    const offerId = "mz-unknown-direct";
+    const state = fakeState({
+      "unknown-direct": {
+        status: "processing",
+        data: {
+          sku: "unknown-direct",
+          submission_intent: true,
+          submitted: false,
+          submission_pending: false,
+          api_call_started_at: "2026-07-30T04:00:00.000Z",
+          api_call_attempts_total: 1,
+          api_call_attempts_day: 1,
+          api_call_day: "2026-07-30",
+          offer_id: offerId,
+          store_id: 7,
+          submission_payload: {
+            rows: [{ sku: "unknown-direct", offer_id: offerId }],
+          },
+        },
+      },
+    });
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([{ sku: "unknown-direct" }], {
+        findImportLog: async () => null,
+        findOnlineProduct: async () => null,
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true };
+        },
+      }),
+      costBridge: {
+        estimate: async () => {
+          throw new Error("unknown submission must not repeat sourcing");
+        },
+      },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      reconciliationOnly: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(result.accepted, 0);
+    assert.equal(publishCalls, 0);
+    const unknown = state.entryOf("unknown-direct");
+    assert.equal(unknown.status, "processing");
+    assert.equal(unknown.data.reason, "submission-api-status-unknown");
+    assert.equal(unknown.data.submission_intent, true);
+    assert.equal(unknown.data.reconcile_only, true);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode turns an unconfirmed ERP response into reconciliation-only state", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-new-unknown-"));
+  try {
+    const favorite = {
+      sku: "new-unknown-direct",
+      title: "Безопасный неизвестный ответ",
+      cover_image: "https://img.example/new-unknown-direct.jpg",
+      sell_price: 100,
+    };
+    const state = fakeState();
+    let publishCalls = 0;
+    const client = clientFor([favorite], {
+      publish: async () => {
+        publishCalls += 1;
+        return { ok: false, reason: "gateway response was not confirmed" };
+      },
+      findImportLog: async () => null,
+      findOnlineProduct: async () => null,
+    });
+    await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(publishCalls, 1);
+    const uncertain = state.entryOf(favorite.sku);
+    assert.equal(uncertain.status, "processing");
+    assert.equal(uncertain.data.reason, "submission-api-status-unknown");
+    assert.equal(uncertain.data.submission_intent, true);
+    assert.equal(uncertain.data.reconcile_only, true);
+
+    await createPublishRunner({
+      client,
+      costBridge: {
+        estimate: async () => {
+          throw new Error("uncertain request must not repeat sourcing");
+        },
+      },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      reconciliationOnly: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+    assert.equal(publishCalls, 1);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct store-limit cancellation leaves queued ERP work durably retryable", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-store-retry-"));
+  try {
+    const state = fakeState();
+    let publishCalls = 0;
+    const client = clientFor([
+      {
+        sku: "store-limit-first",
+        title: "Первый безопасный товар",
+        cover_image: "https://img.example/store-limit-first.jpg",
+        sell_price: 100,
+      },
+      {
+        sku: "store-limit-queued",
+        title: "Второй безопасный товар",
+        cover_image: "https://img.example/store-limit-queued.jpg",
+        sell_price: 100,
+      },
+    ], {
+      resolvePublishTarget: async ({ storeId }) => ({
+        store: { id: Number(storeId), name: `store-${storeId}` },
+        watermark: { id: 8, name: "lysh" },
+      }),
+      publish: async () => {
+        publishCalls += 1;
+        return {
+          ok: false,
+          response: { message: "вы исчерпали суточный лимит магазина" },
+        };
+      },
+    });
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 10,
+      runDir,
+      directMode: true,
+      concurrency: 2,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 0);
+    assert.equal(publishCalls, 1);
+    for (const sku of ["store-limit-first", "store-limit-queued"]) {
+      const retryable = state.entryOf(sku);
+      assert.equal(retryable.status, "failed");
+      assert.equal(retryable.data.reason, "submission-not-sent-deferred");
+      assert.equal(retryable.data.original_reason, "daily-product-limit");
+      assert.equal(retryable.data.submission_intent, false);
+      assert.equal(retryable.data.terminal, false);
+      assert.ok(retryable.data.retry_at);
+    }
+    assert.ok(result.store_switches.some((row) => (
+      row.from_store_id === 7
+      && row.to_store_id === 9
+      && row.reason === "daily-product-limit"
+    )));
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode stops after every configured store returns a real publish rejection", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-all-stores-rejected-"));
+  try {
+    const publishStoreIds = [];
+    const items = Array.from({ length: 4 }, (_, index) => ({
+      sku: `all-stores-rejected-${index}`,
+      title: `Безопасный товар для отказа магазина ${index}`,
+      cover_image: `https://img.example/all-stores-rejected-${index}.jpg`,
+      sell_price: 100,
+    }));
+    const result = await createPublishRunner({
+      client: clientFor(items, {
+        resolvePublishTarget: async ({ storeId }) => ({
+          store: { id: Number(storeId), name: `store-${storeId}` },
+          watermark: { id: 8, name: "lysh" },
+        }),
+        publish: async (payload) => {
+          publishStoreIds.push(Number(payload.shop_ids[0]));
+          return {
+            ok: false,
+            response: { message: "вы исчерпали суточный лимит магазина" },
+          };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state: fakeState(),
+      target: 10,
+      runDir,
+      directMode: true,
+      concurrency: 1,
+      storeTargets: [
+        { id: 7, needle: "store-7", requireWarehouse: false },
+        { id: 9, needle: "store-9", requireWarehouse: false },
+      ],
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.deepEqual(publishStoreIds, [7, 9]);
+    assert.equal(result.halt_reason, "daily-product-limit");
+    assert.deepEqual(result.stores_exhausted, {
+      rejected_store_ids: [7, 9],
+      all: true,
+    });
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }
@@ -4741,6 +5463,7 @@ test("direct mode permits a different SKU with a title already used by another s
           sku: "new-sku",
           title,
           cover_image: "https://img.example/new-sku.jpg",
+          sell_price: 100,
         },
       ], {
         getProductDetail: async (sku) => ({
@@ -4952,9 +5675,11 @@ test("fatal batch waits for sibling settlement and cancels its pending ERP mutat
     const siblingWasStarted = new Promise((resolve) => { siblingStarted = resolve; });
     let publishCalls = 0;
     let runSettled = false;
+    const detailSkus = [];
     const runner = createPublishRunner({
-      client: clientFor([{ sku: "fatal" }, { sku: "sibling" }], {
+      client: clientFor([{ sku: "fatal" }, { sku: "sibling" }, { sku: "not-started" }], {
         getProductDetail: async (sku) => {
+          detailSkus.push(String(sku));
           if (String(sku) === "fatal") {
             await siblingWasStarted;
             throw new Error("Target page, context or browser has been closed");
@@ -4981,6 +5706,7 @@ test("fatal batch waits for sibling settlement and cancels its pending ERP mutat
     releaseSibling();
     await assert.rejects(running, /context or browser has been closed/);
     assert.equal(publishCalls, 0);
+    assert.ok(!detailSkus.includes("not-started"));
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }

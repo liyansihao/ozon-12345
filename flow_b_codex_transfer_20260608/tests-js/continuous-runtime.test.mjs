@@ -13,7 +13,11 @@ import {
   mergeCandidateFacts,
   isFatalBrowserError,
   rankSourcesByYield,
+  createRuntimeWakeSignal,
   runProducerLoop,
+  runtimeEmptyBackoffIntervals,
+  runtimeIdleDelay,
+  runtimeRoundHasActivity,
   withRuntimeCleanup,
   summarizeConsumerRound,
   clearCandidateFactsCache,
@@ -461,6 +465,7 @@ test("producer loop uses 30/60/120 second quiet backoff when source activity is 
       waits.push(ms);
       now += ms;
     },
+    shouldStop: () => calls >= 4,
     scan: async () => {
       calls += 1;
       return { activity_count: calls < 4 ? 0 : 1 };
@@ -468,6 +473,87 @@ test("producer loop uses 30/60/120 second quiet backoff when source activity is 
   });
   assert.deepEqual(waits.slice(0, 3), [30_000, 60_000, 120_000]);
   assert.equal(calls, 4);
+});
+
+test("active producer rounds continue immediately while empty rounds use 1/3/10 second backoff", async () => {
+  let now = 0;
+  let calls = 0;
+  const starts = [];
+  const waits = [];
+  await runProducerLoop({
+    deadlineMs: Number.POSITIVE_INFINITY,
+    idleIntervalsMs: [1_000, 3_000, 10_000],
+    isIdleResult: (result) => result.activity_count === 0,
+    now: () => now,
+    sleep: async (ms) => {
+      waits.push(ms);
+      now += ms;
+    },
+    shouldStop: () => calls >= 5,
+    scan: async () => {
+      starts.push(now);
+      calls += 1;
+      return { activity_count: calls <= 2 ? 1 : 0 };
+    },
+  });
+  assert.deepEqual(starts, [0, 0, 0, 1_000, 4_000]);
+  assert.deepEqual(waits, [1_000, 3_000]);
+});
+
+test("producer errors keep the configured 60-second retry while active and empty rounds stay fast", async () => {
+  let now = 0;
+  let calls = 0;
+  const starts = [];
+  const waits = [];
+  await runProducerLoop({
+    deadlineMs: Number.POSITIVE_INFINITY,
+    intervalMs: 60_000,
+    idleIntervalsMs: [1_000, 3_000, 10_000],
+    isIdleResult: (result) => result.activity_count === 0,
+    now: () => now,
+    sleep: async (ms) => {
+      waits.push(ms);
+      now += ms;
+    },
+    shouldStop: () => calls >= 4,
+    scan: async () => {
+      starts.push(now);
+      calls += 1;
+      if (calls === 2) throw new Error("transient source scan failure");
+      return { activity_count: calls === 3 ? 0 : 1 };
+    },
+    onError: async () => {},
+  });
+  assert.deepEqual(starts, [0, 0, 60_000, 61_000]);
+  assert.deepEqual(waits, [60_000, 1_000]);
+});
+
+test("runtime wake signals interrupt an idle consumer wait and retain one early wake", async () => {
+  let scheduled = null;
+  const wake = createRuntimeWakeSignal({
+    setTimer: (callback) => {
+      scheduled = callback;
+      return 1;
+    },
+    clearTimer: () => { scheduled = null; },
+  });
+  const waiting = wake.wait(10_000);
+  wake.wake();
+  assert.equal(await waiting, true);
+  assert.equal(scheduled, null);
+  wake.wake();
+  assert.equal(await wake.wait(10_000), true);
+});
+
+test("runtime activity helpers use the new empty-round defaults", () => {
+  assert.deepEqual(runtimeEmptyBackoffIntervals({}), [1_000, 3_000, 10_000]);
+  assert.deepEqual(runtimeEmptyBackoffIntervals({
+    FLOW_B_RUNTIME_EMPTY_BACKOFF_MS: "200,400",
+  }), [200, 400]);
+  assert.equal(runtimeIdleDelay(4, [1_000, 3_000, 10_000]), 10_000);
+  assert.equal(runtimeRoundHasActivity({ attempted: 1 }), true);
+  assert.equal(runtimeRoundHasActivity({ attempted: 0, activity_count: 0 }), false);
+  assert.equal(runtimeRoundHasActivity({ accepted: 10, attempted: 0 }), false);
 });
 
 test("producer loop accepts an open-ended direct publishing deadline", async () => {

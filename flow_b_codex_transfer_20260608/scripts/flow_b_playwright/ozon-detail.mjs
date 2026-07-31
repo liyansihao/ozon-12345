@@ -1,6 +1,9 @@
 import { canonicalProductUrl } from "./publish-state.mjs";
 import { AdaptiveConcurrency } from "./continuous-runtime.mjs";
-import { isOzonCaptchaText } from "./ozon-access-controller.mjs";
+import {
+  isOzonAuthenticationText,
+  isOzonCaptchaText,
+} from "./ozon-access-controller.mjs";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -114,9 +117,16 @@ export function createOzonDetailProvider({
               sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
                 || document.querySelector('a[href*="/seller/"]')?.href || "",
             })).catch(() => null);
-            const diagnostic = `${payload?.title || ""} ${payload?.text?.slice(0, 1000) || ""}`;
+            const diagnostic = [
+              payload?.url,
+              payload?.title,
+              payload?.text?.slice(0, 1000),
+            ].filter(Boolean).join(" ");
             if (isOzonCaptchaText(diagnostic)) {
               throw new Error(`Ozon CAPTCHA required for SKU ${sku}`);
+            }
+            if (isOzonAuthenticationText(diagnostic)) {
+              throw new Error(`Ozon authentication or MFA required for SKU ${sku}`);
             }
             if (/доступ ограничен|access denied|похоже, нет(?:\s|\u00a0)+соединения/i.test(diagnostic)) {
               throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
