@@ -1,98 +1,119 @@
-# Ozon 五店 24 小时生产系统
+# Ozon 十店直接上架生产手册
 
-## 每天启动
+## 桌面控制面板（推荐）
 
-安装完成后，每天只运行：
+桌面上的 `Ozon上品控制.app` 是现有生产控制脚本的原生 macOS 中文面板。双击即可查看和控制，不需要打开 Codex 或终端。它不会修改选品、1688 同款判断、利润率、店铺轮换、SKU 去重或生产状态数据库。
+
+面板每 5 秒自动刷新，显示：
+
+- 当前生产状态；
+- ERP 已接受数、500 目标和剩余数；
+- 后台已在线数；
+- 当前店铺；
+- supervisor、worker、browser/profile owner 数量；
+- Chrome 页面标签数量（CDP 暂时不可用时显示 `—`）；
+- 最后状态错误或说明。
+
+四个按钮的含义：
+
+- `启动/继续`：仅在状态为 `STOPPED` 且三个 owner 全部为 0 时启用。它继续原 run，不清空已接受 SKU，也不会创建第二个 worker。
+- `安全暂停`：确认后调用生产 `stop` 入口，并持续等待到状态变成 `STOPPED` 且三个 owner 全部为 0，才提示暂停完成。
+- `刷新状态`：只读刷新；操作执行期间点击会排队，不会并发启动第二条控制命令。
+- `验证后恢复`：仅在 `WAITING_FOR_VERIFICATION` 时启用。必须先在系统保留的 Chrome 中手工完成验证码、MFA 或登录检查。
+
+`TARGET_COMPLETE` 和 `FATAL_STOP` 不允许面板自动重启。验证码、安全检查和登录失效也不会被自动绕过。
+
+## 安装或重装面板
+
+在项目目录运行：
 
 ```sh
-~/.ozon-24h-production/app/scripts/ozon_24h_production.sh start
+flow_b_codex_transfer_20260608/scripts/install_ozon_control_panel.sh
 ```
 
-`start` 先创建 pending run，不会立即打开正式计时窗口。Supervisor 会只读核验五店 ERP 仓库和上海自然日剩余额度；五店映射全部严格匹配、额度均可验证且总剩余额度大于 0 后，把此刻 ERP 实时总剩余额度冻结为当天唯一目标，写入 `current_run.json`、`acceptance_window.json` 和 `frozen_manifest.json`，随后开始连续 24 小时生产。例如开窗时总剩余额度为 469，当天目标就是 469；系统不会等待固定的 481，也不会在窗口内因后续额度变化修改目标。总剩余额度为 0 时才进入 `WAITING_FOR_QUOTA_RESET`，到 ERP 提供的下一个重置点自动复查。
+安装器使用系统 Swift 编译器生成原生 Apple Silicon 应用，进行本机临时签名并安装到：
 
-重复执行 `start` 会恢复当前 run，不会创建第二个 worker、Chrome profile 或重复窗口。
+```text
+~/Desktop/Ozon上品控制.app
+```
 
-## 查看状态
+安装可重复执行。面板固定调用稳定部署软链接：
+
+```text
+~/.ozon-24h-production/app/scripts/ozon_24h_production.sh
+```
+
+因此以后提升新的 stable 上架版本时，不需要重新安装面板。面板不会设置开机自动上架，也不会监听任何公网或局域网端口。
+
+## 终端备用命令
+
+控制面板不可用时，CLI 始终保留：
 
 ```sh
 ~/.ozon-24h-production/app/scripts/ozon_24h_production.sh status
-```
-
-持久状态位于 `~/.ozon-24h-production/state/`：
-
-- `current_run.json`：当前 pending/formal run；
-- `operational_status.json`：运行、恢复、等待验证或等待额度状态；
-- `process_owners.json`：唯一 supervisor、worker、Chrome profile owner；
-- `capacity_preflight.json`：五店 ERP 仓库和当日剩余额度；
-- `acceptance_window.json` / `frozen_manifest.json`：正式窗口和开窗时冻结的 ERP 容量目标；
-- `sources/`：当前来源组合、来源漏斗和停用来源；
-- `dedupe/published_links.csv`：跨历史窗口去重集合；
-- `recovery.jsonl`：自动恢复记录；
-- `runs/<run_id>/compact_checkpoint.json`：确定性 compact checkpoint；
-- `exports/<run_id>/`：五店 CSV、汇总和 24 小时报告。
-
-普通网络、429、页面失败、ERP 延迟、worker 退出和 CDP 短暂断开由 supervisor 按 30/60/120 秒退避恢复。每两小时自动刷新 compact checkpoint。
-
-## 安全停止与恢复
-
-安全停止：
-
-```sh
-~/.ozon-24h-production/app/scripts/ozon_24h_production.sh stop
-```
-
-恢复同一 checkpoint 和同一正式窗口：
-
-```sh
 ~/.ozon-24h-production/app/scripts/ozon_24h_production.sh start
-```
-
-不要手工复制 run、清除 lock、启动第二个 Chrome profile，或删除 pending/去重状态。Stale supervisor lock 会由 supervisor 在确认原 PID 已不存在后自行清理。
-
-## CAPTCHA、滑块、MFA 或登录安全检查
-
-系统会保留 Chrome 和 checkpoint，并把状态改为 `WAITING_FOR_VERIFICATION`。在系统保留的 Chrome 窗口中手工完成验证；不得使用任何绕过方式。完成后运行：
-
-```sh
+~/.ozon-24h-production/app/scripts/ozon_24h_production.sh stop
 ~/.ozon-24h-production/app/scripts/ozon_24h_production.sh resume
 ```
 
-系统从原 run 恢复，不重新提交已处理 SKU。
+命令说明：
 
-## 导出五店严格成功 SKU
+- `status`：只读输出当前生产 JSON。
+- `start`：安全恢复当前 `STOPPED` run；生产脚本会检查全局 worker，发现已有 worker 时拒绝重复启动。
+- `stop`：写入持久停止请求，由 supervisor 在状态机边界停止 worker、保存状态并释放 browser owner。
+- `resume`：只用于手工完成验证后恢复同一 run。
 
-窗口结束时会自动导出。也可随时手工刷新：
+不要手工删除 `stop.request`、锁文件、run 目录、SQLite 幂等状态或浏览器 profile，也不要直接再开一个 Flow-B worker。
 
-```sh
-~/.ozon-24h-production/app/scripts/ozon_24h_production.sh export
-```
+## 当前直接上架口径
 
-输出目录为 `~/.ozon-24h-production/state/exports/<run_id>/`，包含五个 `confirmed_store_<store_id>.csv`、`confirmed_all_stores.csv`、`summary.json`，以及窗口结束后的 `24h_report.json`。只导出当前 run 内 `profit_rate > 30`、ERP/Ozon `online_status=selling` 且 `stock>0` 的唯一 SKU。
+生产唯一目标是 500 个不同 SKU 被毛子 ERP 接口接受。ERP 接受后立即计入目标；`imported`、`online` 和 `stock_updated` 属于后台异步结果，不阻塞主链路。
 
-窗口结束后，supervisor 先完成最终 checkpoint、五店 CSV 和 `24h_report.json`，确认工件成功落盘后再停止 worker，并关闭唯一生产 Chrome owner 以释放窗口和内存。Chrome 退出后只清理固定白名单内的 HTTP、Code、GPU 和 Graphite 可重建缓存；Cookie、Local Storage、IndexedDB、扩展登录和 `Local State` 一律保留。清理不会删除浏览器登录 profile、checkpoint、候选队列、跨窗口去重集合、run 证据或导出文件；无论窗口达标还是 `TARGET_NOT_MET`，电脑重启都不会重复执行已完成窗口。手工 `stop` 属于可恢复暂停，不执行终点缓存清理；验证码状态也会保留原 Chrome 窗口。
+系统保留以下关键条件：
 
-若需要为旧 release 的已完成窗口补做同样的安全清理，可在确认 `status` 中 browser profile owner 为 0 后运行：
+- 至少 1 个标题、图片、规格和有效 SKU 价格可信的 1688 同款；
+- 使用 Ozon 当前价与跟卖最低价中的较低值；
+- 毛子 ERP 精确利润率必须严格大于 30%；
+- SKU 级持久幂等，崩溃恢复后不重复提交已接受或请求状态不明的 SKU；
+- 当前店铺上满或 ERP 真实返回店铺限额/不可用后，按已配置的十店顺序切换。
 
-```bash
-scripts/ozon_24h_production.sh cleanup-profile-caches
-```
+主要状态文件位于 `~/.ozon-24h-production/state/`：
 
-命令检测到任何 profile owner 时会拒绝执行，不会在 Chrome 仍使用 profile 时删除缓存。
+- `current_run.json`：当前 run 指针；
+- `operational_status.json`：运行、停止、恢复或等待验证状态；
+- `process_owners.json`：唯一 supervisor、worker 和 browser/profile owner；
+- `runs/<run_id>/current_store.json`：当前真实店铺；
+- `runs/<run_id>/erp_accepted.jsonl`：ERP 已接受证据；
+- `runs/<run_id>/background_status.jsonl`：导入、在线和补库存后台状态；
+- 生产 SQLite：SKU 幂等和请求状态。
 
-## 发布候选与回滚
+## CAPTCHA、MFA 和登录安全检查
 
-日常生产只使用 stable：
+当状态变为 `WAITING_FOR_VERIFICATION`：
 
-```sh
-~/.ozon-24h-production/app/scripts/ozon_24h_production.sh doctor
-```
+1. 不要关闭系统保留的 Chrome。
+2. 在该 Chrome 中手工完成验证码、滑块、MFA 或重新登录。
+3. 完成后点击面板的 `验证后恢复`，或执行 CLI 的 `resume`。
 
-维护时先安装并诊断 candidate，再提升：
+系统不会实现任何验证绕过。若状态为 `FATAL_STOP`，先检查面板显示的错误，不要直接反复启动。
+
+## 发布候选与稳定部署
+
+日常生产和控制面板都只引用 stable。维护时使用：
 
 ```sh
 scripts/ozon_24h_production.sh install-candidate
 ~/.ozon-24h-production/releases/candidate/scripts/ozon_24h_production.sh doctor-candidate
 scripts/ozon_24h_production.sh promote
+~/.ozon-24h-production/app/scripts/ozon_24h_production.sh doctor
 ```
 
-提升时只保留 `stable`、`candidate` 和 `rollback` 三个运行版本。
+提升 stable 不会改变当前生产状态根，也不会要求重装控制面板。
+
+## 另一台电脑使用
+
+当前面板只控制这台 Apple Silicon Mac，本机登录 profile 和完整生产状态仍留在这里。
+
+- 另一台电脑只需控制当前 Mac：后续应通过私有 SSH/VPN 增加远程控制，不开放公网控制端口。
+- 另一台 Mac 要独立运行：需要单独的迁移安装器，搬运浏览器、插件、登录 profile 和完整生产状态。
+- 迁移前必须确认旧电脑的 supervisor、worker、profile owner 全部为 0；两台电脑禁止同时运行同一生产状态。
