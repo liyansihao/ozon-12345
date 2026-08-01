@@ -5,7 +5,14 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
-import { ensureMaoziLogin, ensureMaoziPluginLogin, launchFlowContext, openMaoziPage, resolveBrowserOptions } from "./flow_b_playwright/browser-context.mjs";
+import {
+  ensureMaoziLogin,
+  ensureMaoziPluginLogin,
+  launchFlowContext,
+  openMaoziPage,
+  pruneOrphanedFlowPages,
+  resolveBrowserOptions,
+} from "./flow_b_playwright/browser-context.mjs";
 import { createCostBridge } from "./flow_b_playwright/cost-bridge.mjs";
 import { createMaoziClient, createMaoziPageTransport } from "./flow_b_playwright/maozi-client.mjs";
 import { createOzonDetailProvider } from "./flow_b_playwright/ozon-detail.mjs";
@@ -295,8 +302,19 @@ async function createPublishingSession(context, options, env, shared) {
       context,
       accessController: ozonAccessControllerFor(context, env),
       timeout: Math.max(1000, Number(env.FLOW_B_OZON_DETAIL_TIMEOUT_MS) || 10000),
-      initialConcurrency: Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 8),
-      maxConcurrency: Math.max(1, Number(env.FLOW_B_MAX_PUBLISH_WORKERS) || 12),
+      initialConcurrency: Math.max(
+        1,
+        Number(env.FLOW_B_OZON_DETAIL_WORKERS)
+          || Number(env.FLOW_B_PUBLISH_WORKERS)
+          || 8,
+      ),
+      maxConcurrency: Math.max(
+        1,
+        Number(env.FLOW_B_MAX_OZON_DETAIL_WORKERS)
+          || Number(env.FLOW_B_OZON_DETAIL_WORKERS)
+          || Number(env.FLOW_B_MAX_PUBLISH_WORKERS)
+          || 12,
+      ),
     });
     const runner = createPublishRunner({
       client,
@@ -780,6 +798,30 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         target_metric: "erp_accepted_unique_skus",
         minimum_same_item_matches: 1,
       });
+      const pageCleanup = directEnv.FLOW_B_PRUNE_ORPHAN_PAGES_ON_START === "1"
+        ? await pruneOrphanedFlowPages(context, {
+            preserveOrdinaryPages: Math.max(
+              0,
+              Number(directEnv.FLOW_B_ORPHAN_PAGE_KEEP_COUNT) || 1,
+            ),
+            closeTimeoutMs: Math.max(
+              1,
+              Number(directEnv.FLOW_B_ORPHAN_PAGE_CLOSE_TIMEOUT_MS) || 5_000,
+            ),
+          })
+        : {
+            observed_pages: context.pages().length,
+            closed_pages: 0,
+            failed_pages: 0,
+            preserved_pages: context.pages().length,
+            protected_pages: 0,
+            disabled: true,
+          };
+      await fs.appendFile(path.join(options.runDir, "browser_page_cleanup.jsonl"), `${JSON.stringify({
+        at: new Date().toISOString(),
+        stage: "direct-worker-start",
+        ...pageCleanup,
+      })}\n`);
       const directRunControl = {
         cancelled: false,
         fatalError: null,

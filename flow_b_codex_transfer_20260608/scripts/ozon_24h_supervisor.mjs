@@ -21,6 +21,7 @@ import {
   releaseSubmissionGate,
 } from "./flow_b_playwright/runtime-state.mjs";
 import { hasReliableSameItemCostEvidence } from "./flow_b_playwright/cost-evidence.mjs";
+import { archiveRestorableProfileSessions } from "./prepare_cdp_profile.mjs";
 
 const execFileAsync = promisify(execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -845,6 +846,7 @@ export function chromeArguments(browser) {
     `--user-data-dir=${absolute(browser.profile_dir)}`,
     "--no-first-run",
     "--no-default-browser-check",
+    "--disable-session-crashed-bubble",
     "--disable-blink-features=AutomationControlled",
     "--disable-gpu",
     `--disable-extensions-except=${absolute(browser.extension_dir)}`,
@@ -878,6 +880,24 @@ export async function ensureBrowserOwner({ config, stateRoot, runDir }) {
       pid: owners[0].pid,
     });
   }
+  owners = await profileOwners(profileDir);
+  if (owners.length > 0) {
+    const error = new Error(`refusing session archive while profile owner is active: ${owners.map((row) => row.pid).join(",")}`);
+    error.code = "OZON_PROFILE_IN_USE";
+    throw error;
+  }
+  const sessionArchive = await archiveRestorableProfileSessions({
+    profileDir,
+    runDir,
+    archiveId: `browser-start-${Date.now()}`,
+  });
+  await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+    at: new Date().toISOString(),
+    run_dir: runDir,
+    action: "archived-restorable-browser-tabs",
+    archived_count: sessionArchive.archived_count,
+    archive_dir: sessionArchive.archive_dir,
+  });
   await fsp.mkdir(profileDir, { recursive: true });
   const stdoutFd = fs.openSync(path.join(stateRoot, "chrome.stdout.log"), "a");
   const stderrFd = fs.openSync(path.join(stateRoot, "chrome.stderr.log"), "a");

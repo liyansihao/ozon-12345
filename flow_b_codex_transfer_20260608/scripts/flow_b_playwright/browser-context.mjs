@@ -121,6 +121,121 @@ function targetUrl(target) {
   }
 }
 
+function pageNeedsManualAttention(url, title) {
+  return /captcha|challenge|verification|required|\bmfa\b|(?:^|[/?#_-])(?:login|signin|auth)(?:[/?#_-]|$)|验证码|人机验证|身份验证|登录/iu
+    .test(`${String(url || "")} ${String(title || "")}`);
+}
+
+async function closePageWithin(page, timeoutMs) {
+  let timer;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => page.close()),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`orphan page close timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function pageTitleWithin(page, timeoutMs) {
+  if (typeof page?.title !== "function") return "";
+  let timer;
+  try {
+    return await Promise.race([
+      page.title(),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(""), timeoutMs);
+      }),
+    ]);
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function pageSecurityTextWithin(page, timeoutMs) {
+  if (typeof page?.evaluate !== "function") return "";
+  let timer;
+  try {
+    return await Promise.race([
+      page.evaluate(() => String(document.body?.innerText || "").slice(0, 2_000)),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(""), timeoutMs);
+      }),
+    ]);
+  } catch {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function pruneOrphanedFlowPages(context, {
+  preserveOrdinaryPages = 1,
+  closeTimeoutMs = 5_000,
+} = {}) {
+  if (!context || typeof context.pages !== "function") {
+    return {
+      observed_pages: 0,
+      closed_pages: 0,
+      failed_pages: 0,
+      preserved_pages: 0,
+      protected_pages: 0,
+    };
+  }
+  const pages = context.pages().filter(
+    (page) => typeof page?.isClosed !== "function" || !page.isClosed(),
+  );
+  const descriptors = await Promise.all(pages.map(async (page, index) => {
+    const url = targetUrl(page);
+    const inspectionTimeoutMs = Math.min(1_000, Math.max(1, Number(closeTimeoutMs) || 1));
+    const [title, securityText] = await Promise.all([
+      pageTitleWithin(page, inspectionTimeoutMs),
+      /^https:\/\/(?:www\.ozon\.(?:ru|kz|by)|ozon\.maozierp\.com)\//iu.test(url)
+        ? pageSecurityTextWithin(page, inspectionTimeoutMs)
+        : "",
+    ]);
+    const protectedPage = url.startsWith("chrome-extension://")
+      || (url.startsWith("chrome://") && url !== "about:blank")
+      || pageNeedsManualAttention(url, `${title} ${securityText}`);
+    const preference = url === "about:blank"
+      ? 0
+      : url.startsWith("https://ozon.maozierp.com/")
+        ? 1
+        : 2;
+    return { page, index, url, title, protectedPage, preference };
+  }));
+  const protectedPages = descriptors.filter((entry) => entry.protectedPage);
+  const ordinaryPages = descriptors
+    .filter((entry) => !entry.protectedPage)
+    .sort((left, right) => left.preference - right.preference || left.index - right.index);
+  const preserveCount = Math.max(0, Math.floor(Number(preserveOrdinaryPages) || 0));
+  const preservedOrdinary = new Set(ordinaryPages.slice(0, preserveCount).map((entry) => entry.page));
+  const closing = ordinaryPages.filter((entry) => !preservedOrdinary.has(entry.page));
+  const closed = await Promise.all(closing.map((entry) => closePageWithin(
+    entry.page,
+    Math.max(1, Number(closeTimeoutMs) || 1),
+  )));
+  const closedPages = closed.filter(Boolean).length;
+  return {
+    observed_pages: descriptors.length,
+    closed_pages: closedPages,
+    failed_pages: closing.length - closedPages,
+    preserved_pages: descriptors.length - closing.length,
+    protected_pages: protectedPages.length,
+  };
+}
+
 export async function assertPluginLoaded(context, { timeout = 15000, interval = 100 } = {}) {
   const deadline = Date.now() + Math.max(0, timeout);
   do {
@@ -183,16 +298,35 @@ export async function openMaoziPage(context, {
 } = {}) {
   const available = () => context.pages().filter((page) => typeof page.isClosed !== "function" || !page.isClosed());
   const navigable = () => available().filter((page) => !targetUrl(page).startsWith("chrome-extension://"));
+  const pagesBeforeOpen = new Set(available());
   let page = forceNew ? null : available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
   if (!page) {
-    page = forceNew ? await context.newPage() : navigable()[0] || await context.newPage();
-    await page.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded", timeout: 60000 });
+    let createdPage = false;
+    if (forceNew) {
+      page = await context.newPage();
+      createdPage = true;
+    } else {
+      page = navigable()[0];
+      if (!page) {
+        page = await context.newPage();
+        createdPage = true;
+      }
+    }
+    try {
+      await page.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded", timeout: 60000 });
+    } catch (error) {
+      if (createdPage) await page.close().catch(() => {});
+      throw error;
+    }
   }
   if (settleMs > 0) await delay(settleMs);
   if (typeof page.isClosed === "function" && page.isClosed()) {
     const deadline = Date.now() + Math.max(0, Number(recoveryTimeoutMs) || 0);
     do {
-      page = available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
+      page = available().find((candidate) => (
+        (!forceNew || !pagesBeforeOpen.has(candidate))
+        && targetUrl(candidate).startsWith("https://ozon.maozierp.com/")
+      ));
       if (page || Date.now() >= deadline) break;
       await delay(Math.max(1, Number(recoveryPollMs) || 1));
     } while (true);

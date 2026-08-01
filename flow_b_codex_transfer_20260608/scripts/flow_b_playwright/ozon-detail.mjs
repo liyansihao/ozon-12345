@@ -119,38 +119,86 @@ export function createOzonDetailProvider({
   maxConcurrency = 12,
 } = {}) {
   if (!context || typeof context.newPage !== "function") throw new TypeError("Playwright context is required for Ozon detail extraction");
-  const adaptive = new AdaptiveConcurrency({ initial: initialConcurrency, max: maxConcurrency });
+  const adaptive = new AdaptiveConcurrency({ initial: initialConcurrency, max: maxConcurrency, min: 1 });
   const available = [];
   const waiters = [];
+  const allPages = new Set();
+  const pageCreations = new Set();
   let created = 0;
+  let closing = false;
+  let closePromise = null;
+
+  function providerClosedError() {
+    const error = new Error("Ozon detail page provider is closed");
+    error.code = "FLOW_B_OZON_DETAIL_PROVIDER_CLOSED";
+    return error;
+  }
+
+  async function createPage() {
+    if (closing) throw providerClosedError();
+    created += 1;
+    let retained = false;
+    const creation = (async () => {
+      const page = await context.newPage();
+      if (closing) {
+        await page.close().catch(() => {});
+        return null;
+      }
+      allPages.add(page);
+      retained = true;
+      return page;
+    })();
+    pageCreations.add(creation);
+    try {
+      const page = await creation;
+      if (!page) throw providerClosedError();
+      return page;
+    } finally {
+      pageCreations.delete(creation);
+      if (!retained) created = Math.max(0, created - 1);
+    }
+  }
+
+  async function discardPage(page) {
+    if (allPages.delete(page)) created = Math.max(0, created - 1);
+    await page?.close?.().catch(() => {});
+  }
+
+  function nextWaiter() {
+    return waiters.shift() || null;
+  }
 
   async function acquirePage() {
-    if (available.length) return available.pop();
-    if (created < adaptive.current) {
-      created += 1;
-      try {
-        return await context.newPage();
-      } catch (error) {
-        created -= 1;
-        throw error;
-      }
+    if (closing) throw providerClosedError();
+    while (available.length) {
+      const page = available.pop();
+      if (allPages.has(page) && (typeof page?.isClosed !== "function" || !page.isClosed())) return page;
+      if (allPages.delete(page)) created = Math.max(0, created - 1);
     }
-    return new Promise((resolve) => waiters.push(resolve));
+    if (created < adaptive.current) {
+      return createPage();
+    }
+    return new Promise((resolve, reject) => {
+      if (closing) reject(providerClosedError());
+      else waiters.push({ resolve, reject });
+    });
   }
 
   async function releasePage(page, reusable = true) {
+    if (closing) {
+      await discardPage(page);
+      return;
+    }
     if (!reusable || (typeof page?.isClosed === "function" && page.isClosed())) {
-      created = Math.max(0, created - 1);
-      await page?.close?.().catch(() => {});
-      const next = waiters.shift();
+      await discardPage(page);
+      const next = nextWaiter();
       if (next) {
-        created += 1;
-        context.newPage().then(next, () => { created = Math.max(0, created - 1); next(null); });
+        createPage().then(next.resolve, next.reject);
       }
       return;
     }
-    const next = waiters.shift();
-    if (next) next(page);
+    const next = nextWaiter();
+    if (next) next.resolve(page);
     else available.push(page);
   }
 
@@ -221,8 +269,19 @@ export function createOzonDetailProvider({
       }
     },
     async close() {
-      await Promise.all(available.splice(0).map((page) => page.close().catch(() => {})));
-      created = 0;
+      if (closePromise) return closePromise;
+      closing = true;
+      const closeError = providerClosedError();
+      for (const waiter of waiters.splice(0)) waiter.reject(closeError);
+      available.splice(0);
+      closePromise = (async () => {
+        await Promise.allSettled([...pageCreations]);
+        const pages = [...allPages];
+        allPages.clear();
+        created = 0;
+        await Promise.all(pages.map((page) => page.close().catch(() => {})));
+      })();
+      return closePromise;
     },
   };
 }

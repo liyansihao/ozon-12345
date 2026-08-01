@@ -165,6 +165,12 @@ test("production config freezes the direct 500-acceptance runtime and external 1
   assert.equal(config.flow_env.FLOW_B_1688_WORKERS, "4");
   assert.equal(config.flow_env.FLOW_B_TAB_WORKERS, "3");
   assert.equal(config.flow_env.FLOW_B_FAVORITE_WORKERS, "3");
+  assert.equal(config.flow_env.FLOW_B_PUBLISH_WORKERS, "8");
+  assert.equal(config.flow_env.FLOW_B_OZON_DETAIL_WORKERS, "1");
+  assert.equal(config.flow_env.FLOW_B_MAX_OZON_DETAIL_WORKERS, "1");
+  assert.equal(config.flow_env.FLOW_B_PRUNE_ORPHAN_PAGES_ON_START, "1");
+  assert.equal(config.flow_env.FLOW_B_ORPHAN_PAGE_KEEP_COUNT, "1");
+  assert.equal(config.flow_env.FLOW_B_ORPHAN_PAGE_CLOSE_TIMEOUT_MS, "5000");
   assert.equal(config.flow_env.FLOW_B_OZON_WARMUP_INTERVAL_MS, "4000");
   assert.equal(config.flow_env.FLOW_B_OZON_BASE_INTERVAL_MS, "3000");
   assert.equal(config.flow_env.FLOW_B_OZON_MAX_INTERVAL_MS, "8000");

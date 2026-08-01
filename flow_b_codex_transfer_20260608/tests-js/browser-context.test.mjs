@@ -12,6 +12,7 @@ import {
   ensureMaoziPluginLogin,
   launchFlowContext,
   openMaoziPage,
+  pruneOrphanedFlowPages,
   resolveBrowserOptions,
 } from "../scripts/flow_b_playwright/browser-context.mjs";
 
@@ -76,6 +77,84 @@ test("browser options can bypass a broken macOS system proxy explicitly", async 
 
   assert.ok(directOptions.args.includes("--no-proxy-server"));
   assert.equal(defaultOptions.args.includes("--no-proxy-server"), false);
+});
+
+test("direct worker startup prunes orphan pages while preserving security and extension pages", async () => {
+  const closed = [];
+  const page = (name, url, title = "") => ({
+    url: () => url,
+    title: async () => title,
+    evaluate: async () => "",
+    isClosed: () => false,
+    close: async () => { closed.push(name); },
+  });
+  const pages = [
+    page("blank", "about:blank"),
+    page("old-erp", "https://ozon.maozierp.com/#/product/favorite", "毛子ERP"),
+    page("old-ozon", "https://www.ozon.ru/product/123", "Ozon"),
+    page("extension", "chrome-extension://fixture/popup.html", "插件"),
+    page("captcha", "https://www.ozon.ru/product/456", "需要人机验证"),
+  ];
+
+  const result = await pruneOrphanedFlowPages({ pages: () => pages }, {
+    preserveOrdinaryPages: 1,
+    closeTimeoutMs: 100,
+  });
+
+  assert.deepEqual(closed.sort(), ["old-erp", "old-ozon"]);
+  assert.deepEqual(result, {
+    observed_pages: 5,
+    closed_pages: 2,
+    failed_pages: 0,
+    preserved_pages: 3,
+    protected_pages: 2,
+  });
+});
+
+test("orphan pruning reports a bounded close failure without closing protected login pages", async () => {
+  let loginClosed = false;
+  const result = await pruneOrphanedFlowPages({
+    pages: () => [
+      {
+        url: () => "about:blank",
+        title: async () => "",
+        isClosed: () => false,
+        close: async () => { throw new Error("target already gone"); },
+      },
+      {
+        url: () => "https://ozon.maozierp.com/#/login",
+        title: async () => "登录",
+        evaluate: async () => "",
+        isClosed: () => false,
+        close: async () => { loginClosed = true; },
+      },
+    ],
+  }, {
+    preserveOrdinaryPages: 0,
+    closeTimeoutMs: 100,
+  });
+
+  assert.equal(loginClosed, false);
+  assert.equal(result.failed_pages, 1);
+  assert.equal(result.protected_pages, 1);
+  assert.equal(result.preserved_pages, 1);
+});
+
+test("orphan pruning reads the page body before preserving an Ozon verification tab", async () => {
+  let closed = false;
+  const result = await pruneOrphanedFlowPages({
+    pages: () => [{
+      url: () => "https://www.ozon.ru/product/123",
+      title: async () => "Ozon",
+      evaluate: async () => "请完成验证码后继续",
+      isClosed: () => false,
+      close: async () => { closed = true; },
+    }],
+  }, { preserveOrdinaryPages: 0, closeTimeoutMs: 100 });
+
+  assert.equal(closed, false);
+  assert.equal(result.protected_pages, 1);
+  assert.equal(result.preserved_pages, 1);
 });
 
 test("browser context can attach to a normally launched CDP browser and owns its shutdown", async () => {
@@ -272,6 +351,26 @@ test("Maozi navigation reuses an existing authenticated page", async () => {
   assert.equal(newPageCalls, 0);
 });
 
+test("Maozi navigation closes a page it created when goto fails", async () => {
+  let closed = 0;
+  const opened = {
+    url: () => "about:blank",
+    isClosed: () => false,
+    goto: async () => { throw new Error("navigation failed"); },
+    close: async () => { closed += 1; },
+  };
+  const context = {
+    pages: () => [],
+    newPage: async () => opened,
+  };
+
+  await assert.rejects(
+    openMaoziPage(context, { forceNew: true, settleMs: 0 }),
+    /navigation failed/,
+  );
+  assert.equal(closed, 1);
+});
+
 test("force-new Maozi navigation waits for a delayed authenticated replacement after SSO closes", async () => {
   let pageChecks = 0;
   let openedClosed = false;
@@ -297,6 +396,33 @@ test("force-new Maozi navigation waits for a delayed authenticated replacement a
     recoveryTimeoutMs: 50,
     recoveryPollMs: 1,
   }), replacement);
+});
+
+test("force-new Maozi navigation never borrows another session's existing page after SSO closes", async () => {
+  const existing = {
+    url: () => "https://ozon.maozierp.com/#/product/favorite",
+    isClosed: () => false,
+  };
+  let openedClosed = false;
+  const opened = {
+    url: () => "https://sso.maozierp.com/login",
+    isClosed: () => openedClosed,
+    goto: async () => { openedClosed = true; },
+  };
+  const context = {
+    pages: () => [existing],
+    newPage: async () => opened,
+  };
+
+  await assert.rejects(
+    openMaoziPage(context, {
+      forceNew: true,
+      settleMs: 0,
+      recoveryTimeoutMs: 5,
+      recoveryPollMs: 1,
+    }),
+    /SSO page closed/i,
+  );
 });
 
 test("browser options reject a missing or invalid extension manifest", async () => {

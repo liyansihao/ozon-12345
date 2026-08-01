@@ -621,6 +621,7 @@ test("supervised Chrome disables GPU acceleration after repeated SkSurface resou
   });
 
   assert.equal(args.includes("--disable-gpu"), true);
+  assert.equal(args.includes("--disable-session-crashed-bubble"), true);
   assert.equal(args.includes("--disable-software-rasterizer"), false);
 });
 

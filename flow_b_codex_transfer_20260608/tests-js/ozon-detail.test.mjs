@@ -124,6 +124,57 @@ test("Playwright detail provider reuses its page until the pool closes", async (
   assert.equal(closed, true);
 });
 
+test("detail provider close reclaims a leased page and rejects queued waiters", async () => {
+  let closed = false;
+  let closeCalls = 0;
+  let newPageCalls = 0;
+  let rejectNavigation;
+  let markNavigationStarted;
+  const navigationStarted = new Promise((resolve) => { markNavigationStarted = resolve; });
+  const page = {
+    isClosed: () => closed,
+    goto: async () => {
+      markNavigationStarted();
+      return new Promise((_, reject) => { rejectNavigation = reject; });
+    },
+    evaluate: async () => null,
+    close: async () => {
+      if (closed) return;
+      closed = true;
+      closeCalls += 1;
+      rejectNavigation?.(new Error("Target page has been closed"));
+    },
+  };
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        newPageCalls += 1;
+        return page;
+      },
+    },
+    timeout: 5,
+    pollInterval: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  const first = provider.getProductDetail("leased", { sell_price: 90 });
+  await navigationStarted;
+  const firstRejected = assert.rejects(first, /target page has been closed/i);
+  const second = provider.getProductDetail("waiting", { sell_price: 90 });
+  const secondRejected = assert.rejects(second, /provider is closed/i);
+  await Promise.resolve();
+
+  await provider.close();
+  await Promise.all([firstRejected, secondRejected]);
+  assert.equal(closeCalls, 1);
+  assert.equal(newPageCalls, 1);
+  await assert.rejects(
+    provider.getProductDetail("after-close", { sell_price: 90 }),
+    /provider is closed/i,
+  );
+});
+
 test("detail provider waits for Maozi mode instead of accepting a long bare Ozon body", async () => {
   let calls = 0;
   const page = {
