@@ -742,6 +742,7 @@ export function createPublishRunner({
   const targetCount = Number(target);
   const profitThreshold = Number(threshold);
   const activeDirectMode = Boolean(directMode);
+  const unlimitedTarget = activeDirectMode && targetCount === 0;
   const sharedDirectRunControl = directRunControl && typeof directRunControl === "object"
     ? directRunControl
     : null;
@@ -1196,7 +1197,7 @@ export function createPublishRunner({
         return { ok: false, reason: "batch-fatal-cancelled", not_submitted: true };
       }
       if (activeDirectMode) {
-        if (directAcceptedCount() >= targetCount) {
+        if (!unlimitedTarget && directAcceptedCount() >= targetCount) {
           return { ok: false, reason: "target-already-reached", not_submitted: true };
         }
         const activeStoreId = Number(directActiveStoreId() || 0);
@@ -3850,12 +3851,16 @@ export function createPublishRunner({
           || item?.submitted === true
           || item?.submission_pending === true
           || item?.submission_intent === true;
-        if (!activeValidationOnly
+        if (!unlimitedTarget
+          && !activeValidationOnly
           && inFlightFreshCount() > 0
           && acceptedCount() + inFlightFreshCount() >= targetCount) {
           break;
         }
-        if (!activeValidationOnly && !reconciliation && acceptedCount() >= targetCount) {
+        if (!unlimitedTarget
+          && !activeValidationOnly
+          && !reconciliation
+          && acceptedCount() >= targetCount) {
           cursor += 1;
           continue;
         }
@@ -3897,7 +3902,7 @@ export function createPublishRunner({
           continue schedulerLoop;
         }
 
-        if (!reconciliation) {
+        if (!unlimitedTarget && !reconciliation) {
           const remainingTarget = targetCount - acceptedCount() - inFlightFreshCount();
           if (!activeValidationOnly && remainingTarget <= 0) break;
         }
@@ -3928,7 +3933,7 @@ export function createPublishRunner({
     return {
       published,
       accepted: acceptedCount(),
-      remaining: Math.max(0, targetCount - acceptedCount()),
+      remaining: unlimitedTarget ? null : Math.max(0, targetCount - acceptedCount()),
       validated,
       failed,
       skipped,
@@ -3937,7 +3942,8 @@ export function createPublishRunner({
       dry_candidates: dryCandidates,
       final_concurrency: adaptive.current,
       deadline_reached: Boolean(deadlineAt && Date.now() >= Date.parse(deadlineAt)),
-      target: targetCount,
+      target: unlimitedTarget ? null : targetCount,
+      unlimited: unlimitedTarget,
       halt_reason: haltReason,
       direct_target_slots_used: activeDirectMode ? directTargetUsage() : null,
       stores_exhausted: activeDirectMode ? {

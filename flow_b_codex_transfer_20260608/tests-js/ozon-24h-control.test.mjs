@@ -9,6 +9,7 @@ import {
   buildIncidentDigest,
   compactProductionStatus,
   currentRunRetirementDecision,
+  dailyAcceptedSummary,
   deploymentIdentityValid,
   directCompletionEvidenceDecision,
   doctor,
@@ -84,6 +85,36 @@ test("direct target completion is resumable when current-run ERP evidence is bel
   });
 });
 
+test("legacy target completion always resumes when direct publishing is unlimited", () => {
+  assert.deepEqual(directCompletionEvidenceDecision({
+    status: { status: "TARGET_COMPLETE" },
+    current,
+    acceptedCount: 499,
+    target: 0,
+  }), {
+    action: "resume-current-run",
+    accepted: 499,
+    target: null,
+    unlimited: true,
+  });
+});
+
+test("direct daily status counts unique ERP acceptances in the Shanghai natural day", () => {
+  assert.deepEqual(dailyAcceptedSummary([
+    { sku: "previous", store_id: 1, accepted_at: "2026-07-31T15:59:59.999Z" },
+    { sku: "today-a", store_id: 2, accepted_at: "2026-07-31T16:00:00.000Z" },
+    { sku: "today-a", store_id: 2, accepted_at: "2026-08-01T01:00:00.000Z" },
+    { sku: "today-b", store_id: 3, at: "2026-08-01T15:59:59.999Z" },
+    { sku: "tomorrow", store_id: 3, accepted_at: "2026-08-01T16:00:00.000Z" },
+  ], {
+    now: "2026-08-01T12:00:00.000Z",
+  }), {
+    date: "2026-08-01",
+    accepted: 2,
+    by_store: { "2": 1, "3": 1 },
+  });
+});
+
 test("legacy production run can only be retired after a zero-owner safe stop", () => {
   assert.deepEqual(currentRunRetirementDecision({
     status: { status: "STOPPED", reason: "safe stop requested" },
@@ -148,7 +179,7 @@ test("doctor release identity requires exact commit, config hash, source hash, a
   assert.equal(deploymentIdentityValid({ ...valid, state_schema_version: 2 }, configText), false);
 });
 
-test("production config freezes the direct 500-acceptance runtime and external 1688 Python", async () => {
+test("production config freezes unlimited direct runtime and external 1688 Python", async () => {
   const configPath = path.resolve(
     import.meta.dirname,
     "../config/ozon_24h_production.json",
@@ -156,8 +187,11 @@ test("production config freezes the direct 500-acceptance runtime and external 1
   const config = JSON.parse(await fs.readFile(configPath, "utf8"));
   assert.doesNotThrow(() => validateConfig(config));
   assert.equal(config.runtime_mode, "direct");
-  assert.equal(config.publish_target, 500);
+  assert.equal(config.publish_target, 0);
+  assert.equal(config.unlimited_publish, true);
   assert.equal(config.flow_env.FLOW_B_DIRECT_PUBLISH, "1");
+  assert.equal(config.flow_env.FLOW_B_TARGET_PUBLISH_COUNT, "0");
+  assert.equal(config.flow_env.FLOW_B_UNLIMITED_PUBLISH, "1");
   assert.equal(config.flow_env.FLOW_B_1688_MIN_MATCHES, "1");
   assert.equal(config.flow_env.FLOW_B_1688_TOTAL_BUDGET_MS, "15000");
   assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "15");
@@ -224,9 +258,9 @@ test("production config freezes the direct 500-acceptance runtime and external 1
   assert.throws(
     () => validateConfig({
       ...config,
-      publish_target: 499,
+      publish_target: 500,
     }),
-    /target must equal 500/u,
+    /target zero/u,
   );
   assert.throws(
     () => validateConfig({ ...config, stores: config.stores.slice(0, 9) }),

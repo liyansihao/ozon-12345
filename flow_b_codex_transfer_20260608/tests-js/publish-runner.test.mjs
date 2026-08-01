@@ -6057,6 +6057,51 @@ test("direct background reconciliation records online state without changing ERP
   }
 });
 
+test("direct mode target zero keeps accepting candidates without a global quantity cap", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-unlimited-"));
+  try {
+    let publishCalls = 0;
+    const candidates = ["unlimited-a", "unlimited-b"].map((sku) => ({
+      sku,
+      title: `safe ${sku}`,
+      cover_image: `https://img.example/${sku}.jpg`,
+      sell_price: 100,
+    }));
+    const result = await createPublishRunner({
+      client: clientFor(candidates, {
+        getProductDetail: async (sku) => ({
+          sku,
+          mode: "FBO",
+          title: `safe ${sku}`,
+          cover_image: `https://img.example/${sku}.jpg`,
+          current_price: 100,
+          follow_min: 90,
+        }),
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true, response: { code: 1 } };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state: fakeState(),
+      target: 0,
+      runDir,
+      directMode: true,
+      concurrency: 2,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(publishCalls, 2);
+    assert.equal(result.accepted, 2);
+    assert.equal(result.unlimited, true);
+    assert.equal(result.target, null);
+    assert.equal(result.remaining, null);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("direct mode excludes historical ERP acceptances without current-run ownership", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-run-scope-"));
   try {

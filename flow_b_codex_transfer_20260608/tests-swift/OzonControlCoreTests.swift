@@ -72,7 +72,7 @@ private func makeFixture() throws -> (root: URL, script: URL, log: URL, state: U
 }
 
 private let runningJSON = """
-{"at":"2026-08-01T01:00:00Z","status":"RUNNING","reason":null,"run_id":"test-run","target":500,"remaining":377,"funnel":{"candidate_required_fields_passed":900,"snapshot_category_passed":800,"cost_passed":200,"live_price_confirmed":130,"profit_passed":125,"erp_accepted":123,"online":97},"owners":{"supervisor":1,"worker":1,"profile":1}}
+{"at":"2026-08-01T01:00:00Z","status":"RUNNING","reason":null,"run_id":"test-run","count_date":"2026-08-01","target":null,"remaining":null,"unlimited":true,"run_accepted":499,"funnel":{"candidate_required_fields_passed":900,"snapshot_category_passed":800,"cost_passed":200,"live_price_confirmed":130,"profit_passed":125,"erp_accepted":166,"online":97},"owners":{"supervisor":1,"worker":1,"profile":1}}
 """
 
 private func testCommandMappingAndParsing() throws {
@@ -99,8 +99,12 @@ private func testCommandMappingAndParsing() throws {
     )
     let service = OzonControlService(runner: runner, inspector: inspector, stopSettleTimeout: 0.1)
     let snapshot = try service.loadSnapshot()
-    try expect(snapshot.production.accepted == 123, "ERP accepted count should parse")
-    try expect(snapshot.production.remainingCount == 377, "remaining count should parse")
+    try expect(snapshot.production.accepted == 166, "today ERP accepted count should parse")
+    try expect(snapshot.production.countDate == "2026-08-01", "Shanghai count date should parse")
+    try expect(snapshot.production.runAccepted == 499, "run accepted count should parse")
+    try expect(snapshot.production.unlimited, "unlimited flag should parse")
+    try expect(snapshot.production.target == nil, "unlimited status must not expose a target")
+    try expect(snapshot.production.remainingCount == nil, "unlimited status must not expose remaining")
     try expect(snapshot.production.online == 97, "online count should parse")
     try expect(snapshot.production.owners == OzonOwners(supervisor: 1, worker: 1, profile: 1), "owners should parse")
     try expect(snapshot.local.currentStore == OzonCurrentStore(id: 106640, name: "丽丽三号"), "current store should come from run state")
@@ -150,7 +154,7 @@ private func testSafeStopWaitsForReleasedOwners() throws {
     let statusFile = fixture.root.appendingPathComponent("fake-status.json")
     try write(runningJSON, to: statusFile)
     let stoppedJSON = """
-    {"status":"STOPPED","run_id":"test-run","target":500,"remaining":377,"funnel":{"erp_accepted":123,"online":97},"owners":{"supervisor":0,"worker":0,"profile":0}}
+    {"status":"STOPPED","run_id":"test-run","count_date":"2026-08-01","target":null,"remaining":null,"unlimited":true,"run_accepted":499,"funnel":{"erp_accepted":166,"online":97},"owners":{"supervisor":0,"worker":0,"profile":0}}
     """
     var environment = ProcessInfo.processInfo.environment
     environment["FAKE_COMMAND_LOG"] = fixture.log.path
@@ -192,7 +196,7 @@ private func testSafeStopDoesNotMisreportFatalOwners() throws {
     let statusFile = fixture.root.appendingPathComponent("fake-status.json")
     try write(runningJSON, to: statusFile)
     let fatalJSON = """
-    {"status":"FATAL_STOP","reason":"fake fatal","run_id":"test-run","target":500,"remaining":377,"funnel":{"erp_accepted":123,"online":97},"owners":{"supervisor":1,"worker":1,"profile":1}}
+    {"status":"FATAL_STOP","reason":"fake fatal","run_id":"test-run","count_date":"2026-08-01","target":null,"remaining":null,"unlimited":true,"run_accepted":499,"funnel":{"erp_accepted":166,"online":97},"owners":{"supervisor":1,"worker":1,"profile":1}}
     """
     var environment = ProcessInfo.processInfo.environment
     environment["FAKE_COMMAND_LOG"] = fixture.log.path

@@ -62,12 +62,18 @@ function runtimeDefaults(env) {
   const threshold = Number(env.FLOW_B_PROFIT_THRESHOLD ?? 30);
   const target = Number(env.FLOW_B_TARGET_PUBLISH_COUNT ?? 500);
   if (!Number.isFinite(threshold)) throw new Error("FLOW_B_PROFIT_THRESHOLD must be numeric");
-  if (!Number.isInteger(target) || target <= 0) throw new Error("FLOW_B_TARGET_PUBLISH_COUNT must be a positive integer");
+  if (!Number.isInteger(target) || target < 0) {
+    throw new Error("FLOW_B_TARGET_PUBLISH_COUNT must be zero (unlimited) or a positive integer");
+  }
   const storeNeedle = String(env.FLOW_B_STORE_NEEDLE ?? "丽丽1号").trim();
   const watermarkNeedle = String(env.FLOW_B_WATERMARK_NEEDLE ?? "lysh").trim();
   if (!storeNeedle) throw new Error("FLOW_B_STORE_NEEDLE is required");
   if (!watermarkNeedle) throw new Error("FLOW_B_WATERMARK_NEEDLE is required");
   return { threshold, target, storeNeedle, watermarkNeedle };
+}
+
+export function unlimitedPublishTarget(target) {
+  return Number(target) === 0;
 }
 
 export function allDirectStoresRejected(publish = {}) {
@@ -758,7 +764,7 @@ function printHelp() {
   flow_b_playwright.mjs run RUN_DIR URLS.txt
 
 Required for browser commands: FLOW_B_EXTENSION_DIR=/path/to/unpacked/maozi-plugin
-Defaults: one verified 1688 same-item match, profit_rate > 30, 500 ERP-accepted unique SKUs, watermark contains lysh`);
+Defaults: one verified 1688 same-item match, profit_rate > 30, FLOW_B_TARGET_PUBLISH_COUNT=0 for continuous publishing, watermark contains lysh`);
 }
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
@@ -794,8 +800,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         urls_file: options.urlsFile,
         scan_output: options.outFile,
         profit_threshold: options.threshold,
-        publish_target: options.target,
-        target_metric: "erp_accepted_unique_skus",
+        publish_target: unlimitedPublishTarget(options.target) ? null : options.target,
+        unlimited_publish: unlimitedPublishTarget(options.target),
+        target_metric: unlimitedPublishTarget(options.target)
+          ? "daily_erp_accepted_unique_skus"
+          : "erp_accepted_unique_skus",
         minimum_same_item_matches: 1,
       });
       const pageCleanup = directEnv.FLOW_B_PRUNE_ORPHAN_PAGES_ON_START === "1"
@@ -946,7 +955,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             shared,
             { attemptLimit: publishAttemptLimit(directEnv) },
           );
-          if (Number(publish?.accepted || 0) >= options.target) break;
+          if (!unlimitedPublishTarget(options.target)
+            && Number(publish?.accepted || 0) >= options.target) break;
           if (allDirectStoresRejected(publish)) {
             const error = new Error(`all configured stores rejected direct publishing: ${publish.halt_reason}`);
             error.code = "FLOW_B_ALL_STORES_REJECTED";
@@ -957,7 +967,8 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             await runtimeWake.wait(runtimeIdleDelay(idleStreak, emptyBackoffIntervals));
             continue;
           }
-          if (Number(publish?.direct_target_slots_used || 0) >= options.target) {
+          if (!unlimitedPublishTarget(options.target)
+            && Number(publish?.direct_target_slots_used || 0) >= options.target) {
             idleStreak += 1;
             await runtimeWake.wait(runtimeIdleDelay(idleStreak, emptyBackoffIntervals));
             continue;

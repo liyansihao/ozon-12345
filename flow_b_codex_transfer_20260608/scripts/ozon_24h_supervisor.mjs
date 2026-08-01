@@ -988,7 +988,8 @@ export function workerEnvironment(config, currentRun) {
     environment.FLOW_B_DIRECT_PUBLISH = "1";
     environment.FLOW_B_1688_MIN_MATCHES = "1";
     environment.FLOW_B_VALIDATION_ONLY = "0";
-    environment.FLOW_B_TARGET_PUBLISH_COUNT = String(Number(config.publish_target) || 500);
+    environment.FLOW_B_TARGET_PUBLISH_COUNT = String(Number(config.publish_target));
+    environment.FLOW_B_UNLIMITED_PUBLISH = Number(config.publish_target) === 0 ? "1" : "0";
     environment.FLOW_B_PROFIT_THRESHOLD = String(Number(config.minimum_profit_rate_exclusive) || 30);
     delete environment.FLOW_B_SUBMISSION_GATE_FILE;
     delete environment.FLOW_B_SUBMISSION_GATE_RUN_ID;
@@ -1992,8 +1993,11 @@ async function superviseDirectPublishing({
       await updateOperationalState(stateRoot, currentRun, {
         status: "RUNNING",
         reason: null,
-        target_metric: "erp_accepted_unique_skus",
-        target: Number(config.publish_target) || 500,
+        target_metric: Number(config.publish_target) === 0
+          ? "daily_erp_accepted_unique_skus"
+          : "erp_accepted_unique_skus",
+        target: Number(config.publish_target) === 0 ? null : Number(config.publish_target),
+        unlimited: Number(config.publish_target) === 0,
         worker_pid: Number(worker.pid) || null,
       });
       const activeWorker = worker;
@@ -2014,7 +2018,7 @@ async function superviseDirectPublishing({
         error: result.error,
       });
       if (shuttingDown) break;
-      if (result.code === 0 && !result.browser_unhealthy) {
+      if (result.code === 0 && !result.browser_unhealthy && Number(config.publish_target) > 0) {
         await updateOperationalState(stateRoot, currentRun, {
           status: "TARGET_COMPLETE",
           reason: "erp-accepted-target-reached",

@@ -14,6 +14,7 @@ import {
   publishedCsvPath,
   resumedAcceptanceWindow,
   sourceScanOutputFile,
+  unlimitedPublishTarget,
 } from "../scripts/flow_b_playwright.mjs";
 
 test("direct run stops only after every configured store is rejected", () => {
@@ -115,6 +116,19 @@ test("the direct run command accepts the same bounded candidate-attempt budget",
   assert.equal(parsed.command, "run");
   assert.equal(parsed.target, 3);
   assert.equal(publishAttemptLimit({ FLOW_B_PUBLISH_ATTEMPT_LIMIT: "3" }), 3);
+});
+
+test("direct run accepts zero as an explicit unlimited publish target", () => {
+  const parsed = parseCli(["run", "runs/continuous", "urls.txt"], {
+    FLOW_B_TARGET_PUBLISH_COUNT: "0",
+  });
+  assert.equal(parsed.target, 0);
+  assert.equal(unlimitedPublishTarget(parsed.target), true);
+  assert.equal(unlimitedPublishTarget(500), false);
+  assert.throws(
+    () => parseCli(["run", "runs/invalid", "urls.txt"], { FLOW_B_TARGET_PUBLISH_COUNT: "-1" }),
+    /zero \(unlimited\) or a positive integer/u,
+  );
 });
 
 test("CLI accepts setup, scan, and run shapes", () => {

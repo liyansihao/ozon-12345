@@ -96,8 +96,11 @@ struct OzonProductionStatus: Decodable, Equatable {
     let status: String
     let reason: String?
     let runID: String?
-    let target: Int
+    let countDate: String?
+    let target: Int?
     let remaining: Int?
+    let unlimited: Bool
+    let runAccepted: Int
     let funnel: OzonFunnel
     let owners: OzonOwners
 
@@ -106,8 +109,11 @@ struct OzonProductionStatus: Decodable, Equatable {
         case status
         case reason
         case runID = "run_id"
+        case countDate = "count_date"
         case target
         case remaining
+        case unlimited
+        case runAccepted = "run_accepted"
         case funnel
         case owners
         case strict
@@ -118,8 +124,11 @@ struct OzonProductionStatus: Decodable, Equatable {
         status: String,
         reason: String? = nil,
         runID: String? = nil,
-        target: Int = 500,
+        countDate: String? = nil,
+        target: Int? = nil,
         remaining: Int? = nil,
+        unlimited: Bool = false,
+        runAccepted: Int = 0,
         funnel: OzonFunnel = OzonFunnel(),
         owners: OzonOwners = OzonOwners()
     ) {
@@ -127,8 +136,11 @@ struct OzonProductionStatus: Decodable, Equatable {
         self.status = status
         self.reason = reason
         self.runID = runID
+        self.countDate = countDate
         self.target = target
         self.remaining = remaining
+        self.unlimited = unlimited
+        self.runAccepted = runAccepted
         self.funnel = funnel
         self.owners = owners
     }
@@ -139,8 +151,11 @@ struct OzonProductionStatus: Decodable, Equatable {
         status = (try values.decodeIfPresent(String.self, forKey: .status) ?? "UNKNOWN").uppercased()
         reason = try values.decodeIfPresent(String.self, forKey: .reason)
         runID = try values.decodeIfPresent(String.self, forKey: .runID)
-        target = max(1, try values.decodeIfPresent(Int.self, forKey: .target) ?? 500)
+        countDate = try values.decodeIfPresent(String.self, forKey: .countDate)
+        target = try values.decodeIfPresent(Int.self, forKey: .target)
         remaining = try values.decodeIfPresent(Int.self, forKey: .remaining)
+        unlimited = try values.decodeIfPresent(Bool.self, forKey: .unlimited) ?? (target == nil)
+        runAccepted = max(0, try values.decodeIfPresent(Int.self, forKey: .runAccepted) ?? 0)
         owners = try values.decodeIfPresent(OzonOwners.self, forKey: .owners) ?? OzonOwners()
 
         if let directFunnel = try values.decodeIfPresent(OzonFunnel.self, forKey: .funnel) {
@@ -159,8 +174,9 @@ struct OzonProductionStatus: Decodable, Equatable {
         max(0, funnel.online)
     }
 
-    var remainingCount: Int {
-        max(0, remaining ?? (target - accepted))
+    var remainingCount: Int? {
+        guard !unlimited, let target else { return nil }
+        return max(0, remaining ?? (target - accepted))
     }
 }
 

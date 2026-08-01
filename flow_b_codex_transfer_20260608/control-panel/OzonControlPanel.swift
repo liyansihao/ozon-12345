@@ -177,19 +177,20 @@ struct OzonControlPanelView: View {
     private var progressCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text("ERP 已接受")
+                Text("今天 ERP 已接受")
                     .font(.headline)
                 Spacer()
                 Text("\(production?.accepted ?? 0)")
                     .font(.system(size: 30, weight: .bold, design: .rounded))
-                Text("/ \(production?.target ?? 500)")
-                    .font(.title3)
+                Text(production?.unlimited == true ? "持续运行" : finiteTargetText)
+                    .font(.headline)
                     .foregroundStyle(.secondary)
             }
-            ProgressView(value: progressValue)
-                .tint(statusColor)
+            Text("上海自然日：\(production?.countDate ?? "—")")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             HStack {
-                metric(title: "剩余", value: "\(production?.remainingCount ?? 500)")
+                metric(title: "当前 run 累计", value: "\(production?.runAccepted ?? 0)")
                 Divider().frame(height: 32)
                 metric(title: "后台在线", value: "\(production?.online ?? 0)")
                 Divider().frame(height: 32)
@@ -306,9 +307,9 @@ struct OzonControlPanelView: View {
         .controlSize(.large)
     }
 
-    private var progressValue: Double {
-        guard let production else { return 0 }
-        return min(1, max(0, Double(production.accepted) / Double(max(1, production.target))))
+    private var finiteTargetText: String {
+        guard let production, let target = production.target else { return "" }
+        return "/ \(target)"
     }
 
     private var tabCountText: String {
@@ -424,9 +425,12 @@ enum OzonControlPanelEntryPoint {
             let snapshot = try service.loadSnapshot()
             let payload: [String: Any] = [
                 "status": snapshot.production.status,
-                "accepted": snapshot.production.accepted,
-                "target": snapshot.production.target,
-                "remaining": snapshot.production.remainingCount,
+                "count_date": snapshot.production.countDate ?? NSNull(),
+                "accepted_today": snapshot.production.accepted,
+                "run_accepted": snapshot.production.runAccepted,
+                "target": snapshot.production.target ?? NSNull(),
+                "remaining": snapshot.production.remainingCount ?? NSNull(),
+                "unlimited": snapshot.production.unlimited,
                 "online": snapshot.production.online,
                 "current_store": snapshot.local.currentStore.displayName,
                 "supervisor": snapshot.production.owners.supervisor,

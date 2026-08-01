@@ -7,7 +7,7 @@
 面板每 5 秒自动刷新，显示：
 
 - 当前生产状态；
-- ERP 已接受数、500 目标和剩余数；
+- 上海自然日当天 ERP 已接受数和当前 run 累计数；
 - 后台已在线数；
 - 当前店铺；
 - supervisor、worker、browser/profile owner 数量；
@@ -21,7 +21,7 @@
 - `刷新状态`：只读刷新；操作执行期间点击会排队，不会并发启动第二条控制命令。
 - `验证后恢复`：仅在 `WAITING_FOR_VERIFICATION` 时启用。必须先在系统保留的 Chrome 中手工完成验证码、MFA 或登录检查。
 
-`TARGET_COMPLETE` 和 `FATAL_STOP` 不允许面板自动重启。验证码、安全检查和登录失效也不会被自动绕过。
+无限 direct 模式不再产生数量型 `TARGET_COMPLETE`。`FATAL_STOP` 不允许面板自动重启；验证码、安全检查和登录失效也不会被自动绕过。
 
 ## 安装或重装面板
 
@@ -43,7 +43,7 @@ flow_b_codex_transfer_20260608/scripts/install_ozon_control_panel.sh
 ~/.ozon-24h-production/app/scripts/ozon_24h_production.sh
 ```
 
-因此以后提升新的 stable 上架版本时，不需要重新安装面板。面板不会设置开机自动上架，也不会监听任何公网或局域网端口。
+因此只升级 stable 上架程序时不需要重新安装面板；若面板界面或状态字段本身升级，则重新运行安装器。面板不会设置开机自动上架，也不会监听任何公网或局域网端口。
 
 ## 终端备用命令
 
@@ -67,7 +67,9 @@ flow_b_codex_transfer_20260608/scripts/install_ozon_control_panel.sh
 
 ## 当前直接上架口径
 
-生产唯一目标是 500 个不同 SKU 被毛子 ERP 接口接受。ERP 接受后立即计入目标；`imported`、`online` 和 `stock_updated` 属于后台异步结果，不阻塞主链路。
+生产不设置全局上架数量目标，会持续寻找并提交符合条件的不同 SKU，直到用户安全暂停、需要人工验证、登录失效，或十个店铺都被真实接口拒绝。ERP 接受后立即计入当天数量；`imported`、`online` 和 `stock_updated` 属于后台异步结果，不阻塞主链路。
+
+面板主数字按 `Asia/Shanghai` 自然日统计 `erp_accepted.jsonl` 中的唯一 SKU。每天 00:00 自动从 0 重新计数，但历史记录和当前 run 累计数不会清空，也不会因此重启 worker。
 
 系统保留以下关键条件：
 

@@ -79,6 +79,9 @@ export function directCompletionEvidenceDecision({
 } = {}) {
   if (String(status?.status || "") !== "TARGET_COMPLETE") return { action: "unchanged" };
   if (!current?.run_id || !current?.run_dir || !current?.urls_file) return { action: "unchanged" };
+  if (Number(target) === 0) {
+    return { action: "resume-current-run", accepted: Math.max(0, Number(acceptedCount) || 0), target: null, unlimited: true };
+  }
   const required = Math.max(1, Number(target) || 500);
   const accepted = Math.max(0, Number(acceptedCount) || 0);
   return accepted >= required
@@ -188,7 +191,9 @@ export function deploymentIdentityValid(deployment, configText) {
 function validateConfig(config) {
   if (config?.frozen !== true) throw new Error("production config must be frozen");
   if (config?.runtime_mode === "direct") {
-    if (Number(config?.publish_target) !== 500) throw new Error("direct publish target must equal 500");
+    if (Number(config?.publish_target) !== 0 || config?.unlimited_publish !== true) {
+      throw new Error("direct publishing must use target zero with unlimited_publish enabled");
+    }
     if (Number(config?.minimum_profit_rate_exclusive) !== 30) {
       throw new Error("direct profit rate must be exclusively greater than 30");
     }
@@ -198,8 +203,9 @@ function validateConfig(config) {
     if (Number(config?.flow_env?.FLOW_B_1688_MIN_MATCHES) !== 1) {
       throw new Error("direct publishing requires one verified 1688 same-item match");
     }
-    if (Number(config?.flow_env?.FLOW_B_TARGET_PUBLISH_COUNT) !== 500) {
-      throw new Error("direct ERP-accepted target must equal 500");
+    if (Number(config?.flow_env?.FLOW_B_TARGET_PUBLISH_COUNT) !== 0
+      || String(config?.flow_env?.FLOW_B_UNLIMITED_PUBLISH || "") !== "1") {
+      throw new Error("direct publishing must be unlimited");
     }
     const balancedSpeedContract = {
       FLOW_B_1688_TOTAL_BUDGET_MS: "15000",
@@ -799,10 +805,13 @@ async function normalizeDirectCompletionStatus(config, paths, status, current) {
   const repaired = {
     ...status,
     status: "STOPPED",
-    reason: "direct-target-completion-evidence-missing",
+    reason: decision.unlimited
+      ? "legacy-target-removed-continuous-resume"
+      : "direct-target-completion-evidence-missing",
     observed_at: new Date().toISOString(),
     accepted: decision.accepted,
     target: decision.target,
+    unlimited: decision.unlimited === true,
   };
   await writeJsonAtomic(path.join(paths.stateRoot, "operational_status.json"), repaired);
   return repaired;
@@ -917,8 +926,9 @@ async function start(config) {
     source_set_sha256: sha256(sourceText),
     state_schema_version: Number(config.state_schema_version || 3),
     runtime_mode: directMode ? "direct" : "strict-acceptance",
-    target_metric: directMode ? "erp_accepted_unique_skus" : "strict_online_skus",
-    publish_target: directMode ? Number(config.publish_target || 500) : undefined,
+    target_metric: directMode ? "daily_erp_accepted_unique_skus" : "strict_online_skus",
+    publish_target: directMode ? null : undefined,
+    unlimited_publish: directMode ? true : undefined,
     current_store_id: directMode ? Number(config.starting_store_id || 0) || undefined : undefined,
     formal_window_started: directMode,
   });
@@ -926,8 +936,9 @@ async function start(config) {
     await writeJsonAtomic(path.join(runDir, "source_config.json"), {
       mode: "direct-publish",
       urls_file: sources,
-      target_metric: "erp_accepted_unique_skus",
-      publish_target: Number(config.publish_target || 500),
+      target_metric: "daily_erp_accepted_unique_skus",
+      publish_target: null,
+      unlimited_publish: true,
       minimum_profit_rate_exclusive: Number(config.minimum_profit_rate_exclusive || 30),
       minimum_same_item_matches: 1,
       store_targets: config.flow_env?.FLOW_B_STORE_TARGETS || [],
@@ -940,8 +951,9 @@ async function start(config) {
     requested_at: requestedAt.toISOString(),
     formal_started: directMode,
     runtime_mode: directMode ? "direct" : "strict-acceptance",
-    target_metric: directMode ? "erp_accepted_unique_skus" : "strict_online_skus",
-    publish_target: directMode ? Number(config.publish_target || 500) : undefined,
+    target_metric: directMode ? "daily_erp_accepted_unique_skus" : "strict_online_skus",
+    publish_target: directMode ? null : undefined,
+    unlimited_publish: directMode ? true : undefined,
     current_store_id: directMode ? Number(config.starting_store_id || 0) || undefined : undefined,
     config_sha256: sha256(configText),
     source_sha256: sha256(sourceText),
@@ -1108,6 +1120,43 @@ function uniqueSkuCount(rows) {
   return new Set((rows || []).map((row) => String(row?.sku ?? row?.data?.sku ?? "").trim()).filter(Boolean)).size;
 }
 
+export function shanghaiDateKey(value = new Date(), timeZone = "Asia/Shanghai") {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((entry) => [entry.type, entry.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+export function dailyAcceptedSummary(rows = [], {
+  now = new Date(),
+  timeZone = "Asia/Shanghai",
+} = {}) {
+  const date = shanghaiDateKey(now, timeZone);
+  const acceptedBySku = new Map();
+  for (const row of rows || []) {
+    const sku = String(row?.sku ?? row?.data?.sku ?? "").trim();
+    const acceptedAt = row?.accepted_at || row?.api_call_accepted_at || row?.at || row?.timestamp;
+    if (!sku || shanghaiDateKey(acceptedAt, timeZone) !== date) continue;
+    acceptedBySku.set(sku, row);
+  }
+  const byStore = {};
+  for (const row of acceptedBySku.values()) {
+    const key = String(Number(row?.store_id ?? row?.data?.store_id) || "unknown");
+    byStore[key] = Number(byStore[key] || 0) + 1;
+  }
+  return {
+    date,
+    accepted: acceptedBySku.size,
+    by_store: byStore,
+  };
+}
+
 function errorFingerprint(row) {
   const source = shortText(
     row?.reason || row?.error || row?.message || row?.data?.reason || row?.data?.error || "unknown",
@@ -1175,31 +1224,38 @@ async function status(config) {
       readJsonLines(path.join(current.run_dir, "background_status.jsonl")),
     ]);
     const stageCount = (stage) => uniqueSkuCount(funnel.filter((row) => row?.stage === stage));
-    const accepted = uniqueSkuCount(acceptedRows);
-    const byStore = {};
+    const runAccepted = uniqueSkuCount(acceptedRows);
+    const byStoreRun = {};
     for (const row of acceptedRows) {
       const key = String(Number(row?.store_id) || "unknown");
-      byStore[key] = Number(byStore[key] || 0) + 1;
+      byStoreRun[key] = Number(byStoreRun[key] || 0) + 1;
     }
+    const today = dailyAcceptedSummary(acceptedRows, {
+      timeZone: String(config?.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai"),
+    });
     return {
       at: operational.observed_at || new Date().toISOString(),
       status: operational.status || "UNKNOWN",
       reason: shortText(operational.reason || "", 160) || null,
       run_id: current.run_id || null,
       runtime_mode: "direct",
-      target_metric: "erp_accepted_unique_skus",
-      target: Number(config.publish_target) || 500,
-      remaining: Math.max(0, (Number(config.publish_target) || 500) - accepted),
+      target_metric: "daily_erp_accepted_unique_skus",
+      count_date: today.date,
+      target: null,
+      remaining: null,
+      unlimited: true,
+      run_accepted: runAccepted,
       funnel: {
         candidate_required_fields_passed: stageCount("candidate_required_fields_passed"),
         snapshot_category_passed: stageCount("snapshot_category_passed"),
         cost_passed: stageCount("cost_passed"),
         live_price_confirmed: stageCount("live_price_confirmed"),
         profit_passed: stageCount("profit_passed"),
-        erp_accepted: accepted,
+        erp_accepted: today.accepted,
         online: uniqueSkuCount(backgroundRows.filter((row) => row?.online === true)),
       },
-      by_store: byStore,
+      by_store: today.by_store,
+      by_store_run: byStoreRun,
       owners: {
         supervisor: Number(owners?.counts?.supervisor || 0),
         worker: Number(owners?.counts?.worker || 0),

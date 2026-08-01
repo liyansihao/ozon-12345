@@ -231,7 +231,7 @@ test("worker environment cannot inherit a reduced target", () => {
 test("direct worker starts from the persisted store and has no strict submission gate", () => {
   const environment = workerEnvironment({
     runtime_mode: "direct",
-    publish_target: 500,
+    publish_target: 0,
     minimum_profit_rate_exclusive: 30,
     starting_store_id: 104965,
     state_root: "/state",
@@ -256,7 +256,8 @@ test("direct worker starts from the persisted store and has no strict submission
   assert.equal(stores[0].id, 104965);
   assert.equal(environment.FLOW_B_DIRECT_PUBLISH, "1");
   assert.equal(environment.FLOW_B_1688_MIN_MATCHES, "1");
-  assert.equal(environment.FLOW_B_TARGET_PUBLISH_COUNT, "500");
+  assert.equal(environment.FLOW_B_TARGET_PUBLISH_COUNT, "0");
+  assert.equal(environment.FLOW_B_UNLIMITED_PUBLISH, "1");
   assert.equal(environment.FLOW_B_SUBMISSION_GATE_FILE, undefined);
   assert.equal(environment.FLOW_B_VALIDATION_ONLY, "0");
 });
