@@ -379,6 +379,42 @@ test("direct target slots are atomic across main and background runtime-state ow
   });
 });
 
+test("direct target zero means unlimited and still preserves SKU reservations", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "runtime.sqlite");
+    const runDir = path.join(dir, "unlimited-run");
+    const state = createRuntimeState({
+      dbPath,
+      ownerId: "unlimited-publisher",
+      generationId: "unlimited-generation",
+    });
+
+    for (const sku of ["unlimited-a", "unlimited-b"]) {
+      const reserved = state.reserveSubmission(sku, {
+        reason: "submission-intent",
+        data: {
+          runtime_run_dir: runDir,
+          direct_target_count: 0,
+        },
+      });
+      assert.equal(reserved.recorded, true);
+    }
+    assert.equal(state.directTargetUsage(runDir), 2);
+
+    const duplicate = state.reserveSubmission("unlimited-a", {
+      reason: "submission-intent",
+      data: {
+        runtime_run_dir: runDir,
+        direct_target_count: 0,
+      },
+    });
+    assert.equal(duplicate.recorded, true);
+    assert.equal(state.directTargetUsage(runDir), 2);
+
+    state.close();
+  });
+});
+
 test("formal prefix gate atomically permits only its three frozen distinct SKUs until release", async () => {
   await withTempDir(async (dir) => {
     const dbPath = path.join(dir, "runtime.sqlite");

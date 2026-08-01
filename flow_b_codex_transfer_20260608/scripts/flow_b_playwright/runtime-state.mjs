@@ -1527,7 +1527,7 @@ export function createRuntimeState({
       if (
         directRunDir
         && Number.isInteger(directTarget)
-        && directTarget >= 0
+        && directTarget > 0
       ) {
         const reservationRunDir = normalizedDirectRunDir(
           reservation?.data?.runtime_run_dir,
