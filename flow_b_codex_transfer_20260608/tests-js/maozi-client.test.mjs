@@ -493,6 +493,49 @@ test("browser transport retries GET requests through a short HTTP 0 outage", asy
   assert.deepEqual(delays, [750, 1_500, 3_000, 5_000]);
 });
 
+test("browser transport retries a GET after ERP navigation replaces the execution context", async () => {
+  let calls = 0;
+  const delays = [];
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error("Execution context was destroyed, most likely because of a navigation");
+      }
+      return { status: 200, json: { code: 1, data: [] } };
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    maxGetAttempts: 3,
+    retrySleep: async (ms) => delays.push(ms),
+  });
+
+  assert.deepEqual(await transport("/api.shop/lists"), {
+    status: 200,
+    json: { code: 1, data: [] },
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [250]);
+});
+
+test("browser transport never replays a POST after navigation destroys its context", async () => {
+  let calls = 0;
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      throw new Error("Execution context was destroyed, most likely because of a navigation");
+    },
+  };
+  const transport = createMaoziPageTransport({ page, maxGetAttempts: 3 });
+
+  await assert.rejects(
+    () => transport("/api.selection.follow/import", { method: "POST", body: { rows: [] } }),
+    /execution context was destroyed/i,
+  );
+  assert.equal(calls, 1);
+});
+
 test("browser transport falls back to the authenticated context request after persistent HTTP 0", async () => {
   const calls = [];
   const page = {

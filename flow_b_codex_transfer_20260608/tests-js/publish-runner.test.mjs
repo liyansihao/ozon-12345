@@ -5727,6 +5727,11 @@ test("background daily-limit evidence freezes the foreground ERP queue and rotat
 
     assert.deepEqual(foregroundPublishStoreIds, [7]);
     assert.equal(result.active_store_id, 9);
+    assert.equal(directRunControl.activeStoreId, 9);
+    const persistedStore = JSON.parse(
+      await fs.readFile(path.join(runDir, "current_store.json"), "utf8"),
+    );
+    assert.equal(persistedStore.store_id, 9);
     assert.equal(foregroundState.entryOf("shared-freeze-inflight").data.submitted, true);
     const queued = foregroundState.entryOf("shared-freeze-queued");
     assert.equal(queued.status, "failed");

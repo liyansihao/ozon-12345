@@ -56,6 +56,11 @@ function stringQuery(input) {
   return query;
 }
 
+function isTransientNavigationContextError(error) {
+  return /execution context was destroyed|cannot find context with specified id|most likely because of a navigation|frame was detached/iu
+    .test(String(error?.message || error || ""));
+}
+
 export function createMaoziClient({ transport }) {
   if (typeof transport !== "function") throw new TypeError("Maozi transport must be a function");
 
@@ -444,6 +449,16 @@ export function createMaoziPageTransport({
         await retrySleep(Math.min(5_000, 750 * (2 ** attempt)));
       } catch (error) {
         lastError = error;
+        if (request.method === "GET"
+          && isTransientNavigationContextError(error)
+          && attempt + 1 < attempts) {
+          // ERP route changes can replace the page execution context while a
+          // read-only request is being prepared. Retrying the GET on the new
+          // context is safe; POST requests remain single-shot and are never
+          // replayed because their server-side status could be unknown.
+          await retrySleep(Math.min(2_000, 250 * (attempt + 1)));
+          continue;
+        }
         if (!context || !/target page|context or browser has been closed/i.test(String(error?.message || error))) throw error;
         const previous = page;
         let replacement = null;

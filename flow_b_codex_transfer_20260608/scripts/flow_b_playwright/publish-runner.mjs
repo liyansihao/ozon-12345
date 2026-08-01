@@ -823,6 +823,7 @@ export function createPublishRunner({
     }
     directRejectedStoreIds = sharedDirectRunControl.rejectedStoreIds;
     directRejectedStoreReasons = sharedDirectRunControl.rejectionReasons;
+    sharedDirectRunControl.storeSwitchChain ||= Promise.resolve();
   }
   const storeDailyUsage = new Map();
   const storeDailyLimits = new Map();
@@ -925,12 +926,10 @@ export function createPublishRunner({
     return firstSignal;
   }
 
-  function recordCurrentStore(targetConfig, reason = "active") {
+  async function recordCurrentStore(targetConfig, reason = "active") {
     if (activeDirectMode && reconciliationOnly) return false;
-    metricsChain = metricsChain.then(async () => {
+    const write = metricsChain.then(async () => {
       const filename = path.join(runDir, "current_store.json");
-      currentStoreWriteSequence += 1;
-      const temp = `${filename}.${process.pid}.${currentStoreWriteSequence}.tmp`;
       const value = {
         at: now().toISOString(),
         store_id: Number(targetConfig?.store?.id || 0),
@@ -939,9 +938,21 @@ export function createPublishRunner({
         reason,
       };
       await fs.mkdir(runDir, { recursive: true });
-      await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`);
-      await fs.rename(temp, filename);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        currentStoreWriteSequence += 1;
+        const temp = `${filename}.${process.pid}.${currentStoreWriteSequence}.${attempt}.tmp`;
+        try {
+          await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`);
+          await fs.rename(temp, filename);
+          return;
+        } catch (error) {
+          await fs.unlink(temp).catch(() => {});
+          if (error?.code !== "ENOENT" || attempt > 0) throw error;
+        }
+      }
     });
+    metricsChain = write;
+    await write;
     return true;
   }
 
@@ -2894,7 +2905,7 @@ export function createPublishRunner({
       });
     }
 
-    async function advanceStore(reason, currentConfig, { excludedStoreIds = new Set() } = {}) {
+    async function advanceStoreUnlocked(reason, currentConfig, { excludedStoreIds = new Set() } = {}) {
       const fromStoreId = Number(currentConfig?.store?.id || targetPlan[activeTargetIndex]?.id);
       const startingIndex = activeTargetIndex;
       const blockedStoreIds = new Set([
@@ -2909,7 +2920,7 @@ export function createPublishRunner({
           const nextConfig = await resolveTargetConfig(activeTargetIndex);
           storeSwitches.push({ from_store_id: fromStoreId, to_store_id: Number(nextConfig.store.id), reason });
           recordMetric("store_switches.jsonl", storeSwitches.at(-1));
-          recordCurrentStore(nextConfig, reason);
+          await recordCurrentStore(nextConfig, reason);
           if (sharedDirectRunControl) {
             sharedDirectRunControl.activeStoreId = Number(nextConfig.store.id);
             sharedDirectRunControl.storeSwitchReason = null;
@@ -2937,6 +2948,32 @@ export function createPublishRunner({
       }
       activeTargetIndex = startingIndex;
       return null;
+    }
+
+    async function advanceStore(reason, currentConfig, options = {}) {
+      if (!activeDirectMode || !sharedDirectRunControl) {
+        return advanceStoreUnlocked(reason, currentConfig, options);
+      }
+      const fromStoreId = Number(currentConfig?.store?.id || targetPlan[activeTargetIndex]?.id);
+      const previous = Promise.resolve(sharedDirectRunControl.storeSwitchChain).catch(() => {});
+      const turn = previous.then(async () => {
+        const sharedStoreId = Number(sharedDirectRunControl.activeStoreId || 0);
+        if (sharedStoreId > 0
+          && sharedStoreId !== fromStoreId
+          && !directRejectedStoreIds.has(sharedStoreId)) {
+          const sharedIndex = targetPlan.findIndex((entry) => Number(entry.id) === sharedStoreId);
+          if (sharedIndex >= 0) {
+            activeTargetIndex = sharedIndex;
+            const sharedConfig = await resolveTargetConfig(sharedIndex);
+            await recordCurrentStore(sharedConfig, "shared-store-switch");
+            haltReason = null;
+            return sharedConfig;
+          }
+        }
+        return advanceStoreUnlocked(reason, currentConfig, options);
+      });
+      sharedDirectRunControl.storeSwitchChain = turn.then(() => undefined, () => undefined);
+      return turn;
     }
 
     async function probeInactiveTargetConfigs() {
@@ -3028,7 +3065,7 @@ export function createPublishRunner({
         }
       }
     }
-    recordCurrentStore(
+    await recordCurrentStore(
       targetConfig,
       storeSwitches.at(-1)?.reason || initialPauseReason || "active",
     );
@@ -3181,7 +3218,9 @@ export function createPublishRunner({
     );
     directAcceptedCount = acceptedCount;
     markDirectAccepted = (sku) => acceptedSkus.add(String(sku));
-    directActiveStoreId = () => Number(targetConfig?.store?.id || 0);
+    directActiveStoreId = () => Number(
+      sharedDirectRunControl?.activeStoreId || targetConfig?.store?.id || 0,
+    );
 
     async function recordDirectBackgroundOnline(item, existing, importLog, reconciliationTarget, extra = {}) {
       const sku = asSku(item);
