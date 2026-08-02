@@ -16,8 +16,8 @@
 
 四个按钮的含义：
 
-- `启动/继续`：仅在状态为 `STOPPED` 且三个 owner 全部为 0 时启用。它继续原 run，不清空已接受 SKU，也不会创建第二个 worker。
-- `安全暂停`：确认后调用生产 `stop` 入口，并持续等待到状态变成 `STOPPED` 且三个 owner 全部为 0，才提示暂停完成。
+- `启动/继续`：仅在状态为 `STOPPED` 且 supervisor、worker 都为 0 时启用。browser/profile owner 可以保留为 1，以复用登录状态；启动仍会执行全局 worker 去重检查，不会创建第二个 worker。
+- `安全暂停`：确认后调用生产 `stop` 入口，并持续等待到状态变成 `STOPPED` 且 supervisor、worker 都为 0，才提示暂停完成。生产浏览器默认保留，不会因为暂停被关闭。
 - `刷新状态`：只读刷新；操作执行期间点击会排队，不会并发启动第二条控制命令。
 - `验证后恢复`：仅在 `WAITING_FOR_VERIFICATION` 时启用。必须先在系统保留的 Chrome 中手工完成验证码、MFA 或登录检查。
 
@@ -60,7 +60,7 @@ flow_b_codex_transfer_20260608/scripts/install_ozon_control_panel.sh
 
 - `status`：只读输出当前生产 JSON。
 - `start`：安全恢复当前 `STOPPED` run；生产脚本会检查全局 worker，发现已有 worker 时拒绝重复启动。
-- `stop`：写入持久停止请求，由 supervisor 在状态机边界停止 worker、保存状态并释放 browser owner。
+- `stop`：写入持久停止请求，由 supervisor 在状态机边界停止 worker、保存状态并退出；browser owner 保留以复用登录状态。
 - `resume`：只用于手工完成验证后恢复同一 run。
 
 不要手工删除 `stop.request`、锁文件、run 目录、SQLite 幂等状态或浏览器 profile，也不要直接再开一个 Flow-B worker。

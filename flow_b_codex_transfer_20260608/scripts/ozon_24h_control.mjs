@@ -119,11 +119,36 @@ export function globalFlowBWorkerPids(lines = []) {
   for (const line of lines || []) {
     const match = String(line || "").trim().match(/^(\d+)\s+([\s\S]+)$/u);
     if (!match) continue;
+    if (/^(?:\S*\/)?node\s+\S*flow_b_playwright\.mjs\s+(?:accept|run|publish)\b/u.test(match[2])) {
+      pids.add(Number(match[1]));
+    }
+  }
+  return [...pids].sort((left, right) => left - right);
+}
+
+export function productionSupervisorPids(lines = []) {
+  const pids = new Set();
+  for (const line of lines || []) {
+    const match = String(line || "").trim().match(/^(\d+)\s+([\s\S]+)$/u);
+    if (!match) continue;
+    if (/^(?:\S*\/)?node\s+\S*ozon_24h_supervisor\.mjs\s+supervise\b/u.test(match[2])) {
+      pids.add(Number(match[1]));
+    }
+  }
+  return [...pids].sort((left, right) => left - right);
+}
+
+export function productionProfileOwnerPids(lines = [], profileMarker = "", browserExecutable = "") {
+  if (!profileMarker || !browserExecutable) return [];
+  const pids = new Set();
+  for (const line of lines || []) {
+    const match = String(line || "").trim().match(/^(\d+)\s+([\s\S]+)$/u);
+    if (!match) continue;
     const command = match[2];
-    if (
-      command.includes("flow_b_playwright.mjs")
-      && /\b(?:accept|run|publish)\b/u.test(command)
-    ) {
+    if (command.startsWith(`${browserExecutable} `)
+      && command.includes(profileMarker)
+      && command.includes("--remote-debugging-port=")
+      && !command.includes(" --type=")) {
       pids.add(Number(match[1]));
     }
   }
@@ -997,12 +1022,28 @@ async function actualRuntimeOwnerCounts(config, current) {
   const lines = processResult.stdout.split(/\r?\n/u).filter(Boolean);
   const profileMarker = `--user-data-dir=${expandHome(config.browser.profile_dir)}`;
   return {
-    supervisor: lines.filter((line) => line.includes("ozon_24h_supervisor.mjs")).length,
+    supervisor: productionSupervisorPids(lines).length,
     worker: globalFlowBWorkerPids(lines).length,
-    profile: lines.filter((line) => (
-      line.includes(profileMarker)
-      && !line.includes(" --type=")
-    )).length,
+    profile: productionProfileOwnerPids(
+      lines,
+      profileMarker,
+      expandHome(config.browser.executable),
+    ).length,
+  };
+}
+
+export function effectiveRuntimeOwners(persisted = {}, actual = null) {
+  if (actual && typeof actual === "object") {
+    return {
+      supervisor: Math.max(0, Number(actual.supervisor) || 0),
+      worker: Math.max(0, Number(actual.worker) || 0),
+      profile: Math.max(0, Number(actual.profile) || 0),
+    };
+  }
+  return {
+    supervisor: Math.max(0, Number(persisted?.counts?.supervisor) || 0),
+    worker: Math.max(0, Number(persisted?.counts?.worker) || 0),
+    profile: Math.max(0, Number(persisted?.counts?.profile_owner) || 0),
   };
 }
 
@@ -1219,6 +1260,8 @@ async function status(config) {
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   const operational = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const owners = await readJson(path.join(paths.stateRoot, "process_owners.json"), {});
+  const actualOwners = await actualRuntimeOwnerCounts(config, current).catch(() => null);
+  const effectiveOwners = effectiveRuntimeOwners(owners, actualOwners);
   const checkpoint = current?.run_dir
     ? await readJson(path.join(current.run_dir, "compact_checkpoint.json"), {})
     : {};
@@ -1272,9 +1315,9 @@ async function status(config) {
         promoted_at: matchPolicyState.promoted_at || null,
       },
       owners: {
-        supervisor: Number(owners?.counts?.supervisor || 0),
-        worker: Number(owners?.counts?.worker || 0),
-        profile: Number(owners?.counts?.profile_owner || 0),
+        supervisor: effectiveOwners.supervisor,
+        worker: effectiveOwners.worker,
+        profile: effectiveOwners.profile,
       },
       identity: {
         config_sha256: current.config_sha256 || null,
@@ -1283,7 +1326,18 @@ async function status(config) {
       },
     };
   }
-  return compactProductionStatus({ current, operational, owners, checkpoint });
+  return compactProductionStatus({
+    current,
+    operational,
+    owners: {
+      counts: {
+        supervisor: effectiveOwners.supervisor,
+        worker: effectiveOwners.worker,
+        profile_owner: effectiveOwners.profile,
+      },
+    },
+    checkpoint,
+  });
 }
 
 async function incident(config) {

@@ -330,7 +330,7 @@ struct OzonControlPanelView: View {
         case "RUNNING": return "正在直接上架"
         case "STOPPED":
             let owners = production?.owners ?? OzonOwners()
-            return owners == OzonOwners() ? "已安全暂停" : "正在安全收尾"
+            return owners.supervisor == 0 && owners.worker == 0 ? "已安全暂停" : "正在安全收尾"
         case "WAITING_FOR_VERIFICATION": return "等待人工验证"
         case "TARGET_COMPLETE": return "本轮目标已完成"
         case "FATAL_STOP": return "已因严重错误停止"

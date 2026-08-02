@@ -2084,6 +2084,14 @@ async function superviseDirectPublishing({
     process.off("SIGINT", onSignal);
     process.off("SIGHUP", onSignal);
     await stopWorker();
+    const remainingProfileOwners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
+    await writeProcessOwners({
+      stateRoot,
+      currentRun,
+      browserPid: remainingProfileOwners[0]?.pid || null,
+      workerPid: null,
+      supervisorPid: null,
+    });
     await releaseLock();
   }
 }

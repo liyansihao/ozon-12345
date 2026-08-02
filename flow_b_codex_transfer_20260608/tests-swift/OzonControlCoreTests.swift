@@ -122,9 +122,19 @@ private func testButtonPolicies() throws {
         "STOPPED policy mismatch"
     )
     try expect(
+        OzonButtonPolicy.forStatus("STOPPED", owners: OzonOwners(supervisor: 0, worker: 0, profile: 1))
+            == OzonButtonPolicy(canStart: true, canStop: false, canResumeVerification: false),
+        "STOPPED must allow restart while the reusable browser remains open"
+    )
+    try expect(
         OzonButtonPolicy.forStatus("STOPPED", owners: OzonOwners(supervisor: 1, worker: 0, profile: 0))
             == OzonButtonPolicy(canStart: false, canStop: false, canResumeVerification: false),
-        "STOPPED must wait for all owners to release"
+        "STOPPED must wait for the supervisor to release"
+    )
+    try expect(
+        OzonButtonPolicy.forStatus("STOPPED", owners: OzonOwners(supervisor: 0, worker: 1, profile: 1))
+            == OzonButtonPolicy(canStart: false, canStop: false, canResumeVerification: false),
+        "STOPPED must not allow a duplicate worker"
     )
     try expect(
         OzonButtonPolicy.forStatus("WAITING_FOR_VERIFICATION") == OzonButtonPolicy(canStart: false, canStop: true, canResumeVerification: true),
@@ -154,7 +164,7 @@ private func testSafeStopWaitsForReleasedOwners() throws {
     let statusFile = fixture.root.appendingPathComponent("fake-status.json")
     try write(runningJSON, to: statusFile)
     let stoppedJSON = """
-    {"status":"STOPPED","run_id":"test-run","count_date":"2026-08-01","target":null,"remaining":null,"unlimited":true,"run_accepted":499,"funnel":{"erp_accepted":166,"online":97},"owners":{"supervisor":0,"worker":0,"profile":0}}
+    {"status":"STOPPED","run_id":"test-run","count_date":"2026-08-01","target":null,"remaining":null,"unlimited":true,"run_accepted":499,"funnel":{"erp_accepted":166,"online":97},"owners":{"supervisor":0,"worker":0,"profile":1}}
     """
     var environment = ProcessInfo.processInfo.environment
     environment["FAKE_COMMAND_LOG"] = fixture.log.path
@@ -180,7 +190,10 @@ private func testSafeStopWaitsForReleasedOwners() throws {
     switch resultBox.result {
     case .success(let snapshot):
         try expect(snapshot.production.status == "STOPPED", "safe stop should land in STOPPED")
-        try expect(snapshot.production.owners == OzonOwners(), "safe stop must wait for all owners to release")
+        try expect(
+            snapshot.production.owners == OzonOwners(supervisor: 0, worker: 0, profile: 1),
+            "safe stop should preserve the reusable browser owner"
+        )
     case .failure(let error):
         throw TestFailure.failed("safe stop failed: \(error.localizedDescription)")
     case .none:

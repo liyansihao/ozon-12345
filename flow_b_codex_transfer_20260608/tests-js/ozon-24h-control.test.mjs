@@ -13,7 +13,10 @@ import {
   deploymentIdentityValid,
   directCompletionEvidenceDecision,
   doctor,
+  effectiveRuntimeOwners,
   globalFlowBWorkerPids,
+  productionProfileOwnerPids,
+  productionSupervisorPids,
   refreshCurrentRunSources,
   resumeMode,
   shouldResumeCurrentRun,
@@ -160,7 +163,46 @@ test("control ownership precheck finds flow_b workers from every run", () => {
     " 202 /usr/bin/node /old/scripts/flow_b_playwright.mjs run /state/runs/old /state/urls.txt",
     " 303 /usr/bin/node /app/scripts/flow_b_playwright.mjs scan /state/urls.txt /tmp/out.json",
     " 404 /usr/bin/node /app/scripts/other.mjs publish",
+    " 505 /bin/zsh -lc ps | rg 'flow_b_playwright.mjs run'",
   ]), [101, 202]);
+});
+
+test("owner detection ignores diagnostic shells that only mention process names", () => {
+  const marker = "--user-data-dir=/state/profile";
+  const lines = [
+    " 101 /usr/bin/node /app/scripts/ozon_24h_supervisor.mjs supervise /app/config.json",
+    " 202 /bin/zsh -lc ps | rg 'ozon_24h_supervisor.mjs supervise'",
+    " 303 /Applications/Google Chrome for Testing --remote-debugging-port=9223 --user-data-dir=/state/profile about:blank",
+    " 304 /Applications/Google Chrome Helper --type=renderer --remote-debugging-port=9223 --user-data-dir=/state/profile",
+    " 404 /bin/zsh -lc echo '--remote-debugging-port=9223 --user-data-dir=/state/profile'",
+  ];
+  assert.deepEqual(productionSupervisorPids(lines), [101]);
+  assert.deepEqual(productionProfileOwnerPids(
+    lines,
+    marker,
+    "/Applications/Google Chrome for Testing",
+  ), [303]);
+});
+
+test("live owner counts replace stale persisted owners after a safe stop", () => {
+  assert.deepEqual(effectiveRuntimeOwners({
+    counts: { supervisor: 1, worker: 1, profile_owner: 1 },
+  }, {
+    supervisor: 0,
+    worker: 0,
+    profile: 1,
+  }), {
+    supervisor: 0,
+    worker: 0,
+    profile: 1,
+  });
+  assert.deepEqual(effectiveRuntimeOwners({
+    counts: { supervisor: 1, worker: 0, profile_owner: 1 },
+  }), {
+    supervisor: 1,
+    worker: 0,
+    profile: 1,
+  });
 });
 
 test("doctor release identity requires exact commit, config hash, source hash, and schema v3", () => {

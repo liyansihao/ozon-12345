@@ -188,7 +188,9 @@ struct OzonButtonPolicy: Equatable {
     static func forStatus(_ rawStatus: String, owners: OzonOwners = OzonOwners()) -> OzonButtonPolicy {
         switch rawStatus.uppercased() {
         case "STOPPED":
-            let ownersReleased = owners.supervisor == 0 && owners.worker == 0 && owners.profile == 0
+            // The production browser intentionally remains open across a safe pause
+            // so login state can be reused. Only live supervisors/workers block restart.
+            let ownersReleased = owners.supervisor == 0 && owners.worker == 0
             return OzonButtonPolicy(canStart: ownersReleased, canStop: false, canResumeVerification: false)
         case "WAITING_FOR_VERIFICATION":
             return OzonButtonPolicy(canStart: false, canStop: true, canResumeVerification: true)
@@ -642,8 +644,7 @@ final class OzonControlService {
                 latest = try loadSnapshot()
                 if latest.production.status == "STOPPED",
                    latest.production.owners.supervisor == 0,
-                   latest.production.owners.worker == 0,
-                   latest.production.owners.profile == 0 {
+                   latest.production.owners.worker == 0 {
                     return latest
                 }
             }
