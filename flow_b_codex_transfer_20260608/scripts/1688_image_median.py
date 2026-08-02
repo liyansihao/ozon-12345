@@ -89,6 +89,8 @@ PRODUCT_SEMANTIC_GROUPS = [
     ("data_cable", {"кабель", "провод", "cable", "wire", "数据线", "充电线", "线缆"}),
     ("adapter", {"переходник", "адаптер", "adapter", "adaptor", "converter", "转接头", "转换器", "适配器"}),
     ("phone_case", {"чехол", "case", "cover", "手机壳", "保护壳", "外壳"}),
+    ("card_holder", {"картхолдер", "кошелек", "wallet", "cardholder", "卡包", "卡套", "钱包", "卡夹"}),
+    ("ribbon", {"лента", "ribbon", "丝带", "彩带", "包装带"}),
     ("lamp", {"лампа", "фонарь", "light", "lamp", "灯", "台灯", "手电筒"}),
     ("battery", {"аккумулятор", "battery", "电池", "蓄电池"}),
 ]
@@ -343,7 +345,7 @@ def balanced_same_item_assessment(
     expected_specs = extract_specs(expected_text)
     high_needles = high_information_tokens(expect_title)
     feature_needles = feature_tokens(expect_title)
-    model_needles = model_tokens(expect_model)
+    model_needles = model_tokens(" ".join(filter(None, [expect_model, expect_title])))
     rows: list[dict] = []
     metrics_override = image_metrics_by_offer or {}
     image_offer_ids = {
@@ -408,7 +410,7 @@ def balanced_same_item_assessment(
             "strong_single": (
                 1 <= int(row.get("rank") or 0) <= 3
                 and bool(image.get("available"))
-                and image_score >= IMAGE_HIGH_SIMILARITY
+                and image_score >= (0.68 if exact_model else IMAGE_HIGH_SIMILARITY)
                 and not conflicts
                 and not has_accessory_conflict
                 and (
@@ -452,7 +454,9 @@ def balanced_same_item_assessment(
         decision = len(independent) >= 2 and high_image
         match_type = "corroborated_multi" if decision else "rejected"
         supporting_offer_ids = [str(row.get("offerId") or "") for row in independent[:2]] if decision else []
-        if len({row.get("supplier_id") for row in credible}) < 2:
+        if decision:
+            reason = "two independent suppliers agree on semantics, price cluster and image"
+        elif len({row.get("supplier_id") for row in credible}) < 2:
             reason = "fewer than two independent suppliers"
         elif not high_image:
             reason = "no corroborating offer has high image similarity"

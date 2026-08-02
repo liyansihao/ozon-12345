@@ -225,13 +225,14 @@ export function verifyReturnedSameItemEvidence({
     if (balancedMatch?.passed === true && matchType === "strong_single") {
       const row = supportingRows[0];
       const semanticStrength = String(row?.semantic_strength || "");
+      const requiredImageScore = semanticStrength === "exact_model" ? 0.68 : 0.78;
       const semanticOk = ["exact_model", "two_high_information_terms"].includes(semanticStrength)
         || (semanticStrength === "one_high_information_term" && imageScore(row) >= 0.90);
       if (supportingRows.length !== 1
         || !Number.isInteger(Number(row?.rank))
         || Number(row.rank) < 1
         || Number(row.rank) > 3
-        || !highImage(row)
+        || !highImage(row, requiredImageScore)
         || !cleanRow(row)
         || !semanticOk) {
         return { ok: false, reason: "strong-single v3 evidence does not satisfy rank, image, semantics and specifications" };

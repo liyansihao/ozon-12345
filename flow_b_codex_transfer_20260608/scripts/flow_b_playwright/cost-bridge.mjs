@@ -285,7 +285,7 @@ export function createCostBridge({
       : "shadow";
     let state = {
       version: 1,
-      matcher_version: "balanced-v3.1",
+      matcher_version: "balanced-v3.2",
       configured_policy: configured,
       effective_policy: configured,
       samples: [],

@@ -362,6 +362,19 @@ class FirstPageClusterCostTest(unittest.TestCase):
         self.assertTrue(result["passed"])
         self.assertEqual(result["match_type"], "corroborated_multi")
         self.assertEqual(result["rows"][0]["semantic_strength"], "one_high_information_plus_product")
+        self.assertIn("two independent suppliers", result["reason"])
+
+    def test_exact_model_inside_title_can_support_a_single_cross_language_offer(self):
+        result = image_median_1688.balanced_same_item_assessment(
+            [{"offerId": "lamp-e27", "title": "木质布艺台灯 E27", "price": 17, "rank": 3, "shop": "factory-a"}],
+            expect_title="настольная лампа E27",
+            expect_model="",
+            expect_category="家用照明",
+            image_metrics_by_offer={"lamp-e27": {"available": True, "score": 0.70}},
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["match_type"], "strong_single")
+        self.assertEqual(result["rows"][0]["semantic_strength"], "exact_model")
 
     def test_new_cost_evidence_uses_v3_and_binds_supplier_image_specs_and_cluster(self):
         result = image_median_1688.first_page_p70_cost(
