@@ -22,6 +22,9 @@ function returnedSameItemOutput({
   source = "search_first_page_cluster_p70_similarity_filtered",
   selectedCost = 12,
   title = null,
+  balancedPassed = true,
+  matchType = "strong_single",
+  imageAvailable = true,
 } = {}) {
   const normalizedRequest = {
     expect_category: String(request?.expect_category || "").toLocaleLowerCase("und").trim(),
@@ -36,17 +39,37 @@ function returnedSameItemOutput({
     : { category: [], model: [], title: [titleHit] };
   const rows = prices.map((price, index) => ({
     offer_id: `offer-${index + 1}`,
+    supplier_id: `supplier-${index + 1}`,
+    supplier: `supplier ${index + 1}`,
+    image_url: `https://img.example/offer-${index + 1}.jpg`,
+    image: { available: imageAvailable && index === 0, score: imageAvailable && index === 0 ? 0.95 : 0 },
+    rank: index + 1,
     price,
     semantic_hits: semanticHits,
+    semantic_hits_v3: { model: modelHit ? [modelHit] : [], high_information: [titleHit], feature: [] },
+    semantic_strength: modelHit ? "exact_model" : "two_high_information_terms",
+    specs: {},
+    spec_conflicts: [],
+    accessory_conflict: false,
     title: returnedTitle,
   }));
   const evidence = JSON.stringify({
-    contract: "1688-returned-same-item-v2",
+    contract: "1688-returned-same-item-v3",
     cost_source: source,
     request: normalizedRequest,
     rows,
-    selected_cluster: rows.map(({ offer_id, price }) => ({ offer_id, price })),
+    selected_cluster: rows.map(({ offer_id, supplier_id, price }) => ({ offer_id, supplier_id, price })),
     selected_cost: selectedCost,
+    balanced_match: {
+      passed: balancedPassed,
+      match_type: balancedPassed ? matchType : "rejected",
+      reason: balancedPassed ? "test match" : "test rejection",
+      image_available: imageAvailable,
+      supporting_offer_ids: balancedPassed
+        ? (matchType === "strong_single" ? ["offer-1"] : ["offer-1", "offer-2"])
+        : [],
+      expected_specs: {},
+    },
   });
   const key = crypto.createHash("sha256").update(evidence).digest("hex");
   return [
@@ -89,7 +112,7 @@ test("verifies returned offer identities, semantics, prices, source and selected
   assert.equal(result.ok, true);
   assert.equal(result.same_item_match, true);
   assert.equal(result.returned_evidence_verified, true);
-  assert.equal(result.match_evidence_contract, "1688-returned-same-item-v2");
+  assert.equal(result.match_evidence_contract, "1688-returned-same-item-v3");
   assert.equal(result.matched_offer_count, 4);
   assert.match(result.match_evidence_key, /^[a-f0-9]{64}$/u);
 });
@@ -110,6 +133,107 @@ test("direct publishing accepts one verified same-item offer", () => {
   assert.equal(result.cost, 18);
   assert.equal(result.matched_offer_count, 1);
   assert.equal(result.same_item_match, true);
+});
+
+test("fresh submission rejects legacy v2 evidence while historical verification remains compatible", () => {
+  const request = { expect_title: "same product lamp" };
+  const v3 = returnedSameItemOutput({ request, prices: [18], selectedCost: 18 });
+  const encoded = JSON.parse(v3.match(/^SAME_ITEM_EVIDENCE\s+(.+)$/mu)?.[1] || "{}");
+  encoded.contract = "1688-returned-same-item-v2";
+  delete encoded.balanced_match;
+  const legacyEvidence = JSON.stringify(encoded);
+  const legacy = v3
+    .replace(/^SAME_ITEM_EVIDENCE\s+.+$/mu, `SAME_ITEM_EVIDENCE ${legacyEvidence}`)
+    .replace(/^MATCH_EVIDENCE_KEY\s+.+$/mu, `MATCH_EVIDENCE_KEY ${crypto.createHash("sha256").update(legacyEvidence).digest("hex")}`);
+  const compatible = parseCostOutput(legacy, 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+    minimumSameItemMatches: 1,
+  });
+  const fresh = parseCostOutput(legacy, 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+    minimumSameItemMatches: 1,
+    requiredEvidenceContract: "1688-returned-same-item-v3",
+  });
+  assert.equal(compatible.ok, true);
+  assert.equal(fresh.ok, false);
+  assert.match(fresh.reason, /requires 1688-returned-same-item-v3/i);
+});
+
+test("v3 evidence rejects a re-signed supplier binding tamper", () => {
+  const request = { expect_title: "same product lamp" };
+  const output = returnedSameItemOutput({ request, prices: [18], selectedCost: 18 });
+  const evidence = JSON.parse(output.match(/^SAME_ITEM_EVIDENCE\s+(.+)$/mu)?.[1] || "{}");
+  evidence.selected_cluster[0].supplier_id = "forged-supplier";
+  const encoded = JSON.stringify(evidence);
+  const resigned = output
+    .replace(/^SAME_ITEM_EVIDENCE\s+.+$/mu, `SAME_ITEM_EVIDENCE ${encoded}`)
+    .replace(/^MATCH_EVIDENCE_KEY\s+.+$/mu, `MATCH_EVIDENCE_KEY ${crypto.createHash("sha256").update(encoded).digest("hex")}`);
+  const result = parseCostOutput(resigned, 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+    minimumSameItemMatches: 1,
+    requiredEvidenceContract: "1688-returned-same-item-v3",
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /supplier is not bound/i);
+});
+
+test("shadow records legacy passes and automatically enforces balanced v3 after healthy samples", async () => {
+  await withTempDir(async (runDir) => {
+    let runs = 0;
+    const bridge = createCostBridge({
+      matchPolicy: "shadow",
+      matchPolicySampleSize: 2,
+      matchPolicyRetentionPercent: 75,
+      matchPolicyImageAvailabilityPercent: 90,
+      matchPolicyP95Ms: 15_000,
+      minimumSameItemMatches: 1,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async ({ args }) => {
+        runs += 1;
+        const request = {
+          expect_title: args[args.indexOf("--expect-title") + 1],
+          expect_model: "",
+          expect_category: "",
+        };
+        return {
+          code: 0,
+          stdout: returnedSameItemOutput({
+            request,
+            prices: [18],
+            selectedCost: 18,
+            balancedPassed: runs <= 2,
+          }),
+          stderr: "",
+        };
+      },
+    });
+    const item = (sku) => ({
+      sku,
+      cover_image: `https://img.example/${sku}.jpg`,
+      sell_price: 100,
+      expect_title: "same product lamp",
+    });
+    const first = await bridge.estimate(item("shadow-1"), runDir);
+    const second = await bridge.estimate(item("shadow-2"), runDir);
+    const rejected = await bridge.estimate(item("balanced-3"), runDir);
+    const state = JSON.parse(await fs.readFile(path.join(runDir, "1688_match_policy.json"), "utf8"));
+    const logLines = (await fs.readFile(path.join(runDir, "1688_match_quality.jsonl"), "utf8")).trim().split("\n");
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(second.match_policy_promoted, true);
+    assert.equal(state.effective_policy, "balanced");
+    assert.equal(state.summary.sample_count, 2);
+    assert.equal(state.summary.retention_percent, 100);
+    assert.equal(state.summary.image_availability_percent, 100);
+    assert.equal(logLines.length, 2);
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.reason, /balanced 1688 match rejected/i);
+    await bridge.close();
+  });
 });
 
 test("a request hash plus prices can no longer self-prove a same-item match", () => {

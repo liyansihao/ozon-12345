@@ -46,6 +46,9 @@ export function verifyReturnedSameItemEvidence({
   costSource,
   selectedCost,
   minimumMatches = 3,
+  requiredContract = null,
+  requireBalancedMatch = false,
+  allowLegacyV2 = true,
 } = {}) {
   const requiredMatches = Math.max(1, Number(minimumMatches) || 1);
   const encoded = String(encodedEvidence || "").trim();
@@ -61,8 +64,14 @@ export function verifyReturnedSameItemEvidence({
   } catch {
     return { ok: false, reason: "malformed returned same-item evidence" };
   }
-  if (evidence?.contract !== "1688-returned-same-item-v2") {
+  const contract = String(evidence?.contract || "");
+  const supported = contract === "1688-returned-same-item-v3"
+    || (allowLegacyV2 && contract === "1688-returned-same-item-v2");
+  if (!supported) {
     return { ok: false, reason: "unsupported returned same-item evidence contract" };
+  }
+  if (requiredContract && contract !== requiredContract) {
+    return { ok: false, reason: `fresh submission requires ${requiredContract}` };
   }
   if (String(evidence?.cost_source || "") !== String(costSource || "")) {
     return { ok: false, reason: "returned evidence cost source mismatch" };
@@ -149,16 +158,110 @@ export function verifyReturnedSameItemEvidence({
     if (!Number.isFinite(price) || Number(sourceRow?.price) !== price) {
       return { ok: false, reason: "selected cluster price is not bound to its filtered offer" };
     }
+    if (contract === "1688-returned-same-item-v3"
+      && String(row?.supplier_id || "").trim() !== String(sourceRow?.supplier_id || "").trim()) {
+      return { ok: false, reason: "selected cluster supplier is not bound to its filtered offer" };
+    }
     selectedIds.add(offerId);
   }
   if (!selectedCluster.some((row) => Number(row?.price) === Number(selectedCost))) {
     return { ok: false, reason: "selected cost is not present in the selected returned cluster" };
+  }
+  let balancedMatch = null;
+  if (contract === "1688-returned-same-item-v3") {
+    const semanticStrengths = new Set([
+      "exact_model",
+      "two_high_information_terms",
+      "one_high_information_term",
+      "feature_only",
+      "weak_or_none",
+    ]);
+    for (const row of rows) {
+      const image = row?.image && typeof row.image === "object" ? row.image : null;
+      if (!Number.isInteger(Number(row?.rank)) || Number(row.rank) < 1
+        || typeof row?.supplier_id !== "string"
+        || !image
+        || !semanticStrengths.has(String(row?.semantic_strength || ""))
+        || !Array.isArray(row?.spec_conflicts)
+        || typeof row?.accessory_conflict !== "boolean") {
+        return { ok: false, reason: "v3 row is missing rank, supplier, image, semantics or specification bindings" };
+      }
+      if (image.available === true && !/^https?:\/\//iu.test(String(row?.image_url || ""))) {
+        return { ok: false, reason: "v3 image score is not bound to a returned image URL" };
+      }
+      if (image.available === true
+        && (!Number.isFinite(Number(image.score)) || Number(image.score) < 0 || Number(image.score) > 1)) {
+        return { ok: false, reason: "v3 row has an invalid image similarity score" };
+      }
+    }
+    balancedMatch = evidence?.balanced_match && typeof evidence.balanced_match === "object"
+      ? evidence.balanced_match
+      : null;
+    if (!balancedMatch) return { ok: false, reason: "missing balanced v3 match decision" };
+    if (balancedMatch.image_available !== rows.some((row) => row?.image?.available === true)) {
+      return { ok: false, reason: "balanced image availability is not bound to returned rows" };
+    }
+    const matchType = String(balancedMatch?.match_type || "");
+    if (!["strong_single", "corroborated_multi", "rejected"].includes(matchType)) {
+      return { ok: false, reason: "invalid balanced v3 match type" };
+    }
+    const supportingIds = Array.isArray(balancedMatch?.supporting_offer_ids)
+      ? balancedMatch.supporting_offer_ids.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    if (new Set(supportingIds).size !== supportingIds.length
+      || supportingIds.some((offerId) => !offerIds.has(offerId))) {
+      return { ok: false, reason: "balanced support identities are invalid or outside returned rows" };
+    }
+    const supportingRows = supportingIds.map((offerId) => rows.find((row) => String(row?.offer_id || "").trim() === offerId));
+    const cleanRow = (row) => Array.isArray(row?.spec_conflicts)
+      && row.spec_conflicts.length === 0
+      && row?.accessory_conflict === false;
+    const imageScore = (row) => Number(row?.image?.score);
+    const highImage = (row) => row?.image?.available === true
+      && Number.isFinite(imageScore(row))
+      && imageScore(row) >= 0.78;
+    if (balancedMatch?.passed === true && matchType === "strong_single") {
+      const row = supportingRows[0];
+      const semanticStrength = String(row?.semantic_strength || "");
+      const semanticOk = ["exact_model", "two_high_information_terms"].includes(semanticStrength)
+        || (semanticStrength === "one_high_information_term" && imageScore(row) >= 0.90);
+      if (supportingRows.length !== 1
+        || !Number.isInteger(Number(row?.rank))
+        || Number(row.rank) < 1
+        || Number(row.rank) > 3
+        || !highImage(row)
+        || !cleanRow(row)
+        || !semanticOk) {
+        return { ok: false, reason: "strong-single v3 evidence does not satisfy rank, image, semantics and specifications" };
+      }
+    } else if (balancedMatch?.passed === true && matchType === "corroborated_multi") {
+      const suppliers = supportingRows.map((row) => String(row?.supplier_id || "").trim());
+      if (supportingRows.length < 2
+        || suppliers.some((value) => !value)
+        || new Set(suppliers).size !== suppliers.length
+        || supportingRows.some((row) => !cleanRow(row))
+        || supportingRows.some((row) => !["exact_model", "two_high_information_terms", "one_high_information_term"].includes(String(row?.semantic_strength || "")))
+        || !supportingRows.some(highImage)) {
+        return { ok: false, reason: "multi-source v3 evidence lacks independent suppliers, semantics, image or specification agreement" };
+      }
+    } else if (balancedMatch?.passed !== false || matchType !== "rejected" || supportingIds.length) {
+      return { ok: false, reason: "rejected v3 evidence has inconsistent decision fields" };
+    }
+    if (requireBalancedMatch && balancedMatch.passed !== true) {
+      return { ok: false, reason: `balanced match rejected: ${String(balancedMatch.reason || "unknown")}` };
+    }
+  } else if (requireBalancedMatch) {
+    return { ok: false, reason: "balanced matching requires v3 evidence" };
   }
   return {
     ok: true,
     contract: evidence.contract,
     key,
     matched_offer_count: rows.length,
+    balanced_match: balancedMatch?.passed === true,
+    balanced_match_type: balancedMatch?.match_type || null,
+    balanced_match_reason: balancedMatch?.reason || null,
+    image_check_available: balancedMatch?.image_available === true,
   };
 }
 
@@ -175,7 +278,7 @@ export function sameItemCostEvidence(cost = {}, { minimumMatches = 3 } = {}) {
     && isValid1688MatchEvidenceKey(matchEvidenceKey)
     && cost?.same_item_match === true
     && cost?.returned_evidence_verified === true
-    && cost?.match_evidence_contract === "1688-returned-same-item-v2"
+    && ["1688-returned-same-item-v2", "1688-returned-same-item-v3"].includes(cost?.match_evidence_contract)
     && Number(cost?.matched_offer_count) >= requiredMatches
     && prices.length >= requiredMatches;
   return {
@@ -206,7 +309,7 @@ export function hasReliableSameItemCostEvidence(data = {}, { minimumMatches = 3 
     && evidence?.reliable_source === true
     && evidence?.same_item_match === true
     && evidence?.returned_evidence_verified === true
-    && evidence?.match_evidence_contract === "1688-returned-same-item-v2"
+    && ["1688-returned-same-item-v2", "1688-returned-same-item-v3"].includes(evidence?.match_evidence_contract)
     && Number(evidence?.matched_offer_count) >= requiredMatches
     && isReliable1688CostSource(source)
     && String(evidence?.source || "") === source

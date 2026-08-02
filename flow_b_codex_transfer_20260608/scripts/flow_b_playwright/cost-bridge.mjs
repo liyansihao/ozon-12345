@@ -14,7 +14,18 @@ function lineValue(text, label) {
 }
 
 export function compactCostOutput(text) {
-  return ["SAME_ITEM_EVIDENCE", "MATCH_EVIDENCE_KEY", "COST_SOURCE", "REASON", "FILTERED_FIRST_PAGE_PRICES", "P70_COST"]
+  return [
+    "SAME_ITEM_EVIDENCE",
+    "MATCH_EVIDENCE_KEY",
+    "BALANCED_MATCH_OK",
+    "BALANCED_MATCH_TYPE",
+    "BALANCED_MATCH_REASON",
+    "IMAGE_CHECK_AVAILABLE",
+    "COST_SOURCE",
+    "REASON",
+    "FILTERED_FIRST_PAGE_PRICES",
+    "P70_COST",
+  ]
     .map((label) => [label, lineValue(text, label)])
     .filter(([, value]) => value !== "")
     .map(([label, value]) => `${label} ${value}`)
@@ -49,6 +60,8 @@ export function parseCostOutput(text, sellPrice, {
   expectedMatchEvidence = null,
   requireSameItemEvidence = false,
   minimumSameItemMatches = 3,
+  requiredEvidenceContract = null,
+  requireBalancedMatch = false,
 } = {}) {
   const requiredMatches = Math.max(1, Number(minimumSameItemMatches) || 1);
   const cost = Number(lineValue(text, "P70_COST"));
@@ -79,6 +92,8 @@ export function parseCostOutput(text, sellPrice, {
     costSource: source,
     selectedCost: cost,
     minimumMatches: requiredMatches,
+    requiredContract: requiredEvidenceContract,
+    requireBalancedMatch,
   });
   if (requireSameItemEvidence && !sameItemProof.ok) {
     return { ok: false, reason: `same-item evidence rejected: ${sameItemProof.reason}` };
@@ -94,6 +109,10 @@ export function parseCostOutput(text, sellPrice, {
       returned_evidence_verified: true,
       match_evidence_contract: sameItemProof.contract,
       matched_offer_count: sameItemProof.matched_offer_count,
+      balanced_match: sameItemProof.balanced_match,
+      balanced_match_type: sameItemProof.balanced_match_type,
+      balanced_match_reason: sameItemProof.balanced_match_reason,
+      image_check_available: sameItemProof.image_check_available,
     } : {}),
   };
 }
@@ -200,6 +219,11 @@ export function createCostBridge({
   totalBudgetMs = Number(process.env.FLOW_B_1688_TOTAL_BUDGET_MS || 15_000),
   workerFailureThreshold = Number(process.env.FLOW_B_1688_WORKER_FAILURE_THRESHOLD || 3),
   cacheFlushDebounceMs = Number(process.env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS || 150),
+  matchPolicy = String(process.env.FLOW_B_1688_MATCH_POLICY || "shadow"),
+  matchPolicySampleSize = Number(process.env.FLOW_B_1688_MATCH_SHADOW_SAMPLES || 100),
+  matchPolicyRetentionPercent = Number(process.env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT || 75),
+  matchPolicyImageAvailabilityPercent = Number(process.env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT || 90),
+  matchPolicyP95Ms = Number(process.env.FLOW_B_1688_MATCH_MAX_P95_MS || 15_000),
   writeCache = defaultWriteCache,
   now = () => Date.now(),
   downloadAttempts = 2,
@@ -215,6 +239,8 @@ export function createCostBridge({
   let ownedWorkerPool = null;
   let persistentWorkersDisabled = process.env.FLOW_B_1688_PERSISTENT_POOL === "0";
   let workerInfrastructureFailures = 0;
+  const matchPolicyByRun = new Map();
+  let matchPolicyWriteChain = Promise.resolve();
   const health = {
     circuit: "closed",
     consecutiveFailures: 0,
@@ -239,7 +265,105 @@ export function createCostBridge({
       expectedMatchEvidence,
       requireSameItemEvidence: Object.values(expectedMatchEvidence).some(Boolean),
       minimumSameItemMatches: Math.max(1, Number(minimumSameItemMatches) || 1),
+      requiredEvidenceContract: Object.values(expectedMatchEvidence).some(Boolean)
+        ? "1688-returned-same-item-v3"
+        : null,
     };
+  }
+
+  function percentile95(values) {
+    if (!values.length) return 0;
+    const sorted = [...values].map(Number).filter(Number.isFinite).sort((left, right) => left - right);
+    return sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] || 0;
+  }
+
+  async function loadMatchPolicyState(runDir) {
+    const root = path.resolve(runDir);
+    if (matchPolicyByRun.has(root)) return matchPolicyByRun.get(root);
+    const configured = ["shadow", "balanced"].includes(String(matchPolicy).trim().toLowerCase())
+      ? String(matchPolicy).trim().toLowerCase()
+      : "shadow";
+    let state = {
+      version: 1,
+      configured_policy: configured,
+      effective_policy: configured,
+      samples: [],
+      summary: { sample_count: 0, retention_percent: 0, image_availability_percent: 0, p95_ms: 0 },
+      promoted_at: configured === "balanced" ? new Date(now()).toISOString() : null,
+    };
+    try {
+      const parsed = JSON.parse(await fs.readFile(path.join(root, "1688_match_policy.json"), "utf8"));
+      if (parsed?.version === 1) {
+        state = {
+          ...state,
+          ...parsed,
+          configured_policy: configured,
+          effective_policy: configured === "balanced" ? "balanced" : parsed.effective_policy,
+          samples: Array.isArray(parsed.samples) ? parsed.samples : [],
+        };
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+    }
+    matchPolicyByRun.set(root, state);
+    return state;
+  }
+
+  async function applyMatchPolicy(result, runDir, { elapsedMs = 0, recordShadowSample = false } = {}) {
+    const root = path.resolve(runDir);
+    return (matchPolicyWriteChain = matchPolicyWriteChain.then(async () => {
+      const state = await loadMatchPolicyState(root);
+      const effectiveBefore = state.effective_policy;
+      if (recordShadowSample && result?.ok && effectiveBefore === "shadow") {
+        const sample = {
+          at: new Date(now()).toISOString(),
+          balanced_passed: result?.balanced_match === true,
+          balanced_match_type: result?.balanced_match_type || "rejected",
+          balanced_match_reason: result?.balanced_match_reason || null,
+          image_check_available: result?.image_check_available === true,
+          elapsed_ms: Math.max(0, Number(elapsedMs) || 0),
+        };
+        const sampleLimit = Math.max(1, Number(matchPolicySampleSize) || 100);
+        state.samples = [...state.samples, sample].slice(-sampleLimit);
+        state.summary = {
+          sample_count: state.samples.length,
+          retention_percent: Number((state.samples.filter((row) => row.balanced_passed).length * 100 / state.samples.length).toFixed(2)),
+          image_availability_percent: Number((state.samples.filter((row) => row.image_check_available).length * 100 / state.samples.length).toFixed(2)),
+          p95_ms: percentile95(state.samples.map((row) => row.elapsed_ms)),
+        };
+        const healthy = state.samples.length >= sampleLimit
+          && state.summary.retention_percent >= Number(matchPolicyRetentionPercent)
+          && state.summary.image_availability_percent >= Number(matchPolicyImageAvailabilityPercent)
+          && state.summary.p95_ms <= Number(matchPolicyP95Ms);
+        if (healthy) {
+          state.effective_policy = "balanced";
+          state.promoted_at = new Date(now()).toISOString();
+        }
+        state.updated_at = new Date(now()).toISOString();
+        await fs.mkdir(root, { recursive: true });
+        await fs.appendFile(path.join(root, "1688_match_quality.jsonl"), `${JSON.stringify(sample)}\n`, "utf8");
+        await defaultWriteCache(path.join(root, "1688_match_policy.json"), state);
+      }
+      const policyResult = {
+        ...result,
+        match_policy_configured: state.configured_policy,
+        match_policy_effective: effectiveBefore,
+        match_policy_summary: state.summary,
+        match_policy_promoted: effectiveBefore === "shadow" && state.effective_policy === "balanced",
+      };
+      if (effectiveBefore === "balanced" && result?.ok && result?.balanced_match !== true) {
+        return {
+          ...policyResult,
+          ok: false,
+          reason: `balanced 1688 match rejected: ${result?.balanced_match_reason || "insufficient v3 evidence"}`,
+          terminal: true,
+        };
+      }
+      return policyResult;
+    })).catch((error) => {
+      matchPolicyWriteChain = Promise.resolve();
+      throw error;
+    });
   }
 
   function isCandidateCollapse(result) {
@@ -409,7 +533,7 @@ export function createCostBridge({
     const hasEvidence = Object.values(evidence).some(Boolean);
     const payload = hasEvidence
       ? JSON.stringify({
-        version: 4,
+        version: 5,
         image_url: imageUrl,
         minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
         ...evidence,
@@ -526,6 +650,7 @@ export function createCostBridge({
     deadlineAt = Date.now() + Math.max(1, Number(totalBudgetMs) || 15_000),
     signal = null,
   } = {}) {
+      const estimateStartedAt = Date.now();
       let sku;
       try {
         sku = safeSku(item?.sku);
@@ -548,7 +673,7 @@ export function createCostBridge({
           const cachedText = await fs.readFile(outputPath, "utf8");
           if (/^P70_COST\s+/m.test(cachedText)) {
             const cached = parseCostOutput(cachedText, item?.sell_price, parseOptions(item));
-            if (cached.ok) return { ...cached, cached: true, outputPath };
+            if (cached.ok) return applyMatchPolicy({ ...cached, cached: true, outputPath }, root);
           }
         }
 
@@ -587,13 +712,17 @@ export function createCostBridge({
             health_probe: result?.health_probe === true,
           };
         }
-        return {
+        const parsed = {
           ...parseCostOutput(combined, item?.sell_price, parseOptions(item)),
           process_code: 0,
           cached: false,
           outputPath,
           health_probe: result?.health_probe === true,
         };
+        return applyMatchPolicy(parsed, root, {
+          elapsedMs: Date.now() - estimateStartedAt,
+          recordShadowSample: parsed.ok === true,
+        });
       } catch (error) {
         if (processStarted) {
           const evidence = [
@@ -651,14 +780,14 @@ export function createCostBridge({
         };
       }
       if (!legacyCandidateCollapse && !legacyTransportFailure && (parsed.ok || cached.terminal)) {
-        return {
+        return applyMatchPolicy({
           ...parsed,
           process_code: Number.isFinite(Number(cached.process_code)) ? Number(cached.process_code) : undefined,
           cached: true,
           shared_cache: true,
           cross_run_cache: crossRunKeysByRun.get(root)?.has(key) === true,
           cache_key: key,
-        };
+        }, root);
       }
     }
     if (inFlight.has(compositeKey)) {
@@ -810,6 +939,7 @@ export function createCostBridge({
     estimate,
     async close() {
       await flushCacheWrites();
+      await matchPolicyWriteChain;
       await workerPool?.close?.().catch(() => {});
       await ownedWorkerPool?.close?.().catch(() => {});
       ownedWorkerPool = null;

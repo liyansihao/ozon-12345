@@ -213,6 +213,11 @@ function validateConfig(config) {
       FLOW_B_1688_TRANSIENT_RETRIES: "1",
       FLOW_B_1688_RETRY_BUDGET_SECONDS: "15",
       FLOW_B_1688_WORKERS: "4",
+      FLOW_B_1688_MATCH_POLICY: "shadow",
+      FLOW_B_1688_MATCH_SHADOW_SAMPLES: "100",
+      FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT: "75",
+      FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT: "90",
+      FLOW_B_1688_MATCH_MAX_P95_MS: "15000",
       FLOW_B_PUBLISH_WORKERS: "8",
       FLOW_B_MAX_PUBLISH_WORKERS: "8",
       FLOW_B_OZON_DETAIL_WORKERS: "1",
@@ -1218,10 +1223,11 @@ async function status(config) {
     ? await readJson(path.join(current.run_dir, "compact_checkpoint.json"), {})
     : {};
   if (config.runtime_mode === "direct" && current?.run_dir) {
-    const [funnel, acceptedRows, backgroundRows] = await Promise.all([
+    const [funnel, acceptedRows, backgroundRows, matchPolicyState] = await Promise.all([
       readJsonLines(path.join(current.run_dir, "direct_funnel.jsonl")),
       readJsonLines(path.join(current.run_dir, "erp_accepted.jsonl")),
       readJsonLines(path.join(current.run_dir, "background_status.jsonl")),
+      readJson(path.join(current.run_dir, "1688_match_policy.json"), {}),
     ]);
     const stageCount = (stage) => uniqueSkuCount(funnel.filter((row) => row?.stage === stage));
     const runAccepted = uniqueSkuCount(acceptedRows);
@@ -1256,6 +1262,15 @@ async function status(config) {
       },
       by_store: today.by_store,
       by_store_run: byStoreRun,
+      match_policy: {
+        configured: matchPolicyState.configured_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
+        effective: matchPolicyState.effective_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
+        sample_count: Number(matchPolicyState?.summary?.sample_count || 0),
+        retention_percent: Number(matchPolicyState?.summary?.retention_percent || 0),
+        image_availability_percent: Number(matchPolicyState?.summary?.image_availability_percent || 0),
+        p95_ms: Number(matchPolicyState?.summary?.p95_ms || 0),
+        promoted_at: matchPolicyState.promoted_at || null,
+      },
       owners: {
         supervisor: Number(owners?.counts?.supervisor || 0),
         worker: Number(owners?.counts?.worker || 0),

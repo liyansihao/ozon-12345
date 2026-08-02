@@ -14,18 +14,27 @@ class WorkerFormattingTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         output = module.format_cost_output({
-            "same_item_evidence": '{"contract":"1688-returned-same-item-v2"}',
+            "same_item_evidence": '{"contract":"1688-returned-same-item-v3"}',
             "match_evidence_key": "a" * 64,
+            "balanced_match": {
+                "passed": True,
+                "match_type": "strong_single",
+                "reason": "verified",
+                "image_available": True,
+            },
             "cost_source": "search_first_page_cluster_p70_similarity_filtered",
             "reason": "filtered first-page similarity clustered cost",
             "filtered_first_page_prices": [10, 11, 12],
             "p70_cost": 11,
         })
-        self.assertIn('SAME_ITEM_EVIDENCE {"contract":"1688-returned-same-item-v2"}', output)
+        self.assertIn('SAME_ITEM_EVIDENCE {"contract":"1688-returned-same-item-v3"}', output)
         self.assertIn(f"MATCH_EVIDENCE_KEY {'a' * 64}", output)
         self.assertIn("COST_SOURCE search_first_page_cluster_p70_similarity_filtered", output)
         self.assertIn("FILTERED_FIRST_PAGE_PRICES [10, 11, 12]", output)
         self.assertIn("P70_COST 11", output)
+        self.assertIn("BALANCED_MATCH_OK true", output)
+        self.assertIn("BALANCED_MATCH_TYPE strong_single", output)
+        self.assertIn("IMAGE_CHECK_AVAILABLE true", output)
 
 
 class WorkerTransientRecoveryTests(unittest.TestCase):

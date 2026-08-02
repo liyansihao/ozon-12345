@@ -197,6 +197,11 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "15");
   assert.equal(config.flow_env.FLOW_B_1688_TRANSIENT_RETRIES, "1");
   assert.equal(config.flow_env.FLOW_B_1688_WORKERS, "4");
+  assert.equal(config.flow_env.FLOW_B_1688_MATCH_POLICY, "shadow");
+  assert.equal(config.flow_env.FLOW_B_1688_MATCH_SHADOW_SAMPLES, "100");
+  assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT, "75");
+  assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT, "90");
+  assert.equal(config.flow_env.FLOW_B_1688_MATCH_MAX_P95_MS, "15000");
   assert.equal(config.flow_env.FLOW_B_TAB_WORKERS, "3");
   assert.equal(config.flow_env.FLOW_B_FAVORITE_WORKERS, "3");
   assert.equal(config.flow_env.FLOW_B_PUBLISH_WORKERS, "8");

@@ -31,6 +31,13 @@ def format_cost_output(result: dict, recovery: dict | None = None) -> str:
         evidence_lines.append(f"SAME_ITEM_EVIDENCE {result['same_item_evidence']}")
     if result.get("match_evidence_key"):
         evidence_lines.append(f"MATCH_EVIDENCE_KEY {result['match_evidence_key']}")
+    if result.get("balanced_match"):
+        evidence_lines.extend([
+            f"BALANCED_MATCH_OK {str(bool(result['balanced_match'].get('passed'))).lower()}",
+            f"BALANCED_MATCH_TYPE {result['balanced_match'].get('match_type') or 'rejected'}",
+            f"BALANCED_MATCH_REASON {result['balanced_match'].get('reason') or ''}",
+            f"IMAGE_CHECK_AVAILABLE {str(bool(result['balanced_match'].get('image_available'))).lower()}",
+        ])
     return "\n".join([
         *evidence_lines,
         f"COST_SOURCE {result.get('cost_source') or 'search_first_page_p70_similarity_filtered'}",
@@ -58,6 +65,7 @@ def analyze(module, session, request: dict) -> dict:
         expect_category=str(request.get("expect_category") or ""),
         page_size=max(1, int(request.get("top") or 10)),
         minimum_matches=max(1, int(request.get("minimum_same_item_matches") or 3)),
+        source_image_path=image_path,
     )
     top3 = rows[:3]
     result["top3_prices"] = [row["price"] for row in top3]

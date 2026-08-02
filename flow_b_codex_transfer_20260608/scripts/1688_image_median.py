@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
+import math
 import re
 import shutil
 import statistics
@@ -18,6 +20,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+import requests
+from PIL import Image, ImageOps
 
 
 GENERIC_TOKENS = {
@@ -33,6 +38,48 @@ GENERIC_TOKENS = {
     "без",
     "无品牌",
 }
+
+WEAK_EVIDENCE_TOKENS = {
+    "type",
+    "usb",
+    "pro",
+    "max",
+    "mini",
+    "plus",
+    "new",
+    "original",
+    "universal",
+    "универсальный",
+    "оригинальный",
+    "новый",
+}
+
+FEATURE_TOKENS = {
+    "iphone",
+    "magsafe",
+    "android",
+    "apple",
+    "samsung",
+    "xiaomi",
+    "huawei",
+}
+
+ACCESSORY_INTENT_HINTS = {
+    "adapter",
+    "adaptor",
+    "converter",
+    "переходник",
+    "адаптер",
+    "转换器",
+    "转接头",
+    "转接器",
+    "保护膜",
+    "包装盒",
+    "packaging",
+}
+
+IMAGE_HIGH_SIMILARITY = 0.78
+IMAGE_VERY_HIGH_SIMILARITY = 0.90
 
 CATEGORY_KEYWORDS = {
     "汽车防盗器遥控器套": ["钥匙套", "钥匙壳", "钥匙包", "保护壳", "汽车钥匙", "本田", "honda"],
@@ -89,9 +136,30 @@ def split_tokens(value: str) -> list[str]:
     return [token for token in ascii_tokens + cyrillic_tokens + cn_tokens if token not in GENERIC_TOKENS]
 
 
+def high_information_tokens(value: str) -> list[str]:
+    """Return title evidence that cannot be satisfied by numbers or generic feature words alone."""
+    useful: list[str] = []
+    for token in split_tokens(value):
+        normalized = normalize_text(token)
+        if not normalized or normalized in WEAK_EVIDENCE_TOKENS or normalized in FEATURE_TOKENS:
+            continue
+        if normalized.isdigit():
+            continue
+        if re.fullmatch(r"[a-z]+", normalized) and len(normalized) < 4:
+            continue
+        if re.search(r"[\u4e00-\u9fff]", normalized) and len(normalized) < 2:
+            continue
+        useful.append(normalized)
+    return list(dict.fromkeys(useful))[:20]
+
+
+def feature_tokens(value: str) -> list[str]:
+    return [token for token in split_tokens(value) if normalize_text(token) in FEATURE_TOKENS]
+
+
 def model_tokens(value: str) -> list[str]:
     tokens = split_tokens(value)
-    return [token for token in tokens if re.search(r"\d", token) and len(token) >= 2]
+    return [token for token in tokens if re.search(r"\d", token) and not token.isdigit() and len(token) >= 2]
 
 
 def title_tokens(value: str) -> list[str]:
@@ -128,6 +196,240 @@ def matching_tokens(title: str, tokens: list[str]) -> list[str]:
         for token in tokens
         if (normalized_token := normalize_text(token)) and normalized_token in normalized
     })
+
+
+def normalize_supplier(value: object) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fffа-яё]+", "", normalize_text(value), flags=re.IGNORECASE)
+
+
+def extract_specs(value: str) -> dict[str, list[str]]:
+    """Extract only comparison-safe quantity and technical specifications."""
+    text = normalize_text(value).replace("×", "x")
+    specs: dict[str, list[str]] = {}
+
+    def add(kind: str, raw: str) -> None:
+        normalized = re.sub(r"\s+", "", raw.lower())
+        specs.setdefault(kind, [])
+        if normalized not in specs[kind]:
+            specs[kind].append(normalized)
+
+    patterns = {
+        "power": r"\b\d+(?:\.\d+)?\s*(?:w|瓦|вт)\b",
+        "capacity": r"\b\d+(?:\.\d+)?\s*(?:mah|м ач|мач|毫安(?:时)?)\b",
+        "length": r"\b\d+(?:\.\d+)?\s*(?:mm|cm|m|мм|см|м|毫米|厘米|米)\b",
+        "count": r"\b\d+\s*(?:pcs?|pack|шт|штук|件|个|只|套)\b",
+        "voltage": r"\b\d+(?:\.\d+)?\s*(?:v|伏|в)\b",
+    }
+    for kind, pattern in patterns.items():
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            add(kind, match.group(0))
+    for match in re.finditer(r"\b\d+(?:\.\d+)?\s*[xх]\s*\d+(?:\.\d+)?(?:\s*[xх]\s*\d+(?:\.\d+)?)?\s*(?:mm|cm|m|мм|см|毫米|厘米)?\b", text):
+        add("dimensions", match.group(0))
+    return specs
+
+
+def spec_conflicts(expected: dict[str, list[str]], returned: dict[str, list[str]]) -> list[str]:
+    conflicts: list[str] = []
+    for kind in sorted(set(expected) & set(returned)):
+        left = set(expected.get(kind) or [])
+        right = set(returned.get(kind) or [])
+        if left and right and left.isdisjoint(right):
+            conflicts.append(kind)
+    return conflicts
+
+
+def accessory_conflict(expected_text: str, returned_text: str) -> bool:
+    expected = normalize_text(expected_text)
+    returned = normalize_text(returned_text)
+    expected_hints = {hint for hint in ACCESSORY_INTENT_HINTS if hint in expected}
+    returned_hints = {hint for hint in ACCESSORY_INTENT_HINTS if hint in returned}
+    return bool(returned_hints and not expected_hints)
+
+
+def image_fingerprint(image: Image.Image) -> tuple[int, list[float]]:
+    prepared = ImageOps.exif_transpose(image).convert("RGB")
+    gray = prepared.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+    pixels = list(gray.getdata())
+    difference_hash = 0
+    for row in range(8):
+        for column in range(8):
+            difference_hash <<= 1
+            if pixels[row * 9 + column] > pixels[row * 9 + column + 1]:
+                difference_hash |= 1
+    histogram = [0.0] * 64
+    for red, green, blue in prepared.resize((64, 64), Image.Resampling.BILINEAR).getdata():
+        histogram[(red // 64) * 16 + (green // 64) * 4 + (blue // 64)] += 1.0
+    length = math.sqrt(sum(value * value for value in histogram)) or 1.0
+    return difference_hash, [value / length for value in histogram]
+
+
+def compare_fingerprints(left: tuple[int, list[float]], right: tuple[int, list[float]]) -> dict:
+    left_hash, left_histogram = left
+    right_hash, right_histogram = right
+    hash_similarity = 1.0 - ((left_hash ^ right_hash).bit_count() / 64.0)
+    color_similarity = max(0.0, min(1.0, sum(
+        left * right for left, right in zip(left_histogram, right_histogram)
+    )))
+    score = max(0.0, min(1.0, hash_similarity * 0.7 + color_similarity * 0.3))
+    return {
+        "available": True,
+        "dhash_score": round(hash_similarity, 6),
+        "color_score": round(color_similarity, 6),
+        "score": round(score, 6),
+    }
+
+
+def compare_remote_image(source_image: Path, image_url: str, timeout_seconds: float = 1.5) -> dict:
+    if not source_image.is_file() or not re.match(r"^https?://", str(image_url or ""), flags=re.IGNORECASE):
+        return {"available": False, "reason": "missing-image"}
+    session = requests.Session()
+    session.trust_env = False
+    try:
+        response = session.get(
+            image_url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=(min(0.8, timeout_seconds), timeout_seconds),
+        )
+        response.raise_for_status()
+        if not response.content:
+            return {"available": False, "reason": "empty-image"}
+        with Image.open(source_image) as source, Image.open(io.BytesIO(response.content)) as returned:
+            return compare_fingerprints(image_fingerprint(source), image_fingerprint(returned))
+    except Exception as exc:
+        return {"available": False, "reason": f"image-error:{type(exc).__name__}"}
+    finally:
+        session.close()
+
+
+def balanced_same_item_assessment(
+    selected_cluster_rows: list[dict],
+    *,
+    expect_title: str,
+    expect_model: str,
+    expect_category: str,
+    source_image_path: Path | None = None,
+    image_metrics_by_offer: dict[str, dict] | None = None,
+) -> dict:
+    expected_text = " ".join(filter(None, [expect_title, expect_model, expect_category]))
+    expected_specs = extract_specs(expected_text)
+    high_needles = high_information_tokens(expect_title)
+    feature_needles = feature_tokens(expect_title)
+    model_needles = model_tokens(expect_model)
+    rows: list[dict] = []
+    metrics_override = image_metrics_by_offer or {}
+    image_offer_ids = {
+        str(row.get("offerId") or "")
+        for row in sorted(selected_cluster_rows, key=lambda candidate: int(candidate.get("rank") or 9999))[:3]
+    }
+
+    for row in selected_cluster_rows:
+        offer_id = str(row.get("offerId") or "").strip()
+        title = normalize_text(row.get("title"))
+        model_hits = matching_tokens(title, model_needles)
+        information_hits = matching_tokens(title, high_needles)
+        matched_features = matching_tokens(title, feature_needles)
+        returned_specs = extract_specs(title)
+        conflicts = spec_conflicts(expected_specs, returned_specs)
+        has_accessory_conflict = accessory_conflict(expected_text, title)
+        image = metrics_override.get(offer_id)
+        if image is None and source_image_path is not None and offer_id in image_offer_ids:
+            image = compare_remote_image(source_image_path, str(row.get("pic") or ""))
+        image = dict(image or {"available": False, "reason": "image-not-checked"})
+        image_score = float(image.get("score") or 0)
+        exact_model = bool(model_needles and model_hits)
+        if exact_model:
+            semantic_strength = "exact_model"
+        elif len(information_hits) >= 2:
+            semantic_strength = "two_high_information_terms"
+        elif len(information_hits) == 1:
+            semantic_strength = "one_high_information_term"
+        elif matched_features:
+            semantic_strength = "feature_only"
+        else:
+            semantic_strength = "weak_or_none"
+        semantic_valid = exact_model or len(information_hits) >= 1
+        rows.append({
+            **row,
+            "rank": int(row.get("rank") or 0),
+            "supplier_id": normalize_supplier(row.get("shop")),
+            "image": image,
+            "semantic_strength": semantic_strength,
+            "semantic_hits_v3": {
+                "model": model_hits,
+                "high_information": information_hits,
+                "feature": matched_features,
+            },
+            "specs": returned_specs,
+            "spec_conflicts": conflicts,
+            "accessory_conflict": has_accessory_conflict,
+            "semantic_valid": semantic_valid,
+            "strong_single": (
+                1 <= int(row.get("rank") or 0) <= 3
+                and bool(image.get("available"))
+                and image_score >= IMAGE_HIGH_SIMILARITY
+                and not conflicts
+                and not has_accessory_conflict
+                and (
+                    exact_model
+                    or len(information_hits) >= 2
+                    or (len(information_hits) == 1 and image_score >= IMAGE_VERY_HIGH_SIMILARITY)
+                )
+            ),
+        })
+
+    strong = next((row for row in rows if row["strong_single"]), None)
+    if strong:
+        decision = True
+        match_type = "strong_single"
+        reason = "top-three image, semantics and specifications agree"
+        supporting_offer_ids = [str(strong.get("offerId") or "")]
+    else:
+        credible = [row for row in rows if (
+            row.get("semantic_valid")
+            and not row.get("spec_conflicts")
+            and not row.get("accessory_conflict")
+            and str(row.get("offerId") or "").strip()
+            and row.get("supplier_id")
+        )]
+        independent: list[dict] = []
+        seen_offers: set[str] = set()
+        seen_suppliers: set[str] = set()
+        for row in credible:
+            offer_id = str(row.get("offerId") or "").strip()
+            supplier_id = str(row.get("supplier_id") or "")
+            if offer_id in seen_offers or supplier_id in seen_suppliers:
+                continue
+            seen_offers.add(offer_id)
+            seen_suppliers.add(supplier_id)
+            independent.append(row)
+        high_image = any(
+            bool(row.get("image", {}).get("available"))
+            and float(row.get("image", {}).get("score") or 0) >= IMAGE_HIGH_SIMILARITY
+            for row in independent
+        )
+        decision = len(independent) >= 2 and high_image
+        match_type = "corroborated_multi" if decision else "rejected"
+        supporting_offer_ids = [str(row.get("offerId") or "") for row in independent[:2]] if decision else []
+        if len({row.get("supplier_id") for row in credible}) < 2:
+            reason = "fewer than two independent suppliers"
+        elif not high_image:
+            reason = "no corroborating offer has high image similarity"
+        elif any(row.get("spec_conflicts") for row in rows):
+            reason = "specification conflict"
+        elif any(row.get("accessory_conflict") for row in rows):
+            reason = "accessory or packaging conflict"
+        else:
+            reason = "weak title semantics"
+
+    return {
+        "passed": decision,
+        "match_type": match_type,
+        "reason": reason,
+        "image_available": any(bool(row.get("image", {}).get("available")) for row in rows),
+        "supporting_offer_ids": supporting_offer_ids,
+        "expected_specs": expected_specs,
+        "rows": rows,
+    }
 
 
 def assess_match(rows: list[dict], expect_title: str, expect_model: str, expect_category: str, match_top: int) -> dict:
@@ -279,7 +581,7 @@ def scored_similarity_rows(rows: list[dict], expect_title: str, expect_model: st
     category_needles = category_tokens(expect_category)
     weak_needles = [token for token in category_needles if token not in title_needles]
     scored = []
-    for row in rows[:match_top]:
+    for rank, row in enumerate(rows[:match_top], 1):
         title = row.get("title", "")
         semantic_hits = {
             "model": matching_tokens(title, model_needles),
@@ -303,6 +605,7 @@ def scored_similarity_rows(rows: list[dict], expect_title: str, expect_model: st
             level = "none"
         scored.append({
             **row,
+            "rank": rank,
             "score": score,
             "level": level,
             "bad_hits": bad_hits,
@@ -320,10 +623,11 @@ def build_same_item_evidence(
     cost_source: str,
     selected_cost: float,
     selected_cluster_rows: list[dict],
+    balanced_match: dict,
 ) -> tuple[str, str]:
     """Bind accepted return rows and request semantics into one auditable digest."""
     evidence = {
-        "contract": "1688-returned-same-item-v2",
+        "contract": "1688-returned-same-item-v3",
         "cost_source": cost_source,
         "request": {
             "expect_category": normalize_text(expect_category),
@@ -333,12 +637,22 @@ def build_same_item_evidence(
         "rows": [
             {
                 "offer_id": str(row.get("offerId") or "").strip(),
+                "supplier_id": normalize_supplier(row.get("shop")),
+                "supplier": normalize_text(row.get("shop")),
+                "image_url": str(row.get("pic") or "").strip(),
                 "price": float(row["price"]),
+                "rank": int(row.get("rank") or 0),
                 "semantic_hits": {
                     "category": list((row.get("semantic_hits") or {}).get("category") or []),
                     "model": list((row.get("semantic_hits") or {}).get("model") or []),
                     "title": list((row.get("semantic_hits") or {}).get("title") or []),
                 },
+                "semantic_hits_v3": dict(row.get("semantic_hits_v3") or {}),
+                "semantic_strength": str(row.get("semantic_strength") or "weak_or_none"),
+                "image": dict(row.get("image") or {"available": False}),
+                "specs": dict(row.get("specs") or {}),
+                "spec_conflicts": list(row.get("spec_conflicts") or []),
+                "accessory_conflict": bool(row.get("accessory_conflict")),
                 "title": normalize_text(row.get("title")),
             }
             for row in filtered_rows
@@ -346,11 +660,20 @@ def build_same_item_evidence(
         "selected_cluster": [
             {
                 "offer_id": str(row.get("offerId") or "").strip(),
+                "supplier_id": normalize_supplier(row.get("shop")),
                 "price": float(row["price"]),
             }
             for row in selected_cluster_rows
         ],
         "selected_cost": float(selected_cost),
+        "balanced_match": {
+            "passed": bool(balanced_match.get("passed")),
+            "match_type": str(balanced_match.get("match_type") or "rejected"),
+            "reason": str(balanced_match.get("reason") or ""),
+            "image_available": bool(balanced_match.get("image_available")),
+            "supporting_offer_ids": list(balanced_match.get("supporting_offer_ids") or []),
+            "expected_specs": dict(balanced_match.get("expected_specs") or {}),
+        },
     }
     encoded = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -364,6 +687,8 @@ def first_page_p70_cost(
     expect_category: str = "",
     page_size: int = 10,
     minimum_matches: int = 3,
+    source_image_path: Path | str | None = None,
+    image_metrics_by_offer: dict[str, dict] | None = None,
 ) -> dict:
     required_matches = max(1, int(minimum_matches))
     first_page = scored_similarity_rows(rows, expect_title, expect_model, expect_category, page_size)
@@ -531,14 +856,35 @@ def first_page_p70_cost(
         if use_p80
         else "search_first_page_cluster_p70_similarity_filtered"
     )
+    balanced_match = balanced_same_item_assessment(
+        selected_cluster["rows"],
+        expect_title=expect_title,
+        expect_model=expect_model,
+        expect_category=expect_category,
+        source_image_path=Path(source_image_path).expanduser().resolve() if source_image_path else None,
+        image_metrics_by_offer=image_metrics_by_offer,
+    )
+    balanced_by_offer = {
+        str(row.get("offerId") or ""): row
+        for row in balanced_match.get("rows") or []
+    }
+    evidence_rows = [
+        {**row, **balanced_by_offer.get(str(row.get("offerId") or ""), {})}
+        for row in filtered_rows
+    ]
+    evidence_cluster_rows = [
+        {**row, **balanced_by_offer.get(str(row.get("offerId") or ""), {})}
+        for row in selected_cluster["rows"]
+    ]
     same_item_evidence, match_evidence_key = build_same_item_evidence(
-        filtered_rows,
+        evidence_rows,
         expect_title=expect_title,
         expect_model=expect_model,
         expect_category=expect_category,
         cost_source=cost_source,
         selected_cost=selected_cost,
-        selected_cluster_rows=selected_cluster["rows"],
+        selected_cluster_rows=evidence_cluster_rows,
+        balanced_match=balanced_match,
     )
     return {
         "decision": "LIGHT_ACCEPT",
@@ -554,6 +900,9 @@ def first_page_p70_cost(
         "cost_source": cost_source,
         "same_item_evidence": same_item_evidence,
         "match_evidence_key": match_evidence_key,
+        "balanced_match": {
+            key: value for key, value in balanced_match.items() if key != "rows"
+        },
         "filtered_rows": filtered_rows,
         "excluded_rows": excluded_rows,
     }
@@ -609,6 +958,9 @@ def summarize_products(raw_products: list[dict]) -> list[dict]:
         sale = parse_int(data.get("saleQuantity") or (data.get("afterPrice") or {}).get("text"))
         if price is None or not sale:
             continue
+        image_url = str(data.get("offerPicUrl") or data.get("odPicUrl") or "").strip()
+        if image_url.startswith("//"):
+            image_url = f"https:{image_url}"
         rows.append(
             {
                 "offerId": data.get("offerId"),
@@ -616,7 +968,7 @@ def summarize_products(raw_products: list[dict]) -> list[dict]:
                 "price": price,
                 "saleQuantity": sale,
                 "shop": (data.get("shop") or {}).get("text") or data.get("loginId"),
-                "pic": data.get("offerPicUrl") or data.get("odPicUrl"),
+                "pic": image_url,
                 "url": data.get("linkUrl"),
             }
         )
@@ -653,6 +1005,7 @@ def main() -> int:
         expect_category=args.expect_category,
         page_size=args.top,
         minimum_matches=max(1, args.min_matches),
+        source_image_path=image_path,
     )
 
     payload = {
@@ -673,6 +1026,7 @@ def main() -> int:
         "p70_cost": p70["p70_cost"],
         "filtered_rows": p70["filtered_rows"],
         "excluded_rows": p70["excluded_rows"],
+        "balanced_match": p70.get("balanced_match"),
         "valid_count": len(rows),
         "top3_prices": [row["price"] for row in top3],
         "median_cost": median,
@@ -694,6 +1048,11 @@ def main() -> int:
         print("SAME_ITEM_EVIDENCE", p70["same_item_evidence"])
     if p70.get("match_evidence_key"):
         print("MATCH_EVIDENCE_KEY", p70["match_evidence_key"])
+    if p70.get("balanced_match"):
+        print("BALANCED_MATCH_OK", str(bool(p70["balanced_match"].get("passed"))).lower())
+        print("BALANCED_MATCH_TYPE", p70["balanced_match"].get("match_type") or "rejected")
+        print("BALANCED_MATCH_REASON", p70["balanced_match"].get("reason") or "")
+        print("IMAGE_CHECK_AVAILABLE", str(bool(p70["balanced_match"].get("image_available"))).lower())
     print("COST_SOURCE", payload["cost_source"])
     print("REASON", payload["reason"])
     for index, row in enumerate(payload["top_rows"], 1):

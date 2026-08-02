@@ -256,6 +256,120 @@ class FirstPageClusterCostTest(unittest.TestCase):
         self.assertEqual(result["filtered_first_page_prices"], [20.0, 21.0])
         self.assertIn("fewer than 3", result["reason"])
 
+    def test_balanced_single_source_accepts_top_three_exact_model_image_and_specs(self):
+        result = image_median_1688.balanced_same_item_assessment(
+            [{
+                "offerId": "strong-1",
+                "title": "portable camping lamp X100 20W",
+                "price": 20,
+                "rank": 1,
+                "shop": "factory-a",
+            }],
+            expect_title="portable camping lamp 20W",
+            expect_model="X100",
+            expect_category="lighting",
+            image_metrics_by_offer={"strong-1": {"available": True, "score": 0.86}},
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["match_type"], "strong_single")
+
+    def test_weak_type_and_pure_number_cannot_prove_same_item(self):
+        type_result = image_median_1688.balanced_same_item_assessment(
+            [{
+                "offerId": "adapter-1",
+                "title": "USB Type C adapter 150",
+                "price": 10,
+                "rank": 1,
+                "shop": "factory-a",
+            }],
+            expect_title="USB Type C data cable 150",
+            expect_model="150",
+            expect_category="cable",
+            image_metrics_by_offer={"adapter-1": {"available": True, "score": 0.99}},
+        )
+        numeric_result = image_median_1688.balanced_same_item_assessment(
+            [{
+                "offerId": "numeric-1",
+                "title": "150 000 pro max",
+                "price": 10,
+                "rank": 1,
+                "shop": "factory-a",
+            }],
+            expect_title="150 000 pro max",
+            expect_model="150",
+            expect_category="",
+            image_metrics_by_offer={"numeric-1": {"available": True, "score": 0.99}},
+        )
+        self.assertFalse(type_result["passed"])
+        self.assertFalse(numeric_result["passed"])
+
+    def test_balanced_multi_source_requires_two_distinct_suppliers_and_one_high_image(self):
+        candidates = [
+            {"offerId": "offer-a", "title": "portable camping lamp", "price": 20, "rank": 4, "shop": "factory-a"},
+            {"offerId": "offer-b", "title": "portable camping lamp", "price": 21, "rank": 5, "shop": "factory-b"},
+        ]
+        passed = image_median_1688.balanced_same_item_assessment(
+            candidates,
+            expect_title="portable camping lamp",
+            expect_model="",
+            expect_category="lighting",
+            image_metrics_by_offer={
+                "offer-a": {"available": True, "score": 0.82},
+                "offer-b": {"available": False},
+            },
+        )
+        same_supplier = image_median_1688.balanced_same_item_assessment(
+            [{**candidates[0]}, {**candidates[1], "shop": "factory-a"}],
+            expect_title="portable camping lamp",
+            expect_model="",
+            expect_category="lighting",
+            image_metrics_by_offer={"offer-a": {"available": True, "score": 0.82}},
+        )
+        self.assertTrue(passed["passed"])
+        self.assertEqual(passed["match_type"], "corroborated_multi")
+        self.assertFalse(same_supplier["passed"])
+
+    def test_specification_conflict_and_missing_image_fail_closed(self):
+        conflict = image_median_1688.balanced_same_item_assessment(
+            [{"offerId": "wrong-power", "title": "portable lamp X100 10W", "price": 20, "rank": 1, "shop": "factory-a"}],
+            expect_title="portable lamp 20W",
+            expect_model="X100",
+            expect_category="lighting",
+            image_metrics_by_offer={"wrong-power": {"available": True, "score": 0.95}},
+        )
+        missing_image = image_median_1688.balanced_same_item_assessment(
+            [{"offerId": "no-image", "title": "portable lamp X100 20W", "price": 20, "rank": 1, "shop": "factory-a"}],
+            expect_title="portable lamp 20W",
+            expect_model="X100",
+            expect_category="lighting",
+            image_metrics_by_offer={"no-image": {"available": False, "reason": "timeout"}},
+        )
+        self.assertFalse(conflict["passed"])
+        self.assertIn("power", conflict["rows"][0]["spec_conflicts"])
+        self.assertFalse(missing_image["passed"])
+
+    def test_new_cost_evidence_uses_v3_and_binds_supplier_image_specs_and_cluster(self):
+        result = image_median_1688.first_page_p70_cost(
+            [{
+                "offerId": "v3-offer",
+                "title": "portable camping lamp X100 20W",
+                "price": 18,
+                "saleQuantity": 100,
+                "shop": "factory-a",
+                "pic": "https://img.example/v3.jpg",
+            }],
+            expect_title="portable camping lamp 20W",
+            expect_model="X100",
+            page_size=10,
+            minimum_matches=1,
+            image_metrics_by_offer={"v3-offer": {"available": True, "score": 0.92}},
+        )
+        evidence = json.loads(result["same_item_evidence"])
+        self.assertEqual(evidence["contract"], "1688-returned-same-item-v3")
+        self.assertEqual(evidence["rows"][0]["supplier_id"], "factorya")
+        self.assertEqual(evidence["rows"][0]["image_url"], "https://img.example/v3.jpg")
+        self.assertTrue(evidence["balanced_match"]["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

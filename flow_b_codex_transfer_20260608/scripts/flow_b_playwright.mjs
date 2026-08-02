@@ -303,6 +303,11 @@ async function createPublishingSession(context, options, env, shared) {
       cacheFlushDebounceMs: String(env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS || "").trim()
         ? Math.max(0, Number(env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS) || 0)
         : 150,
+      matchPolicy: env.FLOW_B_1688_MATCH_POLICY || "shadow",
+      matchPolicySampleSize: Math.max(1, Number(env.FLOW_B_1688_MATCH_SHADOW_SAMPLES) || 100),
+      matchPolicyRetentionPercent: Math.max(0, Number(env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT) || 75),
+      matchPolicyImageAvailabilityPercent: Math.max(0, Number(env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT) || 90),
+      matchPolicyP95Ms: Math.max(1, Number(env.FLOW_B_1688_MATCH_MAX_P95_MS) || 15_000),
     });
     const detailProvider = createOzonDetailProvider({
       context,
@@ -806,6 +811,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
           ? "daily_erp_accepted_unique_skus"
           : "erp_accepted_unique_skus",
         minimum_same_item_matches: 1,
+        match_policy: directEnv.FLOW_B_1688_MATCH_POLICY || "shadow",
       });
       const pageCleanup = directEnv.FLOW_B_PRUNE_ORPHAN_PAGES_ON_START === "1"
         ? await pruneOrphanedFlowPages(context, {
