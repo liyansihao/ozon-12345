@@ -29,7 +29,7 @@ const DEFAULT_LABEL = "com.codex.ozon.24h-production";
 const DEFAULT_INSTALL_ROOT = path.join(process.env.HOME || "/Users/mac", ".ozon-24h-production");
 const PRODUCTION_STORE_IDS = [106637, 106640, 106644, 106646, 104965];
 const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|安全检查|验证码/i;
-const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
+const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|connectOverCDP:\s*Timeout|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
 
 function absolute(value, fallback) {
   return path.resolve(String(value || fallback || ""));
@@ -2071,6 +2071,16 @@ async function superviseDirectPublishing({
           checkpointEnv: workerEnvironment(config, currentRun),
         });
       } else {
+        for (const pid of browserOwnerPidsForRecovery(decision, owners)) {
+          await stopExactOwner(pid);
+          await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+            at: new Date().toISOString(),
+            run_dir: runDir,
+            action: "recycled-unresponsive-profile-owner",
+            pid,
+            reason: decision.reason,
+          });
+        }
         await delay(seconds * 1000);
       }
     }

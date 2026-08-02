@@ -880,6 +880,7 @@ test("safe stop retains the worker identity while its exit handler clears the ow
 test("browser and CDP failures recover the same run with bounded backoff", () => {
   for (const message of [
     "connect ECONNREFUSED 127.0.0.1:9223",
+    "browserType.connectOverCDP: Timeout 30000ms exceeded.",
     "browserContext.newPage: Target page, context or browser has been closed",
     "page.goto: net::ERR_CONNECTION_RESET",
   ]) {
@@ -888,6 +889,16 @@ test("browser and CDP failures recover the same run with bounded backoff", () =>
       reason: "browser-or-network-recoverable",
     });
   }
+
+  const sessionTimeoutDecision = classifyWorkerFailure({
+    message: "browserType.connectOverCDP: Timeout 30000ms exceeded.",
+    profileOwnerCount: 1,
+  });
+  assert.deepEqual(sessionTimeoutDecision, {
+    action: "restart-browser-and-worker",
+    reason: "browser-or-network-recoverable",
+  });
+  assert.deepEqual(browserOwnerPidsForRecovery(sessionTimeoutDecision, [{ pid: 84424 }]), [84424]);
 
   assert.deepEqual(
     [0, 1, 2, 3, 20].map((attempt) => nextRestartDelaySeconds(attempt)),
