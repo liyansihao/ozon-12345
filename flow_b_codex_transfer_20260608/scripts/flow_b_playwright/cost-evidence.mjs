@@ -173,6 +173,8 @@ export function verifyReturnedSameItemEvidence({
       "exact_model",
       "two_high_information_terms",
       "one_high_information_term",
+      "one_high_information_plus_product",
+      "product_semantics",
       "feature_only",
       "weak_or_none",
     ]);
@@ -217,9 +219,9 @@ export function verifyReturnedSameItemEvidence({
       && row.spec_conflicts.length === 0
       && row?.accessory_conflict === false;
     const imageScore = (row) => Number(row?.image?.score);
-    const highImage = (row) => row?.image?.available === true
+    const highImage = (row, threshold = 0.78) => row?.image?.available === true
       && Number.isFinite(imageScore(row))
-      && imageScore(row) >= 0.78;
+      && imageScore(row) >= threshold;
     if (balancedMatch?.passed === true && matchType === "strong_single") {
       const row = supportingRows[0];
       const semanticStrength = String(row?.semantic_strength || "");
@@ -240,8 +242,14 @@ export function verifyReturnedSameItemEvidence({
         || suppliers.some((value) => !value)
         || new Set(suppliers).size !== suppliers.length
         || supportingRows.some((row) => !cleanRow(row))
-        || supportingRows.some((row) => !["exact_model", "two_high_information_terms", "one_high_information_term"].includes(String(row?.semantic_strength || "")))
-        || !supportingRows.some(highImage)) {
+        || supportingRows.some((row) => ![
+          "exact_model",
+          "two_high_information_terms",
+          "one_high_information_term",
+          "one_high_information_plus_product",
+          "product_semantics",
+        ].includes(String(row?.semantic_strength || "")))
+        || !supportingRows.some((row) => highImage(row, 0.58))) {
         return { ok: false, reason: "multi-source v3 evidence lacks independent suppliers, semantics, image or specification agreement" };
       }
     } else if (balancedMatch?.passed !== false || matchType !== "rejected" || supportingIds.length) {

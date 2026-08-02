@@ -285,6 +285,7 @@ export function createCostBridge({
       : "shadow";
     let state = {
       version: 1,
+      matcher_version: "balanced-v3.1",
       configured_policy: configured,
       effective_policy: configured,
       samples: [],
@@ -293,7 +294,7 @@ export function createCostBridge({
     };
     try {
       const parsed = JSON.parse(await fs.readFile(path.join(root, "1688_match_policy.json"), "utf8"));
-      if (parsed?.version === 1) {
+      if (parsed?.version === 1 && parsed?.matcher_version === state.matcher_version) {
         state = {
           ...state,
           ...parsed,
@@ -317,6 +318,7 @@ export function createCostBridge({
       if (recordShadowSample && result?.ok && effectiveBefore === "shadow") {
         const sample = {
           at: new Date(now()).toISOString(),
+          matcher_version: state.matcher_version,
           balanced_passed: result?.balanced_match === true,
           balanced_match_type: result?.balanced_match_type || "rejected",
           balanced_match_reason: result?.balanced_match_reason || null,

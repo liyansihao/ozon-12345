@@ -80,6 +80,18 @@ ACCESSORY_INTENT_HINTS = {
 
 IMAGE_HIGH_SIMILARITY = 0.78
 IMAGE_VERY_HIGH_SIMILARITY = 0.90
+IMAGE_CORROBORATION_SIMILARITY = 0.58
+
+PRODUCT_SEMANTIC_GROUPS = [
+    ("sweater", {"свитер", "джемпер", "sweater", "cardigan", "毛衣", "毛衫", "针织", "开衫"}),
+    ("protective_film", {"стекло", "пленка", "плёнка", "glass", "film", "保护膜", "钢化膜", "手机膜", "玻璃膜"}),
+    ("camera_lens", {"камера", "объектив", "camera", "lens", "镜头", "摄像头"}),
+    ("data_cable", {"кабель", "провод", "cable", "wire", "数据线", "充电线", "线缆"}),
+    ("adapter", {"переходник", "адаптер", "adapter", "adaptor", "converter", "转接头", "转换器", "适配器"}),
+    ("phone_case", {"чехол", "case", "cover", "手机壳", "保护壳", "外壳"}),
+    ("lamp", {"лампа", "фонарь", "light", "lamp", "灯", "台灯", "手电筒"}),
+    ("battery", {"аккумулятор", "battery", "电池", "蓄电池"}),
+]
 
 CATEGORY_KEYWORDS = {
     "汽车防盗器遥控器套": ["钥匙套", "钥匙壳", "钥匙包", "保护壳", "汽车钥匙", "本田", "honda"],
@@ -155,6 +167,23 @@ def high_information_tokens(value: str) -> list[str]:
 
 def feature_tokens(value: str) -> list[str]:
     return [token for token in split_tokens(value) if normalize_text(token) in FEATURE_TOKENS]
+
+
+def product_semantic_match(expected_value: str, returned_value: str) -> dict:
+    expected = normalize_text(expected_value)
+    returned = normalize_text(returned_value)
+    expected_groups = [
+        (name, terms)
+        for name, terms in PRODUCT_SEMANTIC_GROUPS
+        if any(term in expected for term in terms)
+    ]
+    hits = [
+        name
+        for name, terms in expected_groups
+        if any(term in returned for term in terms)
+    ]
+    missing = [name for name, _terms in expected_groups if name not in hits]
+    return {"hits": hits, "missing": missing}
 
 
 def model_tokens(value: str) -> list[str]:
@@ -330,6 +359,8 @@ def balanced_same_item_assessment(
         matched_features = matching_tokens(title, feature_needles)
         returned_specs = extract_specs(title)
         conflicts = spec_conflicts(expected_specs, returned_specs)
+        product_semantics = product_semantic_match(expected_text, title)
+        conflicts.extend(f"product:{name}" for name in product_semantics["missing"])
         has_accessory_conflict = accessory_conflict(expected_text, title)
         image = metrics_override.get(offer_id)
         if image is None and source_image_path is not None and offer_id in image_offer_ids:
@@ -342,12 +373,22 @@ def balanced_same_item_assessment(
         elif len(information_hits) >= 2:
             semantic_strength = "two_high_information_terms"
         elif len(information_hits) == 1:
-            semantic_strength = "one_high_information_term"
+            semantic_strength = (
+                "one_high_information_plus_product"
+                if product_semantics["hits"] and not product_semantics["missing"]
+                else "one_high_information_term"
+            )
+        elif product_semantics["hits"] and not product_semantics["missing"]:
+            semantic_strength = "product_semantics"
         elif matched_features:
             semantic_strength = "feature_only"
         else:
             semantic_strength = "weak_or_none"
-        semantic_valid = exact_model or len(information_hits) >= 1
+        semantic_valid = (
+            exact_model
+            or len(information_hits) >= 1
+            or bool(product_semantics["hits"] and not product_semantics["missing"])
+        )
         rows.append({
             **row,
             "rank": int(row.get("rank") or 0),
@@ -358,6 +399,7 @@ def balanced_same_item_assessment(
                 "model": model_hits,
                 "high_information": information_hits,
                 "feature": matched_features,
+                "product": product_semantics["hits"],
             },
             "specs": returned_specs,
             "spec_conflicts": conflicts,
@@ -404,7 +446,7 @@ def balanced_same_item_assessment(
             independent.append(row)
         high_image = any(
             bool(row.get("image", {}).get("available"))
-            and float(row.get("image", {}).get("score") or 0) >= IMAGE_HIGH_SIMILARITY
+            and float(row.get("image", {}).get("score") or 0) >= IMAGE_CORROBORATION_SIMILARITY
             for row in independent
         )
         decision = len(independent) >= 2 and high_image

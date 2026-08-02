@@ -348,6 +348,21 @@ class FirstPageClusterCostTest(unittest.TestCase):
         self.assertIn("power", conflict["rows"][0]["spec_conflicts"])
         self.assertFalse(missing_image["passed"])
 
+    def test_cross_language_product_terms_support_two_independent_suppliers(self):
+        result = image_median_1688.balanced_same_item_assessment(
+            [
+                {"offerId": "sweater-a", "title": "stone 拉链针织毛衣", "price": 100, "rank": 4, "shop": "factory-a"},
+                {"offerId": "sweater-b", "title": "stone 立领毛衫", "price": 105, "rank": 5, "shop": "factory-b"},
+            ],
+            expect_title="свитер stone island",
+            expect_model="",
+            expect_category="服装",
+            image_metrics_by_offer={"sweater-a": {"available": True, "score": 0.60}},
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["match_type"], "corroborated_multi")
+        self.assertEqual(result["rows"][0]["semantic_strength"], "one_high_information_plus_product")
+
     def test_new_cost_evidence_uses_v3_and_binds_supplier_image_specs_and_cluster(self):
         result = image_median_1688.first_page_p70_cost(
             [{
