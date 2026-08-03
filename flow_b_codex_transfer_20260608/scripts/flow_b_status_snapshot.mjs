@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import readline from "node:readline";
 import { pathToFileURL } from "node:url";
 
 const EXCLUDED_SKUS = new Set(["2815247918"]);
@@ -376,6 +378,29 @@ async function readJsonLines(filename) {
   }
 }
 
+async function readLatestSkuStateLines(filename) {
+  const latest = new Map();
+  const input = fsSync.createReadStream(filename, { encoding: "utf8" });
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const event = JSON.parse(line);
+        const sku = String(event?.sku ?? event?.data?.sku ?? "").trim();
+        if (sku) latest.set(sku, event);
+      } catch {}
+    }
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+  return [...latest.values()];
+}
+
 export async function snapshotRun(runDir, observedAt = new Date().toISOString()) {
   const root = path.resolve(runDir);
   const config = await readJson(path.join(root, "source_config.json"));
@@ -393,7 +418,7 @@ export async function snapshotRun(runDir, observedAt = new Date().toISOString())
     },
     published: await readJsonLines(path.join(root, "published.jsonl")),
     selected: await readJsonLines(path.join(root, "selected.jsonl")),
-    skuStateEvents: await readJsonLines(path.join(root, "sku_states.jsonl")),
+    skuStateEvents: await readLatestSkuStateLines(path.join(root, "sku_states.jsonl")),
     storeTargetEvents: await readJsonLines(path.join(root, "store_targets.jsonl")),
     storeDailyUsageEvents: await readJsonLines(path.join(root, "store_daily_usage.jsonl")),
     runtimeErrors: await readJsonLines(path.join(root, "runtime_errors.jsonl")),

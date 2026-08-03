@@ -496,15 +496,22 @@ export function createPublishState({
     return entry;
   }
 
-  function hydrateFromRuntime({ pendingSeeds = new Map(), localRunPublished = new Set() } = {}) {
+  function hydrateFromRuntime({
+    pendingSeeds = new Map(),
+    localRunPublished = new Set(),
+    runtimeEntries = runtimeState?.stateEntries?.() ?? [],
+  } = {}) {
     if (!runtimeState) return;
-    const allSkus = new Set(runtimeState.auditEvents().map((event) => event.sku));
     states.clear();
     publishedSkus.clear();
     runPublishedSkus.clear();
-    for (const sku of allSkus) {
-      const entry = syncRuntimeSku(sku);
+    const runtimeBySku = new Map(runtimeEntries.map((entry) => [entry.sku, entry]));
+    for (const runtimeValue of runtimeEntries) {
+      const entry = runtimePublicEntry(runtimeValue);
       if (!entry) continue;
+      const sku = entry.sku;
+      states.set(sku, { status: entry.status, data: { ...entry.data } });
+      if (entry.status === "published") publishedSkus.add(sku);
       const pendingSeed = pendingSeeds.get(sku);
       if (
         pendingSeed &&
@@ -517,17 +524,28 @@ export function createPublishState({
         entry.data.seed_source_file = pendingSeed.filename;
         states.set(sku, { status: entry.status, data: { ...entry.data } });
       }
+      const storeId = Number(entry.data?.store_id);
+      if (storeId > 0 && (
+        entry.status === "published"
+        || entry.data?.selected_at
+        || entry.data?.prepared_at
+        || entry.data?.submission_intent === true
+        || entry.data?.submission_pending === true
+        || entry.data?.submitted === true
+      )) {
+        selectedKeys.add(`${storeId}:${sku}`);
+      }
     }
     const runtimeRunSkus = new Set(
-      runtimeState.auditEvents()
-        .filter((event) => (
-          event.strict &&
-          path.resolve(String(event.data?.runtime_run_dir || "")) === resolvedRunDir
+      runtimeEntries
+        .filter((entry) => (
+          entry.strict &&
+          path.resolve(String(entry.data?.runtime_run_dir || "")) === resolvedRunDir
         ))
-        .map((event) => event.sku),
+        .map((entry) => entry.sku),
     );
     for (const sku of new Set([...localRunPublished, ...runtimeRunSkus])) {
-      if (runtimeState.get(sku)?.strict) runPublishedSkus.add(sku);
+      if (runtimeBySku.get(sku)?.strict) runPublishedSkus.add(sku);
     }
   }
 
@@ -686,6 +704,18 @@ export function createPublishState({
       if (persistedSummary && Number.isFinite(Number(persistedSummary.published)) && Number.isFinite(Number(persistedSummary.remaining))) {
         summaryTarget = Math.max(0, Number(persistedSummary.published) + Number(persistedSummary.remaining));
       }
+      if (runtimeState?.hasNativeRuntimeEvents?.()) {
+        hydrateFromRuntime();
+        loaded = true;
+        try {
+          lastStrictAuditReconciliation = await reconcileStrictAuditOutputsInternal();
+        } catch (error) {
+          loaded = false;
+          throw error;
+        }
+        if (summaryTarget !== undefined) writeSummary(summaryTarget);
+        return api;
+      }
       const latestPendingSeeds = new Map();
       for (const filename of pendingStateFiles) {
         for (const event of parseJsonLines(await readTextIfPresent(filename))) {
@@ -736,8 +766,7 @@ export function createPublishState({
       }
       if (runtimeState) {
         const localRunPublished = new Set(runPublishedSkus);
-        const existingRuntimeEvents = runtimeState.auditEvents();
-        const hasNativeRuntimeEvents = existingRuntimeEvents.some((event) => event.source === "runtime");
+        const hasNativeRuntimeEvents = runtimeState.hasNativeRuntimeEvents();
         if (!hasNativeRuntimeEvents) {
           // CSV is imported first so richer JSONL evidence can upgrade a
           // historical link-only publication to a strict publication.
@@ -786,6 +815,14 @@ export function createPublishState({
       const runtimeRunDir = String(row.data?.runtime_run_dir || "").trim();
       return runtimeRunDir && path.resolve(runtimeRunDir) === resolvedRunDir;
     });
+    const result = {
+      strict: strictRows.length,
+      state_jsonl_added: 0,
+      published_jsonl_added: 0,
+      published_csv_added: 0,
+      store_csv_added: 0,
+    };
+    if (strictRows.length === 0) return result;
     const statePublished = new Set(
       parseJsonLines(await readTextIfPresent(statePath))
         .map(eventFromHistory)
@@ -800,14 +837,6 @@ export function createPublishState({
     );
     const publishedCsvSkus = csvPublishedSkus(await readTextIfPresent(publishedCsv));
     const knownStoreSkus = new Map();
-    const result = {
-      strict: strictRows.length,
-      state_jsonl_added: 0,
-      published_jsonl_added: 0,
-      published_csv_added: 0,
-      store_csv_added: 0,
-    };
-
     for (const row of strictRows) {
       const sku = row.sku;
       const data = {
@@ -1002,9 +1031,6 @@ export function createPublishState({
   }
 
   function entries() {
-    if (runtimeState) {
-      for (const sku of [...states.keys()]) syncRuntimeSku(sku);
-    }
     return [...states].map(([sku, value]) => ({
       sku,
       status: value.status,
