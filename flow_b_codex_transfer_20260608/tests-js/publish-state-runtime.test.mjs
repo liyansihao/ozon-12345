@@ -168,6 +168,29 @@ test("native SQLite restore skips oversized legacy histories and hydrates latest
   });
 });
 
+test("direct production can disable growing legacy state and close-time audit exports", async () => {
+  await withTempDir(async (dir) => {
+    const runDir = path.join(dir, "run");
+    const dbPath = path.join(dir, "external-state", "runtime.sqlite");
+    const state = createPublishState({
+      runDir,
+      publishedCsv: path.join(dir, "published.csv"),
+      runtimeStateDbPath: dbPath,
+      writeLegacyStateAudit: false,
+      exportRuntimeAuditOnClose: false,
+    });
+
+    assert.equal(await state.transition("sqlite-audit-only", "processing", {
+      reason: "direct-processing",
+    }), true);
+    await state.close();
+
+    assert.equal(sqliteCount(dbPath, "sku_state"), 1);
+    await assert.rejects(fs.access(path.join(runDir, "sku_states.jsonl")), /ENOENT/);
+    await assert.rejects(fs.access(path.join(runDir, "runtime_state_audit.jsonl")), /ENOENT/);
+  });
+});
+
 test("SQLite-backed publish state terminalizes deterministic failures and enforces two transient failures per Shanghai day", async () => {
   await withTempDir(async (dir) => {
     const runDir = path.join(dir, "run");

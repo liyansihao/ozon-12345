@@ -173,6 +173,8 @@ export function createPublishState({
   pendingStateFiles = [],
   runtimeStateDbPath = null,
   enforceTitleUniqueness = true,
+  writeLegacyStateAudit = true,
+  exportRuntimeAuditOnClose = true,
 }) {
   if (!runDir) throw new TypeError("runDir is required");
   if (!publishedCsv) throw new TypeError("publishedCsv is required");
@@ -900,7 +902,7 @@ export function createPublishState({
     };
     const publicStatus = runtimeState ? (syncRuntimeSku(sku)?.status ?? status) : status;
     states.set(sku, { status: publicStatus, data: nextData });
-    await appendJsonl(statePath, event);
+    if (writeLegacyStateAudit) await appendJsonl(statePath, event);
 
     if (status === "published") {
       publishedSkus.add(sku);
@@ -1120,7 +1122,9 @@ export function createPublishState({
           const reconciliation = await capture(reconcileStrictAuditOutputsInternal());
           if (reconciliation) lastStrictAuditReconciliation = reconciliation;
           await capture(writeChain);
-          await capture(runtimeState.exportAuditJsonl(runtimeAuditPath));
+          if (exportRuntimeAuditOnClose) {
+            await capture(runtimeState.exportAuditJsonl(runtimeAuditPath));
+          }
         } finally {
           runtimeState.close();
         }

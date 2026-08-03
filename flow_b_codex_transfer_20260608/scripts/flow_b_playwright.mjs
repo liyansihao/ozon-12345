@@ -290,6 +290,11 @@ async function createPublishingSession(context, options, env, shared) {
       pendingStateFiles: String(env.FLOW_B_PENDING_STATE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
       runtimeStateDbPath: resolvedRuntimeStateDbPath,
       enforceTitleUniqueness: env.FLOW_B_DIRECT_PUBLISH !== "1",
+      // SQLite is the durable source of truth in direct production. Rewriting
+      // the ever-growing compatibility audit on every recoverable session
+      // close stalls publishing and can exhaust memory on long-lived runs.
+      writeLegacyStateAudit: env.FLOW_B_WRITE_LEGACY_STATE_AUDIT === "1",
+      exportRuntimeAuditOnClose: env.FLOW_B_EXPORT_RUNTIME_AUDIT_ON_CLOSE === "1",
     });
     const costBridge = createCostBridge({
       python: env.FLOW_B_PYTHON || "python3",
