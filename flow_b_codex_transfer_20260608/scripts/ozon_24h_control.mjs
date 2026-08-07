@@ -190,6 +190,49 @@ async function writeJsonAtomic(filename, value) {
   await fsp.rename(temporary, filename);
 }
 
+async function appendJsonLine(filename, value) {
+  await fsp.mkdir(path.dirname(filename), { recursive: true });
+  await fsp.appendFile(filename, `${JSON.stringify(value)}\n`, "utf8");
+}
+
+export async function clearOzonManualVerificationLock({
+  config,
+  stateRoot,
+  now = new Date(),
+} = {}) {
+  const profileDir = expandHome(config?.browser?.profile_dir);
+  const configured = expandHome(config?.flow_env?.FLOW_B_OZON_ACCESS_STATE);
+  const filename = configured
+    ? path.resolve(configured)
+    : profileDir
+      ? path.join(path.dirname(path.resolve(profileDir)), "ozon_access_state.json")
+      : null;
+  if (!filename) return { cleared: false, reason: "access-state-path-unavailable" };
+  const prior = await readJson(filename, {});
+  if (prior?.requires_manual_clear !== true) {
+    return { cleared: false, reason: "manual-clearance-lock-not-set", filename };
+  }
+  const requestedAt = (now instanceof Date ? now : new Date(now)).toISOString();
+  const priorReason = String(prior.reason || "manual verification requested");
+  const evidence = {
+    requested_at: requestedAt,
+    source: "control-panel-verification-resume",
+    prior_reason: priorReason,
+  };
+  await writeJsonAtomic(filename, {
+    ...prior,
+    updated_at: requestedAt,
+    requires_manual_clear: false,
+    captcha_retry_pending: false,
+    captcha_retry_at: null,
+    reason: null,
+    manually_cleared_at: requestedAt,
+    manual_clearance_evidence: evidence,
+  });
+  await appendJsonLine(path.join(stateRoot, "ozon_access_manual_clearance.jsonl"), evidence);
+  return { cleared: true, filename, evidence };
+}
+
 async function pathExists(filename) {
   try {
     await fsp.access(filename);
@@ -1116,10 +1159,16 @@ async function resume(config) {
   let status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   status = await normalizeDirectCompletionStatus(config, paths, status, current);
-  if (resumeMode(status, current) === "restart-current-run") return start(config);
+  const mode = resumeMode(status, current);
+  const manualClearance = mode === "verification" || mode === "restart-current-run"
+    ? await clearOzonManualVerificationLock({ config, stateRoot: paths.stateRoot })
+    : { cleared: false, reason: "not-waiting-for-verification" };
+  if (mode === "restart-current-run") {
+    return { ...(await start(config)), manual_clearance: manualClearance };
+  }
   await fsp.writeFile(path.join(paths.stateRoot, "resume.request"), `${new Date().toISOString()}\n`, "utf8");
   await kickstart(config);
-  return { ok: true, resume_requested: true };
+  return { ok: true, resume_requested: true, manual_clearance: manualClearance };
 }
 
 function shortText(value, maximum = 160) {

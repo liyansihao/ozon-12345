@@ -110,11 +110,40 @@ export function parseOzonDetailText(text, fallbackPrice, webPriceText = "") {
   };
 }
 
+function hasUsableProductDetail(payload = {}) {
+  const text = String(payload?.text || "");
+  return (
+    /\u53d1\u8d27\u6a21\u5f0f\uff1a/u.test(text)
+    || Boolean(String(payload?.webPriceText || "").trim())
+    || Boolean(String(payload?.sellerUrl || "").trim())
+  );
+}
+
+export function classifyOzonDetailAccessPayload(payload = {}) {
+  const url = String(payload?.url || "");
+  const title = String(payload?.title || "");
+  const text = String(payload?.text || "");
+  const urlAndTitle = `${url} ${title}`;
+  const bodyHead = text.slice(0, 1_000);
+  const productReady = hasUsableProductDetail(payload);
+  const captcha = isOzonCaptchaText(urlAndTitle)
+    || (isOzonCaptchaText(bodyHead) && !productReady);
+  const authentication = isOzonAuthenticationText(urlAndTitle)
+    || (isOzonAuthenticationText(bodyHead) && !productReady);
+  return {
+    captcha,
+    authentication,
+    productReady,
+  };
+}
+
 export function createOzonDetailProvider({
   context,
   accessController = null,
   timeout = 20000,
   pollInterval = 750,
+  captchaConfirmations = 2,
+  captchaConfirmationDelayMs = 750,
   initialConcurrency = 8,
   maxConcurrency = 12,
 } = {}) {
@@ -215,6 +244,11 @@ export function createOzonDetailProvider({
         const readDetail = async () => {
           await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
           const deadline = Date.now() + Math.max(0, timeout);
+          const requiredCaptchaConfirmations = Math.max(
+            1,
+            Math.floor(Number(captchaConfirmations) || 2),
+          );
+          let consecutiveCaptchaObservations = 0;
           let payload = null;
           do {
             payload = await page.evaluate(() => ({
@@ -225,17 +259,26 @@ export function createOzonDetailProvider({
               sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
                 || document.querySelector('a[href*="/seller/"]')?.href || "",
             })).catch(() => null);
+            const access = classifyOzonDetailAccessPayload(payload);
+            if (access.captcha) {
+              consecutiveCaptchaObservations += 1;
+              if (consecutiveCaptchaObservations < requiredCaptchaConfirmations) {
+                await delay(Math.max(1, Number(captchaConfirmationDelayMs) || 750));
+                continue;
+              }
+              throw new Error(
+                `Ozon CAPTCHA required for SKU ${sku} after ${consecutiveCaptchaObservations} confirmations`,
+              );
+            }
+            consecutiveCaptchaObservations = 0;
+            if (access.authentication) {
+              throw new Error(`Ozon authentication or MFA required for SKU ${sku}`);
+            }
             const diagnostic = [
               payload?.url,
               payload?.title,
               payload?.text?.slice(0, 1000),
             ].filter(Boolean).join(" ");
-            if (isOzonCaptchaText(diagnostic)) {
-              throw new Error(`Ozon CAPTCHA required for SKU ${sku}`);
-            }
-            if (isOzonAuthenticationText(diagnostic)) {
-              throw new Error(`Ozon authentication or MFA required for SKU ${sku}`);
-            }
             if (/доступ ограничен|access denied|похоже, нет(?:\s|\u00a0)+соединения/i.test(diagnostic)) {
               throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
             }

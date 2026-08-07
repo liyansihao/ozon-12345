@@ -1507,7 +1507,7 @@ async function waitForVerification({
     resume_file: resumeFile,
   });
   while (!fs.existsSync(resumeFile) && !fs.existsSync(stopFile) && !await acceptanceEnded(runDir)) {
-    await delay(30_000);
+    await delay(2_000);
   }
   if (fs.existsSync(resumeFile)) await fsp.unlink(resumeFile).catch(() => {});
   await runCheckpoint(appRoot, runDir, "verification-wait", checkpointEnv);

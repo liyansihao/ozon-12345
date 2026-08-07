@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   buildIncidentDigest,
+  clearOzonManualVerificationLock,
   compactProductionStatus,
   currentRunRetirementDecision,
   dailyAcceptedSummary,
@@ -63,6 +64,39 @@ test("resume restarts the same checkpoint after an intentional safe stop", () =>
   assert.equal(resumeMode({ status: "WAITING_FOR_VERIFICATION" }, current), "verification");
   assert.equal(resumeMode({ status: "RUNNING" }, current), "wake-supervisor");
   assert.equal(resumeMode({ status: "STOPPED" }, { run_id: "partial" }), "wake-supervisor");
+});
+
+test("verification resume clears the persistent Ozon access lock with audit evidence", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-verification-resume-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "state");
+  const profileDir = path.join(stateRoot, "profiles", "production-profile");
+  const accessState = path.join(path.dirname(profileDir), "ozon_access_state.json");
+  await fs.mkdir(path.dirname(accessState), { recursive: true });
+  await fs.writeFile(accessState, `${JSON.stringify({
+    requires_manual_clear: true,
+    reason: "Ozon CAPTCHA required for SKU 123",
+    captcha_retry_pending: true,
+  })}\n`);
+
+  const result = await clearOzonManualVerificationLock({
+    config: { browser: { profile_dir: profileDir }, flow_env: {} },
+    stateRoot,
+    now: new Date("2026-08-07T06:00:00.000Z"),
+  });
+  const saved = JSON.parse(await fs.readFile(accessState, "utf8"));
+  const audit = JSON.parse((await fs.readFile(
+    path.join(stateRoot, "ozon_access_manual_clearance.jsonl"),
+    "utf8",
+  )).trim());
+
+  assert.equal(result.cleared, true);
+  assert.equal(saved.requires_manual_clear, false);
+  assert.equal(saved.reason, null);
+  assert.equal(saved.captcha_retry_pending, false);
+  assert.equal(saved.manually_cleared_at, "2026-08-07T06:00:00.000Z");
+  assert.equal(audit.prior_reason, "Ozon CAPTCHA required for SKU 123");
+  assert.equal(audit.source, "control-panel-verification-resume");
 });
 
 test("direct target completion is resumable when current-run ERP evidence is below 500", () => {
