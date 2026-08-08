@@ -4001,7 +4001,7 @@ test("runner requires an explicit CEL Economy result and positive category fee",
   const runner = createPublishRunner({ client, costBridge: { estimate: async () => ({ ok: true, cost: 20 }) }, state, target: 1, threshold: 30, runDir: "/tmp/run" });
   const result = await runner.run();
   assert.equal(result.published, 0);
-  assert.ok(state.transitions.some((event) => event.sku === "5" && event.data.reason === "missing-cel-economy"));
+  assert.ok(state.transitions.some((event) => event.sku === "5" && event.data.reason === "missing-supported-economy"));
   assert.ok(state.transitions.some((event) => event.sku === "6" && event.data.reason === "cate_fee<=0"));
 });
 
@@ -5062,6 +5062,79 @@ test("direct mode fetches one live detail after cost and remaps commission using
     assert.ok(funnel.every((row) => row.source_url === sourceUrl));
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode uses the weight-selected warehouse and matching profit provider", async (t) => {
+  for (const expected of [
+    { weight: 500, logistics: "CEL", warehouseId: 101, route: "postal" },
+    { weight: 501, logistics: "Ural", warehouseId: 202, route: "ural" },
+  ]) {
+    await t.test(`${expected.weight}g`, async () => {
+      const runDir = await fs.mkdtemp(path.join(os.tmpdir(), `flow-b-weight-route-${expected.weight}-`));
+      try {
+        const state = fakeState();
+        const profitInputs = [];
+        const client = clientFor([{
+          sku: `weight-${expected.weight}`,
+          title: `Безопасный товар ${expected.weight}`,
+          cover_image: `https://img.example/${expected.weight}.jpg`,
+          sell_price: 100,
+        }], {
+          getCategoryBySku: async () => ({
+            cate: [11, 22, "1,12.00"],
+            product_info: { weight: expected.weight, depth: 20, width: 10, height: 5 },
+          }),
+          calculateProfit: async (input) => {
+            profitInputs.push(input);
+            return {
+              calc_result: [{
+                name: expected.logistics,
+                speed: "economy",
+                title: `${expected.logistics} Economy Small`,
+                price_list: {
+                  logistics_name: expected.logistics,
+                  logistics_speed: "economy",
+                  purchase_price: 20,
+                  sell_price: 90,
+                  cate_rate: 12,
+                  cate_fee: 8,
+                  profit_rate: 40,
+                },
+              }],
+            };
+          },
+        });
+        const result = await createPublishRunner({
+          client,
+          costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+          state,
+          target: 1,
+          runDir,
+          directMode: true,
+          minimumSameItemMatches: 1,
+          requireReliableCostContract: true,
+          storeTargets: [{
+            id: 7,
+            needle: "丽丽1号",
+            warehouseId: 101,
+            uralWarehouseId: 202,
+            weightThresholdGrams: 500,
+            weightRouting: true,
+            requireWarehouse: true,
+          }],
+        }).run();
+
+        assert.equal(result.accepted, 1);
+        assert.equal(profitInputs.length, 1);
+        assert.equal(profitInputs[0].logistics, expected.logistics);
+        assert.equal(state.selections[0].warehouse_id, expected.warehouseId);
+        assert.equal(state.selections[0].shipping_route, expected.route);
+        assert.equal(state.selections[0].package_weight_grams, expected.weight);
+      } finally {
+        await fs.rm(runDir, { recursive: true, force: true });
+      }
+    });
   }
 });
 

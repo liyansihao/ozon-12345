@@ -306,6 +306,14 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
     config.flow_env.FLOW_B_STORE_TARGETS.map((row) => Number(row.warehouseId)),
     config.stores.map((row) => Number(row.warehouse_id)),
   );
+  assert.equal(new Set(config.stores.map((row) => Number(row.ural_warehouse_id))).size, 10);
+  assert.deepEqual(
+    config.flow_env.FLOW_B_STORE_TARGETS.map((row) => Number(row.uralWarehouseId)),
+    config.stores.map((row) => Number(row.ural_warehouse_id)),
+  );
+  assert.ok(config.flow_env.FLOW_B_STORE_TARGETS.every(
+    (row) => row.weightRouting === true && Number(row.weightThresholdGrams) === 500,
+  ));
   assert.throws(
     () => validateConfig({
       ...config,

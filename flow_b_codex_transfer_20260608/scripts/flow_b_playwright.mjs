@@ -41,16 +41,24 @@ import {
 const ROOT = path.resolve(import.meta.dirname, "..");
 const DEFAULT_PROFILE = path.join(ROOT, "runs/flow_b/playwright_setup/playwright_profile");
 const DEFAULT_STORE_TARGETS = Object.freeze([
-  { id: 104965, needle: "丽丽1号", warehouseId: 1020005023597900, requireWarehouse: true },
-  { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
-  { id: 106640, needle: "丽丽三号", warehouseId: 1020005023616740, requireWarehouse: true },
-  { id: 106644, needle: "丽丽四号", warehouseId: 1020005023616380, requireWarehouse: true },
-  { id: 106646, needle: "丽丽五号", warehouseId: 1020005023616970, requireWarehouse: true },
-  { id: 113151, needle: "丽丽六号", warehouseId: 1020005024854760, requireWarehouse: true },
-  { id: 113153, needle: "丽丽七号", warehouseId: 1020005024855310, requireWarehouse: true },
-  { id: 113154, needle: "丽丽八号", warehouseId: 1020005024855600, requireWarehouse: true },
-  { id: 113155, needle: "丽丽九号", warehouseId: 1020005024855790, requireWarehouse: true },
-  { id: 113156, needle: "丽丽十号", warehouseId: 1020005024856090, requireWarehouse: true },
+  {
+    id: 104965,
+    needle: "丽丽1号",
+    warehouseId: 1020005023597900,
+    uralWarehouseId: 1020005026342280,
+    weightThresholdGrams: 500,
+    weightRouting: true,
+    requireWarehouse: true,
+  },
+  { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, uralWarehouseId: 1020005026343390, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
+  { id: 106640, needle: "丽丽三号", warehouseId: 1020005023616740, uralWarehouseId: 1020005026339130, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
+  { id: 106644, needle: "丽丽四号", warehouseId: 1020005023616380, uralWarehouseId: 1020005026343030, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
+  { id: 106646, needle: "丽丽五号", warehouseId: 1020005023616970, uralWarehouseId: 1020005026342580, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
+  { id: 113151, needle: "丽丽六号", warehouseId: 1020005024854760, uralWarehouseId: 1020005026343600, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
+  { id: 113153, needle: "丽丽七号", warehouseId: 1020005024855310, uralWarehouseId: 1020005026341880, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
+  { id: 113154, needle: "丽丽八号", warehouseId: 1020005024855600, uralWarehouseId: 1020005026343890, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
+  { id: 113155, needle: "丽丽九号", warehouseId: 1020005024855790, uralWarehouseId: 1020005026344240, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
+  { id: 113156, needle: "丽丽十号", warehouseId: 1020005024856090, uralWarehouseId: 1020005026344600, weightThresholdGrams: 500, weightRouting: true, requireWarehouse: true },
 ]);
 
 function required(value, label) {
@@ -95,9 +103,19 @@ export function parseStoreTargets(env = process.env) {
     const id = Number(row?.id);
     const needle = String(row?.needle || row?.name || "").trim();
     const warehouseId = row?.warehouseId === null || row?.warehouseId === undefined ? null : Number(row.warehouseId);
+    const uralWarehouseId = row?.uralWarehouseId === null || row?.uralWarehouseId === undefined ? null : Number(row.uralWarehouseId);
+    const weightThresholdGrams = Number(row?.weightThresholdGrams ?? 500);
+    const weightRouting = row?.weightRouting === true;
     if (!(id > 0) || !needle) throw new Error("FLOW_B_STORE_TARGETS entries require a positive id and needle");
     if (warehouseId !== null && !(warehouseId > 0)) throw new Error("FLOW_B_STORE_TARGETS warehouseId must be positive when configured");
-    return { id, needle, warehouseId, requireWarehouse: row?.requireWarehouse !== false };
+    if (uralWarehouseId !== null && !(uralWarehouseId > 0)) throw new Error("FLOW_B_STORE_TARGETS uralWarehouseId must be positive when configured");
+    if (!(weightThresholdGrams > 0)) throw new Error("FLOW_B_STORE_TARGETS weightThresholdGrams must be positive");
+    if (weightRouting && uralWarehouseId === null) throw new Error(`FLOW_B_STORE_TARGETS store ${id} requires uralWarehouseId when weight routing is enabled`);
+    const target = { id, needle, warehouseId, requireWarehouse: row?.requireWarehouse !== false };
+    if (row?.uralWarehouseId !== null && row?.uralWarehouseId !== undefined) target.uralWarehouseId = uralWarehouseId;
+    if (row?.weightThresholdGrams !== null && row?.weightThresholdGrams !== undefined) target.weightThresholdGrams = weightThresholdGrams;
+    if (row?.weightRouting !== null && row?.weightRouting !== undefined) target.weightRouting = weightRouting;
+    return target;
   });
 }
 

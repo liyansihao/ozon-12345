@@ -327,6 +327,8 @@ function validateConfig(config) {
     }
     const warehouseIds = stores.map((store) => Number(store?.warehouse_id));
     const targetWarehouseIds = storeTargets.map((store) => Number(store?.warehouseId));
+    const uralWarehouseIds = stores.map((store) => Number(store?.ural_warehouse_id));
+    const targetUralWarehouseIds = storeTargets.map((store) => Number(store?.uralWarehouseId));
     if (warehouseIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
       throw new Error("all ten stores require an ERP-verified warehouse mapping");
     }
@@ -335,6 +337,18 @@ function validateConfig(config) {
     }
     if (targetWarehouseIds.join(",") !== warehouseIds.join(",")) {
       throw new Error("direct store target warehouses must match the verified store mappings");
+    }
+    if (uralWarehouseIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new Error("all ten stores require an ERP-verified Ural warehouse mapping");
+    }
+    if (new Set(uralWarehouseIds).size !== DIRECT_PRODUCTION_STORE_IDS.length) {
+      throw new Error("ten-store Ural warehouse mappings must be unique");
+    }
+    if (targetUralWarehouseIds.join(",") !== uralWarehouseIds.join(",")) {
+      throw new Error("direct store target Ural warehouses must match the verified store mappings");
+    }
+    if (!storeTargets.every((store) => store?.weightRouting === true && Number(store?.weightThresholdGrams) === 500)) {
+      throw new Error("every direct store target must route weights above 500g through Ural");
     }
     if (!storeTargets.every((store) => store?.requireWarehouse === true)) {
       throw new Error("every direct store target must require its verified warehouse");

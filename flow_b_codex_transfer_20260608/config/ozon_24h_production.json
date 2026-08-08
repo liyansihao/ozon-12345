@@ -39,61 +39,71 @@
       "id": 104965,
       "name": "丽丽1号",
       "warehouse_id": 1020005023597900,
-      "warehouse_evidence": "ERP live verified 2026-07-31: 邮政陆运经济仓"
+      "ural_warehouse_id": 1020005026342280,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 106637,
       "name": "丽丽二号",
       "warehouse_id": 1020005023256510,
-      "warehouse_evidence": "ERP verified"
+      "ural_warehouse_id": 1020005026343390,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济舱 + ural"
     },
     {
       "id": 106640,
       "name": "丽丽三号",
       "warehouse_id": 1020005023616740,
-      "warehouse_evidence": "ERP live preflight 2026-07-27: unique 邮政陆运经济仓"
+      "ural_warehouse_id": 1020005026339130,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 106644,
       "name": "丽丽四号",
       "warehouse_id": 1020005023616380,
-      "warehouse_evidence": "ERP live preflight 2026-07-27: unique 邮政陆运经济仓"
+      "ural_warehouse_id": 1020005026343030,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 106646,
       "name": "丽丽五号",
       "warehouse_id": 1020005023616970,
-      "warehouse_evidence": "ERP-discovered repeatedly in run 20260727_120626_ozon_stable_30h"
+      "ural_warehouse_id": 1020005026342580,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113151,
       "name": "丽丽六号",
       "warehouse_id": 1020005024854760,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026343600,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113153,
       "name": "丽丽七号",
       "warehouse_id": 1020005024855310,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026341880,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113154,
       "name": "丽丽八号",
       "warehouse_id": 1020005024855600,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026343890,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113155,
       "name": "丽丽九号",
       "warehouse_id": 1020005024855790,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026344240,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113156,
       "name": "丽丽十号",
       "warehouse_id": 1020005024856090,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026344600,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     }
   ],
   "source_pool": {
@@ -111,60 +121,90 @@
         "id": 104965,
         "needle": "丽丽1号",
         "warehouseId": 1020005023597900,
+        "uralWarehouseId": 1020005026342280,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 106637,
         "needle": "丽丽二号",
         "warehouseId": 1020005023256510,
+        "uralWarehouseId": 1020005026343390,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 106640,
         "needle": "丽丽三号",
         "warehouseId": 1020005023616740,
+        "uralWarehouseId": 1020005026339130,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 106644,
         "needle": "丽丽四号",
         "warehouseId": 1020005023616380,
+        "uralWarehouseId": 1020005026343030,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 106646,
         "needle": "丽丽五号",
         "warehouseId": 1020005023616970,
+        "uralWarehouseId": 1020005026342580,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113151,
         "needle": "丽丽六号",
         "warehouseId": 1020005024854760,
+        "uralWarehouseId": 1020005026343600,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113153,
         "needle": "丽丽七号",
         "warehouseId": 1020005024855310,
+        "uralWarehouseId": 1020005026341880,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113154,
         "needle": "丽丽八号",
         "warehouseId": 1020005024855600,
+        "uralWarehouseId": 1020005026343890,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113155,
         "needle": "丽丽九号",
         "warehouseId": 1020005024855790,
+        "uralWarehouseId": 1020005026344240,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113156,
         "needle": "丽丽十号",
         "warehouseId": 1020005024856090,
+        "uralWarehouseId": 1020005026344600,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       }
     ],

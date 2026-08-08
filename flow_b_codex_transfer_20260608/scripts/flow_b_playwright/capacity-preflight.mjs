@@ -65,9 +65,15 @@ export function buildCapacityPreflight({
     if (warehouseId > 0) counts.set(warehouseId, Number(counts.get(warehouseId) || 0) + 1);
     return counts;
   }, new Map());
+  const configuredUralWarehouseCounts = configuredStores.reduce((counts, configured) => {
+    const warehouseId = Number(configured?.ural_warehouse_id ?? configured?.uralWarehouseId);
+    if (warehouseId > 0) counts.set(warehouseId, Number(counts.get(warehouseId) || 0) + 1);
+    return counts;
+  }, new Map());
   const rows = configuredStores.map((configured) => {
     const storeId = Number(configured?.id);
     const warehouseId = Number(configured?.warehouse_id ?? configured?.warehouseId);
+    const uralWarehouseId = Number(configured?.ural_warehouse_id ?? configured?.uralWarehouseId);
     const matchingErpStores = erpStores.filter((row) => Number(row?.id) === storeId);
     const erp = matchingErpStores.length === 1 ? matchingErpStores[0] : null;
     const profile = profileStores.find((row) => Number(row?.id) === storeId) || null;
@@ -86,6 +92,11 @@ export function buildCapacityPreflight({
       && warehouseId > 0
       && matchingWarehouseCandidates.length === 1
       && Number(configuredWarehouseCounts.get(warehouseId)) === 1;
+    const uralWarehouseConfigured = Number.isSafeInteger(uralWarehouseId) && uralWarehouseId > 0;
+    const uralWarehouseVerified = !uralWarehouseConfigured || (
+      candidates.filter((candidate) => candidate === uralWarehouseId).length === 1
+      && Number(configuredUralWarehouseCounts.get(uralWarehouseId)) === 1
+    );
     const dailyCreate = erp?.product_limit?.daily_create ?? profile?.product_limit?.daily_create;
     const erpLimit = Number(dailyCreate?.limit);
     const erpUsage = Number(dailyCreate?.usage);
@@ -102,10 +113,12 @@ export function buildCapacityPreflight({
       store_id: storeId,
       store_name: String(erp?.name ?? erp?.title ?? configured?.name ?? ""),
       warehouse_id: warehouseId || null,
+      ural_warehouse_id: uralWarehouseConfigured ? uralWarehouseId : null,
       warehouse_candidates: candidates,
       warehouse_candidate_details: warehouseCandidates,
       warehouse_verified: warehouseVerified,
       warehouse_mapping_unique: warehouseVerified,
+      ural_warehouse_verified: uralWarehouseVerified,
       erp_store_match_count: matchingErpStores.length,
       erp_daily_limit: quotaVerified ? erpLimit : null,
       erp_daily_usage: quotaVerified ? erpUsage : null,
@@ -113,7 +126,7 @@ export function buildCapacityPreflight({
       effective_daily_limit: effectiveLimit,
       remaining_capacity: remaining,
       quota_verified: quotaVerified,
-      available: Boolean(erp && warehouseVerified && quotaVerified && remaining > 0),
+      available: Boolean(erp && warehouseVerified && uralWarehouseVerified && quotaVerified && remaining > 0),
     };
   });
   const totalRemainingCapacity = rows.reduce((sum, row) => sum + row.remaining_capacity, 0);
@@ -127,7 +140,7 @@ export function buildCapacityPreflight({
     required_capacity: Number(requiredCapacity),
     total_remaining_capacity: totalRemainingCapacity,
     all_stores_found: rows.every((row) => row.store_name && row.erp_store_match_count === 1),
-    all_warehouses_verified: rows.every((row) => row.warehouse_verified),
+    all_warehouses_verified: rows.every((row) => row.warehouse_verified && row.ural_warehouse_verified),
     all_quotas_verified: rows.every((row) => row.quota_verified),
     capacity_sufficient: totalRemainingCapacity >= Number(requiredCapacity),
     stores: rows,

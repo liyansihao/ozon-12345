@@ -23,6 +23,7 @@ import {
 } from "./cost-evidence.mjs";
 import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 import { submissionGatePolicy } from "./live-acceptance-gates.mjs";
+import { productWeightGrams, selectShippingRoute } from "./shipping-route.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -382,11 +383,11 @@ function asSku(item) {
   return sku;
 }
 
-function economyResult(calc) {
-  if (calc?.economy?.price_list) return calc.economy;
+function economyResult(calc, logistics = "CEL") {
+  if (calc?.economy?.price_list && calc.economy.price_list.logistics_name === logistics) return calc.economy;
   const rows = calc?.calc_result ?? calc?.data?.calc_result;
   if (!Array.isArray(rows)) return null;
-  const row = rows.find((entry) => entry?.name === "CEL" && entry?.speed === "economy");
+  const row = rows.find((entry) => entry?.name === logistics && entry?.speed === "economy");
   return row ? { title: row.title, price_list: row.price_list } : null;
 }
 
@@ -659,7 +660,12 @@ function buildPayload(item, detail, economy, targetConfig, now) {
   };
 }
 
-function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, detail, category, profitThreshold }) {
+function targetConfigForPersistedRoute(targetConfig, item) {
+  const warehouseId = Number(item?.warehouse_id || 0);
+  return warehouseId > 0 ? { ...targetConfig, warehouseId } : targetConfig;
+}
+
+function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, detail, category, profitThreshold, logistics = "CEL" }) {
   return {
     sku,
     sell_price: salePrice,
@@ -671,7 +677,7 @@ function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, de
     china_fee: 0,
     ad_rate: 0,
     other_rate: 1,
-    logistics: "CEL",
+    logistics,
     profit_value: profitThreshold,
     profit_type: "percentage",
     cate: category.mapped,
@@ -784,12 +790,26 @@ export function createPublishRunner({
       id: Number(entry?.id),
       needle: String(entry?.needle || entry?.name || "").trim(),
       warehouseId: entry?.warehouseId === null || entry?.warehouseId === undefined ? null : Number(entry.warehouseId),
+      uralWarehouseId: entry?.uralWarehouseId === null || entry?.uralWarehouseId === undefined ? null : Number(entry.uralWarehouseId),
+      weightThresholdGrams: Number(entry?.weightThresholdGrams ?? 500),
+      weightRouting: entry?.weightRouting === true,
       requireWarehouse: entry?.requireWarehouse !== false,
     }))
-    : [{ id: Number(storeId), needle: String(storeNeedle), warehouseId: warehouseId == null ? null : Number(warehouseId), requireWarehouse: false }];
+    : [{
+      id: Number(storeId),
+      needle: String(storeNeedle),
+      warehouseId: warehouseId == null ? null : Number(warehouseId),
+      uralWarehouseId: null,
+      weightThresholdGrams: 500,
+      weightRouting: false,
+      requireWarehouse: false,
+    }];
   for (const entry of targetPlan) {
     if (!(entry.id > 0) || !entry.needle) throw new TypeError("each store target requires a positive id and needle");
     if (entry.warehouseId !== null && !(entry.warehouseId > 0)) throw new TypeError("store target warehouseId must be positive when configured");
+    if (entry.uralWarehouseId !== null && !(entry.uralWarehouseId > 0)) throw new TypeError("store target uralWarehouseId must be positive when configured");
+    if (!(entry.weightThresholdGrams > 0)) throw new TypeError("store target weightThresholdGrams must be positive");
+    if (entry.weightRouting && entry.uralWarehouseId === null) throw new TypeError("weight-routed store target requires uralWarehouseId");
   }
   let cnyRubRate = 10.4672;
   let cnyRubRateConfirmed = false;
@@ -1699,6 +1719,36 @@ export function createPublishRunner({
       let contentQuality = null;
       let observedMode = null;
       let fbsEvidence = null;
+      let shippingRoute = null;
+      const applyShippingRoute = () => {
+        if (shippingRoute) return shippingRoute;
+        const weightGrams = productWeightGrams(productInfo, detail || item);
+        if (targetConfig.weightRouting !== true) {
+          shippingRoute = {
+            available: true,
+            route: "postal",
+            logistics: "CEL",
+            warehouseId: Number(targetConfig.warehouseId || 0) || null,
+            weightGrams,
+            thresholdGrams: Number(targetConfig.weightThresholdGrams || 500),
+          };
+          return shippingRoute;
+        }
+        shippingRoute = selectShippingRoute({
+          weightGrams,
+          postalWarehouseId: targetConfig.postalWarehouseId || targetConfig.warehouseId,
+          uralWarehouseId: targetConfig.uralWarehouseId,
+          thresholdGrams: targetConfig.weightThresholdGrams,
+          weightRouting: true,
+        });
+        if (!shippingRoute.available) {
+          const error = new Error(`Ural warehouse is unavailable for store ${targetConfig?.store?.id || "unknown"}`);
+          error.code = "URAL_WAREHOUSE_UNAVAILABLE";
+          throw error;
+        }
+        targetConfig = { ...targetConfig, warehouseId: shippingRoute.warehouseId };
+        return shippingRoute;
+      };
 
       if (activeDirectMode) {
         const snapshotTitle = normalizedContentText(item?.title);
@@ -1750,6 +1800,7 @@ export function createPublishRunner({
           category: category.mapped,
         });
         detail = { ...item };
+        applyShippingRoute();
       } else {
         [detailResult, categoryData] = await timed(sku, "ozon_detail_and_category", () => Promise.all([
           detailProvider.getProductDetail(sku, item),
@@ -1800,6 +1851,7 @@ export function createPublishRunner({
           salePrice,
           cnyRubRate,
         );
+        applyShippingRoute();
         contentQuality = preSubmitContentQuality({
           item,
           detail: { ...(detailResult || {}), ...(confirmationResult || {}) },
@@ -1820,11 +1872,12 @@ export function createPublishRunner({
             detail,
             category,
             profitThreshold,
+            logistics: shippingRoute.logistics,
           })));
         } catch {
           // This fast-path must never replace the original exact calculation on transient ERP failures.
         }
-        const optimisticEconomy = economyResult(optimisticCalc);
+        const optimisticEconomy = economyResult(optimisticCalc, shippingRoute.logistics);
         const optimisticRateValue = optimisticEconomy?.price_list?.profit_rate;
         const optimisticRate = optimisticRateValue === null || optimisticRateValue === undefined || optimisticRateValue === ""
           ? Number.NaN
@@ -2005,6 +2058,7 @@ export function createPublishRunner({
 
       let calc;
       try {
+        applyShippingRoute();
         calc = await timed(sku, "profit_calculation", () => client.calculateProfit(profitCalculationInput({
           sku,
           salePrice,
@@ -2013,6 +2067,7 @@ export function createPublishRunner({
           detail,
           category,
           profitThreshold,
+          logistics: shippingRoute.logistics,
         })));
       } catch (error) {
         if (isFatalRunnerError(error)) throw error;
@@ -2027,7 +2082,7 @@ export function createPublishRunner({
         cnyRubRate = calculatedCnyRubRate;
         cnyRubRateConfirmed = true;
       }
-      const economy = economyResult(calc);
+      const economy = economyResult(calc, shippingRoute.logistics);
       const preflightReason = activeDirectMode
         ? null
         : policy.preflightSkipReason({ ...detail, economy });
@@ -2076,6 +2131,11 @@ export function createPublishRunner({
         store_id: targetConfig.store.id,
         store_name: targetConfig.store.name ?? targetConfig.store.title ?? "",
         watermark_id: targetConfig.watermark.id,
+        warehouse_id: shippingRoute.warehouseId,
+        shipping_route: shippingRoute.route,
+        logistics_provider: shippingRoute.logistics,
+        package_weight_grams: shippingRoute.weightGrams,
+        weight_threshold_grams: shippingRoute.thresholdGrams,
         offer_id: payload.rows[0].offer_id,
         mode: activeDirectMode ? observedMode : "FBS",
         shipping_mode: activeDirectMode ? observedMode : "FBS",
@@ -2819,11 +2879,22 @@ export function createPublishRunner({
         commissionTree = typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [];
         if (targetConfigCache) targetConfigCache.commissionTree = commissionTree;
       }
-      const value = { ...resolved, commissionTree, warehouseId: targetWarehouseId || null };
+      const value = {
+        ...resolved,
+        commissionTree,
+        warehouseId: targetWarehouseId || null,
+        postalWarehouseId: targetWarehouseId || null,
+        uralWarehouseId: Number(spec.uralWarehouseId || 0) || null,
+        weightThresholdGrams: Number(spec.weightThresholdGrams || 500),
+        weightRouting: spec.weightRouting === true,
+      };
       recordStoreTargetMetric({
         store_id: Number(resolved.store?.id || spec.id),
         store_name: resolved.store?.name ?? resolved.store?.title ?? spec.needle,
         warehouse_id: targetWarehouseId || null,
+        ural_warehouse_id: Number(spec.uralWarehouseId || 0) || null,
+        weight_threshold_grams: Number(spec.weightThresholdGrams || 500),
+        weight_routing: spec.weightRouting === true,
         warehouse_source: Number(spec.warehouseId) > 0 ? "configured" : "erp-discovered",
         daily_usage: effectiveDailyUsage,
         daily_limit: effectiveDailyLimit,
@@ -3353,6 +3424,7 @@ export function createPublishRunner({
           }
           recoveryTarget = await resolveTargetConfig(intentTargetIndex, { allowExhausted: true });
         }
+        recoveryTarget = targetConfigForPersistedRoute(recoveryTarget, item);
         return {
           ...await recoverSubmissionIntent(item, recoveryTarget, batchControl),
           attempted: true,
@@ -3453,6 +3525,7 @@ export function createPublishRunner({
           }
           reconciliationTarget = await resolveTargetConfig(restoredTargetIndex, { allowExhausted: true });
         }
+        reconciliationTarget = targetConfigForPersistedRoute(reconciliationTarget, item);
         const nextReconcileAt = Date.parse(item.next_reconcile_at || "");
         if ((item.submitted || item.submission_pending)
           && Number.isFinite(nextReconcileAt)
