@@ -24,6 +24,7 @@ import {
 import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 import { submissionGatePolicy } from "./live-acceptance-gates.mjs";
 import { productWeightGrams, selectShippingRoute } from "./shipping-route.mjs";
+import { dailyWindowState } from "../daily-window.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -722,6 +723,9 @@ export function createPublishRunner({
   initialStock = 1,
   dailyStoreLimit = 100,
   dailyStoreTimeZone = "Asia/Shanghai",
+  enforceDirectDailyLimit = false,
+  dailySubmissionCutoff = "20:00",
+  dailyReportAfter = "20:30",
   dailyStoreUsageSeed = null,
   totalStoreLimit = 100,
   totalStoreUsageSeed = {},
@@ -748,12 +752,20 @@ export function createPublishRunner({
   const targetCount = Number(target);
   const profitThreshold = Number(threshold);
   const activeDirectMode = Boolean(directMode);
+  const enforceDailyQuota = !activeDirectMode
+    || (enforceDirectDailyLimit === true && !reconciliationOnly);
   const unlimitedTarget = activeDirectMode && targetCount === 0;
   const sharedDirectRunControl = directRunControl && typeof directRunControl === "object"
     ? directRunControl
     : null;
   const requiredSameItemMatches = Number(minimumSameItemMatches);
   const configuredCostEstimateTimeoutMs = Number(costEstimateTimeoutMs);
+  dailyWindowState({
+    now: now(),
+    timeZone: dailyStoreTimeZone,
+    cutoff: dailySubmissionCutoff,
+    reportAfter: dailyReportAfter,
+  });
   if (!Number.isInteger(targetCount) || targetCount < 0) throw new TypeError("target must be a non-negative integer");
   if (!Number.isFinite(profitThreshold)) throw new TypeError("threshold must be numeric");
   if (!Number.isInteger(requiredSameItemMatches) || requiredSameItemMatches <= 0) {
@@ -2796,7 +2808,7 @@ export function createPublishRunner({
       const dailyCreate = resolved.store?.product_limit?.daily_create;
       const dailyLimit = Number(dailyCreate?.limit);
       const dailyUsage = Number(dailyCreate?.usage);
-      const effectiveDailyLimit = activeDirectMode
+      const effectiveDailyLimit = activeDirectMode && !enforceDirectDailyLimit
         ? Number.MAX_SAFE_INTEGER
         : dailyLimit > 0
           ? Math.min(configuredDailyStoreLimit, dailyLimit)
@@ -2816,7 +2828,13 @@ export function createPublishRunner({
         error.code = "STORE_TOTAL_LIMIT";
         throw error;
       }
-      if (!activeDirectMode && !allowExhausted && effectiveDailyUsage >= effectiveDailyLimit) {
+      if (enforceDailyQuota && !allowExhausted && effectiveDailyUsage >= effectiveDailyLimit) {
+        if (activeDirectMode) {
+          freezeDirectStore(spec.id, "daily-product-limit", {
+            source: "configured-daily-limit",
+            quota_day: currentUsageDay,
+          }, { record: false });
+        }
         const error = new Error(`daily creation quota exhausted for store ${spec.id}`);
         error.code = "STORE_DAILY_LIMIT";
         throw error;
@@ -2938,7 +2956,7 @@ export function createPublishRunner({
           error.code = "STORE_TOTAL_LIMIT";
           throw error;
         }
-        if (!activeDirectMode
+        if (enforceDailyQuota
           && !allowExhausted
           && Number(storeDailyUsage.get(spec.id) || 0) >= Number(storeDailyLimits.get(spec.id) || configuredDailyStoreLimit)) {
           const error = new Error(`daily creation quota exhausted for store ${spec.id}`);
@@ -3065,7 +3083,14 @@ export function createPublishRunner({
     }
 
     const stalledStoresThisRun = new Set();
-    let freshSubmissionsPaused = false;
+    const dailyWindow = dailyWindowState({
+      now: now(),
+      timeZone: dailyStoreTimeZone,
+      cutoff: dailySubmissionCutoff,
+      reportAfter: dailyReportAfter,
+    });
+    let freshSubmissionsPaused = activeDirectMode && !reconciliationOnly && !dailyWindow.open;
+    let dailyWindowClosed = freshSubmissionsPaused;
     let initialPauseReason = null;
     let targetConfig;
     if (activeDirectMode) {
@@ -3093,6 +3118,9 @@ export function createPublishRunner({
         try {
           targetConfig = await resolveTargetConfig(activeTargetIndex, { allowExhausted: true });
           freshSubmissionsPaused = true;
+          dailyWindowClosed = activeDirectMode
+            && enforceDirectDailyLimit === true
+            && haltReason === "daily-product-limit";
           initialPauseReason = haltReason;
           haltReason = null;
         } catch {
@@ -3963,6 +3991,16 @@ export function createPublishRunner({
           || item?.submitted === true
           || item?.submission_pending === true
           || item?.submission_intent === true;
+        if (activeDirectMode && !reconciliation && !dailyWindowState({
+          now: now(),
+          timeZone: dailyStoreTimeZone,
+          cutoff: dailySubmissionCutoff,
+          reportAfter: dailyReportAfter,
+        }).open) {
+          freshSubmissionsPaused = true;
+          dailyWindowClosed = true;
+          break schedulerLoop;
+        }
         if (!unlimitedTarget
           && !activeValidationOnly
           && inFlightFreshCount() > 0
@@ -3996,7 +4034,7 @@ export function createPublishRunner({
           break schedulerLoop;
         }
 
-        const remainingDailyStoreQuota = activeDirectMode
+        const remainingDailyStoreQuota = !enforceDailyQuota
           ? Number.POSITIVE_INFINITY
           : Number(storeDailyLimits.get(activeStoreId) || configuredDailyStoreLimit)
             - Number(storeDailyUsage.get(activeStoreId) || 0);
@@ -4009,7 +4047,12 @@ export function createPublishRunner({
           if (inFlight.size > 0) break;
           haltReason = remainingDailyStoreQuota <= 0 ? "daily-product-limit" : "store-total-limit";
           const nextConfig = await advanceStore(haltReason, targetConfig);
-          if (!nextConfig) break schedulerLoop;
+          if (!nextConfig) {
+            if (activeDirectMode && enforceDirectDailyLimit === true && haltReason === "daily-product-limit") {
+              dailyWindowClosed = true;
+            }
+            break schedulerLoop;
+          }
           targetConfig = nextConfig;
           continue schedulerLoop;
         }
@@ -4063,6 +4106,13 @@ export function createPublishRunner({
         all: targetPlan.every((entry) => directRejectedStoreIds.has(Number(entry.id))),
       } : null,
       fresh_submissions_paused: freshSubmissionsPaused,
+      daily_window_closed: dailyWindowClosed,
+      daily_submission_window: dailyWindowState({
+        now: now(),
+        timeZone: dailyStoreTimeZone,
+        cutoff: dailySubmissionCutoff,
+        reportAfter: dailyReportAfter,
+      }),
       active_store_id: Number(targetConfig?.store?.id || 0),
       store_switches: storeSwitches,
       store_submitted_usage: Object.fromEntries([...storeDailyUsage].map(([id, usage]) => [String(id), usage])),

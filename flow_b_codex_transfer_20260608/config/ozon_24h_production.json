@@ -15,6 +15,17 @@
   "checkpoint_interval_seconds": 7200,
   "rate_check_interval_seconds": 300,
   "source_refresh_seconds": 7200,
+  "daily_pricing_report": {
+    "enabled": true,
+    "output_dir": "/Users/mac/Desktop/Ozon每日核价",
+    "node": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
+    "node_modules": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules",
+    "runtime_root": "${STATE_ROOT}/report-runtime",
+    "poll_interval_seconds": 60,
+    "time_zone": "Asia/Shanghai",
+    "cutoff": "20:00",
+    "report_after": "20:30"
+  },
   "restart_delays_seconds": [
     5,
     10,
@@ -223,6 +234,10 @@
     "FLOW_B_TARGET_PUBLISH_COUNT": "0",
     "FLOW_B_UNLIMITED_PUBLISH": "1",
     "FLOW_B_DAILY_STORE_TIMEZONE": "Asia/Shanghai",
+    "FLOW_B_ENFORCE_DIRECT_DAILY_LIMIT": "1",
+    "FLOW_B_DAILY_STORE_LIMIT": "100",
+    "FLOW_B_DAILY_SUBMISSION_CUTOFF": "20:00",
+    "FLOW_B_DAILY_REPORT_AFTER": "20:30",
     "FLOW_B_PUBLISH_WORKERS": "8",
     "FLOW_B_MAX_PUBLISH_WORKERS": "8",
     "FLOW_B_OZON_DETAIL_WORKERS": "1",

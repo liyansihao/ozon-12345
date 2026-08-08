@@ -89,6 +89,38 @@ export function allDirectStoresRejected(publish = {}) {
     && publish?.stores_exhausted?.all === true;
 }
 
+async function writeDailySubmissionWindowMarker(runDir, publish, {
+  now = new Date(),
+  timeZone = "Asia/Shanghai",
+} = {}) {
+  const window = publish?.daily_submission_window || {};
+  const date = String(window.date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(date)) return null;
+  const marker = {
+    schema_version: 1,
+    observed_at: (now instanceof Date ? now : new Date(now)).toISOString(),
+    date,
+    time_zone: String(window.time_zone || timeZone),
+    daily_window_closed: publish?.daily_window_closed === true,
+    submission_complete: publish?.daily_window_closed === true
+      || publish?.stores_exhausted?.all === true,
+    drained: true,
+    daily_submission_window: window,
+    halt_reason: publish?.halt_reason || null,
+    store_submitted_usage: publish?.store_submitted_usage || {},
+    stores_exhausted: publish?.stores_exhausted || null,
+  };
+  const filename = path.join(runDir, "daily_submission_window.json");
+  const temporary = `${filename}.tmp-${process.pid}`;
+  await fs.writeFile(temporary, `${JSON.stringify(marker, null, 2)}\n`, "utf8");
+  await fs.rename(temporary, filename);
+  const dailyFilename = path.join(runDir, `daily_submission_window_${date}.json`);
+  const dailyTemporary = `${dailyFilename}.tmp-${process.pid}`;
+  await fs.writeFile(dailyTemporary, `${JSON.stringify(marker, null, 2)}\n`, "utf8");
+  await fs.rename(dailyTemporary, dailyFilename);
+  return marker;
+}
+
 export function parseStoreTargets(env = process.env) {
   const source = String(env.FLOW_B_STORE_TARGETS || "").trim();
   if (!source) return DEFAULT_STORE_TARGETS.map((row) => ({ ...row }));
@@ -386,6 +418,9 @@ async function createPublishingSession(context, options, env, shared) {
       initialStock: Math.max(1, Number(env.FLOW_B_INITIAL_STOCK) || 1),
       dailyStoreLimit: Math.max(1, Number(env.FLOW_B_DAILY_STORE_LIMIT) || 100),
       dailyStoreTimeZone: env.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
+      enforceDirectDailyLimit: env.FLOW_B_ENFORCE_DIRECT_DAILY_LIMIT === "1",
+      dailySubmissionCutoff: env.FLOW_B_DAILY_SUBMISSION_CUTOFF || "20:00",
+      dailyReportAfter: env.FLOW_B_DAILY_REPORT_AFTER || "20:30",
       dailyStoreUsageSeed: parseDailyStoreUsageSeed(env),
       totalStoreLimit: Math.max(1, Number(env.FLOW_B_STORE_TOTAL_LIMIT) || 100),
       totalStoreUsageSeed: parseStoreTotalUsageSeed(env),
@@ -984,6 +1019,18 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             shared,
             { attemptLimit: publishAttemptLimit(directEnv) },
           );
+          await writeDailySubmissionWindowMarker(options.runDir, publish, {
+            timeZone: directEnv.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
+          });
+          if (publish?.daily_window_closed === true) {
+            idleStreak += 1;
+            const nextOpenAt = Date.parse(String(publish?.daily_submission_window?.next_open_at || ""));
+            const waitUntilOpen = Number.isFinite(nextOpenAt)
+              ? Math.max(1_000, nextOpenAt - Date.now())
+              : runtimeIdleDelay(idleStreak, emptyBackoffIntervals);
+            await runtimeWake.wait(Math.min(waitUntilOpen, 5 * 60_000));
+            continue;
+          }
           if (!unlimitedPublishTarget(options.target)
             && Number(publish?.accepted || 0) >= options.target) break;
           if (allDirectStoresRejected(publish)) {

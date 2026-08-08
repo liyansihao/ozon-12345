@@ -12,7 +12,10 @@ import {
   buildLaunchdPlist,
   productionRunContractDecision,
   resolveProductionLayout,
+  runDailyPricingReportCheck,
 } from "./ozon_24h_supervisor.mjs";
+import { dailyWindowState } from "./daily-window.mjs";
+import { reportOutputPath } from "./daily-pricing-report.mjs";
 
 const execFileAsync = promisify(execFile);
 const LABEL = "com.codex.ozon.24h-production";
@@ -372,6 +375,34 @@ function validateConfig(config) {
     }
     if (String(config?.browser?.cdp_endpoint) !== "http://127.0.0.1:9223") {
       throw new Error("production CDP endpoint must be the unique localhost owner on port 9223");
+    }
+    if (String(config?.flow_env?.FLOW_B_ENFORCE_DIRECT_DAILY_LIMIT || "") !== "1"
+      || Number(config?.flow_env?.FLOW_B_DAILY_STORE_LIMIT) !== 100) {
+      throw new Error("direct publishing must enforce a 100-item per-store daily limit");
+    }
+    const dailyCutoff = String(config?.flow_env?.FLOW_B_DAILY_SUBMISSION_CUTOFF || "");
+    const dailyReportAfter = String(config?.flow_env?.FLOW_B_DAILY_REPORT_AFTER || "");
+    const validClock = (value) => /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value);
+    if (!validClock(dailyCutoff) || dailyCutoff !== "20:00"
+      || !validClock(dailyReportAfter) || dailyReportAfter !== "20:30") {
+      throw new Error("direct daily submission cutoff/report window must be 20:00/20:30");
+    }
+    const dailyReport = config?.daily_pricing_report;
+    if (dailyReport?.enabled !== true
+      || String(dailyReport?.time_zone || "") !== "Asia/Shanghai"
+      || String(dailyReport?.cutoff || "") !== "20:00"
+      || String(dailyReport?.report_after || "") !== "20:30"
+      || Number(dailyReport?.poll_interval_seconds) < 30) {
+      throw new Error("daily pricing report must be enabled for Asia/Shanghai at 20:30");
+    }
+    for (const [name, value] of Object.entries({
+      report_node: dailyReport?.node,
+      report_node_modules: dailyReport?.node_modules,
+      report_output_dir: dailyReport?.output_dir,
+    })) {
+      if (!path.isAbsolute(expandHome(String(value || "")))) {
+        throw new Error(`${name} must be an absolute path`);
+      }
     }
     return config;
   }
@@ -796,6 +827,10 @@ async function doctor(config, { appRoot = null } = {}) {
   const resolvedApp = appRoot ? path.resolve(appRoot) : paths.appLink;
   const checks = {};
   const python = expandHome(config?.flow_env?.FLOW_B_PYTHON);
+  const reportConfig = config?.daily_pricing_report || {};
+  const reportNode = expandHome(reportConfig.node);
+  const reportNodeModules = expandHome(reportConfig.node_modules);
+  const reportOutputDir = expandHome(reportConfig.output_dir);
   const required = {
     app: resolvedApp,
     config: path.join(resolvedApp, "config", "ozon_24h_production.json"),
@@ -808,8 +843,46 @@ async function doctor(config, { appRoot = null } = {}) {
     extension: expandHome(config.browser.extension_dir),
     dedupe: path.join(paths.stateRoot, "dedupe", "published_links.csv"),
     sources: path.join(paths.stateRoot, "sources", "active_urls.txt"),
+    report_generator: path.join(resolvedApp, "scripts", "generate_daily_pricing_report.mjs"),
+    report_node: reportNode,
+    report_node_modules: reportNodeModules,
   };
   for (const [name, filename] of Object.entries(required)) checks[name] = await pathExists(filename);
+  if (reportOutputDir) {
+    await fsp.mkdir(reportOutputDir, { recursive: true });
+    checks.report_output_dir = await pathExists(reportOutputDir);
+  } else {
+    checks.report_output_dir = false;
+  }
+  if (checks.report_node && checks.report_node_modules) {
+    const reportRuntime = path.join(paths.stateRoot, "report-runtime");
+    const artifactProbe = await run(reportNode, [
+      "-e",
+      [
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        "const { createRequire } = require('node:module');",
+        "const root = process.argv[1];",
+        "const modules = process.argv[2];",
+        "fs.mkdirSync(root, { recursive: true });",
+        "const link = path.join(root, 'node_modules');",
+        "try { if (fs.existsSync(link) || fs.lstatSync(link)) fs.unlinkSync(link); } catch {}",
+        "if (!fs.existsSync(link)) fs.symlinkSync(modules, link, 'dir');",
+        "const requireFromRuntime = createRequire(path.join(root, 'entry.cjs'));",
+        "const { Workbook, SpreadsheetFile } = requireFromRuntime('@oai/artifact-tool');",
+        "const workbook = Workbook.create(); workbook.worksheets.add('doctor').getRange('A1').values = [['ok']];",
+        "SpreadsheetFile.exportXlsx(workbook).then((file) => file.save(path.join(root, 'artifact-doctor.xlsx'))).then(() => { if (!fs.existsSync(path.join(root, 'artifact-doctor.xlsx'))) throw new Error('artifact export did not create a workbook'); }).catch((error) => { console.error(error); process.exitCode = 1; });",
+      ].join("\n"),
+      reportRuntime,
+      reportNodeModules,
+    ], {
+      cwd: resolvedApp,
+      env: process.env,
+    });
+    checks.report_artifact_tool = artifactProbe.ok;
+  } else {
+    checks.report_artifact_tool = false;
+  }
   if (checks.python && checks.worker) {
     const probe = await run(python, [
       "-c",
@@ -1345,6 +1418,34 @@ async function status(config) {
     const today = dailyAcceptedSummary(acceptedRows, {
       timeZone: String(config?.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai"),
     });
+    const dailyTimeZone = String(config?.daily_pricing_report?.time_zone
+      || config?.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE
+      || "Asia/Shanghai");
+    const submissionWindow = dailyWindowState({
+      now: new Date(),
+      timeZone: dailyTimeZone,
+      cutoff: config?.daily_pricing_report?.cutoff || "20:00",
+      reportAfter: config?.daily_pricing_report?.report_after || "20:30",
+    });
+    const reportStatus = await readJson(
+      path.join(paths.stateRoot, "daily_pricing_report_status.json"),
+      {
+        status: submissionWindow.report_eligible ? "waiting" : "waiting_for_report_time",
+        date: submissionWindow.date,
+        output: reportOutputPath(config?.daily_pricing_report?.output_dir, submissionWindow.date),
+      },
+    );
+    const dailyByStore = Object.fromEntries((config.stores || []).map((store) => {
+      const id = String(Number(store.id));
+      const accepted = Number(today.by_store[id] || 0);
+      return [id, {
+        store_id: Number(store.id),
+        store_name: store.name || store.needle || id,
+        target: 100,
+        accepted,
+        remaining: Math.max(0, 100 - accepted),
+      }];
+    }));
     return {
       at: operational.observed_at || new Date().toISOString(),
       status: operational.status || "UNKNOWN",
@@ -1367,7 +1468,10 @@ async function status(config) {
         online: uniqueSkuCount(backgroundRows.filter((row) => row?.online === true)),
       },
       by_store: today.by_store,
+      daily_by_store: dailyByStore,
       by_store_run: byStoreRun,
+      daily_submission_window: submissionWindow,
+      daily_pricing_report: reportStatus,
       match_policy: {
         configured: matchPolicyState.configured_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
         effective: matchPolicyState.effective_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
@@ -1401,6 +1505,47 @@ async function status(config) {
     },
     checkpoint,
   });
+}
+
+async function reportStatus(config, dateKey = null) {
+  const paths = deploymentPaths(config);
+  const selectedDate = dateKey || null;
+  const value = selectedDate
+    ? await readJson(path.join(paths.stateRoot, "daily_pricing_reports", `${selectedDate}.json`), {
+        status: "not-started",
+        date: selectedDate,
+        output: reportOutputPath(config?.daily_pricing_report?.output_dir, selectedDate),
+      })
+    : await readJson(path.join(paths.stateRoot, "daily_pricing_report_status.json"), {
+        status: "not-started",
+        date: null,
+      });
+  return {
+    ...value,
+    state_root: paths.stateRoot,
+    output: value.output || (value.date
+      ? reportOutputPath(config?.daily_pricing_report?.output_dir, value.date)
+      : null),
+  };
+}
+
+async function manualGenerateReport(config, dateKey = null) {
+  const paths = deploymentPaths(config);
+  const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
+  if (!current?.run_dir) throw new Error("current production run is unavailable");
+  const result = await runDailyPricingReportCheck({
+    config,
+    stateRoot: paths.stateRoot,
+    runDir: current.run_dir,
+    currentRun: current,
+    appRoot: paths.appLink,
+    dateKey,
+    notify: false,
+  });
+  return {
+    ok: ["delivered", "generating"].includes(String(result?.status || "")),
+    ...result,
+  };
 }
 
 async function incident(config) {
@@ -1442,7 +1587,13 @@ async function exportConfirmed(config) {
 }
 
 async function main(argv = process.argv.slice(2)) {
-  const [command = "start", sourceRootArg, configPathArg] = argv;
+  const [command = "start", firstArg, secondArg, thirdArg] = argv;
+  const reportCommand = command === "report" || command === "report-status";
+  const dateKey = reportCommand && /^\d{4}-\d{2}-\d{2}$/u.test(String(firstArg || ""))
+    ? String(firstArg)
+    : null;
+  const sourceRootArg = dateKey ? secondArg : firstArg;
+  const configPathArg = dateKey ? thirdArg : secondArg;
   const sourceRoot = path.resolve(sourceRootArg || import.meta.dirname, sourceRootArg ? "." : "..");
   const configPath = path.resolve(configPathArg || path.join(sourceRoot, "config", "ozon_24h_production.json"));
   const config = validateConfig(await readJson(configPath));
@@ -1465,12 +1616,16 @@ async function main(argv = process.argv.slice(2)) {
     result = await resume(config);
   } else if (command === "status") {
     result = await status(config);
+  } else if (command === "report-status") {
+    result = await reportStatus(config, dateKey);
+  } else if (command === "report") {
+    result = await manualGenerateReport(config, dateKey);
   } else if (command === "incident") {
     result = await incident(config);
   } else if (command === "export") {
     result = await exportConfirmed(config);
   } else {
-    throw new Error("usage: ozon_24h_production.sh [start|install-candidate|doctor-candidate|promote|doctor|status|incident|stop|retire-current|resume|export]");
+    throw new Error("usage: ozon_24h_production.sh [start|install-candidate|doctor-candidate|promote|doctor|status|report-status [YYYY-MM-DD]|report [YYYY-MM-DD]|incident|stop|retire-current|resume|export]");
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   return result?.ok === false ? 1 : 0;
