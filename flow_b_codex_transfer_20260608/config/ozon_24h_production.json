@@ -17,7 +17,7 @@
   "source_refresh_seconds": 7200,
   "daily_pricing_report": {
     "enabled": true,
-    "output_dir": "/Users/mac/Desktop/Ozon每日核价",
+    "output_dir": "/Users/mac/Desktop/ozon每日上品",
     "node": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
     "node_modules": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules",
     "runtime_root": "${STATE_ROOT}/report-runtime",

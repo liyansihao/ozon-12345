@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { dailyWindowState, localDateKeyFor } from "./daily-window.mjs";
 
-export const DEFAULT_REPORT_DIR = "/Users/mac/Desktop/Ozon每日核价";
+export const DEFAULT_REPORT_DIR = "/Users/mac/Desktop/ozon每日上品";
 export const REPORT_STATE_DIRNAME = "daily_pricing_reports";
 
 function text(value) {

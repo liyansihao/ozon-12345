@@ -1131,7 +1131,7 @@ export async function runDailyPricingReportCheck({
     const reportAfter = String(reportConfig.report_after || "20:30");
     const observed = now instanceof Date ? now : new Date(now);
     const window = dailyWindowState({ now: observed, timeZone, cutoff, reportAfter });
-    const reportDir = path.resolve(String(reportConfig.output_dir || "/Users/mac/Desktop/Ozon每日核价"));
+    const reportDir = path.resolve(String(reportConfig.output_dir || "/Users/mac/Desktop/ozon每日上品"));
     const runtimeRoot = path.resolve(String(reportConfig.runtime_root || path.join(stateRoot, "report-runtime")));
     const nodeModules = path.resolve(String(reportConfig.node_modules || ""));
     const reportNode = path.resolve(String(reportConfig.node || process.execPath));
