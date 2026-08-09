@@ -726,17 +726,17 @@ function validateConfig(config) {
     const dailyCutoff = String(config?.flow_env?.FLOW_B_DAILY_SUBMISSION_CUTOFF || "");
     const dailyReportAfter = String(config?.flow_env?.FLOW_B_DAILY_REPORT_AFTER || "");
     const validClock = (value) => /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value);
-    if (!validClock(dailyCutoff) || dailyCutoff !== "20:00"
-      || !validClock(dailyReportAfter) || dailyReportAfter !== "20:30") {
-      throw new Error("direct daily submission cutoff/report window must be 20:00/20:30");
+    if (!validClock(dailyCutoff) || dailyCutoff !== "23:00"
+      || !validClock(dailyReportAfter) || dailyReportAfter !== "23:30") {
+      throw new Error("direct daily submission cutoff/report window must be 23:00/23:30");
     }
     const dailyReport = config?.daily_pricing_report;
     if (dailyReport?.enabled !== true
       || String(dailyReport?.time_zone || "") !== "Asia/Shanghai"
-      || String(dailyReport?.cutoff || "") !== "20:00"
-      || String(dailyReport?.report_after || "") !== "20:30"
+      || String(dailyReport?.cutoff || "") !== "23:00"
+      || String(dailyReport?.report_after || "") !== "23:30"
       || Number(dailyReport?.poll_interval_seconds) < 30) {
-      throw new Error("daily pricing report must be enabled for Asia/Shanghai at 20:30");
+      throw new Error("daily pricing report must be enabled for Asia/Shanghai at 23:30");
     }
     for (const [name, value] of Object.entries({
       report_node: dailyReport?.node,

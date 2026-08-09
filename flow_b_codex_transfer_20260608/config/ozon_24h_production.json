@@ -23,8 +23,8 @@
     "runtime_root": "${STATE_ROOT}/report-runtime",
     "poll_interval_seconds": 60,
     "time_zone": "Asia/Shanghai",
-    "cutoff": "20:00",
-    "report_after": "20:30"
+    "cutoff": "23:00",
+    "report_after": "23:30"
   },
   "profit_learning": {
     "enabled": true,
@@ -254,8 +254,8 @@
     "FLOW_B_DAILY_STORE_TIMEZONE": "Asia/Shanghai",
     "FLOW_B_ENFORCE_DIRECT_DAILY_LIMIT": "1",
     "FLOW_B_DAILY_STORE_LIMIT": "100",
-    "FLOW_B_DAILY_SUBMISSION_CUTOFF": "20:00",
-    "FLOW_B_DAILY_REPORT_AFTER": "20:30",
+    "FLOW_B_DAILY_SUBMISSION_CUTOFF": "23:00",
+    "FLOW_B_DAILY_REPORT_AFTER": "23:30",
     "FLOW_B_PUBLISH_WORKERS": "8",
     "FLOW_B_MAX_PUBLISH_WORKERS": "8",
     "FLOW_B_OZON_DETAIL_WORKERS": "1",

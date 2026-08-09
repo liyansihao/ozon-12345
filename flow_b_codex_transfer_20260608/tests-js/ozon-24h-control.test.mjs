@@ -271,6 +271,10 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_DIRECT_PUBLISH, "1");
   assert.equal(config.flow_env.FLOW_B_TARGET_PUBLISH_COUNT, "0");
   assert.equal(config.flow_env.FLOW_B_UNLIMITED_PUBLISH, "1");
+  assert.equal(config.flow_env.FLOW_B_DAILY_SUBMISSION_CUTOFF, "23:00");
+  assert.equal(config.flow_env.FLOW_B_DAILY_REPORT_AFTER, "23:30");
+  assert.equal(config.daily_pricing_report.cutoff, "23:00");
+  assert.equal(config.daily_pricing_report.report_after, "23:30");
   assert.equal(config.flow_env.FLOW_B_1688_MIN_MATCHES, "1");
   assert.equal(config.flow_env.FLOW_B_1688_TOTAL_BUDGET_MS, "30000");
   assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "30");
