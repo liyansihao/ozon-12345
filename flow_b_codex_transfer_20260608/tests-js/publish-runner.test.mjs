@@ -14,12 +14,54 @@ import {
   offerIdForSku,
   onlineSyncRetryAfterMs,
   preSubmitContentQuality,
+  prioritizeProfitCandidates,
   prioritizePublishCandidates,
   restoredDailyStoreUsage,
   strictSourceYieldEvidence,
   verifiedWarehouseCandidates,
 } from "../scripts/flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "../scripts/flow_b_playwright/publish-state.mjs";
+import {
+  normalizeProfitPriority,
+  normalizeSeasonPriority,
+} from "../scripts/flow_b_playwright/profit-priority.mjs";
+
+test("publisher applies seasonal priority softly after keeping profit mothers first", () => {
+  const snapshot = {
+    priority: normalizeProfitPriority({
+      stores: [{
+        store_id: 101,
+        mother_products: [{
+          source_sku: "mother",
+          title_keywords: ["organizer"],
+          sales_units: 3,
+          real_profit_cny: 1,
+        }],
+      }],
+    }),
+    feedback: {},
+    season: normalizeSeasonPriority({
+      events: [{
+        sales_start: "2026-09-01",
+        sales_end: "2026-09-05",
+        lead_days: 45,
+        categories: [{ name: "Канцтовары", keywords: ["школьный пенал"], boost: 800 }],
+      }],
+    }),
+  };
+  const original = [
+    { sku: "plain-a", title: "ordinary cable" },
+    { sku: "season", title: "Школьный пенал" },
+    { sku: "mother-like", title: "drawer organizer" },
+    { sku: "plain-b", title: "ordinary lamp" },
+  ];
+  const ranked = prioritizeProfitCandidates(original, snapshot, 101, {
+    now: "2026-08-09T00:00:00+08:00",
+  });
+  assert.deepEqual(ranked.map((row) => row.sku), ["mother-like", "season", "plain-a", "plain-b"]);
+  assert.equal(ranked.length, original.length);
+  assert.deepEqual(original.map((row) => row.sku), ["plain-a", "season", "mother-like", "plain-b"]);
+});
 
 test("pre-submit content quality requires title, HTTP image, category, and safe taxonomy", () => {
   const valid = {

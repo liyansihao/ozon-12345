@@ -2,6 +2,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 const EMPTY_PRIORITY = Object.freeze({ schema_version: 1, stores: {} });
+const EMPTY_SEASON = Object.freeze({
+  schema_version: 1,
+  time_zone: "Asia/Shanghai",
+  events: [],
+});
 const EMPTY_FEEDBACK = Object.freeze({
   schema_version: 1,
   blocked_source_skus: [],
@@ -12,6 +17,12 @@ const EMPTY_FEEDBACK = Object.freeze({
   trusted_matches: [],
   loss_sources: [],
 });
+const MODEL_LAST_GOOD_BY_PATH = new Map();
+const SEASON_LAST_GOOD_BY_PATH = new Map();
+const MAX_SEASON_BOOST = 800;
+const DEFAULT_SEASON_LEAD_DAYS = 45;
+const DEFAULT_SEASON_BOOST = 600;
+const PROFIT_MOTHER_TIER = 1_000;
 
 const STOP_WORDS = new Set([
   "для", "или", "при", "под", "над", "без", "как", "это", "его", "ее", "она", "они",
@@ -36,6 +47,162 @@ function normalizedText(value) {
     .replace(/[\p{P}\p{S}_]+/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
+}
+
+function firstFiniteNumber(values, fallback = 0) {
+  for (const value of values) {
+    if (text(value) && Number.isFinite(Number(value))) return Number(value);
+  }
+  return fallback;
+}
+
+function motherSalesUnits(mother) {
+  return Math.max(0, firstFiniteNumber([
+    mother?.sales_units,
+    mother?.completed_units,
+    mother?.completed_unit_count,
+    mother?.completed_orders,
+    mother?.order_count,
+  ]));
+}
+
+function motherRefundRate(mother) {
+  return Math.min(1, Math.max(0, firstFiniteNumber([
+    mother?.refund_cancel_rate,
+    mother?.refund_rate,
+  ])));
+}
+
+function motherProfitValue(mother) {
+  return firstFiniteNumber([
+    mother?.real_profit_cny,
+    mother?.contribution_profit_cny,
+    mother?.profit_cny,
+    mother?.total_profit,
+  ]);
+}
+
+function motherCompletedOrders(mother) {
+  return Math.max(0, firstFiniteNumber([
+    mother?.completed_orders,
+    mother?.order_count,
+  ]));
+}
+
+function compareMotherPerformance(left, right) {
+  return motherSalesUnits(right) - motherSalesUnits(left)
+    || motherRefundRate(left) - motherRefundRate(right)
+    || motherProfitValue(right) - motherProfitValue(left)
+    || motherCompletedOrders(right) - motherCompletedOrders(left);
+}
+
+function validDateKey(value) {
+  const match = text(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
+}
+
+function shiftDateKey(value, days) {
+  if (!validDateKey(value)) throw new TypeError(`invalid seasonal date: ${value}`);
+  const [year, month, day] = String(value).split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + Number(days))).toISOString().slice(0, 10);
+}
+
+export function seasonDateKey(value = new Date(), timeZone = "Asia/Shanghai") {
+  if (String(timeZone || "Asia/Shanghai") !== "Asia/Shanghai") {
+    throw new TypeError("seasonal priority time_zone must be Asia/Shanghai");
+  }
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new TypeError("seasonal priority date must be valid");
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const fields = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+}
+
+function normalizedSeasonKeyword(value) {
+  const normalized = normalizedText(value);
+  return normalized.length >= 3 ? normalized : "";
+}
+
+function normalizeSeasonCategory(value, inheritedBoost) {
+  const row = typeof value === "string" ? { name: value } : value;
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    throw new TypeError("seasonal category must be a string or object");
+  }
+  const name = text(row.name ?? row.category ?? row.label);
+  const keywords = asArray(row.keywords ?? row.aliases ?? row.title_keywords)
+    .map(normalizedSeasonKeyword)
+    .filter(Boolean);
+  if (name && /\p{Script=Cyrillic}/u.test(name)) keywords.push(normalizedSeasonKeyword(name));
+  const uniqueKeywords = [...new Set(keywords.filter(Boolean))];
+  if (!uniqueKeywords.length) {
+    throw new TypeError(`seasonal category ${name || "<unnamed>"} needs a Russian name or valid keywords`);
+  }
+  const rawBoost = Number(row.boost ?? inheritedBoost ?? DEFAULT_SEASON_BOOST);
+  const boost = Math.min(MAX_SEASON_BOOST, Math.max(0, Number.isFinite(rawBoost) ? rawBoost : 0));
+  return { name, normalized_name: normalizedText(name), keywords: uniqueKeywords, boost };
+}
+
+export function normalizeSeasonPriority(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("seasonal priority file must contain a JSON object");
+  }
+  const timeZone = text(value.time_zone ?? value.timezone) || "Asia/Shanghai";
+  if (timeZone !== "Asia/Shanghai") {
+    throw new TypeError("seasonal priority time_zone must be Asia/Shanghai");
+  }
+  const eventsValue = value.events ?? value.calendar ?? [];
+  if (!Array.isArray(eventsValue)) throw new TypeError("seasonal priority events must be an array");
+  const events = eventsValue.map((event, index) => {
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      throw new TypeError(`seasonal event ${index + 1} must be an object`);
+    }
+    const salesStart = text(event.sales_start);
+    const salesEnd = text(event.sales_end || event.sales_start);
+    if (!validDateKey(salesStart) || !validDateKey(salesEnd) || salesEnd < salesStart) {
+      throw new TypeError(`seasonal event ${text(event.id) || index + 1} has invalid sales dates`);
+    }
+    const leadDaysValue = event.lead_days ?? DEFAULT_SEASON_LEAD_DAYS;
+    const leadDays = Number(leadDaysValue);
+    if (leadDays !== DEFAULT_SEASON_LEAD_DAYS) {
+      throw new TypeError(`seasonal event ${text(event.id) || index + 1} lead_days must equal 45`);
+    }
+    const eventBoostValue = Number(event.boost ?? DEFAULT_SEASON_BOOST);
+    const eventBoost = Math.min(
+      MAX_SEASON_BOOST,
+      Math.max(0, Number.isFinite(eventBoostValue) ? eventBoostValue : 0),
+    );
+    if (!Array.isArray(event.categories) || event.categories.length === 0) {
+      throw new TypeError(`seasonal event ${text(event.id) || index + 1} needs categories`);
+    }
+    return {
+      id: text(event.id) || `event-${index + 1}`,
+      name: text(event.name),
+      enabled: event.enabled !== false,
+      sales_start: salesStart,
+      sales_end: salesEnd,
+      active_from: shiftDateKey(salesStart, -leadDays),
+      lead_days: leadDays,
+      categories: event.categories.map((category) => normalizeSeasonCategory(category, eventBoost)),
+    };
+  });
+  return {
+    schema_version: Number(value.schema_version) || 1,
+    updated_at: value.updated_at || null,
+    time_zone: timeZone,
+    events,
+  };
 }
 
 export function profitTokens(value) {
@@ -94,7 +261,7 @@ export function normalizeProfitPriority(value = {}) {
     for (const mother of store.mothers) {
       const key = mother.source_sku || `${normalizedText(mother.title)}:${normalizedText(mother.category)}`;
       const prior = unique.get(key);
-      if (!prior || Number(mother.completed_orders ?? mother.order_count ?? 0) > Number(prior.completed_orders ?? prior.order_count ?? 0)) {
+      if (!prior || compareMotherPerformance(mother, prior) < 0) {
         unique.set(key, mother);
       }
     }
@@ -140,13 +307,38 @@ export function normalizeProfitFeedback(value = {}) {
 
 async function readJsonAttempt(filename) {
   if (!text(filename)) return { ok: false, reason: "not-configured" };
+  const resolved = path.resolve(filename);
   try {
-    const value = JSON.parse(await fs.readFile(path.resolve(filename), "utf8"));
+    const value = JSON.parse(await fs.readFile(resolved, "utf8"));
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       throw new TypeError("profit sidecar file must contain a JSON object");
     }
+    MODEL_LAST_GOOD_BY_PATH.set(resolved, value);
     return { ok: true, value };
   } catch (error) {
+    if (MODEL_LAST_GOOD_BY_PATH.has(resolved)) {
+      return { ok: true, value: MODEL_LAST_GOOD_BY_PATH.get(resolved), last_known_good: true, error };
+    }
+    return {
+      ok: false,
+      reason: error?.code === "ENOENT" ? "missing" : "invalid",
+      error,
+    };
+  }
+}
+
+async function readSeasonAttempt(filename) {
+  if (!text(filename)) return { ok: false, reason: "not-configured" };
+  const resolved = path.resolve(filename);
+  try {
+    const parsed = JSON.parse(await fs.readFile(resolved, "utf8"));
+    const value = normalizeSeasonPriority(parsed);
+    SEASON_LAST_GOOD_BY_PATH.set(resolved, value);
+    return { ok: true, value };
+  } catch (error) {
+    if (SEASON_LAST_GOOD_BY_PATH.has(resolved)) {
+      return { ok: true, value: SEASON_LAST_GOOD_BY_PATH.get(resolved), last_known_good: true, error };
+    }
     return {
       ok: false,
       reason: error?.code === "ENOENT" ? "missing" : "invalid",
@@ -158,15 +350,18 @@ async function readJsonAttempt(filename) {
 export function createProfitFilesReader({
   priorityFile,
   feedbackFile,
+  seasonFile,
   refreshMs = 5_000,
   now = () => Date.now(),
 } = {}) {
   let snapshotValue = {
     priority: normalizeProfitPriority(EMPTY_PRIORITY),
     feedback: normalizeProfitFeedback(EMPTY_FEEDBACK),
+    season: normalizeSeasonPriority(EMPTY_SEASON),
   };
   let priorityLoaded = false;
   let feedbackLoaded = false;
+  let seasonLoaded = false;
   let refreshedAt = 0;
   let refreshPromise = null;
   return {
@@ -179,18 +374,22 @@ export function createProfitFilesReader({
         refreshPromise = Promise.all([
           readJsonAttempt(priorityFile),
           readJsonAttempt(feedbackFile),
-        ]).then(([priorityAttempt, feedbackAttempt]) => {
+          readSeasonAttempt(seasonFile),
+        ]).then(([priorityAttempt, feedbackAttempt, seasonAttempt]) => {
           const priority = priorityAttempt.ok
             ? normalizeProfitPriority(priorityAttempt.value)
             : snapshotValue.priority;
           const feedback = feedbackAttempt.ok
             ? normalizeProfitFeedback(feedbackAttempt.value)
             : snapshotValue.feedback;
+          const season = seasonAttempt.ok ? seasonAttempt.value : snapshotValue.season;
           priorityLoaded ||= priorityAttempt.ok;
           feedbackLoaded ||= feedbackAttempt.ok;
+          seasonLoaded ||= seasonAttempt.ok;
           snapshotValue = {
             priority: priorityLoaded ? priority : normalizeProfitPriority(EMPTY_PRIORITY),
             feedback: feedbackLoaded ? feedback : normalizeProfitFeedback(EMPTY_FEEDBACK),
+            season: seasonLoaded ? season : normalizeSeasonPriority(EMPTY_SEASON),
           };
           refreshedAt = now();
           return snapshotValue;
@@ -207,14 +406,10 @@ function candidateText(row) {
 }
 
 function performanceBonus(mother) {
-  const orders = Math.max(0, Number(mother?.completed_orders ?? mother?.order_count) || 0);
-  const profit = Math.max(0, Number(
-    mother?.real_profit_cny
-      ?? mother?.contribution_profit_cny
-      ?? mother?.profit_cny
-      ?? mother?.total_profit,
-  ) || 0);
-  return Math.min(600, orders * 25 + Math.log1p(profit) * 55);
+  const salesUnits = motherSalesUnits(mother);
+  const profit = Math.max(0, motherProfitValue(mother));
+  const refundRate = motherRefundRate(mother);
+  return Math.min(600, (salesUnits * 25 + Math.log1p(profit) * 55) * (1 - refundRate));
 }
 
 function similarityScore(row, mother) {
@@ -258,8 +453,51 @@ function lossPenalty(feedback, row, storeId = null) {
   return penalty;
 }
 
-export function profitPriorityScore(snapshot, row, { storeId = null } = {}) {
-  const model = snapshot?.priority ? snapshot : { priority: normalizeProfitPriority(snapshot), feedback: normalizeProfitFeedback({}) };
+function containsSeasonPhrase(source, keyword) {
+  if (!source || !keyword) return false;
+  return ` ${source} `.includes(` ${keyword} `);
+}
+
+export function seasonPriorityScore(snapshotValue, row, { now = new Date() } = {}) {
+  const season = snapshotValue?.season || snapshotValue || EMPTY_SEASON;
+  const dateKey = seasonDateKey(now, season.time_zone || "Asia/Shanghai");
+  const categoryValues = [row?.category, row?.category_name, row?.cate_name]
+    .map(normalizedText)
+    .filter(Boolean);
+  const source = normalizedText([
+    row?.title,
+    row?.text,
+    row?.product_name,
+    row?.name,
+    ...categoryValues,
+  ].map(text).filter(Boolean).join(" "));
+  if (!source) return 0;
+  let score = 0;
+  for (const event of season.events || []) {
+    if (event?.enabled === false || dateKey < event.active_from || dateKey > event.sales_end) continue;
+    for (const category of event.categories || []) {
+      const exactCategory = category.normalized_name
+        && categoryValues.includes(category.normalized_name);
+      const matchedKeywords = (category.keywords || [])
+        .filter((keyword) => containsSeasonPhrase(source, keyword));
+      const explicitPhrase = matchedKeywords.some((keyword) => keyword.includes(" "));
+      const distinctSingleKeywords = new Set(
+        matchedKeywords.filter((keyword) => !keyword.includes(" ")),
+      ).size;
+      if (exactCategory || explicitPhrase || distinctSingleKeywords >= 2) {
+        score = Math.max(score, Math.min(MAX_SEASON_BOOST, Math.max(0, Number(category.boost) || 0)));
+      }
+    }
+  }
+  return score;
+}
+
+export function profitPriorityScore(snapshot, row, { storeId = null, now = new Date() } = {}) {
+  const model = snapshot?.priority ? snapshot : {
+    priority: normalizeProfitPriority(snapshot),
+    feedback: normalizeProfitFeedback({}),
+    season: normalizeSeasonPriority(EMPTY_SEASON),
+  };
   const stores = model.priority?.stores || {};
   const targetStores = storeId === null
     ? Object.values(stores)
@@ -268,12 +506,15 @@ export function profitPriorityScore(snapshot, row, { storeId = null } = {}) {
   for (const store of targetStores) {
     for (const mother of store.mothers || []) score = Math.max(score, similarityScore(row, mother));
   }
-  return Math.round(score + lossPenalty(model.feedback, row, storeId));
+  const profitScore = score + lossPenalty(model.feedback, row, storeId);
+  const seasonScore = seasonPriorityScore(model, row, { now });
+  if (profitScore < 0) return Math.round(profitScore);
+  return Math.round((profitScore > 0 ? PROFIT_MOTHER_TIER : 0) + profitScore + seasonScore);
 }
 
-export function prioritizeProfitRows(rows, snapshot, { storeId = null } = {}) {
+export function prioritizeProfitRows(rows, snapshot, { storeId = null, now = new Date() } = {}) {
   return [...(rows || [])]
-    .map((row, index) => ({ row, index, score: profitPriorityScore(snapshot, row, { storeId }) }))
+    .map((row, index) => ({ row, index, score: profitPriorityScore(snapshot, row, { storeId, now }) }))
     .sort((left, right) => right.score - left.score || left.index - right.index)
     .map(({ row }) => row);
 }

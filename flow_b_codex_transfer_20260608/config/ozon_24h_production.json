@@ -29,6 +29,7 @@
   "profit_learning": {
     "enabled": true,
     "priority_file": "/Users/mac/Desktop/ozon每日上品/优先母款.json",
+    "season_file": "/Users/mac/Desktop/ozon每日上品/季节优先类目.json",
     "feedback_file": "/Users/mac/Desktop/ozon每日上品/错误货源.json",
     "feedback_dir": "/Users/mac/Desktop/ozon每日上品/核价反馈",
     "learning_status": "${STATE_ROOT}/profit_learning/status.json",

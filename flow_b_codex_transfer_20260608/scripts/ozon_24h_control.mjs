@@ -175,6 +175,7 @@ function resolvedProfitLearningConfig(config = {}) {
   const resolved = { ...source };
   for (const key of [
     "priority_file",
+    "season_file",
     "feedback_file",
     "feedback_dir",
     "learning_status",
@@ -217,7 +218,274 @@ async function readSidecarStatus(filename) {
   }
 }
 
-export async function readProfitLearningStatus(config, paths = null) {
+function seasonDateKey(value) {
+  const raw = String(value || "").trim();
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/u);
+  if (!match) return null;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return date.getUTCFullYear() === Number(match[1])
+    && date.getUTCMonth() === Number(match[2]) - 1
+    && date.getUTCDate() === Number(match[3])
+    ? raw
+    : null;
+}
+
+function shiftedSeasonDate(dateKey, days) {
+  const valid = seasonDateKey(dateKey);
+  if (!valid) return null;
+  const [year, month, day] = valid.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  date.setUTCDate(date.getUTCDate() + Number(days || 0));
+  return date.toISOString().slice(0, 10);
+}
+
+function seasonDaysBetween(left, right) {
+  const leftKey = seasonDateKey(left);
+  const rightKey = seasonDateKey(right);
+  if (!leftKey || !rightKey) return null;
+  return Math.round((Date.parse(`${rightKey}T00:00:00.000Z`) - Date.parse(`${leftKey}T00:00:00.000Z`)) / 86_400_000);
+}
+
+function seasonShanghaiDateKey(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) throw new TypeError("season priority now must be a valid timestamp");
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function seasonEvents(value = {}) {
+  if (Array.isArray(value?.events)) return value.events;
+  if (Array.isArray(value?.calendar)) return value.calendar;
+  return [];
+}
+
+function seasonSourceEntries(value = {}) {
+  const result = [];
+  const append = (owner, sources) => {
+    if (sources === undefined) return;
+    if (!Array.isArray(sources)) {
+      result.push({ owner, invalid: true, url: "" });
+      return;
+    }
+    for (const source of sources) {
+      const url = typeof source === "string"
+        ? source.trim()
+        : String(source?.url ?? source?.href ?? "").trim();
+      result.push({ owner, invalid: !url, url });
+    }
+  };
+  append("calendar", value?.sources);
+  for (const [index, event] of seasonEvents(value).entries()) append(`event:${index}`, event?.sources);
+  return result;
+}
+
+function normalizedSeasonCategoryKeyword(value) {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLocaleLowerCase("und")
+    .normalize("NFKC")
+    .replace(/[\p{P}\p{S}_]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return normalized.length >= 3 ? normalized : "";
+}
+
+function seasonCategoryDecision(value) {
+  const row = typeof value === "string" ? { name: value } : value;
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    return { valid: false, reason: "must be a string or object" };
+  }
+  const name = String(row.name ?? row.category ?? row.label ?? "").trim();
+  const keywordValue = row.keywords ?? row.aliases ?? row.title_keywords;
+  const keywordRows = Array.isArray(keywordValue)
+    ? keywordValue
+    : keywordValue && typeof keywordValue === "object"
+      ? Object.values(keywordValue)
+      : [];
+  const keywords = keywordRows.map(normalizedSeasonCategoryKeyword).filter(Boolean);
+  if (name && /\p{Script=Cyrillic}/u.test(name)) {
+    const normalizedName = normalizedSeasonCategoryKeyword(name);
+    if (normalizedName) keywords.push(normalizedName);
+  }
+  return [...new Set(keywords)].length > 0
+    ? { valid: true }
+    : { valid: false, reason: "needs a Russian name or a keyword/alias/title_keyword of at least 3 characters" };
+}
+
+export function seasonPriorityDocumentDecision(value = {}) {
+  const errors = [];
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { valid: false, errors: ["season priority must be a JSON object"], events: [], sources: [] };
+  }
+  if (value.schema_version !== undefined
+    && (!Number.isInteger(Number(value.schema_version)) || Number(value.schema_version) < 1)) {
+    errors.push("schema_version must be a positive integer");
+  }
+  const timeZone = value.time_zone ?? value.timezone;
+  if (timeZone !== undefined && String(timeZone) !== "Asia/Shanghai") {
+    errors.push("time_zone must equal Asia/Shanghai");
+  }
+  if (value.lead_days !== undefined) errors.push("root lead_days is not supported");
+  if (value.events !== undefined && !Array.isArray(value.events)) errors.push("events must be an array");
+  if (value.events === undefined && value.calendar !== undefined && !Array.isArray(value.calendar)) {
+    errors.push("calendar must be an array");
+  }
+  for (const key of ["research_verified_at", "next_review_at", "coverage_until"]) {
+    if (value[key] !== undefined && !seasonDateKey(value[key])) errors.push(`${key} must use YYYY-MM-DD`);
+  }
+  const normalizedEvents = [];
+  for (const [index, event] of seasonEvents(value).entries()) {
+    const prefix = `events[${index}]`;
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      errors.push(`${prefix} must be an object`);
+      continue;
+    }
+    const leadDays = Number(event.lead_days ?? 45);
+    if (leadDays !== 45) errors.push(`${prefix}.lead_days must equal 45`);
+    const salesStart = seasonDateKey(event.sales_start);
+    const salesEnd = seasonDateKey(event.sales_end ?? event.sales_start);
+    const explicitStart = seasonDateKey(event.active_from);
+    const explicitEnd = seasonDateKey(event.active_until);
+    if (!salesStart) errors.push(`${prefix}.sales_start must use YYYY-MM-DD`);
+    if (event.sales_end !== undefined && !salesEnd) errors.push(`${prefix}.sales_end must use YYYY-MM-DD`);
+    if (salesStart && salesEnd && salesEnd < salesStart) {
+      errors.push(`${prefix}.sales_end must not be before sales_start`);
+    }
+    if (event.active_from !== undefined && !explicitStart) errors.push(`${prefix}.active_from must use YYYY-MM-DD`);
+    if (event.active_until !== undefined && !explicitEnd) errors.push(`${prefix}.active_until must use YYYY-MM-DD`);
+    const activeFrom = shiftedSeasonDate(salesStart, -leadDays);
+    const activeUntil = salesEnd;
+    if (explicitStart && salesStart && explicitStart !== shiftedSeasonDate(salesStart, -leadDays)) {
+      errors.push(`${prefix}.active_from must be 45 days before sales_start`);
+    }
+    if (explicitEnd && salesEnd && explicitEnd !== salesEnd) {
+      errors.push(`${prefix}.active_until must equal sales_end`);
+    }
+    if (activeFrom && activeUntil && activeFrom > activeUntil) {
+      errors.push(`${prefix} active date range is reversed`);
+    }
+    if (!Array.isArray(event.categories) || event.categories.length === 0) {
+      errors.push(`${prefix}.categories must be a non-empty array`);
+    } else {
+      for (const [categoryIndex, category] of event.categories.entries()) {
+        const categoryDecision = seasonCategoryDecision(category);
+        if (!categoryDecision.valid) {
+          errors.push(`${prefix}.categories[${categoryIndex}] ${categoryDecision.reason}`);
+        }
+      }
+    }
+    normalizedEvents.push({
+      id: String(event.id ?? event.name ?? `event-${index + 1}`),
+      name: String(event.name ?? event.title ?? event.id ?? `event-${index + 1}`),
+      sales_start: salesStart,
+      sales_end: salesEnd,
+      active_from: activeFrom,
+      active_until: activeUntil,
+      lead_days: leadDays,
+      enabled: event.enabled !== false,
+    });
+  }
+  const sources = seasonSourceEntries(value);
+  for (const source of sources) {
+    if (source.invalid || !/^https:\/\//iu.test(source.url)) {
+      errors.push(`${source.owner} source must use an HTTPS URL`);
+    }
+  }
+  return {
+    valid: errors.length === 0,
+    errors,
+    events: normalizedEvents,
+    sources: sources.map((source) => source.url).filter(Boolean),
+  };
+}
+
+export async function optionalSeasonPriorityJsonIsValid(filename) {
+  if (!filename) return false;
+  try {
+    const value = JSON.parse(await fsp.readFile(filename, "utf8"));
+    return seasonPriorityDocumentDecision(value).valid;
+  } catch (error) {
+    return error.code === "ENOENT";
+  }
+}
+
+export async function readSeasonPriorityStatus(filename, { now = new Date() } = {}) {
+  if (!filename) return { status: "not-configured", season_file: null };
+  const absolute = path.resolve(filename);
+  try {
+    const raw = await fsp.readFile(absolute, "utf8");
+    const value = JSON.parse(raw);
+    const decision = seasonPriorityDocumentDecision(value);
+    if (!decision.valid) {
+      return {
+        status: "invalid",
+        season_file: absolute,
+        error: decision.errors.join("; "),
+      };
+    }
+    const date = seasonShanghaiDateKey(now);
+    const activeEvents = decision.events.filter((event) => (
+      event.enabled !== false
+      && event.active_from && event.active_until && date >= event.active_from && date <= event.active_until
+    ));
+    const verifiedAt = seasonDateKey(value.research_verified_at);
+    const nextReviewAt = seasonDateKey(value.next_review_at) || shiftedSeasonDate(verifiedAt, 7);
+    const researchDue = !nextReviewAt || date >= nextReviewAt;
+    const inferredCoverage = decision.events
+      .map((event) => event.active_until)
+      .filter(Boolean)
+      .sort()
+      .at(-1) || null;
+    const coverageUntil = seasonDateKey(value.coverage_until) || inferredCoverage;
+    const coverageDays = seasonDaysBetween(date, coverageUntil);
+    const coverageWarning = coverageDays === null
+      ? "coverage-date-missing"
+      : coverageDays < 0
+        ? "coverage-expired"
+        : coverageDays < 90
+          ? "coverage-under-90-days"
+          : null;
+    return {
+      status: "ready",
+      season_file: absolute,
+      schema_version: Number(value.schema_version || 1),
+      calendar_version: value.calendar_version || value.version || null,
+      fingerprint_sha256: sha256(raw),
+      date,
+      time_zone: "Asia/Shanghai",
+      generated_at: value.generated_at || value.updated_at || null,
+      research_verified_at: verifiedAt,
+      next_review_at: nextReviewAt,
+      research_due: researchDue,
+      coverage_until: coverageUntil,
+      coverage_days_remaining: coverageDays,
+      coverage_warning: coverageWarning,
+      warnings: [
+        ...(researchDue ? [verifiedAt ? "research-verification-due" : "research-date-missing"] : []),
+        ...(coverageWarning ? [coverageWarning] : []),
+      ],
+      event_count: decision.events.length,
+      active_event_count: activeEvents.length,
+      active_events: activeEvents,
+      source_count: decision.sources.length,
+    };
+  } catch (error) {
+    if (error.code === "ENOENT") return { status: "not-started", season_file: absolute };
+    return {
+      status: "invalid",
+      season_file: absolute,
+      error: String(error?.message || error),
+    };
+  }
+}
+
+export async function readProfitLearningStatus(config, paths = null, options = {}) {
   const deployment = paths || deploymentPaths(config);
   const profitConfig = resolvedProfitLearningConfig({
     ...config,
@@ -225,17 +493,20 @@ export async function readProfitLearningStatus(config, paths = null) {
     state_root: deployment.stateRoot || config?.state_root,
   });
   if (profitConfig.enabled !== true) return { enabled: false };
-  const [learning, feedbackImport] = await Promise.all([
+  const [learning, feedbackImport, seasonPriority] = await Promise.all([
     readSidecarStatus(profitConfig.learning_status),
     readSidecarStatus(profitConfig.feedback_status),
+    readSeasonPriorityStatus(profitConfig.season_file, options),
   ]);
   return {
     enabled: true,
     priority_file: profitConfig.priority_file,
+    season_file: profitConfig.season_file,
     feedback_file: profitConfig.feedback_file,
     feedback_dir: profitConfig.feedback_dir,
     learning,
     feedback_import: feedbackImport,
+    season_priority: seasonPriority,
   };
 }
 
@@ -479,6 +750,7 @@ function validateConfig(config) {
     }
     for (const [name, value] of Object.entries({
       profit_priority_file: profitLearning.priority_file,
+      profit_season_file: profitLearning.season_file,
       profit_feedback_file: profitLearning.feedback_file,
       profit_feedback_dir: profitLearning.feedback_dir,
       profit_learning_status: profitLearning.learning_status,
@@ -492,6 +764,7 @@ function validateConfig(config) {
       }
     }
     if (profitLearning.priority_file !== "/Users/mac/Desktop/ozon每日上品/优先母款.json"
+      || profitLearning.season_file !== "/Users/mac/Desktop/ozon每日上品/季节优先类目.json"
       || profitLearning.feedback_file !== "/Users/mac/Desktop/ozon每日上品/错误货源.json"
       || profitLearning.feedback_dir !== "/Users/mac/Desktop/ozon每日上品/核价反馈") {
       throw new Error("profit learning files must use the fixed daily-upload desktop folder");
@@ -1012,6 +1285,7 @@ async function doctor(config, { appRoot = null } = {}) {
     for (const [name, filename] of Object.entries(profitJsonFiles)) {
       checks[name] = await optionalJsonObjectIsValid(filename);
     }
+    checks.season_priority_json = await optionalSeasonPriorityJsonIsValid(profitConfig.season_file);
   }
   if (checks.report_node && checks.report_node_modules) {
     const reportRuntime = path.join(paths.stateRoot, "report-runtime");

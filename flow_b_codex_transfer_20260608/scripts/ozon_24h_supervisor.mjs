@@ -954,6 +954,7 @@ export function expandedConfig(config) {
   }
   for (const key of [
     "priority_file",
+    "season_file",
     "feedback_file",
     "feedback_dir",
     "learning_status",
@@ -1003,6 +1004,7 @@ export function workerEnvironment(config, currentRun) {
     const profitLearning = config.profit_learning;
     const configuredPaths = {
       FLOW_B_PROFIT_PRIORITY_FILE: profitLearning.priority_file,
+      FLOW_B_SEASON_PRIORITY_FILE: profitLearning.season_file,
       FLOW_B_PROFIT_FEEDBACK_FILE: profitLearning.feedback_file,
       FLOW_B_PROFIT_FEEDBACK_DIR: profitLearning.feedback_dir,
       FLOW_B_PROFIT_LEARNING_STATUS: profitLearning.learning_status,

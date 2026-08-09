@@ -444,6 +444,7 @@ async function createPublishingSession(context, options, env, shared) {
       costEstimateTimeoutMs: Math.max(1, Number(env.FLOW_B_1688_TOTAL_BUDGET_MS) || 15_000),
       profitPriorityFile: env.FLOW_B_PROFIT_PRIORITY_FILE || null,
       profitFeedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
+      seasonPriorityFile: env.FLOW_B_SEASON_PRIORITY_FILE || null,
       profitFileRefreshMs: Math.max(0, Number(env.FLOW_B_PROFIT_FILE_REFRESH_MS) || 5_000),
     });
     return { maoziPage, client, costBridge, detailProvider, runner, state };

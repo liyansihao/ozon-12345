@@ -139,6 +139,10 @@ import {
   sourceBatchCollectionMode,
   shouldScanSourcesDuringDetailCooldown,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+import {
+  normalizeSeasonPriority,
+  seasonPriorityScore,
+} from "../scripts/flow_b_playwright/profit-priority.mjs";
 
 test("runtime source evidence demotes legacy published rows without strict proof", () => {
   const source = "https://www.ozon.ru/seller/legacy/";
@@ -3213,6 +3217,33 @@ test("profit learning adds only a stable soft priority and never removes explora
   );
   assert.deepEqual(result.map((row) => row.href), ["learned", "explore-a", "explore-b"]);
   assert.equal(result.length, links.length);
+});
+
+test("active seasonal categories use the existing scanner soft-priority path", () => {
+  const season = normalizeSeasonPriority({
+    events: [{
+      sales_start: "2026-09-01",
+      sales_end: "2026-09-05",
+      lead_days: 45,
+      categories: [{ name: "Школьные принадлежности", keywords: ["школьный пенал"], boost: 600 }],
+    }],
+  });
+  const links = [
+    { href: "explore-a", text: "Обычный кабель" },
+    { href: "season", text: "Школьный пенал" },
+    { href: "explore-b", text: "Обычная лампа" },
+  ];
+  const result = prioritizeFavoriteLinks(
+    links,
+    {},
+    (row) => seasonPriorityScore(season, row, { now: "2026-08-09T00:00:00+08:00" }),
+  );
+  assert.deepEqual(result.map((row) => row.href), ["season", "explore-a", "explore-b"]);
+  assert.equal(result.length, links.length);
+  assert.deepEqual(
+    prioritizeFavoriteLinks(links, {}, () => 0).map((row) => row.href),
+    ["explore-a", "season", "explore-b"],
+  );
 });
 
 test("listing cards with explicit cross-border delivery outrank ambiguous titles", () => {

@@ -9,8 +9,11 @@ import {
   feedbackExcludedOfferIds,
   manualFeedbackDecision,
   normalizeProfitPriority,
+  normalizeSeasonPriority,
   prioritizeProfitRows,
   profitPriorityScore,
+  seasonDateKey,
+  seasonPriorityScore,
 } from "../scripts/flow_b_playwright/profit-priority.mjs";
 
 const priority = {
@@ -39,6 +42,166 @@ const priority = {
   ],
 };
 
+const seasonCalendar = {
+  schema_version: 1,
+  time_zone: "Asia/Shanghai",
+  events: [{
+    id: "school-2026",
+    sales_start: "2026-09-01",
+    sales_end: "2026-09-05",
+    lead_days: 45,
+    categories: [{
+      name: "Школьные принадлежности",
+      keywords: ["канцтовары", "школьный пенал"],
+      boost: 600,
+    }],
+  }],
+};
+
+test("seasonal calendar activates 45 days early on Shanghai date boundaries", () => {
+  const season = normalizeSeasonPriority(seasonCalendar);
+  const candidate = { title: "Школьный пенал для ученика" };
+  assert.equal(season.events[0].active_from, "2026-07-18");
+  assert.equal(seasonDateKey("2026-07-17T16:00:00.000Z"), "2026-07-18");
+  assert.equal(seasonPriorityScore(season, candidate, { now: "2026-07-17T15:59:59.999Z" }), 0);
+  assert.equal(seasonPriorityScore(season, candidate, { now: "2026-07-17T16:00:00.000Z" }), 600);
+  assert.equal(seasonPriorityScore(season, candidate, { now: "2026-09-05T15:59:59.999Z" }), 600);
+  assert.equal(seasonPriorityScore(season, candidate, { now: "2026-09-05T16:00:00.000Z" }), 0);
+  assert.equal(normalizeSeasonPriority({
+    events: [{
+      sales_start: "2026-09-01",
+      sales_end: "2026-09-05",
+      categories: [{ name: "Канцтовары" }],
+    }],
+  }).events[0].lead_days, 45);
+  assert.throws(() => normalizeSeasonPriority({
+    events: [{
+      sales_start: "2026-09-01",
+      sales_end: "2026-09-05",
+      lead_days: 30,
+      categories: [{ name: "Канцтовары" }],
+    }],
+  }), /lead_days must equal 45/);
+});
+
+test("seasonal boosts are capped, use the maximum match, and remain a stable soft sort", () => {
+  const season = normalizeSeasonPriority({
+    time_zone: "Asia/Shanghai",
+    events: [{
+      sales_start: "2026-08-20",
+      sales_end: "2026-09-10",
+      lead_days: 45,
+      categories: [
+        { name: "Канцтовары", boost: 999 },
+        { name: "Школьные товары", keywords: ["пенал"], boost: 700 },
+      ],
+    }],
+  });
+  const snapshot = { priority: normalizeProfitPriority({}), feedback: {}, season };
+  const rows = [
+    { sku: "plain-a", title: "Обычный кабель" },
+    { sku: "season", title: "Канцтовары и пенал", category: "Канцтовары" },
+    { sku: "plain-b", title: "Обычная лампа" },
+  ];
+  assert.equal(seasonPriorityScore(snapshot, rows[1], { now: "2026-08-09T00:00:00+08:00" }), 800);
+  assert.deepEqual(
+    prioritizeProfitRows(rows, snapshot, { now: "2026-08-09T00:00:00+08:00" }).map((row) => row.sku),
+    ["season", "plain-a", "plain-b"],
+  );
+  const noActiveSeason = { ...snapshot, season: normalizeSeasonPriority({ events: [] }) };
+  assert.deepEqual(
+    prioritizeProfitRows(rows, noActiveSeason, { now: "2026-08-09T00:00:00+08:00" }).map((row) => row.sku),
+    rows.map((row) => row.sku),
+  );
+  assert.equal(rows.length, 3);
+  const broadSingle = normalizeSeasonPriority({
+    events: [{
+      sales_start: "2026-08-20",
+      sales_end: "2026-09-10",
+      lead_days: 45,
+      categories: [{ name: "文具", keywords: ["набор"], boost: 800 }],
+    }],
+  });
+  assert.equal(
+    seasonPriorityScore(broadSingle, { title: "Большой набор игрушек" }, { now: "2026-08-09T00:00:00+08:00" }),
+    0,
+  );
+});
+
+test("profit mothers stay ahead of seasonal-only rows and use sales units with refund downweighting", () => {
+  const mother = (fields) => ({
+    stores: [{
+      store_id: 101,
+      mother_products: [{
+        source_sku: "mother",
+        title_keywords: ["organizer"],
+        real_profit_cny: 1,
+        ...fields,
+      }],
+    }],
+  });
+  const season = normalizeSeasonPriority({
+    events: [{
+      sales_start: "2026-08-20",
+      sales_end: "2026-09-10",
+      lead_days: 45,
+      categories: [{ name: "Канцтовары", boost: 800 }],
+    }],
+  });
+  const snapshot = {
+    priority: normalizeProfitPriority(mother({ sales_units: 8, order_count: 1 })),
+    feedback: {},
+    season,
+  };
+  const ranked = prioritizeProfitRows([
+    { sku: "season", title: "Канцтовары", category: "Канцтовары" },
+    { sku: "profit", title: "drawer organizer" },
+  ], snapshot, { storeId: 101, now: "2026-08-09T00:00:00+08:00" });
+  assert.deepEqual(ranked.map((row) => row.sku), ["profit", "season"]);
+
+  const exact = { sku: "mother", title: "organizer" };
+  const scoreFor = (fields) => profitPriorityScore({
+    priority: normalizeProfitPriority(mother(fields)),
+    feedback: {},
+    season: normalizeSeasonPriority({ events: [] }),
+  }, exact, { storeId: 101 });
+  assert.ok(scoreFor({ sales_units: 8, order_count: 1 }) > scoreFor({ order_count: 1 }));
+  assert.ok(scoreFor({ completed_units: 8, refund_cancel_rate: 0.5 }) < scoreFor({ completed_units: 8 }));
+});
+
+test("seasonal boosts never offset confirmed loss similarity", () => {
+  const snapshot = {
+    priority: normalizeProfitPriority({}),
+    feedback: {
+      loss_sources: [{
+        store_id: 101,
+        title_keywords: ["winter", "boots"],
+        real_profit_cny: -20,
+      }],
+    },
+    season: normalizeSeasonPriority({
+      events: [{
+        sales_start: "2026-08-20",
+        sales_end: "2026-09-10",
+        lead_days: 45,
+        categories: [{ name: "Зимняя обувь", keywords: ["winter boots"], boost: 800 }],
+      }],
+    }),
+  };
+  const loss = { sku: "loss", title: "winter boots" };
+  assert.ok(profitPriorityScore(snapshot, loss, {
+    storeId: 101,
+    now: "2026-08-09T00:00:00+08:00",
+  }) < 0);
+  assert.deepEqual(prioritizeProfitRows([
+    loss,
+    { sku: "plain", title: "ordinary cable" },
+  ], snapshot, {
+    storeId: 101,
+    now: "2026-08-09T00:00:00+08:00",
+  }).map((row) => row.sku), ["plain", "loss"]);
+});
+
 test("stable per-store priority advances only that store's similar products", () => {
   const snapshot = { priority: normalizeProfitPriority(priority), feedback: {} };
   const original = [
@@ -62,6 +225,36 @@ test("stable per-store priority advances only that store's similar products", ()
   );
   assert.ok(profitPriorityScore(snapshot, original[2]) > 0, "scanner union should see every store mother");
   assert.deepEqual(original.map((row) => row.sku), ["plain", "pet", "kitchen", "plain-2"]);
+});
+
+test("duplicate mothers retain the highest sales units before orders or profit", () => {
+  const normalized = normalizeProfitPriority({
+    stores: [{
+      store_id: 101,
+      mother_products: [
+        {
+          source_sku: "duplicate",
+          title_keywords: ["high volume"],
+          sales_units: 100,
+          order_count: 3,
+          refund_cancel_rate: 0.1,
+          real_profit_cny: 10,
+        },
+        {
+          source_sku: "duplicate",
+          title_keywords: ["more orders"],
+          sales_units: 4,
+          order_count: 4,
+          refund_cancel_rate: 0,
+          real_profit_cny: 1_000,
+        },
+      ],
+    }],
+  });
+
+  assert.equal(normalized.stores[101].mothers.length, 1);
+  assert.equal(normalized.stores[101].mothers[0].sales_units, 100);
+  assert.deepEqual(normalized.stores[101].mothers[0].keywords, ["high volume"]);
 });
 
 test("manual feedback blocks global offers and only the specified wrong relation", () => {
@@ -138,6 +331,79 @@ test("keeps independent last-known-good priority and error snapshots", async () 
     const deleted = await reader.snapshot({ force: true });
     assert.ok(profitPriorityScore(deleted, { title: "updated-priority" }) > 0);
     assert.equal(manualFeedbackDecision(deleted.feedback, { offerIds: ["never-reenable"] }).blocked, true);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("keeps seasonal last-known-good by absolute path across reader instances", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "season-priority-lkg-"));
+  try {
+    const priorityFile = path.join(directory, "优先母款.json");
+    const feedbackFile = path.join(directory, "错误货源.json");
+    const seasonFile = path.join(directory, "季节优先类目.json");
+    await fs.writeFile(priorityFile, `${JSON.stringify(priority)}\n`, "utf8");
+    await fs.writeFile(feedbackFile, `${JSON.stringify({
+      errors: { blocked_offers: [{ selected_offer_id: "still-blocked" }] },
+    })}\n`, "utf8");
+    await fs.writeFile(seasonFile, `${JSON.stringify(seasonCalendar)}\n`, "utf8");
+    const initial = await createProfitFilesReader({
+      priorityFile,
+      feedbackFile,
+      seasonFile,
+      refreshMs: 0,
+    }).snapshot();
+    assert.equal(
+      seasonPriorityScore(initial, { title: "Школьный пенал" }, { now: "2026-08-09T00:00:00+08:00" }),
+      600,
+    );
+
+    await fs.writeFile(seasonFile, `${JSON.stringify({
+      events: [{
+        sales_start: "broken",
+        sales_end: "2026-09-05",
+        categories: [{ name: "Канцтовары" }],
+      }],
+    })}\n`, "utf8");
+    await fs.writeFile(priorityFile, `${JSON.stringify({
+      stores: [{ store_id: 101, mother_products: [{ title_keywords: ["fresh-priority"] }] }],
+    })}\n`, "utf8");
+    await fs.writeFile(feedbackFile, "{broken", "utf8");
+    const recovered = await createProfitFilesReader({
+      priorityFile,
+      feedbackFile,
+      seasonFile,
+      refreshMs: 0,
+    }).snapshot();
+    assert.equal(
+      seasonPriorityScore(recovered, { title: "Школьный пенал" }, { now: "2026-08-09T00:00:00+08:00" }),
+      600,
+    );
+    assert.ok(profitPriorityScore(recovered, { title: "fresh-priority" }) > 0);
+    assert.equal(manualFeedbackDecision(recovered.feedback, { offerIds: ["still-blocked"] }).blocked, true);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a first invalid seasonal file fails open without disturbing source order", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "season-priority-invalid-"));
+  try {
+    const seasonFile = path.join(directory, "季节优先类目.json");
+    await fs.writeFile(seasonFile, `${JSON.stringify({
+      events: [{
+        sales_start: "2026-09-01",
+        sales_end: "2026-09-05",
+        lead_days: 45,
+        categories: [{ name: "文具" }],
+      }],
+    })}\n`, "utf8");
+    const snapshot = await createProfitFilesReader({ seasonFile, refreshMs: 0 }).snapshot();
+    const rows = [{ sku: "a", title: "first" }, { sku: "b", title: "second" }];
+    assert.deepEqual(
+      prioritizeProfitRows(rows, snapshot, { now: "2026-08-09T00:00:00+08:00" }).map((row) => row.sku),
+      ["a", "b"],
+    );
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

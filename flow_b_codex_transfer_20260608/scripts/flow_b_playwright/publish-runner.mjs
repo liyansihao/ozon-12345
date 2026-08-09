@@ -589,8 +589,8 @@ export function prioritizePublishCandidates(items, preflightPureSkus = new Set()
     .map(({ item }) => item);
 }
 
-export function prioritizeProfitCandidates(items, snapshot, storeId) {
-  return prioritizeProfitRows(items, snapshot, { storeId: Number(storeId) });
+export function prioritizeProfitCandidates(items, snapshot, storeId, options = {}) {
+  return prioritizeProfitRows(items, snapshot, { ...options, storeId: Number(storeId) });
 }
 
 function interleaveCandidateBatches(primary, secondary, batchSize) {
@@ -750,6 +750,7 @@ export function createPublishRunner({
   costEstimateTimeoutMs = 15_000,
   profitPriorityFile = null,
   profitFeedbackFile = null,
+  seasonPriorityFile = null,
   profitFileRefreshMs = 5_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
@@ -771,6 +772,7 @@ export function createPublishRunner({
   const profitFiles = createProfitFilesReader({
     priorityFile: profitPriorityFile,
     feedbackFile: profitFeedbackFile,
+    seasonFile: seasonPriorityFile,
     refreshMs: Math.max(0, Number(profitFileRefreshMs) || 0),
   });
   dailyWindowState({

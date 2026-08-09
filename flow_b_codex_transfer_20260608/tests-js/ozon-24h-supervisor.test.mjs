@@ -280,6 +280,7 @@ test("profit learning paths expand once and are injected without changing the di
     profit_learning: {
       enabled: true,
       priority_file: "${APP_ROOT}/priority.json",
+      season_file: "${APP_ROOT}/season.json",
       feedback_file: "${APP_ROOT}/feedback.json",
       feedback_dir: "${APP_ROOT}/核价反馈",
       learning_status: "${STATE_ROOT}/profit_learning/status.json",
@@ -306,6 +307,7 @@ test("profit learning paths expand once and are injected without changing the di
 
   assert.equal(config.profit_learning.learning_status, "/tmp/ozon-state/profit_learning/status.json");
   assert.equal(environment.FLOW_B_PROFIT_PRIORITY_FILE, "/tmp/ozon-app/priority.json");
+  assert.equal(environment.FLOW_B_SEASON_PRIORITY_FILE, "/tmp/ozon-app/season.json");
   assert.equal(environment.FLOW_B_PROFIT_FEEDBACK_FILE, "/tmp/ozon-app/feedback.json");
   assert.equal(environment.FLOW_B_PROFIT_FEEDBACK_DIR, "/tmp/ozon-app/核价反馈");
   assert.equal(environment.FLOW_B_PROFIT_LEARNING_STATUS, "/tmp/ozon-state/profit_learning/status.json");

@@ -3389,6 +3389,7 @@ export async function scanSources({
   const profitSnapshot = await createProfitFilesReader({
     priorityFile: env.FLOW_B_PROFIT_PRIORITY_FILE,
     feedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE,
+    seasonFile: env.FLOW_B_SEASON_PRIORITY_FILE,
     refreshMs: Math.max(0, Number(env.FLOW_B_PROFIT_FILE_REFRESH_MS) || 5_000),
   }).snapshot();
   const learnedPriority = (row) => profitPriorityScore(profitSnapshot, row);
