@@ -31,6 +31,7 @@ import {
   resolveProductionLayout,
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
+  runDirectSourceRefresh,
   runFormalSourceRefresh,
   runInitialSourceRefresh,
   runFinalArtifacts,
@@ -280,6 +281,7 @@ test("profit learning paths expand once and are injected without changing the di
     profit_learning: {
       enabled: true,
       priority_file: "${APP_ROOT}/priority.json",
+      season_file: "${APP_ROOT}/season.json",
       feedback_file: "${APP_ROOT}/feedback.json",
       feedback_dir: "${APP_ROOT}/核价反馈",
       learning_status: "${STATE_ROOT}/profit_learning/status.json",
@@ -306,6 +308,7 @@ test("profit learning paths expand once and are injected without changing the di
 
   assert.equal(config.profit_learning.learning_status, "/tmp/ozon-state/profit_learning/status.json");
   assert.equal(environment.FLOW_B_PROFIT_PRIORITY_FILE, "/tmp/ozon-app/priority.json");
+  assert.equal(environment.FLOW_B_SEASON_PRIORITY_FILE, "/tmp/ozon-app/season.json");
   assert.equal(environment.FLOW_B_PROFIT_FEEDBACK_FILE, "/tmp/ozon-app/feedback.json");
   assert.equal(environment.FLOW_B_PROFIT_FEEDBACK_DIR, "/tmp/ozon-app/核价反馈");
   assert.equal(environment.FLOW_B_PROFIT_LEARNING_STATUS, "/tmp/ozon-state/profit_learning/status.json");
@@ -653,6 +656,45 @@ test("formal source refresh appends an authorized epoch before updating current 
   const persisted = JSON.parse(await fs.readFile(path.join(stateRoot, "current_run.json"), "utf8"));
   assert.equal(persisted.active_source_set_sha256, newHash);
   assert.equal(persisted.source_set_epoch, 1);
+});
+
+test("direct source refresh reuses a current epoch and repairs a legacy unauthorized set", async () => {
+  const calls = [];
+  const shared = {
+    appRoot: "/tmp/app",
+    stateRoot: "/tmp/state",
+    runDir: "/tmp/run",
+    currentRun: { formal_started: true },
+  };
+  const skipped = await runDirectSourceRefresh({
+    ...shared,
+    initialRefresh: async (options) => {
+      calls.push(["initial", options]);
+      return { code: 0, skipped: true };
+    },
+    formalRefresh: async () => {
+      calls.push(["formal"]);
+      return { code: 0 };
+    },
+  });
+  assert.equal(skipped.skipped, true);
+  assert.deepEqual(calls.map(([name]) => name), ["initial"]);
+
+  calls.length = 0;
+  const repaired = await runDirectSourceRefresh({
+    ...shared,
+    initialRefresh: async () => {
+      const error = new Error("legacy set needs authorization");
+      error.code = "OZON_SOURCE_SET_NOT_AUTHORIZED";
+      throw error;
+    },
+    formalRefresh: async (...args) => {
+      calls.push(["formal", args]);
+      return { code: 0, epoch: 1 };
+    },
+  });
+  assert.equal(repaired.epoch, 1);
+  assert.deepEqual(calls.map(([name]) => name), ["formal"]);
 });
 
 test("checkpoint subprocess inherits the frozen release evidence and exact browser profile", () => {

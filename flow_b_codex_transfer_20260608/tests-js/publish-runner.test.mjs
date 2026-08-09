@@ -6,20 +6,100 @@ import path from "node:path";
 
 import {
   clearObservedPublishFeedbackCache,
+  createConcurrencyGate,
   createPublishRunner,
   duplicateTitleKey,
+  freshCnySnapshotSalePrice,
   loadObservedPublishFeedback,
   normalizeCostFailureReason,
   observedPublishFeedbackCacheStats,
   offerIdForSku,
   onlineSyncRetryAfterMs,
   preSubmitContentQuality,
+  prioritizeProfitCandidates,
   prioritizePublishCandidates,
   restoredDailyStoreUsage,
   strictSourceYieldEvidence,
   verifiedWarehouseCandidates,
 } from "../scripts/flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "../scripts/flow_b_playwright/publish-state.mjs";
+import {
+  normalizeProfitPriority,
+  normalizeSeasonPriority,
+} from "../scripts/flow_b_playwright/profit-priority.mjs";
+
+test("1688 concurrency gate waits for a real worker slot before starting queued work", async () => {
+  const gate = createConcurrencyGate(1);
+  let releaseFirst;
+  let secondStarted = false;
+  const first = gate.run(() => new Promise((resolve) => { releaseFirst = resolve; }));
+  const second = gate.run(async () => {
+    secondStarted = true;
+    return "second";
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondStarted, false);
+  assert.deepEqual(gate.stats(), { active: 1, queued: 1, limit: 1 });
+
+  releaseFirst("first");
+  assert.deepEqual(await Promise.all([first, second]), ["first", "second"]);
+  assert.deepEqual(gate.stats(), { active: 0, queued: 0, limit: 1 });
+});
+
+test("fresh CNY snapshot fallback is bounded to fifteen minutes", () => {
+  const item = {
+    sell_price: 119.48,
+    source_currency: "CNY",
+    update_time: "2026-08-09 20:35:10",
+  };
+  assert.equal(freshCnySnapshotSalePrice(item, {
+    now: new Date("2026-08-09T12:50:10.000Z"),
+  }), 119.48);
+  assert.equal(freshCnySnapshotSalePrice(item, {
+    now: new Date("2026-08-09T12:50:11.000Z"),
+  }), null);
+  assert.equal(freshCnySnapshotSalePrice({ ...item, source_currency: "RUB" }, {
+    now: new Date("2026-08-09T12:45:00.000Z"),
+  }), null);
+});
+
+test("publisher applies seasonal priority softly after keeping profit mothers first", () => {
+  const snapshot = {
+    priority: normalizeProfitPriority({
+      stores: [{
+        store_id: 101,
+        mother_products: [{
+          source_sku: "mother",
+          title_keywords: ["organizer"],
+          sales_units: 3,
+          real_profit_cny: 1,
+        }],
+      }],
+    }),
+    feedback: {},
+    season: normalizeSeasonPriority({
+      events: [{
+        sales_start: "2026-09-01",
+        sales_end: "2026-09-05",
+        lead_days: 45,
+        categories: [{ name: "Канцтовары", keywords: ["школьный пенал"], boost: 800 }],
+      }],
+    }),
+  };
+  const original = [
+    { sku: "plain-a", title: "ordinary cable" },
+    { sku: "season", title: "Школьный пенал" },
+    { sku: "mother-like", title: "drawer organizer" },
+    { sku: "plain-b", title: "ordinary lamp" },
+  ];
+  const ranked = prioritizeProfitCandidates(original, snapshot, 101, {
+    now: "2026-08-09T00:00:00+08:00",
+  });
+  assert.deepEqual(ranked.map((row) => row.sku), ["mother-like", "season", "plain-a", "plain-b"]);
+  assert.equal(ranked.length, original.length);
+  assert.deepEqual(original.map((row) => row.sku), ["plain-a", "season", "mother-like", "plain-b"]);
+});
 
 test("pre-submit content quality requires title, HTTP image, category, and safe taxonomy", () => {
   const valid = {
@@ -4916,6 +4996,46 @@ test("direct cost rejection skips live Ozon detail, profit, and ERP submission",
   }
 });
 
+test("direct mode skips a missing economy quote instead of retrying an exception", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-missing-economy-"));
+  try {
+    const state = fakeState();
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "missing-economy",
+        title: "Безопасный товар без тарифа",
+        cover_image: "https://img.example/missing-economy.jpg",
+        sell_price: 120,
+      }], {
+        calculateProfit: async ({ purchase_price: purchasePrice }) => (
+          Number(purchasePrice) === 0.01 ? economy(45) : { calc_result: [] }
+        ),
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 0);
+    assert.equal(publishCalls, 0);
+    const skipped = state.entryOf("missing-economy");
+    assert.equal(skipped.status, "skipped");
+    assert.equal(skipped.data.reason, "missing-supported-economy");
+    assert.equal(skipped.data.outcome_status, "skipped_profit");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("a hung cost lookup times out without pinning the rolling publish queue", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-cost-watchdog-"));
   try {
@@ -5180,6 +5300,51 @@ test("direct mode does not accept a snapshot fallback as a confirmed live Ozon p
     assert.equal(publishCalls, 0);
     assert.equal(state.entryOf("snapshot-price-only").data.reason, "missing-live-sale-price");
     assert.equal(state.entryOf("snapshot-price-only").data.outcome_status, "skipped_profit");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("direct mode can use a fresh converted CNY favorite when the exact live page omits price", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-fresh-snapshot-price-"));
+  try {
+    const state = fakeState();
+    const profitInputs = [];
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "fresh-cny-snapshot-price",
+        title: "Безопасный товар со свежей ценой",
+        cover_image: "https://img.example/fresh-cny-snapshot-price.jpg",
+        sell_price: 119.48,
+        sale_price: 119.48,
+        source_currency: "CNY",
+        create_time: "2026-08-09 20:35:10",
+        update_time: "2026-08-09 20:35:10",
+      }], {
+        getProductDetail: async () => ({ current_price: null, follow_min: null }),
+        calculateProfit: async (input) => {
+          profitInputs.push(input);
+          return economy(45);
+        },
+        publish: async () => ({ ok: true, response: { code: 1 } }),
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      now: () => new Date("2026-08-09T12:45:00.000Z"),
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(profitInputs[0].sell_price, 119.48);
+    const funnel = (await fs.readFile(path.join(runDir, "direct_funnel.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.ok(funnel.some((row) => row.stage === "fresh_snapshot_price_fallback"
+      && row.sale_price === 119.48
+      && row.snapshot_observed_at === "2026-08-09 20:35:10"));
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }

@@ -16,9 +16,11 @@ import {
   doctor,
   effectiveRuntimeOwners,
   globalFlowBWorkerPids,
+  optionalSeasonPriorityJsonIsValid,
   productionProfileOwnerPids,
   productionSupervisorPids,
   readProfitLearningStatus,
+  readSeasonPriorityStatus,
   refreshCurrentRunSources,
   resumeMode,
   shouldResumeCurrentRun,
@@ -269,11 +271,18 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_DIRECT_PUBLISH, "1");
   assert.equal(config.flow_env.FLOW_B_TARGET_PUBLISH_COUNT, "0");
   assert.equal(config.flow_env.FLOW_B_UNLIMITED_PUBLISH, "1");
+  assert.equal(config.flow_env.FLOW_B_DAILY_SUBMISSION_CUTOFF, "23:00");
+  assert.equal(config.flow_env.FLOW_B_DAILY_REPORT_AFTER, "23:30");
+  assert.equal(config.daily_pricing_report.cutoff, "23:00");
+  assert.equal(config.daily_pricing_report.report_after, "23:30");
   assert.equal(config.flow_env.FLOW_B_1688_MIN_MATCHES, "1");
-  assert.equal(config.flow_env.FLOW_B_1688_TOTAL_BUDGET_MS, "15000");
-  assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "15");
+  assert.equal(config.flow_env.FLOW_B_1688_TOTAL_BUDGET_MS, "30000");
+  assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "30");
   assert.equal(config.flow_env.FLOW_B_1688_TRANSIENT_RETRIES, "1");
-  assert.equal(config.flow_env.FLOW_B_1688_WORKERS, "4");
+  assert.equal(config.flow_env.FLOW_B_1688_WORKERS, "1");
+  assert.equal(config.flow_env.FLOW_B_1688_SESSION_MAX_REQUESTS, "4");
+  assert.equal(config.flow_env.FLOW_B_1688_SESSION_MAX_AGE_SECONDS, "120");
+  assert.equal(config.flow_env.FLOW_B_1688_SESSION_RECYCLE_SLOW_SECONDS, "8");
   assert.equal(config.flow_env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS, "5000");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_POLICY, "shadow");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_SHADOW_SAMPLES, "100");
@@ -296,6 +305,7 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_FAVORITE_CACHE_TTL_MS, "30000");
   assert.equal(config.profit_learning.enabled, true);
   assert.equal(config.profit_learning.priority_file, "/Users/mac/Desktop/ozon每日上品/优先母款.json");
+  assert.equal(config.profit_learning.season_file, "/Users/mac/Desktop/ozon每日上品/季节优先类目.json");
   assert.equal(config.profit_learning.feedback_file, "/Users/mac/Desktop/ozon每日上品/错误货源.json");
   assert.equal(config.profit_learning.feedback_dir, "/Users/mac/Desktop/ozon每日上品/核价反馈");
   assert.equal(config.profit_learning.learning_status, "${STATE_ROOT}/profit_learning/status.json");
@@ -403,9 +413,19 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
     }),
     /fixed daily-upload desktop folder/u,
   );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      profit_learning: {
+        ...config.profit_learning,
+        season_file: "/tmp/季节优先类目.json",
+      },
+    }),
+    /fixed daily-upload desktop folder/u,
+  );
 });
 
-test("profit learning status reports both independent sidecars and tolerates a malformed state", async (t) => {
+test("profit learning status reports sidecars and the active Shanghai season without blocking on warnings", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-profit-status-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const stateRoot = path.join(root, "state");
@@ -417,6 +437,30 @@ test("profit learning status reports both independent sidecars and tolerates a m
     priority_count: 7,
   })}\n`);
   await fs.writeFile(path.join(statusDir, "feedback_status.json"), "{broken-json\n");
+  const seasonFile = path.join(root, "季节优先类目.json");
+  await fs.writeFile(seasonFile, `${JSON.stringify({
+    schema_version: 1,
+    time_zone: "Asia/Shanghai",
+    research_verified_at: "2026-08-01",
+    next_review_at: "2026-08-08",
+    coverage_until: "2026-09-15",
+    sources: [{ url: "https://seller.ozon.ru/media/trends/seasonal-products" }],
+    events: [{
+      id: "school-2026",
+      name: "开学季",
+      sales_start: "2026-09-01",
+      sales_end: "2026-09-15",
+      lead_days: 45,
+      categories: [{ name: "文具", keywords: ["канцелярия"] }],
+    }, {
+      id: "disabled-school-2026",
+      enabled: false,
+      sales_start: "2026-09-01",
+      sales_end: "2026-09-15",
+      lead_days: 45,
+      categories: ["Канцтовары"],
+    }],
+  })}\n`);
 
   const result = await readProfitLearningStatus({
     install_root: path.join(root, "app"),
@@ -424,6 +468,7 @@ test("profit learning status reports both independent sidecars and tolerates a m
     profit_learning: {
       enabled: true,
       priority_file: path.join(root, "优先母款.json"),
+      season_file: seasonFile,
       feedback_file: path.join(root, "错误货源.json"),
       feedback_dir: path.join(root, "核价反馈"),
       learning_status: "${STATE_ROOT}/profit_learning/status.json",
@@ -432,6 +477,8 @@ test("profit learning status reports both independent sidecars and tolerates a m
   }, {
     appLink: path.join(root, "app"),
     stateRoot,
+  }, {
+    now: new Date("2026-08-09T00:00:00.000Z"),
   });
 
   assert.equal(result.enabled, true);
@@ -439,6 +486,78 @@ test("profit learning status reports both independent sidecars and tolerates a m
   assert.equal(result.learning.priority_count, 7);
   assert.equal(result.feedback_import.status, "invalid");
   assert.match(result.feedback_import.error, /JSON/u);
+  assert.equal(result.season_priority.status, "ready");
+  assert.equal(result.season_priority.date, "2026-08-09");
+  assert.equal(result.season_priority.event_count, 2);
+  assert.equal(result.season_priority.active_event_count, 1);
+  assert.equal(result.season_priority.active_events[0].id, "school-2026");
+  assert.equal(result.season_priority.active_events[0].active_from, "2026-07-18");
+  assert.equal(result.season_priority.research_due, true);
+  assert.equal(result.season_priority.coverage_warning, "coverage-under-90-days");
+});
+
+test("season priority validation allows absence but rejects unsafe sources and non-45-day rules", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-season-status-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filename = path.join(root, "季节优先类目.json");
+  assert.equal(await optionalSeasonPriorityJsonIsValid(filename), true);
+  assert.equal((await readSeasonPriorityStatus(filename)).status, "not-started");
+
+  await fs.writeFile(filename, `${JSON.stringify({
+    schema_version: 1,
+    timezone: "Europe/Moscow",
+    lead_days: 45,
+    sources: ["http://example.com/calendar"],
+    events: [{
+      sales_start: "2026-12-01",
+      sales_end: "2026-12-31",
+      lead_days: 30,
+      categories: ["文具", { keywords: ["ab"] }, 42],
+    }],
+  })}\n`);
+  assert.equal(await optionalSeasonPriorityJsonIsValid(filename), false);
+  const invalid = await readSeasonPriorityStatus(filename, {
+    now: new Date("2026-08-09T00:00:00.000Z"),
+  });
+  assert.equal(invalid.status, "invalid");
+  assert.match(invalid.error, /time_zone must equal Asia\/Shanghai/u);
+  assert.match(invalid.error, /root lead_days is not supported/u);
+  assert.match(invalid.error, /lead_days must equal 45/u);
+  assert.match(invalid.error, /needs a Russian name/u);
+  assert.match(invalid.error, /must be a string or object/u);
+  assert.match(invalid.error, /HTTPS URL/u);
+
+  await fs.writeFile(filename, `${JSON.stringify({
+    events: [{
+      sales_start: "2026-09-10",
+      sales_end: "2026-09-01",
+      categories: [{ name: "Канцтовары" }],
+    }],
+  })}\n`);
+  assert.equal(await optionalSeasonPriorityJsonIsValid(filename), false);
+  assert.match(
+    (await readSeasonPriorityStatus(filename)).error,
+    /sales_end must not be before sales_start/u,
+  );
+
+  await fs.writeFile(filename, `${JSON.stringify({
+    schema_version: 1,
+    time_zone: "Asia/Shanghai",
+    sources: ["https://seller.ozon.ru/media/trends/seasonal-products"],
+    events: [{
+      id: "single-day-defaults",
+      sales_start: "2026-09-01",
+      categories: [{ name: "文具", keywords: ["канцелярия"] }],
+    }],
+  })}\n`);
+  assert.equal(await optionalSeasonPriorityJsonIsValid(filename), true);
+  const defaults = await readSeasonPriorityStatus(filename, {
+    now: new Date("2026-08-09T00:00:00.000Z"),
+  });
+  assert.equal(defaults.status, "ready");
+  assert.equal(defaults.active_events[0].lead_days, 45);
+  assert.equal(defaults.active_events[0].active_from, "2026-07-18");
+  assert.equal(defaults.active_events[0].active_until, "2026-09-01");
 });
 
 test("doctor expands its Python path without supervisor-only helpers", async (t) => {
@@ -447,8 +566,10 @@ test("doctor expands its Python path without supervisor-only helpers", async (t)
   const stateRoot = path.join(root, "state");
   await fs.mkdir(stateRoot, { recursive: true });
   const priorityFile = path.join(root, "daily", "优先母款.json");
+  const seasonFile = path.join(root, "daily", "季节优先类目.json");
   await fs.mkdir(path.dirname(priorityFile), { recursive: true });
   await fs.writeFile(priorityFile, "{broken-json\n");
+  await fs.writeFile(seasonFile, "{broken-json\n");
   const result = await doctor({
     install_root: path.join(root, "app"),
     state_root: stateRoot,
@@ -458,6 +579,7 @@ test("doctor expands its Python path without supervisor-only helpers", async (t)
     profit_learning: {
       enabled: true,
       priority_file: priorityFile,
+      season_file: seasonFile,
       feedback_file: path.join(root, "daily", "错误货源.json"),
       feedback_dir: path.join(root, "daily", "核价反馈"),
       learning_status: "${STATE_ROOT}/profit_learning/status.json",
@@ -476,6 +598,7 @@ test("doctor expands its Python path without supervisor-only helpers", async (t)
   assert.equal(result.ok, false);
   assert.equal(result.checks.python, false);
   assert.equal(result.checks.profit_priority_json, false);
+  assert.equal(result.checks.season_priority_json, false);
   assert.equal(result.checks.profit_feedback_json, true);
   assert.equal(result.checks.profit_learning_status_json, true);
   assert.equal(result.checks.profit_feedback_status_json, true);

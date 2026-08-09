@@ -101,6 +101,33 @@ def is_transient_transport_error(exc: Exception) -> bool:
     ))
 
 
+def close_session(session) -> None:
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception:
+        pass
+
+
+def session_recycle_reason(
+    session,
+    *,
+    request_count: int,
+    started_at: float | None,
+    now: float,
+    max_requests: int,
+    max_age_seconds: float,
+) -> str | None:
+    if session is None:
+        return None
+    if max_requests > 0 and request_count >= max_requests:
+        return "request-limit"
+    if max_age_seconds > 0 and started_at is not None and now - started_at >= max_age_seconds:
+        return "age-limit"
+    return None
+
+
 def analyze_with_transient_recovery(
     module,
     session,
@@ -144,11 +171,7 @@ def analyze_with_transient_recovery(
                     "budget_exhausted": False,
                 }
                 raise
-            if current_session is not None:
-                try:
-                    current_session.close()
-                except Exception:
-                    pass
+            close_session(current_session)
             current_session = None
             delay = base_delay * (2 ** attempt) + jitter(0.0, jitter_limit)
             elapsed = monotonic() - started
@@ -175,14 +198,35 @@ def main() -> int:
     args = parser.parse_args()
     module = load_module(str(Path(args.script).expanduser().resolve()))
     session = None
+    session_started_at = None
+    session_request_count = 0
     max_retries = max(0, int(os.environ.get("FLOW_B_1688_TRANSIENT_RETRIES", "1")))
     base_delay_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_RETRY_BASE_SECONDS", "0.5")))
     max_jitter_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_RETRY_JITTER_SECONDS", "0.25")))
     total_budget_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_RETRY_BUDGET_SECONDS", "15")))
+    session_max_requests = max(0, int(os.environ.get("FLOW_B_1688_SESSION_MAX_REQUESTS", "4")))
+    session_max_age_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_SESSION_MAX_AGE_SECONDS", "120")))
+    recycle_slow_seconds = max(0.0, float(os.environ.get("FLOW_B_1688_SESSION_RECYCLE_SLOW_SECONDS", "8")))
     for line in sys.stdin:
         request = {}
+        request_started = time.monotonic()
+        recycle_reason = session_recycle_reason(
+            session,
+            request_count=session_request_count,
+            started_at=session_started_at,
+            now=request_started,
+            max_requests=session_max_requests,
+            max_age_seconds=session_max_age_seconds,
+        )
+        if recycle_reason:
+            close_session(session)
+            session = None
+            session_started_at = None
+            session_request_count = 0
+        attempted = False
         try:
             request = json.loads(line)
+            attempted = True
             result, session, recovery = analyze_with_transient_recovery(
                 module,
                 session,
@@ -219,7 +263,24 @@ def main() -> int:
                 ]),
                 **recovery,
             }
+        if attempted and session is not None:
+            if session_started_at is None:
+                session_started_at = request_started
+            session_request_count += 1
+        elif session is None:
+            session_started_at = None
+            session_request_count = 0
+        if (
+            session is not None
+            and recycle_slow_seconds > 0
+            and time.monotonic() - request_started >= recycle_slow_seconds
+        ):
+            close_session(session)
+            session = None
+            session_started_at = None
+            session_request_count = 0
         print(json.dumps(response, ensure_ascii=False), flush=True)
+    close_session(session)
     return 0
 
 

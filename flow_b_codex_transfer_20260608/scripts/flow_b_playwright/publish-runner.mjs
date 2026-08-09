@@ -488,6 +488,37 @@ function plausibleCnyRubRate(value) {
   return Number.isFinite(rate) && rate >= 5 && rate <= 30 ? rate : null;
 }
 
+function observedCandidateTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u.test(raw)
+    ? `${raw.replace(" ", "T")}+08:00`
+    : raw;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function freshCnySnapshotSalePrice(item, {
+  now = new Date(),
+  maximumAgeMs = 15 * 60_000,
+} = {}) {
+  if (String(item?.source_currency || "").toUpperCase() !== "CNY") return null;
+  const salePrice = Number(item?.sell_price ?? item?.sale_price);
+  if (!(salePrice > 0)) return null;
+  const observedAt = [
+    item?.update_time,
+    item?.create_time,
+    item?.favorited_at,
+    item?.collected_at,
+  ].map(observedCandidateTime).find((value) => value !== null);
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(String(now || ""));
+  const ageMs = Number.isFinite(nowMs) && observedAt !== null ? nowMs - observedAt : Number.NaN;
+  if (!Number.isFinite(ageMs) || ageMs < -60_000 || ageMs > Math.max(0, Number(maximumAgeMs) || 0)) {
+    return null;
+  }
+  return rounded(salePrice);
+}
+
 function importErrorMessages(log) {
   const messages = [];
   for (const value of [log?.error_msg, ...(Array.isArray(log?.skus) ? log.skus.map((row) => row?.error_msg) : [])]) {
@@ -589,8 +620,8 @@ export function prioritizePublishCandidates(items, preflightPureSkus = new Set()
     .map(({ item }) => item);
 }
 
-export function prioritizeProfitCandidates(items, snapshot, storeId) {
-  return prioritizeProfitRows(items, snapshot, { storeId: Number(storeId) });
+export function prioritizeProfitCandidates(items, snapshot, storeId, options = {}) {
+  return prioritizeProfitRows(items, snapshot, { ...options, storeId: Number(storeId) });
 }
 
 function interleaveCandidateBatches(primary, secondary, batchSize) {
@@ -690,6 +721,32 @@ function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, de
   };
 }
 
+export function createConcurrencyGate(limit = 1) {
+  const maximum = Number(limit);
+  if (!Number.isInteger(maximum) || maximum <= 0) {
+    throw new TypeError("concurrency gate limit must be a positive integer");
+  }
+  let active = 0;
+  const waiters = [];
+
+  async function run(operation) {
+    if (typeof operation !== "function") throw new TypeError("gated operation must be a function");
+    if (active >= maximum) await new Promise((resolve) => waiters.push(resolve));
+    active += 1;
+    try {
+      return await operation();
+    } finally {
+      active -= 1;
+      waiters.shift()?.();
+    }
+  }
+
+  return {
+    run,
+    stats: () => ({ active, queued: waiters.length, limit: maximum }),
+  };
+}
+
 export function createPublishRunner({
   client,
   detailProvider = client,
@@ -709,6 +766,7 @@ export function createPublishRunner({
   validationOnly = false,
   validationTarget = 3,
   concurrency = 1,
+  costConcurrency = concurrency,
   maxConcurrency = 12,
   dryCandidateLimit = 0,
   deadlineAt = null,
@@ -729,8 +787,8 @@ export function createPublishRunner({
   dailyStoreLimit = 100,
   dailyStoreTimeZone = "Asia/Shanghai",
   enforceDirectDailyLimit = false,
-  dailySubmissionCutoff = "20:00",
-  dailyReportAfter = "20:30",
+  dailySubmissionCutoff = "23:00",
+  dailyReportAfter = "23:30",
   dailyStoreUsageSeed = null,
   totalStoreLimit = 100,
   totalStoreUsageSeed = {},
@@ -750,6 +808,7 @@ export function createPublishRunner({
   costEstimateTimeoutMs = 15_000,
   profitPriorityFile = null,
   profitFeedbackFile = null,
+  seasonPriorityFile = null,
   profitFileRefreshMs = 5_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
@@ -771,6 +830,7 @@ export function createPublishRunner({
   const profitFiles = createProfitFilesReader({
     priorityFile: profitPriorityFile,
     feedbackFile: profitFeedbackFile,
+    seasonFile: seasonPriorityFile,
     refreshMs: Math.max(0, Number(profitFileRefreshMs) || 0),
   });
   dailyWindowState({
@@ -789,6 +849,10 @@ export function createPublishRunner({
   }
   const workerCount = Number(concurrency);
   if (!Number.isInteger(workerCount) || workerCount <= 0) throw new TypeError("concurrency must be a positive integer");
+  const costWorkerCount = Number(costConcurrency);
+  if (!Number.isInteger(costWorkerCount) || costWorkerCount <= 0) {
+    throw new TypeError("costConcurrency must be a positive integer");
+  }
   const dryLimit = Number(dryCandidateLimit);
   if (!Number.isInteger(dryLimit) || dryLimit < 0) throw new TypeError("dryCandidateLimit must be a non-negative integer");
   const validationTargetCount = Number(validationTarget);
@@ -889,6 +953,12 @@ export function createPublishRunner({
       ? workerCount
       : Math.max(workerCount, Number(maxConcurrency) || workerCount),
   });
+  // The 1688 pool can intentionally be smaller than the surrounding publish
+  // pipeline. Acquire a real cost-worker slot before starting the per-item
+  // hard deadline so queue wait cannot consume the query budget.
+  const costGate = costWorkerCount >= workerCount
+    ? { run: (operation) => operation() }
+    : createConcurrencyGate(costWorkerCount);
 
   function cancelDirectRun(error, batchControl = null) {
     for (const control of new Set([batchControl, sharedDirectRunControl].filter(Boolean))) {
@@ -1926,13 +1996,15 @@ export function createPublishRunner({
         (typeof value === "string" && value.trim() !== "")
         || typeof value === "number"
       ));
-      const cost = await timed(sku, "1688_cost", () => boundedCostEstimate(() => costBridge.estimate({
-        ...detail,
-        sell_price: salePrice,
-        expect_title: detail?.title ?? item?.title ?? "",
-        expect_model: costModel ?? "",
-        expect_category: (category?.labels || []).slice(0, 2).join(" "),
-      }, runDir)));
+      const cost = await timed(sku, "1688_cost", () => costGate.run(
+        () => boundedCostEstimate(() => costBridge.estimate({
+          ...detail,
+          sell_price: salePrice,
+          expect_title: detail?.title ?? item?.title ?? "",
+          expect_model: costModel ?? "",
+          expect_category: (category?.labels || []).slice(0, 2).join(" "),
+        }, runDir)),
+      ));
       if (!cost?.ok && cost?.deferred === true && cost?.terminal === false) {
         if (activeDirectMode) {
           return skip(item, normalizeCostFailureReason(cost), {
@@ -2037,9 +2109,12 @@ export function createPublishRunner({
           detailResult?.current_price,
           detailResult?.follow_min,
         ].map(Number).filter((value) => value > 0);
+        const freshSnapshotPrice = confirmedLivePrices.length
+          ? null
+          : freshCnySnapshotSalePrice(item, { now: now() });
         salePrice = confirmedLivePrices.length
           ? Math.min(...confirmedLivePrices)
-          : null;
+          : freshSnapshotPrice;
         if (!(Number(salePrice) > 0)) {
           return skip(item, "missing-live-sale-price", { outcome_status: "skipped_profit" });
         }
@@ -2069,7 +2144,7 @@ export function createPublishRunner({
         };
         recordMetric("direct_funnel.jsonl", {
           sku,
-          stage: "live_price_confirmed",
+          stage: freshSnapshotPrice === null ? "live_price_confirmed" : "fresh_snapshot_price_fallback",
           source_url: item.source_url ?? item.seller_url ?? null,
           current_price: Number(detailResult?.current_price) || null,
           current_price_rub: Number(detailResult?.current_price_rub) || null,
@@ -2077,6 +2152,9 @@ export function createPublishRunner({
           follow_min_rub: Number(detailResult?.follow_min_rub) || null,
           observed_cny_rub_rate: observedCnyRubRate,
           sale_price: Number(salePrice),
+          snapshot_observed_at: freshSnapshotPrice === null
+            ? null
+            : item.update_time || item.create_time || item.favorited_at || item.collected_at || null,
           category: category.mapped,
         });
       }
@@ -2108,6 +2186,11 @@ export function createPublishRunner({
         cnyRubRateConfirmed = true;
       }
       const economy = economyResult(calc, shippingRoute.logistics);
+      if (!economy?.price_list || typeof economy.price_list !== "object") {
+        return skip(item, "missing-supported-economy", {
+          outcome_status: activeDirectMode ? "skipped_profit" : undefined,
+        });
+      }
       const preflightReason = activeDirectMode
         ? null
         : policy.preflightSkipReason({ ...detail, economy });

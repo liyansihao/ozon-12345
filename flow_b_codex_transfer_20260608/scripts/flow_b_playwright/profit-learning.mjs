@@ -455,6 +455,10 @@ export function normalizeErpOrderLine(row = {}, {
   const title = text(firstPath(row, [
     "title", "product_title", "name", "product.name", "item.name", "data.title",
   ]));
+  const rawQuantity = money(firstPath(row, [
+    "quantity", "qty", "count", "product.quantity", "item.quantity", "data.quantity",
+  ]));
+  const quantity = rawQuantity !== null && rawQuantity > 0 ? rawQuantity : 1;
   return {
     store_id: storeId,
     store_sku: storeSku,
@@ -471,6 +475,7 @@ export function normalizeErpOrderLine(row = {}, {
     status_raw: statusRaw,
     order_time: orderTime,
     updated_at: updatedAt,
+    quantity,
     profit_list: profit.components,
     contribution_profit_cny: profit.contribution_profit_cny,
     erp_profit_cny: profit.erp_profit_cny,
@@ -650,6 +655,8 @@ export function aggregateRecentOrderLines(orderLines = [], {
     let realProfit = 0;
     let erpProfit = 0;
     let erpProfitRows = 0;
+    let completedSalesUnits = 0;
+    let refundCancelUnits = 0;
     let hasNegativeFeedback = false;
     for (const row of group.rows) {
       const orderIdentity = row.order_id || `row:${row.input_index}`;
@@ -657,8 +664,15 @@ export function aggregateRecentOrderLines(orderLines = [], {
       if (row.store_sku) storeSkus.add(row.store_sku);
       if (row.offer_id) offerIds.add(row.offer_id);
       const refundAmount = Number(row.profit_list?.refund_cny);
-      if (row.refund_event || REFUND_CANCEL_STATUSES.has(row.status) || (Number.isFinite(refundAmount) && refundAmount > 0)) {
+      const rowQuantity = Number.isFinite(Number(row.quantity)) && Number(row.quantity) > 0
+        ? Number(row.quantity)
+        : 1;
+      const refundOrCancel = row.refund_event
+        || REFUND_CANCEL_STATUSES.has(row.status)
+        || (Number.isFinite(refundAmount) && refundAmount > 0);
+      if (refundOrCancel) {
         refundCancelOrderIds.add(orderIdentity);
+        refundCancelUnits += rowQuantity;
       }
       hasNegativeFeedback ||= row.negative_feedback;
       if (!COMPLETED_STATUSES.has(row.status)) {
@@ -676,6 +690,7 @@ export function aggregateRecentOrderLines(orderLines = [], {
         continue;
       }
       completedOrderIds.add(orderIdentity);
+      if (!refundOrCancel) completedSalesUnits += rowQuantity;
       const hasErpProfit = row.erp_profit_cny !== null && Number.isFinite(Number(row.erp_profit_cny));
       if (row.profit_data_complete) contributionProfit += Number(row.contribution_profit_cny);
       if (hasErpProfit) {
@@ -713,7 +728,9 @@ export function aggregateRecentOrderLines(orderLines = [], {
         .map(([keyword]) => keyword),
       observed_order_count: observedOrderCount,
       completed_order_count: completedOrderCount,
+      completed_sales_units: rounded(completedSalesUnits, 4),
       refund_cancel_count: refundCancelCount,
+      refund_cancel_units: rounded(refundCancelUnits, 4),
       refund_cancel_rate: rounded(refundCancelRate, 4),
       contribution_profit_cny: roundedProfit,
       erp_profit_cny: erpProfitRows > 0 ? rounded(erpProfit) : null,
@@ -753,7 +770,9 @@ export function buildPriorityMotherProducts(orderLines = [], options = {}) {
     mother_products: aggregation.groups
       .filter((group) => group.store_id === storeId && group.eligible)
       .sort((left, right) => (
-        right.real_profit_cny - left.real_profit_cny
+        right.completed_sales_units - left.completed_sales_units
+          || left.refund_cancel_rate - right.refund_cancel_rate
+          || right.real_profit_cny - left.real_profit_cny
           || right.completed_order_count - left.completed_order_count
           || compareText(left.product_key, right.product_key)
       ))
@@ -765,8 +784,10 @@ export function buildPriorityMotherProducts(orderLines = [], options = {}) {
         category: group.category,
         title_keywords: group.title_keywords,
         order_count: group.completed_order_count,
+        sales_units: group.completed_sales_units,
         real_profit_cny: group.real_profit_cny,
         contribution_profit_cny: group.contribution_profit_cny,
+        refund_cancel_units: group.refund_cancel_units,
         refund_cancel_rate: group.refund_cancel_rate,
       })),
   }));

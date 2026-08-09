@@ -49,6 +49,7 @@ test("normalizes ERP identifiers, status, time, source mapping and profit_list l
     posting_number: "POST-001",
     posting_status: "已妥投",
     created_at: "2026-08-08T12:30:00Z",
+    quantity: "4",
     profit_list: JSON.stringify([
       { name: "订单金额", value: "¥100.00" },
       { name: "采购成本", value: -40 },
@@ -70,6 +71,9 @@ test("normalizes ERP identifiers, status, time, source mapping and profit_list l
   assert.equal(row.product_key, "source_sku:SOURCE-001");
   assert.equal(row.status, "delivered");
   assert.equal(row.order_time, "2026-08-08T12:30:00.000Z");
+  assert.equal(row.quantity, 4);
+  assert.equal(normalizeErpOrderLine({ quantity: 0 }).quantity, 1);
+  assert.equal(normalizeErpOrderLine({ quantity: "invalid" }).quantity, 1);
   assert.deepEqual(row.profit_list, profit());
   assert.equal(row.contribution_profit_cny, 30);
   assert.equal(row.erp_profit_cny, 31);
@@ -255,7 +259,9 @@ test("aggregates only the last 30 days, deduplicates updated ERP snapshots and u
     title_keywords: ["ignored", "kitchen", "storage"],
     observed_order_count: 1,
     completed_order_count: 1,
+    completed_sales_units: 1,
     refund_cancel_count: 0,
+    refund_cancel_units: 0,
     refund_cancel_rate: 0,
     contribution_profit_cny: 30,
     erp_profit_cny: null,
@@ -382,6 +388,110 @@ test("requires three completed orders, positive complete profit and no negative 
   assert.equal(capped.groups.find((group) => group.source_sku === "CANCELLED").eligible, false);
 });
 
+test("ranks profitable mothers by completed sales units before profit or order count", () => {
+  const rows = [
+    ...[1, 2, 3].map((sequence) => order("TWELVE-UNITS", sequence, {
+      quantity: 4,
+      profit_cny: 1,
+    })),
+    ...[1, 2, 3, 4, 5, 6].map((sequence) => order("SIX-UNITS", sequence, {
+      quantity: 1,
+      profit_cny: 100,
+    })),
+  ];
+  const output = buildPriorityMotherProducts(rows, {
+    generatedAt: GENERATED_AT,
+    storeIds: [104965],
+  });
+
+  assert.deepEqual(
+    output.stores[0].mother_products.map((mother) => mother.source_sku),
+    ["TWELVE-UNITS", "SIX-UNITS"],
+  );
+  assert.deepEqual(
+    output.stores[0].mother_products.map((mother) => ({
+      source_sku: mother.source_sku,
+      order_count: mother.order_count,
+      sales_units: mother.sales_units,
+      real_profit_cny: mother.real_profit_cny,
+    })),
+    [
+      { source_sku: "TWELVE-UNITS", order_count: 3, sales_units: 12, real_profit_cny: 3 },
+      { source_sku: "SIX-UNITS", order_count: 6, sales_units: 6, real_profit_cny: 600 },
+    ],
+  );
+});
+
+test("uses lower refund rate before real profit when completed sales units tie", () => {
+  const rows = [
+    ...[1, 2, 3].map((sequence) => order("CLEAN-HIGH", sequence, {
+      quantity: 2,
+      profit_cny: 10,
+    })),
+    ...[1, 2, 3].map((sequence) => order("CLEAN-LOW", sequence, {
+      quantity: 2,
+      profit_cny: 1,
+    })),
+    ...[1, 2, 3].map((sequence) => order("REFUND-HIGH", sequence, {
+      quantity: 2,
+      profit_cny: 100,
+    })),
+    order("REFUND-HIGH", 4, {
+      quantity: 2,
+      status: "refunded",
+      refund_cny: 1,
+      profit_cny: -1,
+    }),
+  ];
+  const mothers = buildPriorityMotherProducts(rows, {
+    generatedAt: GENERATED_AT,
+    storeIds: [104965],
+  }).stores[0].mother_products;
+
+  assert.deepEqual(mothers.map((mother) => mother.source_sku), [
+    "CLEAN-HIGH",
+    "CLEAN-LOW",
+    "REFUND-HIGH",
+  ]);
+  assert.deepEqual(mothers.map((mother) => mother.sales_units), [6, 6, 6]);
+  assert.deepEqual(mothers.map((mother) => mother.refund_cancel_rate), [0, 0, 0.25]);
+  assert.ok(mothers[2].real_profit_cny > mothers[0].real_profit_cny);
+});
+
+test("refunds, cancellations and repeated snapshots do not inflate completed sales units", () => {
+  const firstSnapshot = order("UNIT-REFUND", 1, {
+    quantity: 4,
+    updated_at: "2026-08-01T10:30:00.000Z",
+  });
+  const latestSnapshot = {
+    ...firstSnapshot,
+    updated_at: "2026-08-01T11:00:00.000Z",
+  };
+  const refundSnapshot = {
+    ...firstSnapshot,
+    status: "refunded",
+    updated_at: "2026-08-01T12:00:00.000Z",
+    refund_cny: 40,
+  };
+  const aggregation = aggregateRecentOrderLines([
+    firstSnapshot,
+    latestSnapshot,
+    refundSnapshot,
+    order("UNIT-REFUND", 2, { quantity: 4 }),
+    order("UNIT-REFUND", 3, { quantity: 4 }),
+    order("UNIT-REFUND", 4, { quantity: 5, status: "cancelled" }),
+  ], { generatedAt: GENERATED_AT });
+
+  assert.equal(aggregation.groups.length, 1);
+  assert.equal(aggregation.groups[0].observed_order_count, 4);
+  assert.equal(aggregation.groups[0].completed_order_count, 3);
+  assert.equal(aggregation.groups[0].completed_sales_units, 8);
+  assert.equal(aggregation.groups[0].refund_cancel_count, 2);
+  assert.equal(aggregation.groups[0].refund_cancel_units, 9);
+  assert.equal(aggregation.groups[0].refund_cancel_rate, 0.5);
+  assert.equal(aggregation.groups[0].eligible, true);
+});
+
 test("accepts a 10 percent refund boundary and emits a lightweight, stable per-store priority structure", () => {
   const rows = [
     ...[1, 2, 3].map((sequence) => order("LOWER", sequence)),
@@ -421,8 +531,10 @@ test("accepts a 10 percent refund boundary and emits a lightweight, stable per-s
     category: "Kitchen",
     title_keywords: ["higher", "kitchen", "organizer", "storage"],
     order_count: 9,
+    sales_units: 9,
     real_profit_cny: 330,
     contribution_profit_cny: 330,
+    refund_cancel_units: 1,
     refund_cancel_rate: 0.1,
   });
   assert.deepEqual(output.stores[2].mother_products, []);

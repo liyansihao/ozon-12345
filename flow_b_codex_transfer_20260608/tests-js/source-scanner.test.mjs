@@ -139,6 +139,10 @@ import {
   sourceBatchCollectionMode,
   shouldScanSourcesDuringDetailCooldown,
 } from "../scripts/flow_b_playwright/source-scanner.mjs";
+import {
+  normalizeSeasonPriority,
+  seasonPriorityScore,
+} from "../scripts/flow_b_playwright/profit-priority.mjs";
 
 test("runtime source evidence demotes legacy published rows without strict proof", () => {
   const source = "https://www.ozon.ru/seller/legacy/";
@@ -1719,6 +1723,40 @@ test("full-funnel scores put a fully dry explored source below untried supply", 
   assert.ok(scores.get(dry) < 0);
 });
 
+test("1688 infrastructure timeouts do not erase proven source productivity", () => {
+  const productive = "https://www.ozon.ru/seller/recovered-after-throttle/";
+  const semanticDry = "https://www.ozon.ru/seller/semantic-dry/";
+  const rows = [
+    { source_url: productive, sku: "accepted", status: "submitted" },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      source_url: productive,
+      sku: `timeout-${index}`,
+      status: "skipped",
+      reason: "1688-timeout",
+    })),
+    ...Array.from({ length: 8 }, (_, index) => ({
+      source_url: semanticDry,
+      sku: `no-match-${index}`,
+      status: "skipped",
+      reason: "1688-no-reliable-match",
+    })),
+  ];
+  const scores = fullFunnelSourceScores(rows);
+  assert.ok(scores.get(productive) > 0);
+  assert.ok(scores.get(semanticDry) < 0);
+  assert.deepEqual(sourceProductivityStats(rows).get(productive), {
+    attempted: 1,
+    cost_passed: 1,
+    accepted: 1,
+    cost_rate: 1,
+    acceptance_rate: 1,
+  });
+  assert.deepEqual(prioritizeSourceUrls([semanticDry, productive], { yieldRows: rows }), [
+    productive,
+    semanticDry,
+  ]);
+});
+
 test("strict submissions are a stronger leading source signal than favorites", () => {
   const favoriteOnly = "https://www.ozon.ru/seller/favorite-only/";
   const submitted = "https://www.ozon.ru/seller/submitted/";
@@ -3213,6 +3251,33 @@ test("profit learning adds only a stable soft priority and never removes explora
   );
   assert.deepEqual(result.map((row) => row.href), ["learned", "explore-a", "explore-b"]);
   assert.equal(result.length, links.length);
+});
+
+test("active seasonal categories use the existing scanner soft-priority path", () => {
+  const season = normalizeSeasonPriority({
+    events: [{
+      sales_start: "2026-09-01",
+      sales_end: "2026-09-05",
+      lead_days: 45,
+      categories: [{ name: "Школьные принадлежности", keywords: ["школьный пенал"], boost: 600 }],
+    }],
+  });
+  const links = [
+    { href: "explore-a", text: "Обычный кабель" },
+    { href: "season", text: "Школьный пенал" },
+    { href: "explore-b", text: "Обычная лампа" },
+  ];
+  const result = prioritizeFavoriteLinks(
+    links,
+    {},
+    (row) => seasonPriorityScore(season, row, { now: "2026-08-09T00:00:00+08:00" }),
+  );
+  assert.deepEqual(result.map((row) => row.href), ["season", "explore-a", "explore-b"]);
+  assert.equal(result.length, links.length);
+  assert.deepEqual(
+    prioritizeFavoriteLinks(links, {}, () => 0).map((row) => row.href),
+    ["explore-a", "season", "explore-b"],
+  );
 });
 
 test("listing cards with explicit cross-border delivery outrank ambiguous titles", () => {

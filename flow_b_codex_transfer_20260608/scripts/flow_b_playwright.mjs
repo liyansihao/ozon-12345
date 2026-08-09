@@ -403,6 +403,7 @@ async function createPublishingSession(context, options, env, shared) {
       validationOnly: false,
       validationTarget: 1,
       concurrency: Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 8),
+      costConcurrency: Math.max(1, Number(env.FLOW_B_1688_WORKERS) || 4),
       maxConcurrency: Math.max(1, Number(env.FLOW_B_MAX_PUBLISH_WORKERS) || 12),
       dryCandidateLimit: Math.max(0, Number(env.FLOW_B_MAX_DRY_CANDIDATES) || 0),
       deadlineAt: env.FLOW_B_DEADLINE_AT || null,
@@ -423,8 +424,8 @@ async function createPublishingSession(context, options, env, shared) {
       dailyStoreLimit: Math.max(1, Number(env.FLOW_B_DAILY_STORE_LIMIT) || 100),
       dailyStoreTimeZone: env.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
       enforceDirectDailyLimit: env.FLOW_B_ENFORCE_DIRECT_DAILY_LIMIT === "1",
-      dailySubmissionCutoff: env.FLOW_B_DAILY_SUBMISSION_CUTOFF || "20:00",
-      dailyReportAfter: env.FLOW_B_DAILY_REPORT_AFTER || "20:30",
+      dailySubmissionCutoff: env.FLOW_B_DAILY_SUBMISSION_CUTOFF || "23:00",
+      dailyReportAfter: env.FLOW_B_DAILY_REPORT_AFTER || "23:30",
       dailyStoreUsageSeed: parseDailyStoreUsageSeed(env),
       totalStoreLimit: Math.max(1, Number(env.FLOW_B_STORE_TOTAL_LIMIT) || 100),
       totalStoreUsageSeed: parseStoreTotalUsageSeed(env),
@@ -444,6 +445,7 @@ async function createPublishingSession(context, options, env, shared) {
       costEstimateTimeoutMs: Math.max(1, Number(env.FLOW_B_1688_TOTAL_BUDGET_MS) || 15_000),
       profitPriorityFile: env.FLOW_B_PROFIT_PRIORITY_FILE || null,
       profitFeedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
+      seasonPriorityFile: env.FLOW_B_SEASON_PRIORITY_FILE || null,
       profitFileRefreshMs: Math.max(0, Number(env.FLOW_B_PROFIT_FILE_REFRESH_MS) || 5_000),
     });
     return { maoziPage, client, costBridge, detailProvider, runner, state };

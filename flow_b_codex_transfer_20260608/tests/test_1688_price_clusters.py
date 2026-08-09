@@ -1,8 +1,10 @@
 import hashlib
 import importlib.util
 import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -417,6 +419,33 @@ class FirstPageClusterCostTest(unittest.TestCase):
         self.assertEqual(evidence["rows"][0]["supplier_id"], "factorya")
         self.assertEqual(evidence["rows"][0]["image_url"], "https://img.example/v3.jpg")
         self.assertTrue(evidence["balanced_match"]["passed"])
+
+    def test_image_first_fallback_requires_two_visual_suppliers_in_one_price_cluster(self):
+        candidates = [
+            {"offerId": "image-a", "title": "完全不同的中文标题", "price": 12, "shop": "factory-a", "pic": "https://img.example/a.jpg"},
+            {"offerId": "image-b", "title": "另一个不同的中文标题", "price": 13, "shop": "factory-b", "pic": "https://img.example/b.jpg"},
+            {"offerId": "unrelated", "title": "无关商品", "price": 2, "shop": "factory-c", "pic": "https://img.example/c.jpg"},
+        ]
+        with tempfile.NamedTemporaryFile(suffix=".jpg") as source_image, mock.patch.object(
+            image_median_1688,
+            "compare_remote_image",
+            side_effect=lambda _source, url, timeout_seconds=0.6: {
+                "available": url.endswith(("/a.jpg", "/b.jpg")),
+                "score": 0.91 if url.endswith(("/a.jpg", "/b.jpg")) else 0.1,
+            },
+        ):
+            result = image_median_1688.first_page_p70_cost(
+                candidates,
+                expect_title="俄罗斯商品没有中文标题",
+                expect_category="家居用品",
+                minimum_matches=1,
+                source_image_path=source_image.name,
+            )
+
+        self.assertEqual(result["decision"], "LIGHT_ACCEPT")
+        self.assertTrue(result["image_first_fallback"])
+        self.assertEqual(result["filtered_first_page_prices"], [12.0, 13.0])
+        self.assertTrue(result["balanced_match"]["passed"])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ Codex agents when browser automation of 1688 is blocked.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import io
 import json
@@ -81,6 +82,9 @@ ACCESSORY_INTENT_HINTS = {
 IMAGE_HIGH_SIMILARITY = 0.78
 IMAGE_VERY_HIGH_SIMILARITY = 0.90
 IMAGE_CORROBORATION_SIMILARITY = 0.58
+IMAGE_ONLY_SIMILARITY = 0.86
+IMAGE_COMPARE_TIMEOUT_SECONDS = 0.75
+IMAGE_FIRST_PROBE_TIMEOUT_SECONDS = 0.6
 
 PRODUCT_SEMANTIC_GROUPS = [
     ("sweater", {"свитер", "джемпер", "sweater", "cardigan", "毛衣", "毛衫", "针织", "开衫"}),
@@ -347,11 +351,40 @@ def balanced_same_item_assessment(
     feature_needles = feature_tokens(expect_title)
     model_needles = model_tokens(" ".join(filter(None, [expect_model, expect_title])))
     rows: list[dict] = []
-    metrics_override = image_metrics_by_offer or {}
+    metrics_override = dict(image_metrics_by_offer or {})
     image_offer_ids = {
         str(row.get("offerId") or "")
         for row in sorted(selected_cluster_rows, key=lambda candidate: int(candidate.get("rank") or 9999))[:3]
     }
+
+    # Fetch the bounded top-three visual evidence concurrently.  Serial CDN
+    # reads used to consume several seconds from the 1688 stage budget.
+    if source_image_path is not None and image_offer_ids:
+        image_probe_rows = [
+            row for row in selected_cluster_rows
+            if str(row.get("offerId") or "") in image_offer_ids
+            and str(row.get("offerId") or "") not in metrics_override
+            and str(row.get("pic") or "").strip()
+        ]
+
+        def probe_image(row: dict) -> tuple[str, dict]:
+            offer_id = str(row.get("offerId") or "").strip()
+            try:
+                metrics = compare_remote_image(
+                    source_image_path,
+                    str(row.get("pic") or ""),
+                    timeout_seconds=IMAGE_COMPARE_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:  # pragma: no cover - defensive network boundary
+                metrics = {"available": False, "reason": f"image-error:{type(exc).__name__}"}
+            return offer_id, dict(metrics or {"available": False, "reason": "image-not-checked"})
+
+        if image_probe_rows:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(image_probe_rows))) as pool:
+                metrics_override = {
+                    **dict(pool.map(probe_image, image_probe_rows)),
+                    **metrics_override,
+                }
 
     for row in selected_cluster_rows:
         offer_id = str(row.get("offerId") or "").strip()
@@ -366,7 +399,11 @@ def balanced_same_item_assessment(
         has_accessory_conflict = accessory_conflict(expected_text, title)
         image = metrics_override.get(offer_id)
         if image is None and source_image_path is not None and offer_id in image_offer_ids:
-            image = compare_remote_image(source_image_path, str(row.get("pic") or ""))
+            image = compare_remote_image(
+                source_image_path,
+                str(row.get("pic") or ""),
+                timeout_seconds=IMAGE_COMPARE_TIMEOUT_SECONDS,
+            )
         image = dict(image or {"available": False, "reason": "image-not-checked"})
         image_score = float(image.get("score") or 0)
         exact_model = bool(model_needles and model_hits)
@@ -386,11 +423,15 @@ def balanced_same_item_assessment(
             semantic_strength = "feature_only"
         else:
             semantic_strength = "weak_or_none"
+        image_backed = bool(image.get("available")) and image_score >= IMAGE_ONLY_SIMILARITY
         semantic_valid = (
             exact_model
             or len(information_hits) >= 1
             or bool(product_semantics["hits"] and not product_semantics["missing"])
+            or image_backed
         )
+        if image_backed and semantic_strength == "weak_or_none":
+            semantic_strength = "image_backed"
         rows.append({
             **row,
             "rank": int(row.get("rank") or 0),
@@ -407,6 +448,7 @@ def balanced_same_item_assessment(
             "spec_conflicts": conflicts,
             "accessory_conflict": has_accessory_conflict,
             "semantic_valid": semantic_valid,
+            "image_backed": image_backed,
             "strong_single": (
                 1 <= int(row.get("rank") or 0) <= 3
                 and bool(image.get("available"))
@@ -727,6 +769,141 @@ def build_same_item_evidence(
     return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _image_first_page_p70_cost(
+    rows: list[dict],
+    *,
+    expect_title: str,
+    expect_model: str,
+    expect_category: str,
+    page_size: int,
+    source_image_path: Path | str | None,
+    excluded_offer_ids: set[str],
+) -> dict | None:
+    """Bounded cross-language fallback using visual and supplier corroboration."""
+    if source_image_path is None:
+        return None
+    image_path = Path(source_image_path).expanduser().resolve()
+    if not image_path.is_file():
+        return None
+
+    ranked_rows = scored_similarity_rows(
+        rows,
+        expect_title,
+        expect_model,
+        expect_category,
+        max(4, min(6, int(page_size) if int(page_size) > 0 else 6)),
+    )
+    probe_rows = [
+        row for row in ranked_rows[:6]
+        if str(row.get("offerId") or "").strip()
+        and str(row.get("offerId") or "").strip() not in excluded_offer_ids
+        and str(row.get("pic") or "").strip()
+        and row.get("price") is not None
+        and float(row.get("price") or 0) > 0
+        and not row.get("bad_hits")
+    ]
+    if len(probe_rows) < 2:
+        return None
+
+    def probe(row: dict) -> tuple[str, dict]:
+        offer_id = str(row.get("offerId") or "").strip()
+        try:
+            metrics = compare_remote_image(
+                image_path,
+                str(row.get("pic") or ""),
+                timeout_seconds=IMAGE_FIRST_PROBE_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # pragma: no cover - defensive network boundary
+            metrics = {"available": False, "reason": f"image-error:{type(exc).__name__}"}
+        return offer_id, dict(metrics or {"available": False, "reason": "image-not-checked"})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(probe_rows))) as pool:
+        image_metrics_by_offer = dict(pool.map(probe, probe_rows))
+    image_rows = [
+        row for row in probe_rows
+        if float((image_metrics_by_offer.get(str(row.get("offerId") or "")) or {}).get("score") or 0)
+        >= IMAGE_ONLY_SIMILARITY
+    ]
+    if len(image_rows) < 2:
+        return None
+
+    selected_cluster = choose_price_cluster(
+        build_price_clusters(image_rows),
+        median_number([float(row["price"]) for row in image_rows]),
+    )
+    selected_cluster_rows = list((selected_cluster or {}).get("rows") or [])
+    if len(selected_cluster_rows) < 2:
+        return None
+    suppliers = {
+        normalize_supplier(row.get("shop"))
+        for row in selected_cluster_rows
+        if normalize_supplier(row.get("shop"))
+    }
+    if len(suppliers) < 2:
+        return None
+
+    balanced_match = balanced_same_item_assessment(
+        selected_cluster_rows,
+        expect_title=expect_title,
+        expect_model=expect_model,
+        expect_category=expect_category,
+        source_image_path=image_path,
+        image_metrics_by_offer=image_metrics_by_offer,
+    )
+    if not balanced_match.get("passed"):
+        return None
+
+    prices = sorted(float(row["price"]) for row in selected_cluster_rows)
+    p70_cost = prices[p70_index(len(prices))]
+    selected = sorted(
+        selected_cluster_rows,
+        key=lambda row: (abs(float(row["price"]) - p70_cost), -row.get("score", 0), row.get("title", "")),
+    )[0]
+    balanced_by_offer = {
+        str(row.get("offerId") or ""): row
+        for row in balanced_match.get("rows") or []
+    }
+    evidence_rows = [
+        {**row, **balanced_by_offer.get(str(row.get("offerId") or ""), {})}
+        for row in image_rows
+    ]
+    evidence_cluster_rows = [
+        {**row, **balanced_by_offer.get(str(row.get("offerId") or ""), {})}
+        for row in selected_cluster_rows
+    ]
+    cost_source = "search_first_page_cluster_p70_similarity_filtered"
+    same_item_evidence, match_evidence_key = build_same_item_evidence(
+        evidence_rows,
+        expect_title=expect_title,
+        expect_model=expect_model,
+        expect_category=expect_category,
+        cost_source=cost_source,
+        selected_cost=p70_cost,
+        selected_offer_id=str(selected.get("offerId") or "").strip(),
+        selected_cluster_rows=evidence_cluster_rows,
+        balanced_match=balanced_match,
+    )
+    return {
+        "decision": "LIGHT_ACCEPT",
+        "reason": "image-first same-item cluster corroborated by independent suppliers",
+        "p70_cost": p70_cost,
+        "selected_offer_id": selected.get("offerId"),
+        "first_page_prices": [float(row["price"]) for row in ranked_rows if row.get("price") is not None],
+        "filtered_first_page_prices": prices,
+        "price_clusters": build_price_clusters(image_rows),
+        "selected_price_cluster": selected_cluster,
+        "cluster_p70_cost": p70_cost,
+        "cluster_p80_cost": prices[p80_index(len(prices))],
+        "cost_source": cost_source,
+        "same_item_evidence": same_item_evidence,
+        "match_evidence_key": match_evidence_key,
+        "balanced_match": {key: value for key, value in balanced_match.items() if key != "rows"},
+        "filtered_rows": image_rows,
+        "excluded_rows": [],
+        "image_first_fallback": True,
+    }
+
+
 def first_page_p70_cost(
     rows: list[dict],
     *,
@@ -808,6 +985,17 @@ def first_page_p70_cost(
 
     filtered_prices = sorted(float(row["price"]) for row in filtered_rows if row.get("price") is not None)
     if len(filtered_prices) < required_matches:
+        fallback = _image_first_page_p70_cost(
+            rows,
+            expect_title=expect_title,
+            expect_model=expect_model,
+            expect_category=expect_category,
+            page_size=page_size,
+            source_image_path=source_image_path,
+            excluded_offer_ids=blocked_offer_ids,
+        )
+        if fallback is not None:
+            return fallback
         shortage_reason = (
             "no explicit title/model/category semantic same-item matches"
             if not candidate_rows
