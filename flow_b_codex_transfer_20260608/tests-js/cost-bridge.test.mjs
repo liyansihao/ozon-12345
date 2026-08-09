@@ -1016,6 +1016,7 @@ test("same cover image shares one in-flight 1688 query and persists reusable cac
     assert.equal(runs, 1);
     assert.ok(results.every((row) => row.ok));
     assert.ok(results.some((row) => row.shared_cache === true));
+    await bridge.close();
     const cache = JSON.parse(await fs.readFile(path.join(runDir, "1688_cache.json"), "utf8"));
     assert.equal(Object.keys(cache.entries).length, 1);
   });
@@ -1144,10 +1145,97 @@ test("overlapping debounced cache generations all settle without losing a resolv
 
     assert.equal(results.length, 12);
     assert.ok(results.every((result) => result.ok === false));
+    await bridge.close();
     assert.ok(cacheWrites >= 2);
     const cache = JSON.parse(await fs.readFile(path.join(runDir, "1688_cache.json"), "utf8"));
     assert.equal(Object.keys(cache.entries).length, 12);
-    await bridge.close();
+  });
+});
+
+test("cache persistence stays outside the public 1688 deadline and close waits for durability", async () => {
+  await withTempDir(async (runDir) => {
+    let releaseWrite;
+    let markWriteStarted;
+    const writeStarted = new Promise((resolve) => { markWriteStarted = resolve; });
+    const writeReleased = new Promise((resolve) => { releaseWrite = resolve; });
+    const bridge = createCostBridge({
+      totalBudgetMs: 80,
+      cacheFlushDebounceMs: 0,
+      workerPool: {
+        run: async () => ({
+          code: 2,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "REASON no explicit title/model/category semantic same-item matches",
+            "FILTERED_FIRST_PAGE_PRICES []",
+            "P70_COST None",
+          ].join("\n"),
+          stderr: "",
+        }),
+        close: async () => {},
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      writeCache: async (filename, cache) => {
+        markWriteStarted();
+        await writeReleased;
+        await fs.mkdir(path.dirname(filename), { recursive: true });
+        await fs.writeFile(filename, `${JSON.stringify(cache)}\n`, "utf8");
+      },
+    });
+
+    const result = await Promise.race([
+      bridge.estimate({
+        sku: "nonblocking-cache",
+        cover_image: "https://img.example/nonblocking-cache.jpg",
+        sell_price: 100,
+      }, runDir),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("estimate waited for cache persistence")),
+        50,
+      )),
+    ]);
+    assert.equal(result.ok, false);
+    await writeStarted;
+
+    let closed = false;
+    const closing = bridge.close().then(() => { closed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(closed, false);
+    releaseWrite();
+    await closing;
+    assert.equal(closed, true);
+
+    const cache = JSON.parse(await fs.readFile(path.join(runDir, "1688_cache.json"), "utf8"));
+    assert.equal(Object.keys(cache.entries).length, 1);
+  });
+});
+
+test("background cache write failures are reported when the bridge closes", async () => {
+  await withTempDir(async (runDir) => {
+    const bridge = createCostBridge({
+      totalBudgetMs: 80,
+      cacheFlushDebounceMs: 0,
+      workerPool: {
+        run: async () => ({
+          code: 2,
+          stdout: "REASON no match\nP70_COST None",
+          stderr: "",
+        }),
+        close: async () => {},
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      writeCache: async () => {
+        throw new Error("cache disk unavailable");
+      },
+    });
+
+    const result = await bridge.estimate({
+      sku: "failed-cache-write",
+      cover_image: "https://img.example/failed-cache-write.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, false);
+    await assert.rejects(bridge.close(), /cache disk unavailable/);
   });
 });
 
@@ -1302,12 +1390,16 @@ test("shared cache reuses a reliable 1688 result across independent run director
       },
     };
     const item = { sku: "shared-1", cover_image: "https://img.example/shared.jpg", sell_price: 100 };
-    assert.equal((await createCostBridge(options).estimate(item, firstRun)).ok, true);
-    const reused = await createCostBridge({
+    const firstBridge = createCostBridge(options);
+    assert.equal((await firstBridge.estimate(item, firstRun)).ok, true);
+    await firstBridge.close();
+    const secondBridge = createCostBridge({
       ...options,
       runProcess: async () => { throw new Error("shared cache should avoid a second process"); },
       download: async () => { throw new Error("shared cache should avoid a second download"); },
-    }).estimate({ ...item, sku: "shared-2" }, secondRun);
+    });
+    const reused = await secondBridge.estimate({ ...item, sku: "shared-2" }, secondRun);
+    await secondBridge.close();
 
     assert.equal(reused.ok, true);
     assert.equal(reused.shared_cache, true);
