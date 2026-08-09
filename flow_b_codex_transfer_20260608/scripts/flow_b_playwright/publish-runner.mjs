@@ -690,6 +690,32 @@ function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, de
   };
 }
 
+export function createConcurrencyGate(limit = 1) {
+  const maximum = Number(limit);
+  if (!Number.isInteger(maximum) || maximum <= 0) {
+    throw new TypeError("concurrency gate limit must be a positive integer");
+  }
+  let active = 0;
+  const waiters = [];
+
+  async function run(operation) {
+    if (typeof operation !== "function") throw new TypeError("gated operation must be a function");
+    if (active >= maximum) await new Promise((resolve) => waiters.push(resolve));
+    active += 1;
+    try {
+      return await operation();
+    } finally {
+      active -= 1;
+      waiters.shift()?.();
+    }
+  }
+
+  return {
+    run,
+    stats: () => ({ active, queued: waiters.length, limit: maximum }),
+  };
+}
+
 export function createPublishRunner({
   client,
   detailProvider = client,
@@ -709,6 +735,7 @@ export function createPublishRunner({
   validationOnly = false,
   validationTarget = 3,
   concurrency = 1,
+  costConcurrency = concurrency,
   maxConcurrency = 12,
   dryCandidateLimit = 0,
   deadlineAt = null,
@@ -729,8 +756,8 @@ export function createPublishRunner({
   dailyStoreLimit = 100,
   dailyStoreTimeZone = "Asia/Shanghai",
   enforceDirectDailyLimit = false,
-  dailySubmissionCutoff = "20:00",
-  dailyReportAfter = "20:30",
+  dailySubmissionCutoff = "23:00",
+  dailyReportAfter = "23:30",
   dailyStoreUsageSeed = null,
   totalStoreLimit = 100,
   totalStoreUsageSeed = {},
@@ -791,6 +818,10 @@ export function createPublishRunner({
   }
   const workerCount = Number(concurrency);
   if (!Number.isInteger(workerCount) || workerCount <= 0) throw new TypeError("concurrency must be a positive integer");
+  const costWorkerCount = Number(costConcurrency);
+  if (!Number.isInteger(costWorkerCount) || costWorkerCount <= 0) {
+    throw new TypeError("costConcurrency must be a positive integer");
+  }
   const dryLimit = Number(dryCandidateLimit);
   if (!Number.isInteger(dryLimit) || dryLimit < 0) throw new TypeError("dryCandidateLimit must be a non-negative integer");
   const validationTargetCount = Number(validationTarget);
@@ -891,6 +922,12 @@ export function createPublishRunner({
       ? workerCount
       : Math.max(workerCount, Number(maxConcurrency) || workerCount),
   });
+  // The 1688 pool can intentionally be smaller than the surrounding publish
+  // pipeline. Acquire a real cost-worker slot before starting the per-item
+  // hard deadline so queue wait cannot consume the query budget.
+  const costGate = costWorkerCount >= workerCount
+    ? { run: (operation) => operation() }
+    : createConcurrencyGate(costWorkerCount);
 
   function cancelDirectRun(error, batchControl = null) {
     for (const control of new Set([batchControl, sharedDirectRunControl].filter(Boolean))) {
@@ -1928,13 +1965,15 @@ export function createPublishRunner({
         (typeof value === "string" && value.trim() !== "")
         || typeof value === "number"
       ));
-      const cost = await timed(sku, "1688_cost", () => boundedCostEstimate(() => costBridge.estimate({
-        ...detail,
-        sell_price: salePrice,
-        expect_title: detail?.title ?? item?.title ?? "",
-        expect_model: costModel ?? "",
-        expect_category: (category?.labels || []).slice(0, 2).join(" "),
-      }, runDir)));
+      const cost = await timed(sku, "1688_cost", () => costGate.run(
+        () => boundedCostEstimate(() => costBridge.estimate({
+          ...detail,
+          sell_price: salePrice,
+          expect_title: detail?.title ?? item?.title ?? "",
+          expect_model: costModel ?? "",
+          expect_category: (category?.labels || []).slice(0, 2).join(" "),
+        }, runDir)),
+      ));
       if (!cost?.ok && cost?.deferred === true && cost?.terminal === false) {
         if (activeDirectMode) {
           return skip(item, normalizeCostFailureReason(cost), {

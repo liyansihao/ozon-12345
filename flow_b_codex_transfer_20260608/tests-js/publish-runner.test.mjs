@@ -6,6 +6,7 @@ import path from "node:path";
 
 import {
   clearObservedPublishFeedbackCache,
+  createConcurrencyGate,
   createPublishRunner,
   duplicateTitleKey,
   loadObservedPublishFeedback,
@@ -25,6 +26,25 @@ import {
   normalizeProfitPriority,
   normalizeSeasonPriority,
 } from "../scripts/flow_b_playwright/profit-priority.mjs";
+
+test("1688 concurrency gate waits for a real worker slot before starting queued work", async () => {
+  const gate = createConcurrencyGate(1);
+  let releaseFirst;
+  let secondStarted = false;
+  const first = gate.run(() => new Promise((resolve) => { releaseFirst = resolve; }));
+  const second = gate.run(async () => {
+    secondStarted = true;
+    return "second";
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(secondStarted, false);
+  assert.deepEqual(gate.stats(), { active: 1, queued: 1, limit: 1 });
+
+  releaseFirst("first");
+  assert.deepEqual(await Promise.all([first, second]), ["first", "second"]);
+  assert.deepEqual(gate.stats(), { active: 0, queued: 0, limit: 1 });
+});
 
 test("publisher applies seasonal priority softly after keeping profit mothers first", () => {
   const snapshot = {
