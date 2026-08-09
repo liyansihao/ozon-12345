@@ -135,6 +135,62 @@ test("external SQLite is authoritative while legacy JSONL and CSV remain compati
   });
 });
 
+test("native SQLite restore skips oversized legacy histories and hydrates latest SKU state", async () => {
+  await withTempDir(async (dir) => {
+    const runDir = path.join(dir, "run");
+    const dbPath = path.join(dir, "external-state", "runtime.sqlite");
+    const publishedCsv = path.join(dir, "published.csv");
+    const state = createPublishState({ runDir, publishedCsv, runtimeStateDbPath: dbPath });
+    assert.equal(await state.transition("sqlite-only", "processing", {
+      reason: "submission-reconciliation",
+      submitted: true,
+      store_id: 106637,
+      selected_at: "2026-08-03T00:00:00.000Z",
+    }), true);
+    await state.close();
+
+    await fs.rm(path.join(runDir, "sku_states.jsonl"));
+    await fs.mkdir(path.join(runDir, "sku_states.jsonl"));
+    const unreadablePendingHistory = path.join(dir, "pending-history.jsonl");
+    await fs.mkdir(unreadablePendingHistory);
+
+    const restored = createPublishState({
+      runDir,
+      publishedCsv,
+      pendingStateFiles: [unreadablePendingHistory],
+      runtimeStateDbPath: dbPath,
+    });
+    await restored.load();
+    assert.equal(restored.statusOf("sqlite-only"), "processing");
+    assert.equal(restored.entryOf("sqlite-only").data.submitted, true);
+    assert.equal(restored.directAcceptedCount(runDir), 1);
+    await restored.close();
+  });
+});
+
+test("direct production can disable growing legacy state and close-time audit exports", async () => {
+  await withTempDir(async (dir) => {
+    const runDir = path.join(dir, "run");
+    const dbPath = path.join(dir, "external-state", "runtime.sqlite");
+    const state = createPublishState({
+      runDir,
+      publishedCsv: path.join(dir, "published.csv"),
+      runtimeStateDbPath: dbPath,
+      writeLegacyStateAudit: false,
+      exportRuntimeAuditOnClose: false,
+    });
+
+    assert.equal(await state.transition("sqlite-audit-only", "processing", {
+      reason: "direct-processing",
+    }), true);
+    await state.close();
+
+    assert.equal(sqliteCount(dbPath, "sku_state"), 1);
+    await assert.rejects(fs.access(path.join(runDir, "sku_states.jsonl")), /ENOENT/);
+    await assert.rejects(fs.access(path.join(runDir, "runtime_state_audit.jsonl")), /ENOENT/);
+  });
+});
+
 test("SQLite-backed publish state terminalizes deterministic failures and enforces two transient failures per Shanghai day", async () => {
   await withTempDir(async (dir) => {
     const runDir = path.join(dir, "run");

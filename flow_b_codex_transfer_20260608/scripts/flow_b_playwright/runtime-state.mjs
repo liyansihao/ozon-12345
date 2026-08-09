@@ -1131,6 +1131,13 @@ export function createRuntimeState({
   }
 
   const selectState = database.prepare("SELECT * FROM sku_state WHERE sku = ?");
+  const selectAllStates = database.prepare("SELECT * FROM sku_state ORDER BY sku");
+  const selectNativeRuntimeEvent = database.prepare(`
+    SELECT 1 AS present
+    FROM events
+    WHERE source = 'runtime'
+    LIMIT 1
+  `);
   const selectAttempt = database.prepare(`
     SELECT attempts FROM transient_attempts WHERE sku = ? AND shanghai_day = ?
   `);
@@ -1318,6 +1325,16 @@ export function createRuntimeState({
 
   function getState(sku) {
     return rowToState(selectState.get(sku));
+  }
+
+  function stateEntries() {
+    assertOpen();
+    return selectAllStates.all().map(rowToState);
+  }
+
+  function hasNativeRuntimeEvents() {
+    assertOpen();
+    return Boolean(selectNativeRuntimeEvent.get()?.present);
   }
 
   function getReservation(sku) {
@@ -2207,13 +2224,35 @@ export function createRuntimeState({
     if (typeof filename !== "string" || !filename.trim()) {
       throw new TypeError("filename is required");
     }
-    const events = auditEvents();
-    await fs.mkdir(path.dirname(path.resolve(filename)), { recursive: true });
-    const text = events.length > 0
-      ? `${events.map((event) => JSON.stringify(event)).join("\n")}\n`
-      : "";
-    await fs.writeFile(filename, text, "utf8");
-    return events.length;
+    const resolved = path.resolve(filename);
+    const temp = `${resolved}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    const rows = database.prepare("SELECT * FROM events ORDER BY id");
+    await fs.mkdir(path.dirname(resolved), { recursive: true });
+    let handle = null;
+    let count = 0;
+    let batch = "";
+    try {
+      handle = await fs.open(temp, "w");
+      for (const row of rows.iterate()) {
+        batch += `${JSON.stringify(rowToEvent(row))}\n`;
+        count += 1;
+        if (Buffer.byteLength(batch) >= 1024 * 1024) {
+          await handle.write(batch, null, "utf8");
+          batch = "";
+        }
+      }
+      if (batch) await handle.write(batch, null, "utf8");
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await fs.rename(temp, resolved);
+      return count;
+    } finally {
+      await handle?.close().catch(() => {});
+      await fs.unlink(temp).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
   }
 
   function close() {
@@ -2237,6 +2276,8 @@ export function createRuntimeState({
     canAttempt,
     reopenDirectCandidate,
     get,
+    stateEntries,
+    hasNativeRuntimeEvents,
     strictCount,
     strictPublications,
     submissionReservation,

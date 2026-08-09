@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createOzonDetailProvider, parseOzonDetailText } from "../scripts/flow_b_playwright/ozon-detail.mjs";
+import {
+  classifyOzonDetailAccessPayload,
+  createOzonDetailProvider,
+  parseOzonDetailText,
+} from "../scripts/flow_b_playwright/ozon-detail.mjs";
 
 test("detail parser extracts plugin mode, current price, and lowest follow price", () => {
   const detail = parseOzonDetailText([
@@ -234,5 +238,81 @@ test("detail provider rejects an Ozon login page before using the favorite price
     }),
     /authentication or MFA required/i,
   );
+  await provider.close();
+});
+
+test("valid product evidence prevents a sidebar verification hint from becoming a CAPTCHA stop", async () => {
+  assert.deepEqual(classifyOzonDetailAccessPayload({
+    url: "https://www.ozon.ru/product/valid-123/",
+    title: "Valid product",
+    text: "\u767b\u5f55\u9a8c\u8bc1\u7801\u5e2e\u52a9\n\u53d1\u8d27\u6a21\u5f0f\uff1a FBS\n\u8ddf\u5356\u6700\u4f4e\u4ef7\uff1a \u00a5 80",
+    webPriceText: "\u00a5 90",
+  }), {
+    captcha: false,
+    authentication: false,
+    productReady: true,
+  });
+});
+
+test("detail provider requires persistent CAPTCHA evidence before stopping", async () => {
+  let calls = 0;
+  const page = {
+    goto: async () => {},
+    evaluate: async () => {
+      calls += 1;
+      return calls === 1
+        ? {
+          url: "https://www.ozon.ru/product/transient-123/",
+          title: "Checking",
+          text: "\u8bf7\u5b8c\u6210\u4eba\u673a\u9a8c\u8bc1",
+          webPriceText: "",
+        }
+        : {
+          url: "https://www.ozon.ru/product/transient-123/",
+          title: "Ready",
+          text: "\u53d1\u8d27\u6a21\u5f0f\uff1a FBS\n\u8ddf\u5356\u6700\u4f4e\u4ef7\uff1a \u00a5 80",
+          webPriceText: "\u00a5 90",
+        };
+    },
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    timeout: 10,
+    pollInterval: 1,
+    captchaConfirmationDelayMs: 1,
+  });
+  const detail = await provider.getProductDetail("transient-123", { sell_price: 90 });
+  assert.equal(detail.mode, "FBS");
+  assert.equal(calls, 2);
+  await provider.close();
+});
+
+test("detail provider still stops on two consecutive blocking CAPTCHA pages", async () => {
+  let calls = 0;
+  const page = {
+    goto: async () => {},
+    evaluate: async () => {
+      calls += 1;
+      return {
+        url: "https://www.ozon.ru/product/blocked-123/",
+        title: "Checking",
+        text: "\u8bf7\u5b8c\u6210\u4eba\u673a\u9a8c\u8bc1",
+        webPriceText: "",
+      };
+    },
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    timeout: 10,
+    pollInterval: 1,
+    captchaConfirmationDelayMs: 1,
+  });
+  await assert.rejects(
+    provider.getProductDetail("blocked-123", { sell_price: 90 }),
+    /after 2 confirmations/i,
+  );
+  assert.equal(calls, 2);
   await provider.close();
 });

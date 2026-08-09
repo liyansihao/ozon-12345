@@ -15,6 +15,8 @@ const ENDPOINTS = Object.freeze({
   syncWarehouses: "/api.shop/sync_warehouse",
   syncOnlineShops: "/api.product.online/sync_shop",
   userInfo: "/api.user/info",
+  orders: "/api.order.ozon/lists",
+  refunds: "/api.order.refund/list",
 });
 
 function successResponse(response) {
@@ -41,7 +43,7 @@ function requireSuccess(response, label) {
 }
 
 function listRows(data, label) {
-  const rows = Array.isArray(data) ? data : data?.data;
+  const rows = Array.isArray(data) ? data : data?.data ?? data?.list ?? data?.rows ?? data?.items;
   if (!Array.isArray(rows)) throw new Error(`Maozi ${label} response does not contain a valid list`);
   return rows;
 }
@@ -130,6 +132,40 @@ export function createMaoziClient({ transport }) {
     throw new Error("Maozi favorites pagination exceeded 1000 pages");
   }
 
+  async function listPaged(endpoint, label, {
+    pageSize = 100,
+    query = {},
+    maxPages = 100,
+  } = {}) {
+    const size = Math.max(1, Math.floor(Number(pageSize) || 100));
+    const maximum = Math.max(1, Math.floor(Number(maxPages) || 100));
+    const rows = [];
+    for (let page = 1; page <= maximum; page += 1) {
+      const response = await transport(endpoint, {
+        method: "GET",
+        query: { ...query, page, page_size: size },
+      });
+      const data = requireSuccess(response, label);
+      const batch = listRows(data, label);
+      rows.push(...batch);
+      const lastPage = Number(data?.last_page ?? data?.last ?? data?.pages ?? data?.pagination?.last_page);
+      if (Number.isFinite(lastPage) && lastPage > 0) {
+        if (page >= lastPage) return rows;
+      } else if (batch.length < size) {
+        return rows;
+      }
+    }
+    return rows;
+  }
+
+  async function listOrders(options = {}) {
+    return listPaged(ENDPOINTS.orders, "Ozon orders", options);
+  }
+
+  async function listRefunds(options = {}) {
+    return listPaged(ENDPOINTS.refunds, "order refunds", options);
+  }
+
   async function listShops() {
     const data = requireSuccess(await transport(ENDPOINTS.shops, { method: "GET" }), "shops");
     return listRows(data, "shops");
@@ -151,6 +187,8 @@ export function createMaoziClient({ transport }) {
     listFavorites,
     listImportedFavorites,
     listAllFavorites,
+    listOrders,
+    listRefunds,
     listShops,
     listUserShops,
     listWatermarks,

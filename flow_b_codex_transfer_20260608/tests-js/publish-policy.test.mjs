@@ -72,7 +72,7 @@ test("food rules do not reject a safe title containing the letters in Побед
 
 test("preflight rejects a calculation without a CEL Economy result", () => {
   const item = { mode: "FBS", title: "wooden toy", category: "toys" };
-  assert.equal(preflightSkipReason(item), "missing-cel-economy");
+  assert.equal(preflightSkipReason(item), "missing-supported-economy");
 });
 
 test("preflight accepts the explicit CEL Economy result contract", () => {

@@ -23,6 +23,9 @@ import {
 } from "./cost-evidence.mjs";
 import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 import { submissionGatePolicy } from "./live-acceptance-gates.mjs";
+import { productWeightGrams, selectShippingRoute } from "./shipping-route.mjs";
+import { createProfitFilesReader, prioritizeProfitRows } from "./profit-priority.mjs";
+import { dailyWindowState } from "../daily-window.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
@@ -382,11 +385,11 @@ function asSku(item) {
   return sku;
 }
 
-function economyResult(calc) {
-  if (calc?.economy?.price_list) return calc.economy;
+function economyResult(calc, logistics = "CEL") {
+  if (calc?.economy?.price_list && calc.economy.price_list.logistics_name === logistics) return calc.economy;
   const rows = calc?.calc_result ?? calc?.data?.calc_result;
   if (!Array.isArray(rows)) return null;
-  const row = rows.find((entry) => entry?.name === "CEL" && entry?.speed === "economy");
+  const row = rows.find((entry) => entry?.name === logistics && entry?.speed === "economy");
   return row ? { title: row.title, price_list: row.price_list } : null;
 }
 
@@ -586,6 +589,10 @@ export function prioritizePublishCandidates(items, preflightPureSkus = new Set()
     .map(({ item }) => item);
 }
 
+export function prioritizeProfitCandidates(items, snapshot, storeId) {
+  return prioritizeProfitRows(items, snapshot, { storeId: Number(storeId) });
+}
+
 function interleaveCandidateBatches(primary, secondary, batchSize) {
   const width = Math.max(1, Number(batchSize) || 1);
   const result = [];
@@ -659,7 +666,12 @@ function buildPayload(item, detail, economy, targetConfig, now) {
   };
 }
 
-function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, detail, category, profitThreshold }) {
+function targetConfigForPersistedRoute(targetConfig, item) {
+  const warehouseId = Number(item?.warehouse_id || 0);
+  return warehouseId > 0 ? { ...targetConfig, warehouseId } : targetConfig;
+}
+
+function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, detail, category, profitThreshold, logistics = "CEL" }) {
   return {
     sku,
     sell_price: salePrice,
@@ -671,7 +683,7 @@ function profitCalculationInput({ sku, salePrice, purchasePrice, productInfo, de
     china_fee: 0,
     ad_rate: 0,
     other_rate: 1,
-    logistics: "CEL",
+    logistics,
     profit_value: profitThreshold,
     profit_type: "percentage",
     cate: category.mapped,
@@ -716,6 +728,9 @@ export function createPublishRunner({
   initialStock = 1,
   dailyStoreLimit = 100,
   dailyStoreTimeZone = "Asia/Shanghai",
+  enforceDirectDailyLimit = false,
+  dailySubmissionCutoff = "20:00",
+  dailyReportAfter = "20:30",
   dailyStoreUsageSeed = null,
   totalStoreLimit = 100,
   totalStoreUsageSeed = {},
@@ -733,6 +748,9 @@ export function createPublishRunner({
   directRunControl = null,
   minimumSameItemMatches = 3,
   costEstimateTimeoutMs = 15_000,
+  profitPriorityFile = null,
+  profitFeedbackFile = null,
+  profitFileRefreshMs = 5_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -742,12 +760,25 @@ export function createPublishRunner({
   const targetCount = Number(target);
   const profitThreshold = Number(threshold);
   const activeDirectMode = Boolean(directMode);
+  const enforceDailyQuota = !activeDirectMode
+    || (enforceDirectDailyLimit === true && !reconciliationOnly);
   const unlimitedTarget = activeDirectMode && targetCount === 0;
   const sharedDirectRunControl = directRunControl && typeof directRunControl === "object"
     ? directRunControl
     : null;
   const requiredSameItemMatches = Number(minimumSameItemMatches);
   const configuredCostEstimateTimeoutMs = Number(costEstimateTimeoutMs);
+  const profitFiles = createProfitFilesReader({
+    priorityFile: profitPriorityFile,
+    feedbackFile: profitFeedbackFile,
+    refreshMs: Math.max(0, Number(profitFileRefreshMs) || 0),
+  });
+  dailyWindowState({
+    now: now(),
+    timeZone: dailyStoreTimeZone,
+    cutoff: dailySubmissionCutoff,
+    reportAfter: dailyReportAfter,
+  });
   if (!Number.isInteger(targetCount) || targetCount < 0) throw new TypeError("target must be a non-negative integer");
   if (!Number.isFinite(profitThreshold)) throw new TypeError("threshold must be numeric");
   if (!Number.isInteger(requiredSameItemMatches) || requiredSameItemMatches <= 0) {
@@ -784,12 +815,26 @@ export function createPublishRunner({
       id: Number(entry?.id),
       needle: String(entry?.needle || entry?.name || "").trim(),
       warehouseId: entry?.warehouseId === null || entry?.warehouseId === undefined ? null : Number(entry.warehouseId),
+      uralWarehouseId: entry?.uralWarehouseId === null || entry?.uralWarehouseId === undefined ? null : Number(entry.uralWarehouseId),
+      weightThresholdGrams: Number(entry?.weightThresholdGrams ?? 500),
+      weightRouting: entry?.weightRouting === true,
       requireWarehouse: entry?.requireWarehouse !== false,
     }))
-    : [{ id: Number(storeId), needle: String(storeNeedle), warehouseId: warehouseId == null ? null : Number(warehouseId), requireWarehouse: false }];
+    : [{
+      id: Number(storeId),
+      needle: String(storeNeedle),
+      warehouseId: warehouseId == null ? null : Number(warehouseId),
+      uralWarehouseId: null,
+      weightThresholdGrams: 500,
+      weightRouting: false,
+      requireWarehouse: false,
+    }];
   for (const entry of targetPlan) {
     if (!(entry.id > 0) || !entry.needle) throw new TypeError("each store target requires a positive id and needle");
     if (entry.warehouseId !== null && !(entry.warehouseId > 0)) throw new TypeError("store target warehouseId must be positive when configured");
+    if (entry.uralWarehouseId !== null && !(entry.uralWarehouseId > 0)) throw new TypeError("store target uralWarehouseId must be positive when configured");
+    if (!(entry.weightThresholdGrams > 0)) throw new TypeError("store target weightThresholdGrams must be positive");
+    if (entry.weightRouting && entry.uralWarehouseId === null) throw new TypeError("weight-routed store target requires uralWarehouseId");
   }
   let cnyRubRate = 10.4672;
   let cnyRubRateConfirmed = false;
@@ -1699,6 +1744,36 @@ export function createPublishRunner({
       let contentQuality = null;
       let observedMode = null;
       let fbsEvidence = null;
+      let shippingRoute = null;
+      const applyShippingRoute = () => {
+        if (shippingRoute) return shippingRoute;
+        const weightGrams = productWeightGrams(productInfo, detail || item);
+        if (targetConfig.weightRouting !== true) {
+          shippingRoute = {
+            available: true,
+            route: "postal",
+            logistics: "CEL",
+            warehouseId: Number(targetConfig.warehouseId || 0) || null,
+            weightGrams,
+            thresholdGrams: Number(targetConfig.weightThresholdGrams || 500),
+          };
+          return shippingRoute;
+        }
+        shippingRoute = selectShippingRoute({
+          weightGrams,
+          postalWarehouseId: targetConfig.postalWarehouseId || targetConfig.warehouseId,
+          uralWarehouseId: targetConfig.uralWarehouseId,
+          thresholdGrams: targetConfig.weightThresholdGrams,
+          weightRouting: true,
+        });
+        if (!shippingRoute.available) {
+          const error = new Error(`Ural warehouse is unavailable for store ${targetConfig?.store?.id || "unknown"}`);
+          error.code = "URAL_WAREHOUSE_UNAVAILABLE";
+          throw error;
+        }
+        targetConfig = { ...targetConfig, warehouseId: shippingRoute.warehouseId };
+        return shippingRoute;
+      };
 
       if (activeDirectMode) {
         const snapshotTitle = normalizedContentText(item?.title);
@@ -1750,6 +1825,7 @@ export function createPublishRunner({
           category: category.mapped,
         });
         detail = { ...item };
+        applyShippingRoute();
       } else {
         [detailResult, categoryData] = await timed(sku, "ozon_detail_and_category", () => Promise.all([
           detailProvider.getProductDetail(sku, item),
@@ -1800,6 +1876,7 @@ export function createPublishRunner({
           salePrice,
           cnyRubRate,
         );
+        applyShippingRoute();
         contentQuality = preSubmitContentQuality({
           item,
           detail: { ...(detailResult || {}), ...(confirmationResult || {}) },
@@ -1820,11 +1897,12 @@ export function createPublishRunner({
             detail,
             category,
             profitThreshold,
+            logistics: shippingRoute.logistics,
           })));
         } catch {
           // This fast-path must never replace the original exact calculation on transient ERP failures.
         }
-        const optimisticEconomy = economyResult(optimisticCalc);
+        const optimisticEconomy = economyResult(optimisticCalc, shippingRoute.logistics);
         const optimisticRateValue = optimisticEconomy?.price_list?.profit_rate;
         const optimisticRate = optimisticRateValue === null || optimisticRateValue === undefined || optimisticRateValue === ""
           ? Number.NaN
@@ -2005,6 +2083,7 @@ export function createPublishRunner({
 
       let calc;
       try {
+        applyShippingRoute();
         calc = await timed(sku, "profit_calculation", () => client.calculateProfit(profitCalculationInput({
           sku,
           salePrice,
@@ -2013,6 +2092,7 @@ export function createPublishRunner({
           detail,
           category,
           profitThreshold,
+          logistics: shippingRoute.logistics,
         })));
       } catch (error) {
         if (isFatalRunnerError(error)) throw error;
@@ -2027,7 +2107,7 @@ export function createPublishRunner({
         cnyRubRate = calculatedCnyRubRate;
         cnyRubRateConfirmed = true;
       }
-      const economy = economyResult(calc);
+      const economy = economyResult(calc, shippingRoute.logistics);
       const preflightReason = activeDirectMode
         ? null
         : policy.preflightSkipReason({ ...detail, economy });
@@ -2076,6 +2156,11 @@ export function createPublishRunner({
         store_id: targetConfig.store.id,
         store_name: targetConfig.store.name ?? targetConfig.store.title ?? "",
         watermark_id: targetConfig.watermark.id,
+        warehouse_id: shippingRoute.warehouseId,
+        shipping_route: shippingRoute.route,
+        logistics_provider: shippingRoute.logistics,
+        package_weight_grams: shippingRoute.weightGrams,
+        weight_threshold_grams: shippingRoute.thresholdGrams,
         offer_id: payload.rows[0].offer_id,
         mode: activeDirectMode ? observedMode : "FBS",
         shipping_mode: activeDirectMode ? observedMode : "FBS",
@@ -2469,6 +2554,7 @@ export function createPublishRunner({
       throw new TypeError("run attemptLimit must be a non-negative integer");
     }
     await state.load?.();
+    const profitSnapshot = await profitFiles.snapshot();
     const gate = await activeSubmissionGate();
     const allowedSkus = activeValidationOnly ? null : gate.allowed_skus;
     const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
@@ -2736,7 +2822,7 @@ export function createPublishRunner({
       const dailyCreate = resolved.store?.product_limit?.daily_create;
       const dailyLimit = Number(dailyCreate?.limit);
       const dailyUsage = Number(dailyCreate?.usage);
-      const effectiveDailyLimit = activeDirectMode
+      const effectiveDailyLimit = activeDirectMode && !enforceDirectDailyLimit
         ? Number.MAX_SAFE_INTEGER
         : dailyLimit > 0
           ? Math.min(configuredDailyStoreLimit, dailyLimit)
@@ -2756,7 +2842,13 @@ export function createPublishRunner({
         error.code = "STORE_TOTAL_LIMIT";
         throw error;
       }
-      if (!activeDirectMode && !allowExhausted && effectiveDailyUsage >= effectiveDailyLimit) {
+      if (enforceDailyQuota && !allowExhausted && effectiveDailyUsage >= effectiveDailyLimit) {
+        if (activeDirectMode) {
+          freezeDirectStore(spec.id, "daily-product-limit", {
+            source: "configured-daily-limit",
+            quota_day: currentUsageDay,
+          }, { record: false });
+        }
         const error = new Error(`daily creation quota exhausted for store ${spec.id}`);
         error.code = "STORE_DAILY_LIMIT";
         throw error;
@@ -2819,11 +2911,22 @@ export function createPublishRunner({
         commissionTree = typeof client.listCategoryCommissions === "function" ? await client.listCategoryCommissions() : [];
         if (targetConfigCache) targetConfigCache.commissionTree = commissionTree;
       }
-      const value = { ...resolved, commissionTree, warehouseId: targetWarehouseId || null };
+      const value = {
+        ...resolved,
+        commissionTree,
+        warehouseId: targetWarehouseId || null,
+        postalWarehouseId: targetWarehouseId || null,
+        uralWarehouseId: Number(spec.uralWarehouseId || 0) || null,
+        weightThresholdGrams: Number(spec.weightThresholdGrams || 500),
+        weightRouting: spec.weightRouting === true,
+      };
       recordStoreTargetMetric({
         store_id: Number(resolved.store?.id || spec.id),
         store_name: resolved.store?.name ?? resolved.store?.title ?? spec.needle,
         warehouse_id: targetWarehouseId || null,
+        ural_warehouse_id: Number(spec.uralWarehouseId || 0) || null,
+        weight_threshold_grams: Number(spec.weightThresholdGrams || 500),
+        weight_routing: spec.weightRouting === true,
         warehouse_source: Number(spec.warehouseId) > 0 ? "configured" : "erp-discovered",
         daily_usage: effectiveDailyUsage,
         daily_limit: effectiveDailyLimit,
@@ -2867,7 +2970,7 @@ export function createPublishRunner({
           error.code = "STORE_TOTAL_LIMIT";
           throw error;
         }
-        if (!activeDirectMode
+        if (enforceDailyQuota
           && !allowExhausted
           && Number(storeDailyUsage.get(spec.id) || 0) >= Number(storeDailyLimits.get(spec.id) || configuredDailyStoreLimit)) {
           const error = new Error(`daily creation quota exhausted for store ${spec.id}`);
@@ -2994,7 +3097,14 @@ export function createPublishRunner({
     }
 
     const stalledStoresThisRun = new Set();
-    let freshSubmissionsPaused = false;
+    const dailyWindow = dailyWindowState({
+      now: now(),
+      timeZone: dailyStoreTimeZone,
+      cutoff: dailySubmissionCutoff,
+      reportAfter: dailyReportAfter,
+    });
+    let freshSubmissionsPaused = activeDirectMode && !reconciliationOnly && !dailyWindow.open;
+    let dailyWindowClosed = freshSubmissionsPaused;
     let initialPauseReason = null;
     let targetConfig;
     if (activeDirectMode) {
@@ -3022,6 +3132,9 @@ export function createPublishRunner({
         try {
           targetConfig = await resolveTargetConfig(activeTargetIndex, { allowExhausted: true });
           freshSubmissionsPaused = true;
+          dailyWindowClosed = activeDirectMode
+            && enforceDirectDailyLimit === true
+            && haltReason === "daily-product-limit";
           initialPauseReason = haltReason;
           haltReason = null;
         } catch {
@@ -3153,12 +3266,12 @@ export function createPublishRunner({
       const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
       return restored?.status !== "published" && restored?.status !== "skipped";
     });
-    const freshCandidates = prioritizePublishCandidates(
+    const freshCandidates = prioritizeProfitCandidates(prioritizePublishCandidates(
       actionableFavorites.filter((item) => !isReconciliationCandidate(item)),
       preflightPureSkus,
       familyScores,
       sourceScores,
-    );
+    ), profitSnapshot, targetConfig.store.id);
     const dueReconciliations = prioritizePublishCandidates(
       (activeValidationOnly || (activeDirectMode && !reconciliationOnly)
         ? []
@@ -3174,6 +3287,19 @@ export function createPublishRunner({
       ...terminalCleanupCandidates,
       ...interleaveCandidateBatches(freshCandidates, dueReconciliations, workerCount),
     ];
+    const terminalCleanupSet = new Set(terminalCleanupCandidates);
+    const reorderRemainingFreshForStore = (fromIndex, storeId) => {
+      const positions = [];
+      const pendingFresh = [];
+      for (let index = Math.max(0, Number(fromIndex) || 0); index < candidates.length; index += 1) {
+        const item = candidates[index];
+        if (terminalCleanupSet.has(item) || isReconciliationCandidate(item)) continue;
+        positions.push(index);
+        pendingFresh.push(item);
+      }
+      const ranked = prioritizeProfitCandidates(pendingFresh, profitSnapshot, storeId);
+      positions.forEach((position, index) => { candidates[position] = ranked[index]; });
+    };
     let published = Number(state.runPublishedCount?.() ?? 0);
     const resolvedRunDir = path.resolve(runDir);
     const acceptedSkus = new Set(
@@ -3353,6 +3479,7 @@ export function createPublishRunner({
           }
           recoveryTarget = await resolveTargetConfig(intentTargetIndex, { allowExhausted: true });
         }
+        recoveryTarget = targetConfigForPersistedRoute(recoveryTarget, item);
         return {
           ...await recoverSubmissionIntent(item, recoveryTarget, batchControl),
           attempted: true,
@@ -3453,6 +3580,7 @@ export function createPublishRunner({
           }
           reconciliationTarget = await resolveTargetConfig(restoredTargetIndex, { allowExhausted: true });
         }
+        reconciliationTarget = targetConfigForPersistedRoute(reconciliationTarget, item);
         const nextReconcileAt = Date.parse(item.next_reconcile_at || "");
         if ((item.submitted || item.submission_pending)
           && Number.isFinite(nextReconcileAt)
@@ -3860,6 +3988,7 @@ export function createPublishRunner({
           const nextConfig = await advanceStore(haltReason, targetConfig);
           if (!nextConfig) break;
           targetConfig = nextConfig;
+          reorderRemainingFreshForStore(cursor, targetConfig.store.id);
           continue;
         }
         if (haltReason) {
@@ -3890,6 +4019,16 @@ export function createPublishRunner({
           || item?.submitted === true
           || item?.submission_pending === true
           || item?.submission_intent === true;
+        if (activeDirectMode && !reconciliation && !dailyWindowState({
+          now: now(),
+          timeZone: dailyStoreTimeZone,
+          cutoff: dailySubmissionCutoff,
+          reportAfter: dailyReportAfter,
+        }).open) {
+          freshSubmissionsPaused = true;
+          dailyWindowClosed = true;
+          break schedulerLoop;
+        }
         if (!unlimitedTarget
           && !activeValidationOnly
           && inFlightFreshCount() > 0
@@ -3917,13 +4056,14 @@ export function createPublishRunner({
           if (nextConfig) {
             unavailableStoreUntil.set(activeStoreId, now().getTime() + Math.max(0, Number(pendingStoreRetryMs) || 0));
             targetConfig = nextConfig;
+            reorderRemainingFreshForStore(cursor, targetConfig.store.id);
             continue schedulerLoop;
           }
           freshSubmissionsPaused = true;
           break schedulerLoop;
         }
 
-        const remainingDailyStoreQuota = activeDirectMode
+        const remainingDailyStoreQuota = !enforceDailyQuota
           ? Number.POSITIVE_INFINITY
           : Number(storeDailyLimits.get(activeStoreId) || configuredDailyStoreLimit)
             - Number(storeDailyUsage.get(activeStoreId) || 0);
@@ -3936,8 +4076,14 @@ export function createPublishRunner({
           if (inFlight.size > 0) break;
           haltReason = remainingDailyStoreQuota <= 0 ? "daily-product-limit" : "store-total-limit";
           const nextConfig = await advanceStore(haltReason, targetConfig);
-          if (!nextConfig) break schedulerLoop;
+          if (!nextConfig) {
+            if (activeDirectMode && enforceDirectDailyLimit === true && haltReason === "daily-product-limit") {
+              dailyWindowClosed = true;
+            }
+            break schedulerLoop;
+          }
           targetConfig = nextConfig;
+          reorderRemainingFreshForStore(cursor, targetConfig.store.id);
           continue schedulerLoop;
         }
 
@@ -3990,6 +4136,13 @@ export function createPublishRunner({
         all: targetPlan.every((entry) => directRejectedStoreIds.has(Number(entry.id))),
       } : null,
       fresh_submissions_paused: freshSubmissionsPaused,
+      daily_window_closed: dailyWindowClosed,
+      daily_submission_window: dailyWindowState({
+        now: now(),
+        timeZone: dailyStoreTimeZone,
+        cutoff: dailySubmissionCutoff,
+        reportAfter: dailyReportAfter,
+      }),
       active_store_id: Number(targetConfig?.store?.id || 0),
       store_switches: storeSwitches,
       store_submitted_usage: Object.fromEntries([...storeDailyUsage].map(([id, usage]) => [String(id), usage])),

@@ -4,9 +4,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   isReliable1688CostSource,
+  sameItemCostEvidence,
   verifyReturnedSameItemEvidence,
 } from "./cost-evidence.mjs";
 import { createJsonLineWorkerPool } from "./json-line-worker-pool.mjs";
+import {
+  createProfitFilesReader,
+  feedbackExcludedOfferIds,
+  manualFeedbackDecision,
+} from "./profit-priority.mjs";
 
 function lineValue(text, label) {
   const match = String(text || "").match(new RegExp(`^${label}\\s+(.+)$`, "m"));
@@ -17,6 +23,7 @@ export function compactCostOutput(text) {
   return [
     "SAME_ITEM_EVIDENCE",
     "MATCH_EVIDENCE_KEY",
+    "SELECTED_OFFER_ID",
     "BALANCED_MATCH_OK",
     "BALANCED_MATCH_TYPE",
     "BALANCED_MATCH_REASON",
@@ -67,6 +74,7 @@ export function parseCostOutput(text, sellPrice, {
   const cost = Number(lineValue(text, "P70_COST"));
   const source = lineValue(text, "COST_SOURCE");
   const matchEvidenceKey = lineValue(text, "MATCH_EVIDENCE_KEY");
+  const selectedOfferId = lineValue(text, "SELECTED_OFFER_ID");
   const encodedSameItemEvidence = lineValue(text, "SAME_ITEM_EVIDENCE");
   const prices = parsePrices(lineValue(text, "FILTERED_FIRST_PAGE_PRICES"));
   const sale = Number(sellPrice);
@@ -91,6 +99,7 @@ export function parseCostOutput(text, sellPrice, {
     filteredPrices: prices,
     costSource: source,
     selectedCost: cost,
+    selectedOfferId,
     minimumMatches: requiredMatches,
     requiredContract: requiredEvidenceContract,
     requireBalancedMatch,
@@ -109,6 +118,10 @@ export function parseCostOutput(text, sellPrice, {
       returned_evidence_verified: true,
       match_evidence_contract: sameItemProof.contract,
       matched_offer_count: sameItemProof.matched_offer_count,
+      matched_offer_ids: sameItemProof.offer_ids,
+      selected_offer_id: sameItemProof.selected_offer_id,
+      selected_offer_ids: sameItemProof.selected_offer_ids,
+      selected_cluster_offer_ids: sameItemProof.selected_cluster_offer_ids,
       balanced_match: sameItemProof.balanced_match,
       balanced_match_type: sameItemProof.balanced_match_type,
       balanced_match_reason: sameItemProof.balanced_match_reason,
@@ -193,10 +206,11 @@ async function readableFile(filePath) {
   }
 }
 
-async function defaultWriteCache(filename, cache) {
+async function defaultWriteCache(filename, cache, serializedPayload = null) {
   const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await fs.mkdir(path.dirname(filename), { recursive: true });
-  await fs.writeFile(temporary, `${JSON.stringify(cache)}\n`, "utf8");
+  const payload = serializedPayload ?? `${JSON.stringify(cache)}\n`;
+  await fs.writeFile(temporary, payload, "utf8");
   await fs.rename(temporary, filename);
 }
 
@@ -224,6 +238,9 @@ export function createCostBridge({
   matchPolicyRetentionPercent = Number(process.env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT || 75),
   matchPolicyImageAvailabilityPercent = Number(process.env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT || 90),
   matchPolicyP95Ms = Number(process.env.FLOW_B_1688_MATCH_MAX_P95_MS || 15_000),
+  feedbackFile = process.env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
+  feedbackRefreshMs = Number(process.env.FLOW_B_PROFIT_FILE_REFRESH_MS || 5_000),
+  trustedFeedbackMaxAgeMs = Number(process.env.FLOW_B_PROFIT_TRUSTED_MAX_AGE_MS || 30 * 24 * 60 * 60 * 1000),
   writeCache = defaultWriteCache,
   now = () => Date.now(),
   downloadAttempts = 2,
@@ -236,11 +253,21 @@ export function createCostBridge({
   const crossRunKeysByRun = new Map();
   let cacheWriteChain = Promise.resolve();
   let pendingCacheGeneration = null;
+  let backgroundCacheWriteError = null;
   let ownedWorkerPool = null;
   let persistentWorkersDisabled = process.env.FLOW_B_1688_PERSISTENT_POOL === "0";
   let workerInfrastructureFailures = 0;
   const matchPolicyByRun = new Map();
   let matchPolicyWriteChain = Promise.resolve();
+  const profitFiles = createProfitFilesReader({
+    feedbackFile,
+    refreshMs: Math.max(0, Number(feedbackRefreshMs) || 0),
+    now,
+  });
+  // Prime the two small sidecar files outside the per-product hot path. Later
+  // refreshes are fire-and-forget so manual feedback never adds disk latency to
+  // an Ozon publishing request.
+  let profitFilesReady = profitFiles.snapshot().catch(() => profitFiles.current());
   const health = {
     circuit: "closed",
     consecutiveFailures: 0,
@@ -268,6 +295,48 @@ export function createCostBridge({
       requiredEvidenceContract: Object.values(expectedMatchEvidence).some(Boolean)
         ? "1688-returned-same-item-v3"
         : null,
+    };
+  }
+
+  function trustedFeedbackCost(feedback, item) {
+    const sourceSku = String(item?.sku || "").trim();
+    const salePrice = Number(item?.sell_price);
+    if (!sourceSku || !Number.isFinite(salePrice) || salePrice <= 0) return null;
+    const rows = Array.isArray(feedback?.trusted_matches) ? feedback.trusted_matches : [];
+    const entry = rows
+      .filter((row) => String(row?.source_sku || row?.sku || "").trim() === sourceSku)
+      .sort((left, right) => Date.parse(right?.updated_at || "") - Date.parse(left?.updated_at || ""))[0];
+    if (!entry) return null;
+    const updatedAt = Date.parse(entry.updated_at || "");
+    const currentTime = Number(now());
+    const maxAge = Math.max(1, Number(trustedFeedbackMaxAgeMs) || 0);
+    if (!Number.isFinite(updatedAt)
+      || updatedAt > currentTime + 5 * 60 * 1000
+      || currentTime - updatedAt > maxAge) return null;
+    const cost = Number(entry.actual_cost ?? entry.actual_purchase_price ?? entry.purchase_price);
+    if (!Number.isFinite(cost) || cost <= 0 || cost < salePrice * 0.02 || cost >= salePrice * 0.85) return null;
+    const selectedOfferId = String(entry.selected_offer_id || entry.offer_id || "").trim();
+    const verified = entry?.verified_cost && typeof entry.verified_cost === "object"
+      ? entry.verified_cost
+      : null;
+    if (!selectedOfferId || !verified || String(verified.selected_offer_id || "").trim() !== selectedOfferId) return null;
+    const candidate = {
+      ...verified,
+      ok: true,
+      cost,
+      selected_offer_id: selectedOfferId,
+      selected_offer_ids: [selectedOfferId],
+    };
+    const evidence = sameItemCostEvidence(candidate, {
+      minimumMatches: Math.max(1, Number(minimumSameItemMatches) || 1),
+    });
+    if (evidence.same_item_match !== true || evidence.selected_offer_id !== selectedOfferId) return null;
+    return {
+      ...candidate,
+      estimated_cost: Number(entry.estimated_cost ?? verified.cost) || null,
+      manual_feedback_trusted: true,
+      manual_feedback_cache: true,
+      feedback_updated_at: new Date(updatedAt).toISOString(),
     };
   }
 
@@ -486,6 +555,9 @@ export function createCostBridge({
           const result = await pool.run({
             image: String(imagePath),
             minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
+            excluded_offer_ids: Array.isArray(item?.excluded_1688_offer_ids)
+              ? item.excluded_1688_offer_ids.map(String)
+              : [],
             ...evidence,
           }, remaining, { signal });
           workerInfrastructureFailures = 0;
@@ -513,6 +585,9 @@ export function createCostBridge({
       if (evidence[key]) evidenceArgs.push(flag, evidence[key]);
     }
     evidenceArgs.push("--min-matches", String(Math.max(1, Number(minimumSameItemMatches) || 1)));
+    for (const offerId of item?.excluded_1688_offer_ids || []) {
+      evidenceArgs.push("--exclude-offer-id", String(offerId));
+    }
     const remaining = deadlineAt - Date.now();
     if (remaining <= 0) {
       throw Object.assign(new Error(`1688 total budget exceeded after ${budget}ms`), {
@@ -535,9 +610,10 @@ export function createCostBridge({
     const hasEvidence = Object.values(evidence).some(Boolean);
     const payload = hasEvidence
       ? JSON.stringify({
-        version: 5,
+        version: 6,
         image_url: imageUrl,
         minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
+        excluded_offer_ids: [...new Set((item?.excluded_1688_offer_ids || []).map(String))].sort(),
         ...evidence,
       })
       : `${imageUrl}:min-matches=${Math.max(1, Number(minimumSameItemMatches) || 1)}`;
@@ -610,10 +686,23 @@ export function createCostBridge({
     const entries = [...generation.writes.entries()];
     generation.writes.clear();
     const operation = cacheWriteChain.then(async () => {
-      for (const [filename, cache] of entries) await writeCache(filename, cache);
+      const serializedByCache = new Map();
+      for (const [filename, cache] of entries) {
+        let serializedPayload = null;
+        if (writeCache === defaultWriteCache) {
+          if (!serializedByCache.has(cache)) {
+            serializedByCache.set(cache, `${JSON.stringify(cache)}\n`);
+          }
+          serializedPayload = serializedByCache.get(cache);
+        }
+        await writeCache(filename, cache, serializedPayload);
+      }
     });
     generation.operation = operation;
     cacheWriteChain = operation.catch(() => {});
+    operation.catch((error) => {
+      backgroundCacheWriteError ||= error;
+    });
     operation.then(generation.resolve, generation.reject);
     return operation;
   }
@@ -637,14 +726,23 @@ export function createCostBridge({
     for (const filename of new Set(filenames)) {
       generation.writes.set(filename, cache);
     }
+    // Estimates must not spend their public 1688 deadline rewriting the
+    // ever-growing run and shared cache snapshots. The generation remains
+    // tracked and close() still flushes it durably.
+    generation.promise.catch(() => {});
     return generation.promise;
   }
 
   async function flushCacheWrites() {
     while (pendingCacheGeneration) {
-      await beginCacheFlush(pendingCacheGeneration);
+      await beginCacheFlush(pendingCacheGeneration).catch(() => {});
     }
     await cacheWriteChain;
+    if (backgroundCacheWriteError) {
+      const error = backgroundCacheWriteError;
+      backgroundCacheWriteError = null;
+      throw error;
+    }
   }
 
   async function estimateUncached(item, runDir, {
@@ -671,7 +769,7 @@ export function createCostBridge({
         await fs.mkdir(imageDir, { recursive: true });
         await fs.mkdir(outputDir, { recursive: true });
 
-        if (await readableFile(outputPath)) {
+        if ((item?.excluded_1688_offer_ids || []).length === 0 && await readableFile(outputPath)) {
           const cachedText = await fs.readFile(outputPath, "utf8");
           if (/^P70_COST\s+/m.test(cachedText)) {
             const cached = parseCostOutput(cachedText, item?.sell_price, parseOptions(item));
@@ -903,7 +1001,7 @@ export function createCostBridge({
           updated_at: new Date().toISOString(),
         };
         crossRunKeysByRun.get(root)?.delete(key);
-        await saveCache(root, cache);
+        void saveCache(root, cache);
       }
       return { ...result, shared_cache: false, cache_key: key };
     })();
@@ -922,12 +1020,47 @@ export function createCostBridge({
   }
 
   async function estimate(item, runDir) {
+    const files = profitFiles.current();
+    void profitFiles.snapshot().catch(() => {});
+    const excludedOfferIds = feedbackExcludedOfferIds(files.feedback, item?.sku);
+    const effectiveItem = excludedOfferIds.length > 0
+      ? { ...item, excluded_1688_offer_ids: excludedOfferIds }
+      : item;
+    const sourceDecision = manualFeedbackDecision(files.feedback, {
+      sourceSku: item?.sku,
+    });
+    if (sourceDecision.blocked) {
+      return {
+        ok: false,
+        terminal: true,
+        feedback_blocked: true,
+        reason: sourceDecision.reason,
+      };
+    }
+    const trusted = trustedFeedbackCost(files.feedback, item);
+    if (trusted) {
+      const trustedDecision = manualFeedbackDecision(files.feedback, {
+        sourceSku: item?.sku,
+        matchEvidenceKey: trusted.match_evidence_key,
+        offerIds: [trusted.selected_offer_id],
+      });
+      if (trustedDecision.blocked) {
+        return {
+          ...trusted,
+          ok: false,
+          terminal: true,
+          feedback_blocked: true,
+          reason: trustedDecision.reason,
+        };
+      }
+      return trusted;
+    }
     const budget = Math.max(1, Number(totalBudgetMs) || 15_000);
     const deadlineAt = Date.now() + budget;
     const controller = new AbortController();
     const onTimeout = () => controller.abort(totalBudgetError(budget));
-    return withinTotalBudget(
-      estimateWithinBudget(item, runDir, {
+    const result = await withinTotalBudget(
+      estimateWithinBudget(effectiveItem, runDir, {
         budget,
         deadlineAt,
         signal: controller.signal,
@@ -935,16 +1068,57 @@ export function createCostBridge({
       }),
       { deadlineAt, budget, onTimeout },
     );
+    if (!result?.ok) return result;
+    const selectedOfferIds = String(result?.selected_offer_id || "").trim()
+      ? [String(result.selected_offer_id).trim()]
+      : (Array.isArray(result?.selected_offer_ids) && result.selected_offer_ids.length === 1
+        ? result.selected_offer_ids.map(String)
+        : []);
+    const decision = manualFeedbackDecision(files.feedback, {
+      sourceSku: item?.sku,
+      matchEvidenceKey: result?.match_evidence_key,
+      offerIds: selectedOfferIds,
+    });
+    if (decision.blocked) {
+      return {
+        ...result,
+        ok: false,
+        terminal: true,
+        feedback_blocked: true,
+        reason: decision.reason,
+      };
+    }
+    if (Number(decision.cost_override) > 0) {
+      return {
+        ...result,
+        estimated_cost: result.cost,
+        cost: Number(decision.cost_override),
+        manual_cost_override: true,
+        manual_feedback_trusted: decision.trusted === true,
+      };
+    }
+    return decision.trusted === true
+      ? { ...result, manual_feedback_trusted: true }
+      : result;
   }
 
   return {
+    async refreshProfitFeedback({ force = true } = {}) {
+      await profitFilesReady;
+      if (force) {
+        profitFilesReady = profitFiles.snapshot({ force: true }).catch(() => profitFiles.current());
+      }
+      return profitFilesReady;
+    },
     estimate,
     async close() {
-      await flushCacheWrites();
-      await matchPolicyWriteChain;
+      let closeError = null;
+      await flushCacheWrites().catch((error) => { closeError ||= error; });
+      await matchPolicyWriteChain.catch((error) => { closeError ||= error; });
       await workerPool?.close?.().catch(() => {});
       await ownedWorkerPool?.close?.().catch(() => {});
       ownedWorkerPool = null;
+      if (closeError) throw closeError;
     },
   };
 }

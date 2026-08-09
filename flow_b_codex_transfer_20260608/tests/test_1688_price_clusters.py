@@ -43,6 +43,8 @@ class FirstPageClusterCostTest(unittest.TestCase):
         self.assertEqual(result["cost_source"], "search_first_page_cluster_p70_similarity_filtered")
         evidence = json.loads(result["same_item_evidence"])
         self.assertEqual(evidence["selected_cost"], 168.0)
+        self.assertEqual(result["selected_offer_id"], "offer-6")
+        self.assertEqual(evidence["selected_offer_id"], result["selected_offer_id"])
         self.assertEqual(evidence["cost_source"], result["cost_source"])
         self.assertEqual(
             [row["offer_id"] for row in evidence["selected_cluster"]],
@@ -86,6 +88,24 @@ class FirstPageClusterCostTest(unittest.TestCase):
         self.assertEqual(result["p70_cost"], 18.0)
         self.assertEqual(result["filtered_first_page_prices"], [18.0])
         self.assertEqual(result["selected_price_cluster"]["count"], 1)
+
+    def test_confirmed_bad_offer_is_excluded_before_cost_selection(self):
+        result = image_median_1688.first_page_p70_cost(
+            rows([10, 11, 12]),
+            expect_title="same product lamp",
+            page_size=10,
+            minimum_matches=1,
+            excluded_offer_ids=["offer-2"],
+        )
+
+        self.assertEqual(result["decision"], "LIGHT_ACCEPT")
+        self.assertNotIn("offer-2", [
+            row["offerId"] for row in result["filtered_rows"]
+        ])
+        self.assertIn("offer-2", [
+            row["offerId"] for row in result["excluded_rows"]
+            if row["exclude_reason"] == "manually blocked 1688 offer"
+        ])
 
     def test_extreme_spread_requires_strong_cluster(self):
         result = image_median_1688.first_page_p70_cost(

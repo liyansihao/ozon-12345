@@ -22,6 +22,13 @@ import {
 } from "./flow_b_playwright/runtime-state.mjs";
 import { hasReliableSameItemCostEvidence } from "./flow_b_playwright/cost-evidence.mjs";
 import { archiveRestorableProfileSessions } from "./prepare_cdp_profile.mjs";
+import { dailyWindowState } from "./daily-window.mjs";
+import {
+  readDailyPricingScope,
+  readReportState,
+  reportOutputPath,
+  writeReportState,
+} from "./daily-pricing-report.mjs";
 
 const execFileAsync = promisify(execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -29,7 +36,7 @@ const DEFAULT_LABEL = "com.codex.ozon.24h-production";
 const DEFAULT_INSTALL_ROOT = path.join(process.env.HOME || "/Users/mac", ".ozon-24h-production");
 const PRODUCTION_STORE_IDS = [106637, 106640, 106644, 106646, 104965];
 const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|安全检查|验证码/i;
-const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
+const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|connectOverCDP:\s*Timeout|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
 
 function absolute(value, fallback) {
   return path.resolve(String(value || fallback || ""));
@@ -932,13 +939,32 @@ function expandTemplate(value, config = {}) {
     .replaceAll("${STATE_ROOT}", String(config.state_root || ""));
 }
 
-function expandedConfig(config) {
+export function expandedConfig(config) {
   const cloned = structuredClone(config);
   for (const key of ["install_root", "state_root"]) {
     if (cloned[key]) cloned[key] = expandTemplate(cloned[key], cloned);
   }
   for (const key of ["executable", "profile_dir", "extension_dir"]) {
     if (cloned.browser?.[key]) cloned.browser[key] = expandTemplate(cloned.browser[key], cloned);
+  }
+  for (const key of ["output_dir", "runtime_root", "node", "node_modules"]) {
+    if (cloned.daily_pricing_report?.[key]) {
+      cloned.daily_pricing_report[key] = expandTemplate(cloned.daily_pricing_report[key], cloned);
+    }
+  }
+  for (const key of [
+    "priority_file",
+    "feedback_file",
+    "feedback_dir",
+    "learning_status",
+    "feedback_status",
+    "runtime_root",
+    "node",
+    "node_modules",
+  ]) {
+    if (cloned.profit_learning?.[key]) {
+      cloned.profit_learning[key] = expandTemplate(cloned.profit_learning[key], cloned);
+    }
   }
   return cloned;
 }
@@ -973,6 +999,44 @@ export function workerEnvironment(config, currentRun) {
   environment.FLOW_B_CDP_ENDPOINT = config.browser.cdp_endpoint;
   environment.FLOW_B_EXTENSION_DIR = absolute(config.browser.extension_dir);
   environment.FLOW_B_CHROMIUM_EXECUTABLE = absolute(config.browser.executable);
+  if (config.profit_learning?.enabled === true) {
+    const profitLearning = config.profit_learning;
+    const configuredPaths = {
+      FLOW_B_PROFIT_PRIORITY_FILE: profitLearning.priority_file,
+      FLOW_B_PROFIT_FEEDBACK_FILE: profitLearning.feedback_file,
+      FLOW_B_PROFIT_FEEDBACK_DIR: profitLearning.feedback_dir,
+      FLOW_B_PROFIT_LEARNING_STATUS: profitLearning.learning_status,
+      FLOW_B_PROFIT_FEEDBACK_STATE: profitLearning.feedback_status,
+      FLOW_B_PROFIT_RUNTIME_ROOT: profitLearning.runtime_root,
+      FLOW_B_PROFIT_NODE: profitLearning.node,
+      FLOW_B_PROFIT_NODE_MODULES: profitLearning.node_modules,
+      FLOW_B_PROFIT_REPORT_STATUS: path.join(config.state_root, "daily_pricing_report_status.json"),
+      FLOW_B_PROFIT_ARTIFACT_RUNTIME_ROOT: path.join(profitLearning.runtime_root, "artifact-runtime"),
+    };
+    for (const [name, value] of Object.entries(configuredPaths)) {
+      if (!value) continue;
+      environment[name] = absolute(expandTemplate(value, config));
+    }
+    environment.FLOW_B_PROFIT_FILE_REFRESH_MS = String(
+      Math.max(0, Number(profitLearning.file_refresh_ms) || 5_000),
+    );
+    environment.FLOW_B_PROFIT_LEARNING_ENABLED = "1";
+    environment.FLOW_B_PROFIT_POLL_INTERVAL_MS = String(
+      Math.max(1, Number(profitLearning.poll_interval_seconds) || 60) * 1_000,
+    );
+    environment.FLOW_B_PROFIT_LOOKBACK_DAYS = String(
+      Math.max(1, Number(profitLearning.lookback_days) || 30),
+    );
+    environment.FLOW_B_PROFIT_MOTHER_MIN_ORDERS = String(
+      Math.max(1, Number(profitLearning.minimum_completed_orders) || 3),
+    );
+    environment.FLOW_B_PROFIT_ORDER_PAGE_SIZE = String(
+      Math.max(1, Number(profitLearning.order_page_size) || 100),
+    );
+    environment.FLOW_B_PROFIT_ORDER_MAX_PAGES = String(
+      Math.max(1, Number(profitLearning.order_max_pages) || 100),
+    );
+  }
   if (config.runtime_mode === "direct") {
     const configuredTargets = Array.isArray(config.flow_env?.FLOW_B_STORE_TARGETS)
       ? config.flow_env.FLOW_B_STORE_TARGETS
@@ -1026,6 +1090,322 @@ async function runCommand(command, args, options = {}) {
     child.once("error", (error) => resolve({ code: 127, signal: null, error }));
     child.once("exit", (code, signal) => resolve({ code: Number(code ?? 1), signal, error: null }));
   });
+}
+
+function dailyPricingReportStatusPath(stateRoot) {
+  return path.join(path.resolve(stateRoot), "daily_pricing_report_status.json");
+}
+
+function dailyPricingReportStoresPath(stateRoot) {
+  return path.join(path.resolve(stateRoot), "daily_pricing_report_stores.json");
+}
+
+function dailySubmissionWindowMarkerPath(runDir, dateKey = null) {
+  return path.join(
+    path.resolve(runDir),
+    dateKey ? `daily_submission_window_${dateKey}.json` : "daily_submission_window.json",
+  );
+}
+
+function reportDateFromFilename(filename) {
+  const match = String(filename || "").match(/^(\d{4}-\d{2}-\d{2})\.json$/u);
+  return match ? match[1] : null;
+}
+
+async function reportPathExists(filename) {
+  try {
+    await fsp.access(filename);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function reportStateDates(stateRoot) {
+  const directory = path.join(path.resolve(stateRoot), "daily_pricing_reports");
+  let entries = [];
+  try {
+    entries = await fsp.readdir(directory);
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  return entries.map(reportDateFromFilename).filter(Boolean).sort();
+}
+
+async function writeDailyPricingReportStatus(stateRoot, value) {
+  await writeJsonAtomic(dailyPricingReportStatusPath(stateRoot), {
+    schema_version: 1,
+    observed_at: new Date().toISOString(),
+    ...value,
+  });
+}
+
+async function notifyDailyPricingReport(output, dateKey) {
+  const message = `Ozon ${dateKey} 人工核价清单已生成`;
+  const escaped = message.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+  const notification = await runCommand("/usr/bin/osascript", [
+    "-e",
+    `display notification "${escaped}" with title "Ozon每日核价"`,
+  ], { stdio: "ignore" });
+  const reveal = await runCommand("/usr/bin/open", ["-R", output], { stdio: "ignore" });
+  return {
+    notification_ok: notification.code === 0,
+    reveal_ok: reveal.code === 0,
+  };
+}
+
+let dailyPricingReportCheckRunning = false;
+
+export async function runDailyPricingReportCheck({
+  config,
+  stateRoot,
+  runDir,
+  currentRun = {},
+  appRoot = resolveSupervisorAppRoot(),
+  now = new Date(),
+  dateKey = null,
+  notify = true,
+} = {}) {
+  const resolvedConfig = expandedConfig(config || {});
+  const reportConfig = resolvedConfig.daily_pricing_report || {};
+  if (reportConfig.enabled !== true) {
+    const disabled = { status: "disabled", reason: "daily-pricing-report-disabled" };
+    if (stateRoot) await writeDailyPricingReportStatus(stateRoot, disabled);
+    return disabled;
+  }
+  if (dailyPricingReportCheckRunning) return { status: "busy", reason: "daily-pricing-report-check-in-progress" };
+  if (!stateRoot || !runDir) return { status: "waiting", reason: "production-run-not-ready" };
+  dailyPricingReportCheckRunning = true;
+  try {
+    const timeZone = String(reportConfig.time_zone || "Asia/Shanghai");
+    const cutoff = String(reportConfig.cutoff || "20:00");
+    const reportAfter = String(reportConfig.report_after || "20:30");
+    const observed = now instanceof Date ? now : new Date(now);
+    const window = dailyWindowState({ now: observed, timeZone, cutoff, reportAfter });
+    const reportDir = path.resolve(String(reportConfig.output_dir || "/Users/mac/Desktop/ozon每日上品"));
+    const runtimeRoot = path.resolve(String(reportConfig.runtime_root || path.join(stateRoot, "report-runtime")));
+    const nodeModules = path.resolve(String(reportConfig.node_modules || ""));
+    const reportNode = path.resolve(String(reportConfig.node || process.execPath));
+    const stores = Array.isArray(resolvedConfig.stores) ? resolvedConfig.stores : [];
+    const storesFile = dailyPricingReportStoresPath(stateRoot);
+    await writeJsonAtomic(storesFile, stores);
+
+    const dates = new Set(await reportStateDates(stateRoot));
+    try {
+      const markerFiles = await fsp.readdir(runDir);
+      for (const filename of markerFiles) {
+        const match = String(filename).match(/^daily_submission_window_(\d{4}-\d{2}-\d{2})\.json$/u);
+        if (match) dates.add(match[1]);
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    if (dateKey) dates.add(String(dateKey));
+    else if (window.report_eligible) dates.add(window.date);
+    const candidates = [...dates]
+      .filter((value) => /^\d{4}-\d{2}-\d{2}$/u.test(value))
+      .sort();
+    let latest = {
+      status: window.report_eligible ? "waiting" : "waiting_for_report_time",
+      date: dateKey || window.date,
+      reason: window.report_eligible ? "waiting-for-submission-drain" : "report-after-20-30",
+      report_after: reportAfter,
+      next_report_at: window.report_at,
+      output: reportOutputPath(reportDir, dateKey || window.date),
+    };
+    for (const candidateDate of candidates) {
+      const prior = await readReportState(stateRoot, candidateDate);
+      if (prior?.status === "delivered" && await reportPathExists(prior.output || reportOutputPath(reportDir, candidateDate))) {
+        latest = { ...prior, date: candidateDate };
+        continue;
+      }
+      if (candidateDate === window.date && !window.report_eligible) {
+        const waitingForTime = {
+          status: "waiting_for_report_time",
+          date: candidateDate,
+          reason: "report-after-20-30",
+          report_after: reportAfter,
+          next_report_at: window.report_at,
+          output: reportOutputPath(reportDir, candidateDate),
+        };
+        await writeReportState(stateRoot, candidateDate, waitingForTime);
+        latest = waitingForTime;
+        continue;
+      }
+      const candidateMarker = await readJson(
+        dailySubmissionWindowMarkerPath(runDir, candidateDate),
+        await readJson(dailySubmissionWindowMarkerPath(runDir), {}),
+      );
+      if (String(candidateMarker?.date || "") !== candidateDate
+        || !candidateMarker?.drained
+        || candidateMarker?.submission_complete !== true) {
+        const waiting = {
+          status: "waiting",
+          date: candidateDate,
+          reason: "waiting-for-submission-drain",
+          pending_count: null,
+          mismatch_count: null,
+          output: reportOutputPath(reportDir, candidateDate),
+          report_after: reportAfter,
+          next_report_at: dailyWindowState({ now: new Date(`${candidateDate}T00:00:00Z`), timeZone, cutoff, reportAfter }).report_at,
+        };
+        await writeReportState(stateRoot, candidateDate, waiting);
+        latest = waiting;
+        continue;
+      }
+      let scope;
+      try {
+        scope = readDailyPricingScope({
+          runDir,
+          runtimeDbPath: runtimeStateDatabasePath(resolvedConfig),
+          stores,
+          dateKey: candidateDate,
+          timeZone,
+          cutoff,
+          reportAfter,
+          now: observed,
+        });
+      } catch (error) {
+        const failedRead = {
+          status: "error",
+          date: candidateDate,
+          reason: "scope-read-failed",
+          error: String(error?.message || error),
+          output: reportOutputPath(reportDir, candidateDate),
+        };
+        await writeReportState(stateRoot, candidateDate, failedRead);
+        latest = failedRead;
+        continue;
+      }
+      if (Number(scope.blocking_exception_count || scope.mismatch_count || 0) > 0) {
+        const blocked = {
+          status: "blocked",
+          date: candidateDate,
+          reason: scope.mismatch_count > 0 ? "store-id-mismatch" : "data-anomaly",
+          pending_count: scope.pending_count,
+          mismatch_count: scope.mismatch_count,
+          blocking_exception_count: scope.blocking_exception_count,
+          accepted_count: scope.accepted_count,
+          sku_generated_count: scope.sku_generated_count,
+          terminal_failed_count: scope.terminal_failed_count,
+          by_store: scope.by_store,
+          output: reportOutputPath(reportDir, candidateDate),
+        };
+        await writeReportState(stateRoot, candidateDate, blocked);
+        latest = blocked;
+        continue;
+      }
+      if (!scope.ready) {
+        const waiting = {
+          status: "waiting",
+          date: candidateDate,
+          reason: "waiting-for-own-ozon-sku",
+          pending_count: scope.pending_count,
+          mismatch_count: scope.mismatch_count,
+          blocking_exception_count: scope.blocking_exception_count,
+          accepted_count: scope.accepted_count,
+          sku_generated_count: scope.sku_generated_count,
+          terminal_failed_count: scope.terminal_failed_count,
+          by_store: scope.by_store,
+          output: reportOutputPath(reportDir, candidateDate),
+        };
+        await writeReportState(stateRoot, candidateDate, waiting);
+        latest = waiting;
+        continue;
+      }
+      const output = reportOutputPath(reportDir, candidateDate);
+      if (await reportPathExists(output)) {
+        const deliveredAt = prior?.delivered_at || new Date().toISOString();
+        const recovered = {
+          status: "delivered",
+          date: candidateDate,
+          output,
+          delivered_at: deliveredAt,
+          notification_sent_at: prior?.notification_sent_at || deliveredAt,
+          accepted_count: scope.accepted_count,
+          sku_generated_count: scope.sku_generated_count,
+          terminal_failed_count: scope.terminal_failed_count,
+          by_store: scope.by_store,
+        };
+        await writeReportState(stateRoot, candidateDate, recovered);
+        latest = recovered;
+        continue;
+      }
+      const generating = {
+        status: "generating",
+        date: candidateDate,
+        output,
+        pending_count: 0,
+        mismatch_count: 0,
+        accepted_count: scope.accepted_count,
+        sku_generated_count: scope.sku_generated_count,
+        terminal_failed_count: scope.terminal_failed_count,
+        by_store: scope.by_store,
+        started_at: new Date().toISOString(),
+      };
+      await writeReportState(stateRoot, candidateDate, generating);
+      const generatorLog = path.join(stateRoot, "daily_pricing_reports", `${candidateDate}.log`);
+      await fsp.mkdir(path.dirname(generatorLog), { recursive: true });
+      const logFd = fs.openSync(generatorLog, "a");
+      let generated;
+      try {
+        generated = await runCommand(reportNode, [
+          path.join(appRoot, "scripts", "generate_daily_pricing_report.mjs"),
+          "--run-dir", runDir,
+          "--runtime-db", runtimeStateDatabasePath(resolvedConfig),
+          "--stores-file", storesFile,
+          "--date", candidateDate,
+          "--output-dir", reportDir,
+          "--runtime-root", runtimeRoot,
+          "--node-modules", nodeModules,
+          "--time-zone", timeZone,
+          "--cutoff", cutoff,
+          "--report-after", reportAfter,
+          "--verify",
+        ], { cwd: appRoot, env: process.env, stdio: ["ignore", logFd, logFd] });
+      } finally {
+        fs.closeSync(logFd);
+      }
+      if (generated.code !== 0) {
+        const failed = {
+          ...generating,
+          status: "error",
+          reason: "report-generation-failed",
+          error: String(generated.error?.message || `generator exited with code ${generated.code}`),
+          log: generatorLog,
+          failed_at: new Date().toISOString(),
+        };
+        await writeReportState(stateRoot, candidateDate, failed);
+        latest = failed;
+        continue;
+      }
+      const deliveredAt = new Date().toISOString();
+      const notificationSentAt = notify ? deliveredAt : null;
+      const delivered = {
+        ...generating,
+        status: "delivered",
+        delivered_at: deliveredAt,
+        notification_sent_at: notificationSentAt,
+        log: generatorLog,
+      };
+      await writeReportState(stateRoot, candidateDate, delivered);
+      if (notify) {
+        delivered.notification = await notifyDailyPricingReport(output, candidateDate);
+        await writeReportState(stateRoot, candidateDate, delivered);
+      }
+      latest = delivered;
+    }
+    await writeDailyPricingReportStatus(stateRoot, {
+      ...latest,
+      current_date: window.date,
+      current_submission_window: window,
+      output: latest.output || reportOutputPath(reportDir, latest.date || window.date),
+    });
+    return latest;
+  } finally {
+    dailyPricingReportCheckRunning = false;
+  }
 }
 
 async function readTail(filename, maxBytes = 64 * 1024) {
@@ -1507,7 +1887,7 @@ async function waitForVerification({
     resume_file: resumeFile,
   });
   while (!fs.existsSync(resumeFile) && !fs.existsSync(stopFile) && !await acceptanceEnded(runDir)) {
-    await delay(30_000);
+    await delay(2_000);
   }
   if (fs.existsSync(resumeFile)) await fsp.unlink(resumeFile).catch(() => {});
   await runCheckpoint(appRoot, runDir, "verification-wait", checkpointEnv);
@@ -1892,6 +2272,23 @@ async function superviseDirectPublishing({
   let worker = null;
   let shuttingDown = false;
   let restartAttempt = 0;
+  let reportTimer = null;
+  const reportPoll = async () => {
+    try {
+      await runDailyPricingReportCheck({
+        config,
+        stateRoot,
+        runDir,
+        currentRun,
+        appRoot,
+      });
+    } catch (error) {
+      await appendJsonLine(path.join(stateRoot, "daily_pricing_reports", "supervisor-errors.jsonl"), {
+        at: new Date().toISOString(),
+        error: String(error?.message || error),
+      }).catch(() => {});
+    }
+  };
   const stopWorker = async () => {
     await stopOwnedWorker(worker);
     worker = null;
@@ -1905,6 +2302,12 @@ async function superviseDirectPublishing({
   process.on("SIGHUP", onSignal);
   try {
     await fsp.mkdir(runDir, { recursive: true });
+    await reportPoll();
+    const reportIntervalMs = Math.max(
+      30_000,
+      Number(config.daily_pricing_report?.poll_interval_seconds || 60) * 1000,
+    );
+    reportTimer = setInterval(() => { void reportPoll(); }, reportIntervalMs);
     while (!shuttingDown) {
       if (fs.existsSync(stopFile)) {
         await stopWorker();
@@ -2071,6 +2474,16 @@ async function superviseDirectPublishing({
           checkpointEnv: workerEnvironment(config, currentRun),
         });
       } else {
+        for (const pid of browserOwnerPidsForRecovery(decision, owners)) {
+          await stopExactOwner(pid);
+          await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+            at: new Date().toISOString(),
+            run_dir: runDir,
+            action: "recycled-unresponsive-profile-owner",
+            pid,
+            reason: decision.reason,
+          });
+        }
         await delay(seconds * 1000);
       }
     }
@@ -2080,6 +2493,7 @@ async function superviseDirectPublishing({
     });
     return 0;
   } finally {
+    if (reportTimer) clearInterval(reportTimer);
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
     process.off("SIGHUP", onSignal);

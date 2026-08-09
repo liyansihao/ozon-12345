@@ -197,18 +197,21 @@ test("store target environment parses an ordered verified rotation plan", () => 
     { id: 104965, needle: "丽丽1号", warehouseId: 1020005022957960, requireWarehouse: true },
     { id: 106637, needle: "丽丽二号", warehouseId: null, requireWarehouse: true },
   ]);
-  assert.deepEqual(parseStoreTargets({}), [
-    { id: 104965, needle: "丽丽1号", warehouseId: 1020005023597900, requireWarehouse: true },
-    { id: 106637, needle: "丽丽二号", warehouseId: 1020005023256510, requireWarehouse: true },
-    { id: 106640, needle: "丽丽三号", warehouseId: 1020005023616740, requireWarehouse: true },
-    { id: 106644, needle: "丽丽四号", warehouseId: 1020005023616380, requireWarehouse: true },
-    { id: 106646, needle: "丽丽五号", warehouseId: 1020005023616970, requireWarehouse: true },
-    { id: 113151, needle: "丽丽六号", warehouseId: 1020005024854760, requireWarehouse: true },
-    { id: 113153, needle: "丽丽七号", warehouseId: 1020005024855310, requireWarehouse: true },
-    { id: 113154, needle: "丽丽八号", warehouseId: 1020005024855600, requireWarehouse: true },
-    { id: 113155, needle: "丽丽九号", warehouseId: 1020005024855790, requireWarehouse: true },
-    { id: 113156, needle: "丽丽十号", warehouseId: 1020005024856090, requireWarehouse: true },
+  const defaults = parseStoreTargets({});
+  assert.deepEqual(defaults.map((row) => row.id), [
+    104965, 106637, 106640, 106644, 106646, 113151, 113153, 113154, 113155, 113156,
   ]);
+  assert.deepEqual(defaults.map((row) => row.warehouseId), [
+    1020005023597900, 1020005023256510, 1020005023616740, 1020005023616380, 1020005023616970,
+    1020005024854760, 1020005024855310, 1020005024855600, 1020005024855790, 1020005024856090,
+  ]);
+  assert.deepEqual(defaults.map((row) => row.uralWarehouseId), [
+    1020005026342280, 1020005026343390, 1020005026339130, 1020005026343030, 1020005026342580,
+    1020005026343600, 1020005026341880, 1020005026343890, 1020005026344240, 1020005026344600,
+  ]);
+  assert.ok(defaults.every((row) => row.requireWarehouse
+    && row.weightRouting === true
+    && row.weightThresholdGrams === 500));
   assert.throws(() => parseStoreTargets({ FLOW_B_STORE_TARGETS: "not-json" }), /STORE_TARGETS.*JSON/i);
 });
 

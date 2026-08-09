@@ -85,6 +85,41 @@ test("warehouse mappings and ERP store matches must be unique", () => {
   assert.equal(duplicateErpStoreSnapshot.all_stores_found, false);
 });
 
+test("configured Ural warehouses must also exist uniquely in each ERP store", () => {
+  const routedStores = configuredStores.map((store) => ({
+    ...store,
+    ural_warehouse_id: store.warehouse_id + 100,
+  }));
+  const routedErp = erpStores().map((store) => {
+    const configured = routedStores.find((row) => row.id === store.id);
+    return {
+      ...store,
+      warehouse: [
+        ...(store.warehouse || []),
+        { warehouse_id: configured.ural_warehouse_id, name: "ural" },
+      ],
+    };
+  });
+  const verified = buildCapacityPreflight({
+    configuredStores: routedStores,
+    erpStores: routedErp,
+    profileStores: [{ id: 106646, warehouse: [
+      { warehouse_id: 44 },
+      { warehouse_id: 144, name: "ural" },
+    ] }],
+  });
+  assert.equal(verified.all_warehouses_verified, true);
+  assert.ok(verified.stores.every((row) => row.ural_warehouse_verified));
+
+  const missing = buildCapacityPreflight({
+    configuredStores: routedStores,
+    erpStores: erpStores(),
+    profileStores: [{ id: 106646, warehouse: [{ warehouse_id: 44 }] }],
+  });
+  assert.equal(missing.all_warehouses_verified, false);
+  assert.ok(missing.stores.every((row) => row.available === false));
+});
+
 test("capacity preflight uses the ERP daily-create reset that can clear the shortfall", () => {
   const resetAt = "2026-07-28T00:00:00.000Z";
   const snapshot = buildCapacityPreflight({

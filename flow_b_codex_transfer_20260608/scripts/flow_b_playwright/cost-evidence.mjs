@@ -45,6 +45,7 @@ export function verifyReturnedSameItemEvidence({
   filteredPrices = [],
   costSource,
   selectedCost,
+  selectedOfferId,
   minimumMatches = 3,
   requiredContract = null,
   requireBalancedMatch = false,
@@ -167,6 +168,21 @@ export function verifyReturnedSameItemEvidence({
   if (!selectedCluster.some((row) => Number(row?.price) === Number(selectedCost))) {
     return { ok: false, reason: "selected cost is not present in the selected returned cluster" };
   }
+  const emittedSelectedOfferId = String(selectedOfferId || "").trim();
+  const evidenceSelectedOfferId = String(evidence?.selected_offer_id || "").trim();
+  if (!emittedSelectedOfferId || !evidenceSelectedOfferId) {
+    return { ok: false, reason: "missing exact selected 1688 offer identity" };
+  }
+  if (emittedSelectedOfferId !== evidenceSelectedOfferId) {
+    return { ok: false, reason: "selected 1688 offer identity does not match signed evidence" };
+  }
+  if (!selectedIds.has(emittedSelectedOfferId)) {
+    return { ok: false, reason: "selected 1688 offer identity is outside the selected cluster" };
+  }
+  const exactSelectedRow = selectedCluster.find((row) => String(row?.offer_id || "").trim() === emittedSelectedOfferId);
+  if (Number(exactSelectedRow?.price) !== Number(selectedCost)) {
+    return { ok: false, reason: "selected 1688 offer identity is not bound to the selected cost" };
+  }
   let balancedMatch = null;
   if (contract === "1688-returned-same-item-v3") {
     const semanticStrengths = new Set([
@@ -266,6 +282,10 @@ export function verifyReturnedSameItemEvidence({
     ok: true,
     contract: evidence.contract,
     key,
+    offer_ids: [...offerIds],
+    selected_offer_id: emittedSelectedOfferId,
+    selected_offer_ids: [emittedSelectedOfferId],
+    selected_cluster_offer_ids: [...selectedIds],
     matched_offer_count: rows.length,
     balanced_match: balancedMatch?.passed === true,
     balanced_match_type: balancedMatch?.match_type || null,
@@ -278,6 +298,8 @@ export function sameItemCostEvidence(cost = {}, { minimumMatches = 3 } = {}) {
   const requiredMatches = Math.max(1, Number(minimumMatches) || 1);
   const source = String(cost?.source || "").trim();
   const matchEvidenceKey = String(cost?.match_evidence_key || "").trim();
+  const selectedOfferId = String(cost?.selected_offer_id || "").trim();
+  const evidenceContract = String(cost?.match_evidence_contract || "");
   const prices = Array.isArray(cost?.prices)
     ? cost.prices.map(Number).filter((value) => Number.isFinite(value) && value > 0)
     : [];
@@ -287,7 +309,8 @@ export function sameItemCostEvidence(cost = {}, { minimumMatches = 3 } = {}) {
     && isValid1688MatchEvidenceKey(matchEvidenceKey)
     && cost?.same_item_match === true
     && cost?.returned_evidence_verified === true
-    && ["1688-returned-same-item-v2", "1688-returned-same-item-v3"].includes(cost?.match_evidence_contract)
+    && (evidenceContract === "1688-returned-same-item-v2" || Boolean(selectedOfferId))
+    && ["1688-returned-same-item-v2", "1688-returned-same-item-v3"].includes(evidenceContract)
     && Number(cost?.matched_offer_count) >= requiredMatches
     && prices.length >= requiredMatches;
   return {
@@ -297,9 +320,10 @@ export function sameItemCostEvidence(cost = {}, { minimumMatches = 3 } = {}) {
     same_item_match: verified,
     match_evidence_key: matchEvidenceKey || null,
     filtered_price_count: prices.length,
-    match_evidence_contract: verified ? cost.match_evidence_contract : null,
+    match_evidence_contract: verified ? evidenceContract : null,
     returned_evidence_verified: verified,
     matched_offer_count: verified ? Number(cost.matched_offer_count) : 0,
+    selected_offer_id: verified ? selectedOfferId : null,
   };
 }
 
@@ -324,6 +348,10 @@ export function hasReliableSameItemCostEvidence(data = {}, { minimumMatches = 3 
     && String(evidence?.source || "") === source
     && isValid1688MatchEvidenceKey(evidence?.match_evidence_key)
     && String(evidence.match_evidence_key) === String(cost?.match_evidence_key || "")
+    && (evidence?.match_evidence_contract === "1688-returned-same-item-v2" || (
+      Boolean(String(cost?.selected_offer_id || "").trim())
+      && String(evidence?.selected_offer_id || "") === String(cost?.selected_offer_id || "")
+    ))
     && cost?.same_item_match === true
     && cost?.returned_evidence_verified === true
     && cost?.match_evidence_contract === evidence.match_evidence_contract

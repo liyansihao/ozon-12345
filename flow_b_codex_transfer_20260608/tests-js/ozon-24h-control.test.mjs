@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   buildIncidentDigest,
+  clearOzonManualVerificationLock,
   compactProductionStatus,
   currentRunRetirementDecision,
   dailyAcceptedSummary,
@@ -17,6 +18,7 @@ import {
   globalFlowBWorkerPids,
   productionProfileOwnerPids,
   productionSupervisorPids,
+  readProfitLearningStatus,
   refreshCurrentRunSources,
   resumeMode,
   shouldResumeCurrentRun,
@@ -63,6 +65,39 @@ test("resume restarts the same checkpoint after an intentional safe stop", () =>
   assert.equal(resumeMode({ status: "WAITING_FOR_VERIFICATION" }, current), "verification");
   assert.equal(resumeMode({ status: "RUNNING" }, current), "wake-supervisor");
   assert.equal(resumeMode({ status: "STOPPED" }, { run_id: "partial" }), "wake-supervisor");
+});
+
+test("verification resume clears the persistent Ozon access lock with audit evidence", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-verification-resume-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "state");
+  const profileDir = path.join(stateRoot, "profiles", "production-profile");
+  const accessState = path.join(path.dirname(profileDir), "ozon_access_state.json");
+  await fs.mkdir(path.dirname(accessState), { recursive: true });
+  await fs.writeFile(accessState, `${JSON.stringify({
+    requires_manual_clear: true,
+    reason: "Ozon CAPTCHA required for SKU 123",
+    captcha_retry_pending: true,
+  })}\n`);
+
+  const result = await clearOzonManualVerificationLock({
+    config: { browser: { profile_dir: profileDir }, flow_env: {} },
+    stateRoot,
+    now: new Date("2026-08-07T06:00:00.000Z"),
+  });
+  const saved = JSON.parse(await fs.readFile(accessState, "utf8"));
+  const audit = JSON.parse((await fs.readFile(
+    path.join(stateRoot, "ozon_access_manual_clearance.jsonl"),
+    "utf8",
+  )).trim());
+
+  assert.equal(result.cleared, true);
+  assert.equal(saved.requires_manual_clear, false);
+  assert.equal(saved.reason, null);
+  assert.equal(saved.captcha_retry_pending, false);
+  assert.equal(saved.manually_cleared_at, "2026-08-07T06:00:00.000Z");
+  assert.equal(audit.prior_reason, "Ozon CAPTCHA required for SKU 123");
+  assert.equal(audit.source, "control-panel-verification-resume");
 });
 
 test("direct target completion is resumable when current-run ERP evidence is below 500", () => {
@@ -239,6 +274,7 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "15");
   assert.equal(config.flow_env.FLOW_B_1688_TRANSIENT_RETRIES, "1");
   assert.equal(config.flow_env.FLOW_B_1688_WORKERS, "4");
+  assert.equal(config.flow_env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS, "5000");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_POLICY, "shadow");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_SHADOW_SAMPLES, "100");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT, "75");
@@ -258,6 +294,17 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_SOURCE_PRODUCTIVE_WEIGHT, "3");
   assert.equal(config.flow_env.FLOW_B_SOURCE_EXPLORATION_WEIGHT, "1");
   assert.equal(config.flow_env.FLOW_B_FAVORITE_CACHE_TTL_MS, "30000");
+  assert.equal(config.profit_learning.enabled, true);
+  assert.equal(config.profit_learning.priority_file, "/Users/mac/Desktop/ozon每日上品/优先母款.json");
+  assert.equal(config.profit_learning.feedback_file, "/Users/mac/Desktop/ozon每日上品/错误货源.json");
+  assert.equal(config.profit_learning.feedback_dir, "/Users/mac/Desktop/ozon每日上品/核价反馈");
+  assert.equal(config.profit_learning.learning_status, "${STATE_ROOT}/profit_learning/status.json");
+  assert.equal(config.profit_learning.feedback_status, "${STATE_ROOT}/profit_learning/feedback_status.json");
+  assert.equal(config.profit_learning.lookback_days, 30);
+  assert.equal(config.profit_learning.minimum_completed_orders, 3);
+  assert.equal(config.profit_learning.poll_interval_seconds, 60);
+  assert.equal(config.profit_learning.order_page_size, 100);
+  assert.equal(config.profit_learning.order_max_pages, 100);
   assert.equal(config.candidate_buffer, undefined);
   assert.equal(config.acceptance, undefined);
   assert.deepEqual(config.stores.map((row) => Number(row.id)), [
@@ -272,6 +319,14 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
     config.flow_env.FLOW_B_STORE_TARGETS.map((row) => Number(row.warehouseId)),
     config.stores.map((row) => Number(row.warehouse_id)),
   );
+  assert.equal(new Set(config.stores.map((row) => Number(row.ural_warehouse_id))).size, 10);
+  assert.deepEqual(
+    config.flow_env.FLOW_B_STORE_TARGETS.map((row) => Number(row.uralWarehouseId)),
+    config.stores.map((row) => Number(row.ural_warehouse_id)),
+  );
+  assert.ok(config.flow_env.FLOW_B_STORE_TARGETS.every(
+    (row) => row.weightRouting === true && Number(row.weightThresholdGrams) === 500,
+  ));
   assert.throws(
     () => validateConfig({
       ...config,
@@ -338,6 +393,52 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
     }),
     /store targets must match/u,
   );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      profit_learning: {
+        ...config.profit_learning,
+        priority_file: "/tmp/优先母款.json",
+      },
+    }),
+    /fixed daily-upload desktop folder/u,
+  );
+});
+
+test("profit learning status reports both independent sidecars and tolerates a malformed state", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-profit-status-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "state");
+  const statusDir = path.join(stateRoot, "profit_learning");
+  await fs.mkdir(statusDir, { recursive: true });
+  await fs.writeFile(path.join(statusDir, "status.json"), `${JSON.stringify({
+    status: "completed",
+    completed_at: "2026-08-09T12:30:00.000Z",
+    priority_count: 7,
+  })}\n`);
+  await fs.writeFile(path.join(statusDir, "feedback_status.json"), "{broken-json\n");
+
+  const result = await readProfitLearningStatus({
+    install_root: path.join(root, "app"),
+    state_root: stateRoot,
+    profit_learning: {
+      enabled: true,
+      priority_file: path.join(root, "优先母款.json"),
+      feedback_file: path.join(root, "错误货源.json"),
+      feedback_dir: path.join(root, "核价反馈"),
+      learning_status: "${STATE_ROOT}/profit_learning/status.json",
+      feedback_status: "${STATE_ROOT}/profit_learning/feedback_status.json",
+    },
+  }, {
+    appLink: path.join(root, "app"),
+    stateRoot,
+  });
+
+  assert.equal(result.enabled, true);
+  assert.equal(result.learning.status, "completed");
+  assert.equal(result.learning.priority_count, 7);
+  assert.equal(result.feedback_import.status, "invalid");
+  assert.match(result.feedback_import.error, /JSON/u);
 });
 
 test("doctor expands its Python path without supervisor-only helpers", async (t) => {
@@ -345,11 +446,25 @@ test("doctor expands its Python path without supervisor-only helpers", async (t)
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const stateRoot = path.join(root, "state");
   await fs.mkdir(stateRoot, { recursive: true });
+  const priorityFile = path.join(root, "daily", "优先母款.json");
+  await fs.mkdir(path.dirname(priorityFile), { recursive: true });
+  await fs.writeFile(priorityFile, "{broken-json\n");
   const result = await doctor({
     install_root: path.join(root, "app"),
     state_root: stateRoot,
     flow_env: {
       FLOW_B_PYTHON: "${HOME}/definitely-missing-ozon-python",
+    },
+    profit_learning: {
+      enabled: true,
+      priority_file: priorityFile,
+      feedback_file: path.join(root, "daily", "错误货源.json"),
+      feedback_dir: path.join(root, "daily", "核价反馈"),
+      learning_status: "${STATE_ROOT}/profit_learning/status.json",
+      feedback_status: "${STATE_ROOT}/profit_learning/feedback_status.json",
+      runtime_root: "${STATE_ROOT}/profit_learning",
+      node: process.execPath,
+      node_modules: path.dirname(process.execPath),
     },
     browser: {
       executable: path.join(root, "missing-browser"),
@@ -360,6 +475,12 @@ test("doctor expands its Python path without supervisor-only helpers", async (t)
   }, { appRoot: path.join(root, "candidate") });
   assert.equal(result.ok, false);
   assert.equal(result.checks.python, false);
+  assert.equal(result.checks.profit_priority_json, false);
+  assert.equal(result.checks.profit_feedback_json, true);
+  assert.equal(result.checks.profit_learning_status_json, true);
+  assert.equal(result.checks.profit_feedback_status_json, true);
+  assert.equal(result.checks.profit_feedback_dir, true);
+  assert.equal(result.checks.profit_runtime_root, true);
   assert.equal(result.app_root, path.join(root, "candidate"));
 });
 

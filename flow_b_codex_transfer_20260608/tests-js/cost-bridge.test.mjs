@@ -25,6 +25,7 @@ function returnedSameItemOutput({
   balancedPassed = true,
   matchType = "strong_single",
   imageAvailable = true,
+  offerIds = null,
 } = {}) {
   const normalizedRequest = {
     expect_category: String(request?.expect_category || "").toLocaleLowerCase("und").trim(),
@@ -38,7 +39,7 @@ function returnedSameItemOutput({
     ? { category: [], model: [modelHit], title: [titleHit].filter((hit) => returnedTitle.includes(hit)) }
     : { category: [], model: [], title: [titleHit] };
   const rows = prices.map((price, index) => ({
-    offer_id: `offer-${index + 1}`,
+    offer_id: String(offerIds?.[index] || `offer-${index + 1}`),
     supplier_id: `supplier-${index + 1}`,
     supplier: `supplier ${index + 1}`,
     image_url: `https://img.example/offer-${index + 1}.jpg`,
@@ -53,6 +54,8 @@ function returnedSameItemOutput({
     accessory_conflict: false,
     title: returnedTitle,
   }));
+  const exactSelected = rows.find((row) => Number(row.price) === Number(selectedCost));
+  const selectedOfferId = exactSelected?.offer_id || "missing-selected-offer";
   const evidence = JSON.stringify({
     contract: "1688-returned-same-item-v3",
     cost_source: source,
@@ -60,13 +63,16 @@ function returnedSameItemOutput({
     rows,
     selected_cluster: rows.map(({ offer_id, supplier_id, price }) => ({ offer_id, supplier_id, price })),
     selected_cost: selectedCost,
+    selected_offer_id: selectedOfferId,
     balanced_match: {
       passed: balancedPassed,
       match_type: balancedPassed ? matchType : "rejected",
       reason: balancedPassed ? "test match" : "test rejection",
       image_available: imageAvailable,
       supporting_offer_ids: balancedPassed
-        ? (matchType === "strong_single" ? ["offer-1"] : ["offer-1", "offer-2"])
+        ? (matchType === "strong_single"
+            ? [rows[0]?.offer_id].filter(Boolean)
+            : rows.slice(0, 2).map((row) => row.offer_id))
         : [],
       expected_specs: {},
     },
@@ -75,11 +81,217 @@ function returnedSameItemOutput({
   return [
     `SAME_ITEM_EVIDENCE ${evidence}`,
     `MATCH_EVIDENCE_KEY ${key}`,
+    `SELECTED_OFFER_ID ${selectedOfferId}`,
     `COST_SOURCE ${source}`,
     `FILTERED_FIRST_PAGE_PRICES ${JSON.stringify(prices)}`,
     `P70_COST ${selectedCost}`,
   ].join("\n");
 }
+
+test("manual feedback can stop a blocked source before image download or 1688", async () => {
+  await withTempDir(async (runDir) => {
+    const feedbackFile = path.join(runDir, "错误货源.json");
+    await fs.writeFile(feedbackFile, JSON.stringify({
+      blocked_source_skus: [{ source_sku: "blocked-source" }],
+    }));
+    let downloads = 0;
+    let processes = 0;
+    const bridge = createCostBridge({
+      feedbackFile,
+      minimumSameItemMatches: 1,
+      download: async () => { downloads += 1; },
+      runProcess: async () => { processes += 1; return { code: 1, stdout: "", stderr: "" }; },
+    });
+    await bridge.refreshProfitFeedback();
+    const result = await bridge.estimate({
+      sku: "blocked-source",
+      cover_image: "https://img.example/blocked.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, false);
+    assert.equal(result.feedback_blocked, true);
+    assert.equal(downloads, 0);
+    assert.equal(processes, 0);
+    await bridge.close();
+  });
+});
+
+test("new feedback invalidates an old good match and excludes the bad offer on retry", async () => {
+  await withTempDir(async (runDir) => {
+    const feedbackFile = path.join(runDir, "错误货源.json");
+    await fs.writeFile(feedbackFile, "{}\n");
+    let processes = 0;
+    const bridge = createCostBridge({
+      feedbackFile,
+      minimumSameItemMatches: 1,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async ({ args }) => {
+        processes += 1;
+        const excludedIndex = args.indexOf("--exclude-offer-id");
+        const excluded = excludedIndex >= 0 ? args[excludedIndex + 1] : null;
+        const request = {
+          expect_title: args[args.indexOf("--expect-title") + 1],
+          expect_model: "",
+          expect_category: "",
+        };
+        return {
+          code: 0,
+          stdout: returnedSameItemOutput({
+            request,
+            prices: [18],
+            selectedCost: 18,
+            offerIds: [excluded === "offer-1" ? "offer-2" : "offer-1"],
+          }),
+          stderr: "",
+        };
+      },
+    });
+    await bridge.refreshProfitFeedback();
+    const item = {
+      sku: "feedback-retry",
+      cover_image: "https://img.example/feedback-retry.jpg",
+      sell_price: 100,
+      expect_title: "same product lamp",
+    };
+    const first = await bridge.estimate(item, runDir);
+    assert.deepEqual(first.selected_offer_ids, ["offer-1"]);
+
+    await fs.writeFile(feedbackFile, JSON.stringify({
+      errors: { blocked_offers: [{ selected_offer_id: "offer-1" }] },
+    }));
+    await bridge.refreshProfitFeedback();
+    const second = await bridge.estimate(item, runDir);
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.deepEqual(second.selected_offer_ids, ["offer-2"]);
+    assert.equal(processes, 2);
+    await bridge.close();
+  });
+});
+
+test("recent normal feedback with exact verified offer and sane cost bypasses the image matcher", async () => {
+  await withTempDir(async (runDir) => {
+    const nowMs = Date.parse("2026-08-09T12:00:00.000Z");
+    const request = { expect_title: "same product lamp" };
+    const verifiedCost = parseCostOutput(returnedSameItemOutput({
+      request,
+      prices: [18],
+      selectedCost: 18,
+      offerIds: ["trusted-exact"],
+    }), 100, {
+      expectedMatchEvidence: request,
+      requireSameItemEvidence: true,
+      minimumSameItemMatches: 1,
+    });
+    const feedbackFile = path.join(runDir, "错误货源.json");
+    await fs.writeFile(feedbackFile, JSON.stringify({
+      trusted: {
+        trusted: [{
+          source_sku: "trusted-source",
+          selected_offer_id: "trusted-exact",
+          actual_cost: 20,
+          updated_at: "2026-08-08T12:00:00.000Z",
+          verified_cost: verifiedCost,
+        }],
+      },
+    }));
+    let downloads = 0;
+    let processes = 0;
+    const bridge = createCostBridge({
+      feedbackFile,
+      feedbackRefreshMs: 0,
+      minimumSameItemMatches: 1,
+      now: () => nowMs,
+      download: async () => { downloads += 1; },
+      runProcess: async () => { processes += 1; return { code: 1, stdout: "", stderr: "unexpected" }; },
+    });
+    await bridge.refreshProfitFeedback();
+    const result = await bridge.estimate({
+      sku: "trusted-source",
+      cover_image: "https://img.example/trusted.jpg",
+      sell_price: 100,
+      expect_title: "same product lamp",
+    }, runDir);
+    assert.equal(result.ok, true);
+    assert.equal(result.cost, 20);
+    assert.equal(result.selected_offer_id, "trusted-exact");
+    assert.equal(result.manual_feedback_cache, true);
+    assert.equal(downloads, 0);
+    assert.equal(processes, 0);
+    await bridge.close();
+  });
+});
+
+test("stale or invalid normal feedback falls back to the normal matcher", async () => {
+  await withTempDir(async (runDir) => {
+    const nowMs = Date.parse("2026-08-09T12:00:00.000Z");
+    const request = { expect_title: "same product lamp" };
+    const verifiedCost = parseCostOutput(returnedSameItemOutput({
+      request,
+      prices: [18],
+      selectedCost: 18,
+      offerIds: ["trusted-exact"],
+    }), 100, {
+      expectedMatchEvidence: request,
+      requireSameItemEvidence: true,
+      minimumSameItemMatches: 1,
+    });
+    const feedbackFile = path.join(runDir, "错误货源.json");
+    await fs.writeFile(feedbackFile, JSON.stringify({
+      trusted: {
+        trusted: [
+          {
+            source_sku: "stale-source",
+            selected_offer_id: "trusted-exact",
+            actual_cost: 20,
+            updated_at: "2026-05-01T00:00:00.000Z",
+            verified_cost: verifiedCost,
+          },
+          {
+            source_sku: "invalid-source",
+            selected_offer_id: "replacement-not-selected",
+            actual_cost: 20,
+            updated_at: "2026-08-08T12:00:00.000Z",
+            verified_cost: verifiedCost,
+          },
+        ],
+      },
+    }));
+    let processes = 0;
+    const bridge = createCostBridge({
+      feedbackFile,
+      feedbackRefreshMs: 0,
+      minimumSameItemMatches: 1,
+      now: () => nowMs,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async ({ args }) => {
+        processes += 1;
+        return {
+          code: 0,
+          stdout: returnedSameItemOutput({
+            request: { expect_title: args[args.indexOf("--expect-title") + 1] },
+            prices: [18],
+            selectedCost: 18,
+            offerIds: [`fresh-${processes}`],
+          }),
+          stderr: "",
+        };
+      },
+    });
+    await bridge.refreshProfitFeedback();
+    for (const source of ["stale-source", "invalid-source"]) {
+      const result = await bridge.estimate({
+        sku: source,
+        cover_image: `https://img.example/${source}.jpg`,
+        sell_price: 100,
+        expect_title: "same product lamp",
+      }, runDir);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.manual_feedback_cache, undefined);
+    }
+    assert.equal(processes, 2);
+    await bridge.close();
+  });
+});
 
 test("accepts a reliable filtered first-page P70 cost", () => {
   const text = [
@@ -178,6 +390,22 @@ test("v3 evidence rejects a re-signed supplier binding tamper", () => {
   });
   assert.equal(result.ok, false);
   assert.match(result.reason, /supplier is not bound/i);
+});
+
+test("rejects an emitted selected offer that differs from the matcher-signed exact identity", () => {
+  const request = { expect_title: "same product lamp" };
+  const output = returnedSameItemOutput({
+    request,
+    prices: [17, 19.8, 21.3],
+    selectedCost: 21.3,
+    offerIds: ["cluster-first", "cluster-middle", "exact-selected"],
+  }).replace("SELECTED_OFFER_ID exact-selected", "SELECTED_OFFER_ID cluster-first");
+  const result = parseCostOutput(output, 100, {
+    expectedMatchEvidence: request,
+    requireSameItemEvidence: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /does not match signed evidence/i);
 });
 
 test("shadow records legacy passes and automatically enforces balanced v3 after healthy samples", async () => {
@@ -788,6 +1016,7 @@ test("same cover image shares one in-flight 1688 query and persists reusable cac
     assert.equal(runs, 1);
     assert.ok(results.every((row) => row.ok));
     assert.ok(results.some((row) => row.shared_cache === true));
+    await bridge.close();
     const cache = JSON.parse(await fs.readFile(path.join(runDir, "1688_cache.json"), "utf8"));
     assert.equal(Object.keys(cache.entries).length, 1);
   });
@@ -916,10 +1145,97 @@ test("overlapping debounced cache generations all settle without losing a resolv
 
     assert.equal(results.length, 12);
     assert.ok(results.every((result) => result.ok === false));
+    await bridge.close();
     assert.ok(cacheWrites >= 2);
     const cache = JSON.parse(await fs.readFile(path.join(runDir, "1688_cache.json"), "utf8"));
     assert.equal(Object.keys(cache.entries).length, 12);
-    await bridge.close();
+  });
+});
+
+test("cache persistence stays outside the public 1688 deadline and close waits for durability", async () => {
+  await withTempDir(async (runDir) => {
+    let releaseWrite;
+    let markWriteStarted;
+    const writeStarted = new Promise((resolve) => { markWriteStarted = resolve; });
+    const writeReleased = new Promise((resolve) => { releaseWrite = resolve; });
+    const bridge = createCostBridge({
+      totalBudgetMs: 80,
+      cacheFlushDebounceMs: 0,
+      workerPool: {
+        run: async () => ({
+          code: 2,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "REASON no explicit title/model/category semantic same-item matches",
+            "FILTERED_FIRST_PAGE_PRICES []",
+            "P70_COST None",
+          ].join("\n"),
+          stderr: "",
+        }),
+        close: async () => {},
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      writeCache: async (filename, cache) => {
+        markWriteStarted();
+        await writeReleased;
+        await fs.mkdir(path.dirname(filename), { recursive: true });
+        await fs.writeFile(filename, `${JSON.stringify(cache)}\n`, "utf8");
+      },
+    });
+
+    const result = await Promise.race([
+      bridge.estimate({
+        sku: "nonblocking-cache",
+        cover_image: "https://img.example/nonblocking-cache.jpg",
+        sell_price: 100,
+      }, runDir),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("estimate waited for cache persistence")),
+        50,
+      )),
+    ]);
+    assert.equal(result.ok, false);
+    await writeStarted;
+
+    let closed = false;
+    const closing = bridge.close().then(() => { closed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(closed, false);
+    releaseWrite();
+    await closing;
+    assert.equal(closed, true);
+
+    const cache = JSON.parse(await fs.readFile(path.join(runDir, "1688_cache.json"), "utf8"));
+    assert.equal(Object.keys(cache.entries).length, 1);
+  });
+});
+
+test("background cache write failures are reported when the bridge closes", async () => {
+  await withTempDir(async (runDir) => {
+    const bridge = createCostBridge({
+      totalBudgetMs: 80,
+      cacheFlushDebounceMs: 0,
+      workerPool: {
+        run: async () => ({
+          code: 2,
+          stdout: "REASON no match\nP70_COST None",
+          stderr: "",
+        }),
+        close: async () => {},
+      },
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      writeCache: async () => {
+        throw new Error("cache disk unavailable");
+      },
+    });
+
+    const result = await bridge.estimate({
+      sku: "failed-cache-write",
+      cover_image: "https://img.example/failed-cache-write.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, false);
+    await assert.rejects(bridge.close(), /cache disk unavailable/);
   });
 });
 
@@ -1074,12 +1390,16 @@ test("shared cache reuses a reliable 1688 result across independent run director
       },
     };
     const item = { sku: "shared-1", cover_image: "https://img.example/shared.jpg", sell_price: 100 };
-    assert.equal((await createCostBridge(options).estimate(item, firstRun)).ok, true);
-    const reused = await createCostBridge({
+    const firstBridge = createCostBridge(options);
+    assert.equal((await firstBridge.estimate(item, firstRun)).ok, true);
+    await firstBridge.close();
+    const secondBridge = createCostBridge({
       ...options,
       runProcess: async () => { throw new Error("shared cache should avoid a second process"); },
       download: async () => { throw new Error("shared cache should avoid a second download"); },
-    }).estimate({ ...item, sku: "shared-2" }, secondRun);
+    });
+    const reused = await secondBridge.estimate({ ...item, sku: "shared-2" }, secondRun);
+    await secondBridge.close();
 
     assert.equal(reused.ok, true);
     assert.equal(reused.shared_cache, true);

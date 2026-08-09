@@ -12,7 +12,10 @@ import {
   buildLaunchdPlist,
   productionRunContractDecision,
   resolveProductionLayout,
+  runDailyPricingReportCheck,
 } from "./ozon_24h_supervisor.mjs";
+import { dailyWindowState } from "./daily-window.mjs";
+import { reportOutputPath } from "./daily-pricing-report.mjs";
 
 const execFileAsync = promisify(execFile);
 const LABEL = "com.codex.ozon.24h-production";
@@ -159,6 +162,34 @@ function expandHome(value) {
   return String(value || "").replaceAll("${HOME}", process.env.HOME || "/Users/mac");
 }
 
+function expandConfigTemplate(value, config = {}) {
+  const appRoot = expandHome(config?.install_root);
+  const stateRoot = expandHome(config?.state_root);
+  return expandHome(value)
+    .replaceAll("${APP_ROOT}", appRoot)
+    .replaceAll("${STATE_ROOT}", stateRoot);
+}
+
+function resolvedProfitLearningConfig(config = {}) {
+  const source = config?.profit_learning || {};
+  const resolved = { ...source };
+  for (const key of [
+    "priority_file",
+    "feedback_file",
+    "feedback_dir",
+    "learning_status",
+    "feedback_status",
+    "runtime_root",
+    "node",
+    "node_modules",
+  ]) {
+    resolved[key] = source[key]
+      ? path.resolve(expandConfigTemplate(source[key], config))
+      : "";
+  }
+  return resolved;
+}
+
 async function readJson(filename, fallback = null) {
   try {
     return JSON.parse(await fsp.readFile(filename, "utf8"));
@@ -166,6 +197,46 @@ async function readJson(filename, fallback = null) {
     if (error.code === "ENOENT" && fallback !== null) return fallback;
     throw error;
   }
+}
+
+async function readSidecarStatus(filename) {
+  if (!filename) return { status: "not-configured", state_file: null };
+  try {
+    const value = JSON.parse(await fsp.readFile(filename, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("sidecar status must be a JSON object");
+    }
+    return { status: String(value.status || "unknown"), ...value, state_file: filename };
+  } catch (error) {
+    if (error.code === "ENOENT") return { status: "not-started", state_file: filename };
+    return {
+      status: "invalid",
+      state_file: filename,
+      error: String(error?.message || error),
+    };
+  }
+}
+
+export async function readProfitLearningStatus(config, paths = null) {
+  const deployment = paths || deploymentPaths(config);
+  const profitConfig = resolvedProfitLearningConfig({
+    ...config,
+    install_root: deployment.appLink || config?.install_root,
+    state_root: deployment.stateRoot || config?.state_root,
+  });
+  if (profitConfig.enabled !== true) return { enabled: false };
+  const [learning, feedbackImport] = await Promise.all([
+    readSidecarStatus(profitConfig.learning_status),
+    readSidecarStatus(profitConfig.feedback_status),
+  ]);
+  return {
+    enabled: true,
+    priority_file: profitConfig.priority_file,
+    feedback_file: profitConfig.feedback_file,
+    feedback_dir: profitConfig.feedback_dir,
+    learning,
+    feedback_import: feedbackImport,
+  };
 }
 
 async function readJsonLines(filename) {
@@ -188,6 +259,49 @@ async function writeJsonAtomic(filename, value) {
   const temporary = `${filename}.tmp-${process.pid}`;
   await fsp.writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await fsp.rename(temporary, filename);
+}
+
+async function appendJsonLine(filename, value) {
+  await fsp.mkdir(path.dirname(filename), { recursive: true });
+  await fsp.appendFile(filename, `${JSON.stringify(value)}\n`, "utf8");
+}
+
+export async function clearOzonManualVerificationLock({
+  config,
+  stateRoot,
+  now = new Date(),
+} = {}) {
+  const profileDir = expandHome(config?.browser?.profile_dir);
+  const configured = expandHome(config?.flow_env?.FLOW_B_OZON_ACCESS_STATE);
+  const filename = configured
+    ? path.resolve(configured)
+    : profileDir
+      ? path.join(path.dirname(path.resolve(profileDir)), "ozon_access_state.json")
+      : null;
+  if (!filename) return { cleared: false, reason: "access-state-path-unavailable" };
+  const prior = await readJson(filename, {});
+  if (prior?.requires_manual_clear !== true) {
+    return { cleared: false, reason: "manual-clearance-lock-not-set", filename };
+  }
+  const requestedAt = (now instanceof Date ? now : new Date(now)).toISOString();
+  const priorReason = String(prior.reason || "manual verification requested");
+  const evidence = {
+    requested_at: requestedAt,
+    source: "control-panel-verification-resume",
+    prior_reason: priorReason,
+  };
+  await writeJsonAtomic(filename, {
+    ...prior,
+    updated_at: requestedAt,
+    requires_manual_clear: false,
+    captcha_retry_pending: false,
+    captcha_retry_at: null,
+    reason: null,
+    manually_cleared_at: requestedAt,
+    manual_clearance_evidence: evidence,
+  });
+  await appendJsonLine(path.join(stateRoot, "ozon_access_manual_clearance.jsonl"), evidence);
+  return { cleared: true, filename, evidence };
 }
 
 async function pathExists(filename) {
@@ -238,6 +352,7 @@ function validateConfig(config) {
       FLOW_B_1688_TRANSIENT_RETRIES: "1",
       FLOW_B_1688_RETRY_BUDGET_SECONDS: "15",
       FLOW_B_1688_WORKERS: "4",
+      FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS: "5000",
       FLOW_B_1688_MATCH_POLICY: "shadow",
       FLOW_B_1688_MATCH_SHADOW_SAMPLES: "100",
       FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT: "75",
@@ -284,6 +399,8 @@ function validateConfig(config) {
     }
     const warehouseIds = stores.map((store) => Number(store?.warehouse_id));
     const targetWarehouseIds = storeTargets.map((store) => Number(store?.warehouseId));
+    const uralWarehouseIds = stores.map((store) => Number(store?.ural_warehouse_id));
+    const targetUralWarehouseIds = storeTargets.map((store) => Number(store?.uralWarehouseId));
     if (warehouseIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
       throw new Error("all ten stores require an ERP-verified warehouse mapping");
     }
@@ -292,6 +409,18 @@ function validateConfig(config) {
     }
     if (targetWarehouseIds.join(",") !== warehouseIds.join(",")) {
       throw new Error("direct store target warehouses must match the verified store mappings");
+    }
+    if (uralWarehouseIds.some((id) => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new Error("all ten stores require an ERP-verified Ural warehouse mapping");
+    }
+    if (new Set(uralWarehouseIds).size !== DIRECT_PRODUCTION_STORE_IDS.length) {
+      throw new Error("ten-store Ural warehouse mappings must be unique");
+    }
+    if (targetUralWarehouseIds.join(",") !== uralWarehouseIds.join(",")) {
+      throw new Error("direct store target Ural warehouses must match the verified store mappings");
+    }
+    if (!storeTargets.every((store) => store?.weightRouting === true && Number(store?.weightThresholdGrams) === 500)) {
+      throw new Error("every direct store target must route weights above 500g through Ural");
     }
     if (!storeTargets.every((store) => store?.requireWarehouse === true)) {
       throw new Error("every direct store target must require its verified warehouse");
@@ -315,6 +444,73 @@ function validateConfig(config) {
     }
     if (String(config?.browser?.cdp_endpoint) !== "http://127.0.0.1:9223") {
       throw new Error("production CDP endpoint must be the unique localhost owner on port 9223");
+    }
+    if (String(config?.flow_env?.FLOW_B_ENFORCE_DIRECT_DAILY_LIMIT || "") !== "1"
+      || Number(config?.flow_env?.FLOW_B_DAILY_STORE_LIMIT) !== 100) {
+      throw new Error("direct publishing must enforce a 100-item per-store daily limit");
+    }
+    const dailyCutoff = String(config?.flow_env?.FLOW_B_DAILY_SUBMISSION_CUTOFF || "");
+    const dailyReportAfter = String(config?.flow_env?.FLOW_B_DAILY_REPORT_AFTER || "");
+    const validClock = (value) => /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(value);
+    if (!validClock(dailyCutoff) || dailyCutoff !== "20:00"
+      || !validClock(dailyReportAfter) || dailyReportAfter !== "20:30") {
+      throw new Error("direct daily submission cutoff/report window must be 20:00/20:30");
+    }
+    const dailyReport = config?.daily_pricing_report;
+    if (dailyReport?.enabled !== true
+      || String(dailyReport?.time_zone || "") !== "Asia/Shanghai"
+      || String(dailyReport?.cutoff || "") !== "20:00"
+      || String(dailyReport?.report_after || "") !== "20:30"
+      || Number(dailyReport?.poll_interval_seconds) < 30) {
+      throw new Error("daily pricing report must be enabled for Asia/Shanghai at 20:30");
+    }
+    for (const [name, value] of Object.entries({
+      report_node: dailyReport?.node,
+      report_node_modules: dailyReport?.node_modules,
+      report_output_dir: dailyReport?.output_dir,
+    })) {
+      if (!path.isAbsolute(expandHome(String(value || "")))) {
+        throw new Error(`${name} must be an absolute path`);
+      }
+    }
+    const profitLearning = resolvedProfitLearningConfig(config);
+    if (profitLearning.enabled !== true) {
+      throw new Error("profit learning sidecars must be enabled");
+    }
+    for (const [name, value] of Object.entries({
+      profit_priority_file: profitLearning.priority_file,
+      profit_feedback_file: profitLearning.feedback_file,
+      profit_feedback_dir: profitLearning.feedback_dir,
+      profit_learning_status: profitLearning.learning_status,
+      profit_feedback_status: profitLearning.feedback_status,
+      profit_runtime_root: profitLearning.runtime_root,
+      profit_node: profitLearning.node,
+      profit_node_modules: profitLearning.node_modules,
+    })) {
+      if (!path.isAbsolute(String(value || ""))) {
+        throw new Error(`${name} must be an absolute path`);
+      }
+    }
+    if (profitLearning.priority_file !== "/Users/mac/Desktop/ozon每日上品/优先母款.json"
+      || profitLearning.feedback_file !== "/Users/mac/Desktop/ozon每日上品/错误货源.json"
+      || profitLearning.feedback_dir !== "/Users/mac/Desktop/ozon每日上品/核价反馈") {
+      throw new Error("profit learning files must use the fixed daily-upload desktop folder");
+    }
+    const expectedProfitStateRoot = path.join(
+      path.resolve(expandHome(config.state_root)),
+      "profit_learning",
+    );
+    if (profitLearning.learning_status !== path.join(expectedProfitStateRoot, "status.json")
+      || profitLearning.feedback_status !== path.join(expectedProfitStateRoot, "feedback_status.json")) {
+      throw new Error("profit learning sidecar states must stay under the production state root");
+    }
+    if (Number(profitLearning.lookback_days) !== 30
+      || Number(profitLearning.minimum_completed_orders) !== 3) {
+      throw new Error("profit learning must use a 30-day window and at least three completed orders");
+    }
+    if (!Number.isFinite(Number(profitLearning.file_refresh_ms))
+      || Number(profitLearning.file_refresh_ms) < 1_000) {
+      throw new Error("profit learning file refresh must be at least 1000ms");
     }
     return config;
   }
@@ -734,11 +930,26 @@ async function promoteCandidate(config) {
   return { ok: true, stable: paths.stable, rollback: await pathExists(paths.rollback) ? paths.rollback : null };
 }
 
+async function optionalJsonObjectIsValid(filename) {
+  if (!filename) return false;
+  try {
+    const value = JSON.parse(await fsp.readFile(filename, "utf8"));
+    return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  } catch (error) {
+    return error.code === "ENOENT";
+  }
+}
+
 async function doctor(config, { appRoot = null } = {}) {
   const paths = deploymentPaths(config);
   const resolvedApp = appRoot ? path.resolve(appRoot) : paths.appLink;
   const checks = {};
   const python = expandHome(config?.flow_env?.FLOW_B_PYTHON);
+  const reportConfig = config?.daily_pricing_report || {};
+  const reportNode = expandHome(reportConfig.node);
+  const reportNodeModules = expandHome(reportConfig.node_modules);
+  const reportOutputDir = expandHome(reportConfig.output_dir);
+  const profitConfig = resolvedProfitLearningConfig(config);
   const required = {
     app: resolvedApp,
     config: path.join(resolvedApp, "config", "ozon_24h_production.json"),
@@ -751,8 +962,86 @@ async function doctor(config, { appRoot = null } = {}) {
     extension: expandHome(config.browser.extension_dir),
     dedupe: path.join(paths.stateRoot, "dedupe", "published_links.csv"),
     sources: path.join(paths.stateRoot, "sources", "active_urls.txt"),
+    report_generator: path.join(resolvedApp, "scripts", "generate_daily_pricing_report.mjs"),
+    report_node: reportNode,
+    report_node_modules: reportNodeModules,
   };
+  if (profitConfig.enabled === true) {
+    Object.assign(required, {
+      profit_learning_core: path.join(
+        resolvedApp,
+        "scripts",
+        "flow_b_playwright",
+        "profit-learning.mjs",
+      ),
+      profit_learning_sidecar: path.join(
+        resolvedApp,
+        "scripts",
+        "flow_b_playwright",
+        "profit-learning-sidecar.mjs",
+      ),
+      profit_feedback_importer: path.join(resolvedApp, "scripts", "import_profit_feedback.mjs"),
+      profit_node: profitConfig.node,
+      profit_node_modules: profitConfig.node_modules,
+    });
+  }
   for (const [name, filename] of Object.entries(required)) checks[name] = await pathExists(filename);
+  if (reportOutputDir) {
+    await fsp.mkdir(reportOutputDir, { recursive: true });
+    checks.report_output_dir = await pathExists(reportOutputDir);
+  } else {
+    checks.report_output_dir = false;
+  }
+  if (profitConfig.enabled === true) {
+    const profitDirectories = {
+      profit_output_dir: path.dirname(profitConfig.priority_file),
+      profit_feedback_dir: profitConfig.feedback_dir,
+      profit_runtime_root: profitConfig.runtime_root,
+      profit_state_dir: path.dirname(profitConfig.learning_status),
+    };
+    for (const [name, directory] of Object.entries(profitDirectories)) {
+      if (directory) await fsp.mkdir(directory, { recursive: true });
+      checks[name] = Boolean(directory) && await pathExists(directory);
+    }
+    const profitJsonFiles = {
+      profit_priority_json: profitConfig.priority_file,
+      profit_feedback_json: profitConfig.feedback_file,
+      profit_learning_status_json: profitConfig.learning_status,
+      profit_feedback_status_json: profitConfig.feedback_status,
+    };
+    for (const [name, filename] of Object.entries(profitJsonFiles)) {
+      checks[name] = await optionalJsonObjectIsValid(filename);
+    }
+  }
+  if (checks.report_node && checks.report_node_modules) {
+    const reportRuntime = path.join(paths.stateRoot, "report-runtime");
+    const artifactProbe = await run(reportNode, [
+      "-e",
+      [
+        "const fs = require('node:fs');",
+        "const path = require('node:path');",
+        "const { createRequire } = require('node:module');",
+        "const root = process.argv[1];",
+        "const modules = process.argv[2];",
+        "fs.mkdirSync(root, { recursive: true });",
+        "const link = path.join(root, 'node_modules');",
+        "try { if (fs.existsSync(link) || fs.lstatSync(link)) fs.unlinkSync(link); } catch {}",
+        "if (!fs.existsSync(link)) fs.symlinkSync(modules, link, 'dir');",
+        "const requireFromRuntime = createRequire(path.join(root, 'entry.cjs'));",
+        "const { Workbook, SpreadsheetFile } = requireFromRuntime('@oai/artifact-tool');",
+        "const workbook = Workbook.create(); workbook.worksheets.add('doctor').getRange('A1').values = [['ok']];",
+        "SpreadsheetFile.exportXlsx(workbook).then((file) => file.save(path.join(root, 'artifact-doctor.xlsx'))).then(() => { if (!fs.existsSync(path.join(root, 'artifact-doctor.xlsx'))) throw new Error('artifact export did not create a workbook'); }).catch((error) => { console.error(error); process.exitCode = 1; });",
+      ].join("\n"),
+      reportRuntime,
+      reportNodeModules,
+    ], {
+      cwd: resolvedApp,
+      env: process.env,
+    });
+    checks.report_artifact_tool = artifactProbe.ok;
+  } else {
+    checks.report_artifact_tool = false;
+  }
   if (checks.python && checks.worker) {
     const probe = await run(python, [
       "-c",
@@ -1116,10 +1405,16 @@ async function resume(config) {
   let status = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   status = await normalizeDirectCompletionStatus(config, paths, status, current);
-  if (resumeMode(status, current) === "restart-current-run") return start(config);
+  const mode = resumeMode(status, current);
+  const manualClearance = mode === "verification" || mode === "restart-current-run"
+    ? await clearOzonManualVerificationLock({ config, stateRoot: paths.stateRoot })
+    : { cleared: false, reason: "not-waiting-for-verification" };
+  if (mode === "restart-current-run") {
+    return { ...(await start(config)), manual_clearance: manualClearance };
+  }
   await fsp.writeFile(path.join(paths.stateRoot, "resume.request"), `${new Date().toISOString()}\n`, "utf8");
   await kickstart(config);
-  return { ok: true, resume_requested: true };
+  return { ok: true, resume_requested: true, manual_clearance: manualClearance };
 }
 
 function shortText(value, maximum = 160) {
@@ -1265,6 +1560,7 @@ async function status(config) {
   const checkpoint = current?.run_dir
     ? await readJson(path.join(current.run_dir, "compact_checkpoint.json"), {})
     : {};
+  const profitLearning = await readProfitLearningStatus(config, paths);
   if (config.runtime_mode === "direct" && current?.run_dir) {
     const [funnel, acceptedRows, backgroundRows, matchPolicyState] = await Promise.all([
       readJsonLines(path.join(current.run_dir, "direct_funnel.jsonl")),
@@ -1282,6 +1578,34 @@ async function status(config) {
     const today = dailyAcceptedSummary(acceptedRows, {
       timeZone: String(config?.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai"),
     });
+    const dailyTimeZone = String(config?.daily_pricing_report?.time_zone
+      || config?.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE
+      || "Asia/Shanghai");
+    const submissionWindow = dailyWindowState({
+      now: new Date(),
+      timeZone: dailyTimeZone,
+      cutoff: config?.daily_pricing_report?.cutoff || "20:00",
+      reportAfter: config?.daily_pricing_report?.report_after || "20:30",
+    });
+    const reportStatus = await readJson(
+      path.join(paths.stateRoot, "daily_pricing_report_status.json"),
+      {
+        status: submissionWindow.report_eligible ? "waiting" : "waiting_for_report_time",
+        date: submissionWindow.date,
+        output: reportOutputPath(config?.daily_pricing_report?.output_dir, submissionWindow.date),
+      },
+    );
+    const dailyByStore = Object.fromEntries((config.stores || []).map((store) => {
+      const id = String(Number(store.id));
+      const accepted = Number(today.by_store[id] || 0);
+      return [id, {
+        store_id: Number(store.id),
+        store_name: store.name || store.needle || id,
+        target: 100,
+        accepted,
+        remaining: Math.max(0, 100 - accepted),
+      }];
+    }));
     return {
       at: operational.observed_at || new Date().toISOString(),
       status: operational.status || "UNKNOWN",
@@ -1304,7 +1628,11 @@ async function status(config) {
         online: uniqueSkuCount(backgroundRows.filter((row) => row?.online === true)),
       },
       by_store: today.by_store,
+      daily_by_store: dailyByStore,
       by_store_run: byStoreRun,
+      daily_submission_window: submissionWindow,
+      daily_pricing_report: reportStatus,
+      profit_learning: profitLearning,
       match_policy: {
         configured: matchPolicyState.configured_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
         effective: matchPolicyState.effective_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
@@ -1326,18 +1654,62 @@ async function status(config) {
       },
     };
   }
-  return compactProductionStatus({
-    current,
-    operational,
-    owners: {
-      counts: {
-        supervisor: effectiveOwners.supervisor,
-        worker: effectiveOwners.worker,
-        profile_owner: effectiveOwners.profile,
+  return {
+    ...compactProductionStatus({
+      current,
+      operational,
+      owners: {
+        counts: {
+          supervisor: effectiveOwners.supervisor,
+          worker: effectiveOwners.worker,
+          profile_owner: effectiveOwners.profile,
+        },
       },
-    },
-    checkpoint,
+      checkpoint,
+    }),
+    profit_learning: profitLearning,
+  };
+}
+
+async function reportStatus(config, dateKey = null) {
+  const paths = deploymentPaths(config);
+  const selectedDate = dateKey || null;
+  const value = selectedDate
+    ? await readJson(path.join(paths.stateRoot, "daily_pricing_reports", `${selectedDate}.json`), {
+        status: "not-started",
+        date: selectedDate,
+        output: reportOutputPath(config?.daily_pricing_report?.output_dir, selectedDate),
+      })
+    : await readJson(path.join(paths.stateRoot, "daily_pricing_report_status.json"), {
+        status: "not-started",
+        date: null,
+      });
+  return {
+    ...value,
+    state_root: paths.stateRoot,
+    output: value.output || (value.date
+      ? reportOutputPath(config?.daily_pricing_report?.output_dir, value.date)
+      : null),
+  };
+}
+
+async function manualGenerateReport(config, dateKey = null) {
+  const paths = deploymentPaths(config);
+  const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
+  if (!current?.run_dir) throw new Error("current production run is unavailable");
+  const result = await runDailyPricingReportCheck({
+    config,
+    stateRoot: paths.stateRoot,
+    runDir: current.run_dir,
+    currentRun: current,
+    appRoot: paths.appLink,
+    dateKey,
+    notify: false,
   });
+  return {
+    ok: ["delivered", "generating"].includes(String(result?.status || "")),
+    ...result,
+  };
 }
 
 async function incident(config) {
@@ -1379,7 +1751,13 @@ async function exportConfirmed(config) {
 }
 
 async function main(argv = process.argv.slice(2)) {
-  const [command = "start", sourceRootArg, configPathArg] = argv;
+  const [command = "start", firstArg, secondArg, thirdArg] = argv;
+  const reportCommand = command === "report" || command === "report-status";
+  const dateKey = reportCommand && /^\d{4}-\d{2}-\d{2}$/u.test(String(firstArg || ""))
+    ? String(firstArg)
+    : null;
+  const sourceRootArg = dateKey ? secondArg : firstArg;
+  const configPathArg = dateKey ? thirdArg : secondArg;
   const sourceRoot = path.resolve(sourceRootArg || import.meta.dirname, sourceRootArg ? "." : "..");
   const configPath = path.resolve(configPathArg || path.join(sourceRoot, "config", "ozon_24h_production.json"));
   const config = validateConfig(await readJson(configPath));
@@ -1402,12 +1780,16 @@ async function main(argv = process.argv.slice(2)) {
     result = await resume(config);
   } else if (command === "status") {
     result = await status(config);
+  } else if (command === "report-status") {
+    result = await reportStatus(config, dateKey);
+  } else if (command === "report") {
+    result = await manualGenerateReport(config, dateKey);
   } else if (command === "incident") {
     result = await incident(config);
   } else if (command === "export") {
     result = await exportConfirmed(config);
   } else {
-    throw new Error("usage: ozon_24h_production.sh [start|install-candidate|doctor-candidate|promote|doctor|status|incident|stop|retire-current|resume|export]");
+    throw new Error("usage: ozon_24h_production.sh [start|install-candidate|doctor-candidate|promote|doctor|status|report-status [YYYY-MM-DD]|report [YYYY-MM-DD]|incident|stop|retire-current|resume|export]");
   }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   return result?.ok === false ? 1 : 0;

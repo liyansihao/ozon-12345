@@ -31,6 +31,8 @@ def format_cost_output(result: dict, recovery: dict | None = None) -> str:
         evidence_lines.append(f"SAME_ITEM_EVIDENCE {result['same_item_evidence']}")
     if result.get("match_evidence_key"):
         evidence_lines.append(f"MATCH_EVIDENCE_KEY {result['match_evidence_key']}")
+    if result.get("selected_offer_id"):
+        evidence_lines.append(f"SELECTED_OFFER_ID {result['selected_offer_id']}")
     if result.get("balanced_match"):
         evidence_lines.extend([
             f"BALANCED_MATCH_OK {str(bool(result['balanced_match'].get('passed'))).lower()}",
@@ -65,6 +67,7 @@ def analyze(module, session, request: dict) -> dict:
         expect_category=str(request.get("expect_category") or ""),
         page_size=max(1, int(request.get("top") or 10)),
         minimum_matches=max(1, int(request.get("minimum_same_item_matches") or 3)),
+        excluded_offer_ids=request.get("excluded_offer_ids") or [],
         source_image_path=image_path,
     )
     top3 = rows[:3]

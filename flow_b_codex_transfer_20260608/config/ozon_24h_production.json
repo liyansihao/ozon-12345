@@ -15,6 +15,34 @@
   "checkpoint_interval_seconds": 7200,
   "rate_check_interval_seconds": 300,
   "source_refresh_seconds": 7200,
+  "daily_pricing_report": {
+    "enabled": true,
+    "output_dir": "/Users/mac/Desktop/ozon每日上品",
+    "node": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
+    "node_modules": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules",
+    "runtime_root": "${STATE_ROOT}/report-runtime",
+    "poll_interval_seconds": 60,
+    "time_zone": "Asia/Shanghai",
+    "cutoff": "20:00",
+    "report_after": "20:30"
+  },
+  "profit_learning": {
+    "enabled": true,
+    "priority_file": "/Users/mac/Desktop/ozon每日上品/优先母款.json",
+    "feedback_file": "/Users/mac/Desktop/ozon每日上品/错误货源.json",
+    "feedback_dir": "/Users/mac/Desktop/ozon每日上品/核价反馈",
+    "learning_status": "${STATE_ROOT}/profit_learning/status.json",
+    "feedback_status": "${STATE_ROOT}/profit_learning/feedback_status.json",
+    "runtime_root": "${STATE_ROOT}/profit_learning",
+    "node": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
+    "node_modules": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules",
+    "file_refresh_ms": 5000,
+    "poll_interval_seconds": 60,
+    "lookback_days": 30,
+    "minimum_completed_orders": 3,
+    "order_page_size": 100,
+    "order_max_pages": 100
+  },
   "restart_delays_seconds": [
     5,
     10,
@@ -39,61 +67,71 @@
       "id": 104965,
       "name": "丽丽1号",
       "warehouse_id": 1020005023597900,
-      "warehouse_evidence": "ERP live verified 2026-07-31: 邮政陆运经济仓"
+      "ural_warehouse_id": 1020005026342280,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 106637,
       "name": "丽丽二号",
       "warehouse_id": 1020005023256510,
-      "warehouse_evidence": "ERP verified"
+      "ural_warehouse_id": 1020005026343390,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济舱 + ural"
     },
     {
       "id": 106640,
       "name": "丽丽三号",
       "warehouse_id": 1020005023616740,
-      "warehouse_evidence": "ERP live preflight 2026-07-27: unique 邮政陆运经济仓"
+      "ural_warehouse_id": 1020005026339130,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 106644,
       "name": "丽丽四号",
       "warehouse_id": 1020005023616380,
-      "warehouse_evidence": "ERP live preflight 2026-07-27: unique 邮政陆运经济仓"
+      "ural_warehouse_id": 1020005026343030,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 106646,
       "name": "丽丽五号",
       "warehouse_id": 1020005023616970,
-      "warehouse_evidence": "ERP-discovered repeatedly in run 20260727_120626_ozon_stable_30h"
+      "ural_warehouse_id": 1020005026342580,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113151,
       "name": "丽丽六号",
       "warehouse_id": 1020005024854760,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026343600,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113153,
       "name": "丽丽七号",
       "warehouse_id": 1020005024855310,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026341880,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113154,
       "name": "丽丽八号",
       "warehouse_id": 1020005024855600,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026343890,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113155,
       "name": "丽丽九号",
       "warehouse_id": 1020005024855790,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026344240,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     },
     {
       "id": 113156,
       "name": "丽丽十号",
       "warehouse_id": 1020005024856090,
-      "warehouse_evidence": "ERP /api.shop/lists and /api.user/info verified 2026-07-31"
+      "ural_warehouse_id": 1020005026344600,
+      "warehouse_evidence": "ERP live verified 2026-08-08: 邮政陆运经济仓 + ural"
     }
   ],
   "source_pool": {
@@ -111,60 +149,90 @@
         "id": 104965,
         "needle": "丽丽1号",
         "warehouseId": 1020005023597900,
+        "uralWarehouseId": 1020005026342280,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 106637,
         "needle": "丽丽二号",
         "warehouseId": 1020005023256510,
+        "uralWarehouseId": 1020005026343390,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 106640,
         "needle": "丽丽三号",
         "warehouseId": 1020005023616740,
+        "uralWarehouseId": 1020005026339130,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 106644,
         "needle": "丽丽四号",
         "warehouseId": 1020005023616380,
+        "uralWarehouseId": 1020005026343030,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 106646,
         "needle": "丽丽五号",
         "warehouseId": 1020005023616970,
+        "uralWarehouseId": 1020005026342580,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113151,
         "needle": "丽丽六号",
         "warehouseId": 1020005024854760,
+        "uralWarehouseId": 1020005026343600,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113153,
         "needle": "丽丽七号",
         "warehouseId": 1020005024855310,
+        "uralWarehouseId": 1020005026341880,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113154,
         "needle": "丽丽八号",
         "warehouseId": 1020005024855600,
+        "uralWarehouseId": 1020005026343890,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113155,
         "needle": "丽丽九号",
         "warehouseId": 1020005024855790,
+        "uralWarehouseId": 1020005026344240,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       },
       {
         "id": 113156,
         "needle": "丽丽十号",
         "warehouseId": 1020005024856090,
+        "uralWarehouseId": 1020005026344600,
+        "weightThresholdGrams": 500,
+        "weightRouting": true,
         "requireWarehouse": true
       }
     ],
@@ -183,6 +251,10 @@
     "FLOW_B_TARGET_PUBLISH_COUNT": "0",
     "FLOW_B_UNLIMITED_PUBLISH": "1",
     "FLOW_B_DAILY_STORE_TIMEZONE": "Asia/Shanghai",
+    "FLOW_B_ENFORCE_DIRECT_DAILY_LIMIT": "1",
+    "FLOW_B_DAILY_STORE_LIMIT": "100",
+    "FLOW_B_DAILY_SUBMISSION_CUTOFF": "20:00",
+    "FLOW_B_DAILY_REPORT_AFTER": "20:30",
     "FLOW_B_PUBLISH_WORKERS": "8",
     "FLOW_B_MAX_PUBLISH_WORKERS": "8",
     "FLOW_B_OZON_DETAIL_WORKERS": "1",
@@ -218,6 +290,7 @@
     "FLOW_B_MAX_FAVORITE_DETAIL_INTERVAL_MS": "6000",
     "FLOW_B_FAVORITE_DETAIL_SOFT_BLOCK_STEP_MS": "1000",
     "FLOW_B_FAVORITE_CACHE_TTL_MS": "30000",
+    "FLOW_B_IMPORTED_FAVORITE_CLEANUP_LIMIT": "100",
     "FLOW_B_SOURCE_PRODUCTIVE_WEIGHT": "3",
     "FLOW_B_SOURCE_EXPLORATION_WEIGHT": "1",
     "FLOW_B_VERIFY_LISTING_FBS_DETAIL": "0",
@@ -232,7 +305,7 @@
     "FLOW_B_1688_PERSISTENT_POOL": "1",
     "FLOW_B_1688_WORKERS": "4",
     "FLOW_B_1688_WORKER_FAILURE_THRESHOLD": "3",
-    "FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS": "150",
+    "FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS": "5000",
     "FLOW_B_1688_HEALTH_FAILURE_THRESHOLD": "5",
     "FLOW_B_1688_HEALTH_DEFERRED_TTL_MS": "120000",
     "FLOW_B_1688_HEALTH_PROBE_BACKOFF_MS": "30000",
