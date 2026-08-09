@@ -1779,9 +1779,23 @@ function latestSourceSkuOutcomes(rows, acceptedStatuses) {
   return sources;
 }
 
+export function isSourceInfrastructureFailure(row = {}) {
+  const value = row?.data && typeof row.data === "object"
+    ? { ...row, ...row.data }
+    : row;
+  if (["submitted", "published"].includes(String(value?.status || ""))) return false;
+  const reason = String(value?.reason || value?.error?.code || value?.error?.message || "");
+  return /(?:^|[-_ ])1688(?:[-_ ])(?:timeout|total-timeout|health-deferred|image-fetch-failed)(?:$|[-_ ])/iu.test(reason)
+    || /persistent worker (?:queue timed out|request aborted)/iu.test(reason)
+    || /favorite worker page creation timed out|target page, context or browser has been closed/iu.test(reason);
+}
+
 export function fullFunnelSourceScores(rows) {
   const outcomeRank = { favorited: 1, rejected: 2, skipped: 2, submitted: 3, published: 4 };
-  const sources = latestSourceSkuOutcomes(rows, new Set(Object.keys(outcomeRank)));
+  const sources = latestSourceSkuOutcomes(
+    (rows || []).filter((row) => !isSourceInfrastructureFailure(row)),
+    new Set(Object.keys(outcomeRank)),
+  );
   const scoreOutcomes = (key, values) => {
     const attempted = values.length;
     const published = values.filter(({ status }) => status === "published").length;
@@ -1808,6 +1822,7 @@ export function fullFunnelSourceScores(rows) {
 export function sourceProductivityStats(rows = []) {
   const sources = new Map();
   for (const row of rows || []) {
+    if (isSourceInfrastructureFailure(row)) continue;
     const key = sourceYieldKey(row?.source_url);
     const sku = String(row?.sku || "").trim();
     if (!key || !sku) continue;
@@ -2060,6 +2075,7 @@ export function interleaveSourcePortfolio(urls, yieldRows = [], {
 function exhaustedSourceFamilyPenalties(rows) {
   const families = new Map();
   (rows || []).forEach((row, order) => {
+    if (isSourceInfrastructureFailure(row)) return;
     const familyKey = sourceUrlKey(row?.source_url);
     const priceBanded = isPriceBandedSource(row?.source_url);
     const key = priceBanded ? sourceYieldKey(row?.source_url) : familyKey;
@@ -2112,6 +2128,7 @@ function exhaustedSourceFamilyPenalties(rows) {
 function recentSellerFamilyPenalties(rows) {
   const sellers = new Map();
   (rows || []).forEach((row, order) => {
+    if (isSourceInfrastructureFailure(row)) return;
     const key = canonicalSellerUrl(row?.source_url) || canonicalSellerUrl(row?.seller_url);
     const sku = String(row?.sku || "").trim();
     const status = String(row?.status || "");

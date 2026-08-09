@@ -1723,6 +1723,40 @@ test("full-funnel scores put a fully dry explored source below untried supply", 
   assert.ok(scores.get(dry) < 0);
 });
 
+test("1688 infrastructure timeouts do not erase proven source productivity", () => {
+  const productive = "https://www.ozon.ru/seller/recovered-after-throttle/";
+  const semanticDry = "https://www.ozon.ru/seller/semantic-dry/";
+  const rows = [
+    { source_url: productive, sku: "accepted", status: "submitted" },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      source_url: productive,
+      sku: `timeout-${index}`,
+      status: "skipped",
+      reason: "1688-timeout",
+    })),
+    ...Array.from({ length: 8 }, (_, index) => ({
+      source_url: semanticDry,
+      sku: `no-match-${index}`,
+      status: "skipped",
+      reason: "1688-no-reliable-match",
+    })),
+  ];
+  const scores = fullFunnelSourceScores(rows);
+  assert.ok(scores.get(productive) > 0);
+  assert.ok(scores.get(semanticDry) < 0);
+  assert.deepEqual(sourceProductivityStats(rows).get(productive), {
+    attempted: 1,
+    cost_passed: 1,
+    accepted: 1,
+    cost_rate: 1,
+    acceptance_rate: 1,
+  });
+  assert.deepEqual(prioritizeSourceUrls([semanticDry, productive], { yieldRows: rows }), [
+    productive,
+    semanticDry,
+  ]);
+});
+
 test("strict submissions are a stronger leading source signal than favorites", () => {
   const favoriteOnly = "https://www.ozon.ru/seller/favorite-only/";
   const submitted = "https://www.ozon.ru/seller/submitted/";

@@ -2261,6 +2261,22 @@ async function evaluateDueLiveGates({
   return { action: "continue", gate: null, status: "healthy" };
 }
 
+export async function runDirectSourceRefresh({
+  appRoot,
+  stateRoot,
+  runDir,
+  currentRun,
+  initialRefresh = runInitialSourceRefresh,
+  formalRefresh = runFormalSourceRefresh,
+} = {}) {
+  try {
+    return await initialRefresh({ appRoot, stateRoot, runDir, currentRun });
+  } catch (error) {
+    if (error?.code !== "OZON_SOURCE_SET_NOT_AUTHORIZED") throw error;
+    return formalRefresh(appRoot, stateRoot, runDir, currentRun);
+  }
+}
+
 async function superviseDirectPublishing({
   config,
   appRoot,
@@ -2275,6 +2291,28 @@ async function superviseDirectPublishing({
   let shuttingDown = false;
   let restartAttempt = 0;
   let reportTimer = null;
+  let sourceRefreshTimer = null;
+  let sourceRefreshRunning = false;
+  const refreshSources = async () => {
+    if (sourceRefreshRunning || shuttingDown) return null;
+    sourceRefreshRunning = true;
+    try {
+      const result = await runDirectSourceRefresh({ appRoot, stateRoot, runDir, currentRun });
+      if (result.code !== 0) {
+        throw result.error || new Error(`direct source portfolio refresh exited ${result.code}`);
+      }
+      return result;
+    } catch (error) {
+      await appendJsonLine(path.join(runDir, "runtime_errors.jsonl"), {
+        at: new Date().toISOString(),
+        stage: "direct-source-set-refresh",
+        error: String(error?.message || error),
+      }).catch(() => {});
+      return { code: 1, error };
+    } finally {
+      sourceRefreshRunning = false;
+    }
+  };
   const reportPoll = async () => {
     try {
       await runDailyPricingReportCheck({
@@ -2304,6 +2342,13 @@ async function superviseDirectPublishing({
   process.on("SIGHUP", onSignal);
   try {
     await fsp.mkdir(runDir, { recursive: true });
+    await refreshSources();
+    const sourceRefreshIntervalMs = Math.max(
+      60_000,
+      Number(config.source_refresh_seconds || 7_200) * 1000,
+    );
+    sourceRefreshTimer = setInterval(() => { void refreshSources(); }, sourceRefreshIntervalMs);
+    sourceRefreshTimer.unref();
     await reportPoll();
     const reportIntervalMs = Math.max(
       30_000,
@@ -2496,6 +2541,7 @@ async function superviseDirectPublishing({
     return 0;
   } finally {
     if (reportTimer) clearInterval(reportTimer);
+    if (sourceRefreshTimer) clearInterval(sourceRefreshTimer);
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
     process.off("SIGHUP", onSignal);
