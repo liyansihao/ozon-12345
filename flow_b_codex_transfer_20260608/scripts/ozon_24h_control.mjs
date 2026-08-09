@@ -618,11 +618,14 @@ function validateConfig(config) {
       throw new Error("direct publishing must be unlimited");
     }
     const balancedSpeedContract = {
-      FLOW_B_1688_TOTAL_BUDGET_MS: "15000",
-      FLOW_B_1688_ITEM_TIMEOUT: "15",
+      FLOW_B_1688_TOTAL_BUDGET_MS: "30000",
+      FLOW_B_1688_ITEM_TIMEOUT: "30",
       FLOW_B_1688_TRANSIENT_RETRIES: "1",
-      FLOW_B_1688_RETRY_BUDGET_SECONDS: "15",
+      FLOW_B_1688_RETRY_BUDGET_SECONDS: "30",
       FLOW_B_1688_WORKERS: "4",
+      FLOW_B_1688_SESSION_MAX_REQUESTS: "4",
+      FLOW_B_1688_SESSION_MAX_AGE_SECONDS: "120",
+      FLOW_B_1688_SESSION_RECYCLE_SLOW_SECONDS: "8",
       FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS: "5000",
       FLOW_B_1688_MATCH_POLICY: "shadow",
       FLOW_B_1688_MATCH_SHADOW_SAMPLES: "100",

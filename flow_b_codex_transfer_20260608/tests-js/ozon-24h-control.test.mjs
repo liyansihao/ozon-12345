@@ -272,10 +272,13 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_TARGET_PUBLISH_COUNT, "0");
   assert.equal(config.flow_env.FLOW_B_UNLIMITED_PUBLISH, "1");
   assert.equal(config.flow_env.FLOW_B_1688_MIN_MATCHES, "1");
-  assert.equal(config.flow_env.FLOW_B_1688_TOTAL_BUDGET_MS, "15000");
-  assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "15");
+  assert.equal(config.flow_env.FLOW_B_1688_TOTAL_BUDGET_MS, "30000");
+  assert.equal(config.flow_env.FLOW_B_1688_ITEM_TIMEOUT, "30");
   assert.equal(config.flow_env.FLOW_B_1688_TRANSIENT_RETRIES, "1");
   assert.equal(config.flow_env.FLOW_B_1688_WORKERS, "4");
+  assert.equal(config.flow_env.FLOW_B_1688_SESSION_MAX_REQUESTS, "4");
+  assert.equal(config.flow_env.FLOW_B_1688_SESSION_MAX_AGE_SECONDS, "120");
+  assert.equal(config.flow_env.FLOW_B_1688_SESSION_RECYCLE_SLOW_SECONDS, "8");
   assert.equal(config.flow_env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS, "5000");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_POLICY, "shadow");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_SHADOW_SAMPLES, "100");

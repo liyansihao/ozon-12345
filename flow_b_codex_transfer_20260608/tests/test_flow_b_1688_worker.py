@@ -187,6 +187,33 @@ class WorkerTransientRecoveryTests(unittest.TestCase):
                     monotonic=lambda: next(clock),
                 )
 
+    def test_session_recycles_on_request_or_age_limit(self):
+        session = object()
+        self.assertEqual(self.module.session_recycle_reason(
+            session,
+            request_count=4,
+            started_at=10.0,
+            now=20.0,
+            max_requests=4,
+            max_age_seconds=120,
+        ), "request-limit")
+        self.assertEqual(self.module.session_recycle_reason(
+            session,
+            request_count=1,
+            started_at=10.0,
+            now=131.0,
+            max_requests=4,
+            max_age_seconds=120,
+        ), "age-limit")
+        self.assertIsNone(self.module.session_recycle_reason(
+            session,
+            request_count=1,
+            started_at=10.0,
+            now=20.0,
+            max_requests=4,
+            max_age_seconds=120,
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()
