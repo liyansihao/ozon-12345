@@ -488,6 +488,37 @@ function plausibleCnyRubRate(value) {
   return Number.isFinite(rate) && rate >= 5 && rate <= 30 ? rate : null;
 }
 
+function observedCandidateTime(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u.test(raw)
+    ? `${raw.replace(" ", "T")}+08:00`
+    : raw;
+  const parsed = Date.parse(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+export function freshCnySnapshotSalePrice(item, {
+  now = new Date(),
+  maximumAgeMs = 15 * 60_000,
+} = {}) {
+  if (String(item?.source_currency || "").toUpperCase() !== "CNY") return null;
+  const salePrice = Number(item?.sell_price ?? item?.sale_price);
+  if (!(salePrice > 0)) return null;
+  const observedAt = [
+    item?.update_time,
+    item?.create_time,
+    item?.favorited_at,
+    item?.collected_at,
+  ].map(observedCandidateTime).find((value) => value !== null);
+  const nowMs = now instanceof Date ? now.getTime() : Date.parse(String(now || ""));
+  const ageMs = Number.isFinite(nowMs) && observedAt !== null ? nowMs - observedAt : Number.NaN;
+  if (!Number.isFinite(ageMs) || ageMs < -60_000 || ageMs > Math.max(0, Number(maximumAgeMs) || 0)) {
+    return null;
+  }
+  return rounded(salePrice);
+}
+
 function importErrorMessages(log) {
   const messages = [];
   for (const value of [log?.error_msg, ...(Array.isArray(log?.skus) ? log.skus.map((row) => row?.error_msg) : [])]) {
@@ -2078,9 +2109,12 @@ export function createPublishRunner({
           detailResult?.current_price,
           detailResult?.follow_min,
         ].map(Number).filter((value) => value > 0);
+        const freshSnapshotPrice = confirmedLivePrices.length
+          ? null
+          : freshCnySnapshotSalePrice(item, { now: now() });
         salePrice = confirmedLivePrices.length
           ? Math.min(...confirmedLivePrices)
-          : null;
+          : freshSnapshotPrice;
         if (!(Number(salePrice) > 0)) {
           return skip(item, "missing-live-sale-price", { outcome_status: "skipped_profit" });
         }
@@ -2110,7 +2144,7 @@ export function createPublishRunner({
         };
         recordMetric("direct_funnel.jsonl", {
           sku,
-          stage: "live_price_confirmed",
+          stage: freshSnapshotPrice === null ? "live_price_confirmed" : "fresh_snapshot_price_fallback",
           source_url: item.source_url ?? item.seller_url ?? null,
           current_price: Number(detailResult?.current_price) || null,
           current_price_rub: Number(detailResult?.current_price_rub) || null,
@@ -2118,6 +2152,9 @@ export function createPublishRunner({
           follow_min_rub: Number(detailResult?.follow_min_rub) || null,
           observed_cny_rub_rate: observedCnyRubRate,
           sale_price: Number(salePrice),
+          snapshot_observed_at: freshSnapshotPrice === null
+            ? null
+            : item.update_time || item.create_time || item.favorited_at || item.collected_at || null,
           category: category.mapped,
         });
       }
