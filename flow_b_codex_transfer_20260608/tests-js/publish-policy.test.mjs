@@ -53,6 +53,35 @@ test("preflight rejects prohibited categories", () => {
   }
 });
 
+test("preflight rejects skincare while keeping non-skincare personal care", () => {
+  for (const item of [
+    { title: "Крем для лица увлажняющий", category: "Красота и здоровье" },
+    { title: "Blackhead Pore Control Tightening Serum", category: "美容和卫生 > 护理化妆品 > 精华素" },
+    { title: "Hydrabio Tonique для лица", category: "face care" },
+    { title: "PDRN Capsule Cream", category: "护理化妆品" },
+    { title: "AVENE солнцезащитный крем SPF 50", category: "护肤" },
+    { title: "Маска для лица с гиалуроновой кислотой", category: "美容和卫生 > 面膜" },
+  ]) {
+    assert.equal(preflightSkipReason({
+      ...item,
+      mode: "FBS",
+      economy: {
+        title: "CEL Economy Small",
+        price_list: { logistics_name: "CEL", logistics_speed: "economy" },
+      },
+    }), "prohibited-category");
+  }
+  assert.equal(preflightSkipReason({
+    mode: "FBS",
+    title: "Шампунь для волос",
+    category: "美容和卫生 > 护发产品 > 洗发水",
+    economy: {
+      title: "CEL Economy Small",
+      price_list: { logistics_name: "CEL", logistics_speed: "economy" },
+    },
+  }), null);
+});
+
 test("food rules do not reject a safe title containing the letters in Победа", () => {
   assert.equal(preflightSkipReason({
     mode: "FBS",
