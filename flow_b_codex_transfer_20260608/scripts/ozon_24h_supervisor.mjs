@@ -939,7 +939,7 @@ function expandTemplate(value, config = {}) {
     .replaceAll("${STATE_ROOT}", String(config.state_root || ""));
 }
 
-function expandedConfig(config) {
+export function expandedConfig(config) {
   const cloned = structuredClone(config);
   for (const key of ["install_root", "state_root"]) {
     if (cloned[key]) cloned[key] = expandTemplate(cloned[key], cloned);
@@ -950,6 +950,20 @@ function expandedConfig(config) {
   for (const key of ["output_dir", "runtime_root", "node", "node_modules"]) {
     if (cloned.daily_pricing_report?.[key]) {
       cloned.daily_pricing_report[key] = expandTemplate(cloned.daily_pricing_report[key], cloned);
+    }
+  }
+  for (const key of [
+    "priority_file",
+    "feedback_file",
+    "feedback_dir",
+    "learning_status",
+    "feedback_status",
+    "runtime_root",
+    "node",
+    "node_modules",
+  ]) {
+    if (cloned.profit_learning?.[key]) {
+      cloned.profit_learning[key] = expandTemplate(cloned.profit_learning[key], cloned);
     }
   }
   return cloned;
@@ -985,6 +999,44 @@ export function workerEnvironment(config, currentRun) {
   environment.FLOW_B_CDP_ENDPOINT = config.browser.cdp_endpoint;
   environment.FLOW_B_EXTENSION_DIR = absolute(config.browser.extension_dir);
   environment.FLOW_B_CHROMIUM_EXECUTABLE = absolute(config.browser.executable);
+  if (config.profit_learning?.enabled === true) {
+    const profitLearning = config.profit_learning;
+    const configuredPaths = {
+      FLOW_B_PROFIT_PRIORITY_FILE: profitLearning.priority_file,
+      FLOW_B_PROFIT_FEEDBACK_FILE: profitLearning.feedback_file,
+      FLOW_B_PROFIT_FEEDBACK_DIR: profitLearning.feedback_dir,
+      FLOW_B_PROFIT_LEARNING_STATUS: profitLearning.learning_status,
+      FLOW_B_PROFIT_FEEDBACK_STATE: profitLearning.feedback_status,
+      FLOW_B_PROFIT_RUNTIME_ROOT: profitLearning.runtime_root,
+      FLOW_B_PROFIT_NODE: profitLearning.node,
+      FLOW_B_PROFIT_NODE_MODULES: profitLearning.node_modules,
+      FLOW_B_PROFIT_REPORT_STATUS: path.join(config.state_root, "daily_pricing_report_status.json"),
+      FLOW_B_PROFIT_ARTIFACT_RUNTIME_ROOT: path.join(profitLearning.runtime_root, "artifact-runtime"),
+    };
+    for (const [name, value] of Object.entries(configuredPaths)) {
+      if (!value) continue;
+      environment[name] = absolute(expandTemplate(value, config));
+    }
+    environment.FLOW_B_PROFIT_FILE_REFRESH_MS = String(
+      Math.max(0, Number(profitLearning.file_refresh_ms) || 5_000),
+    );
+    environment.FLOW_B_PROFIT_LEARNING_ENABLED = "1";
+    environment.FLOW_B_PROFIT_POLL_INTERVAL_MS = String(
+      Math.max(1, Number(profitLearning.poll_interval_seconds) || 60) * 1_000,
+    );
+    environment.FLOW_B_PROFIT_LOOKBACK_DAYS = String(
+      Math.max(1, Number(profitLearning.lookback_days) || 30),
+    );
+    environment.FLOW_B_PROFIT_MOTHER_MIN_ORDERS = String(
+      Math.max(1, Number(profitLearning.minimum_completed_orders) || 3),
+    );
+    environment.FLOW_B_PROFIT_ORDER_PAGE_SIZE = String(
+      Math.max(1, Number(profitLearning.order_page_size) || 100),
+    );
+    environment.FLOW_B_PROFIT_ORDER_MAX_PAGES = String(
+      Math.max(1, Number(profitLearning.order_max_pages) || 100),
+    );
+  }
   if (config.runtime_mode === "direct") {
     const configuredTargets = Array.isArray(config.flow_env?.FLOW_B_STORE_TARGETS)
       ? config.flow_env.FLOW_B_STORE_TARGETS

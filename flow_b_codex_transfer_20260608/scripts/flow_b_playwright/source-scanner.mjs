@@ -4,6 +4,7 @@ import { ensureMaoziLogin, ensureMaoziPluginLogin, openMaoziPage } from "./brows
 import { createCandidateQueue } from "./candidate-queue.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError } from "./continuous-runtime.mjs";
 import { isPureFbs, prohibitedCategorySkipReason } from "./publish-policy.mjs";
+import { createProfitFilesReader, profitPriorityScore } from "./profit-priority.mjs";
 import {
   isOzonAccessStoppedError,
   isOzonAuthenticationText,
@@ -2374,9 +2375,13 @@ export function nextLowYieldBatchStreak({ current = 0, favorited = 0, threshold 
   return Number(favorited) < Number(threshold) ? Number(current) + 1 : 0;
 }
 
-export function prioritizeFavoriteLinks(links, familyScores = {}) {
+export function prioritizeFavoriteLinks(links, familyScores = {}, extraPriority = () => 0) {
   return [...links]
-    .map((link, index) => ({ link, index, priority: favoriteLinkPriority(link, familyScores) }))
+    .map((link, index) => ({
+      link,
+      index,
+      priority: favoriteLinkPriority(link, familyScores) + (Number(extraPriority(link)) || 0),
+    }))
     .sort((left, right) => right.priority - left.priority || left.index - right.index)
     .map(({ link }) => link);
 }
@@ -2397,17 +2402,17 @@ function deduplicateTitleVariants(links) {
   });
 }
 
-export function limitLinksPerSource(rows, limit = 24, familyScores = {}) {
+export function limitLinksPerSource(rows, limit = 24, familyScores = {}, extraPriority = () => 0) {
   const maximum = Math.max(1, Number(limit) || 24);
   const perSource = rows.map((row) => deduplicateTitleVariants(prioritizeFavoriteLinks((row?.links || []).map((link) => ({
     ...link,
     source_url: row.source_url,
-  })), familyScores)).slice(0, maximum));
+  })), familyScores, extraPriority)).slice(0, maximum));
   const combined = [];
   for (let index = 0; index < maximum; index += 1) {
     const sourceRound = [];
     for (const links of perSource) if (links[index]) sourceRound.push(links[index]);
-    combined.push(...prioritizeFavoriteLinks(sourceRound, familyScores));
+    combined.push(...prioritizeFavoriteLinks(sourceRound, familyScores, extraPriority));
   }
   return combined;
 }
@@ -2806,7 +2811,7 @@ async function extractFavoriteProduct(page, url, timeout, { directMode = false }
   return parseFavoriteProductSnapshot(snapshot || { url });
 }
 
-async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, productiveSourceSampleKeys = new Set(), onResult = () => {}, workerPagePool = null, accessController = null, favoriteTelemetry = null }) {
+export async function collectFavorites({ context, maozi, links, target, currentTotal, env, attempted, logFile, log, familyScores = {}, extraPriority = () => 0, productiveSourceSampleKeys = new Set(), onResult = () => {}, workerPagePool = null, accessController = null, favoriteTelemetry = null }) {
   if (currentTotal >= target || !links.length || isCollectionDeadlineReached(env)) return currentTotal;
   const directMode = String(env.FLOW_B_DIRECT_PUBLISH || "") === "1";
   let existing = new Set();
@@ -2826,7 +2831,7 @@ async function collectFavorites({ context, maozi, links, target, currentTotal, e
     links,
     !directMode && env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1",
   );
-  for (const link of prioritizeFavoriteLinks(eligibleLinks, familyScores)) {
+  for (const link of prioritizeFavoriteLinks(eligibleLinks, familyScores, extraPriority)) {
     const href = typeof link === "string" ? link : link?.href;
     const sku = skuFromProductUrl(href);
     if (!sku) continue;
@@ -3381,6 +3386,12 @@ export async function scanSources({
     && String(env.FLOW_B_STRICT_SOURCE_PORTFOLIO || "") === "1";
   const inputPath = path.resolve(urlsFile);
   const outputPath = path.resolve(outFile);
+  const profitSnapshot = await createProfitFilesReader({
+    priorityFile: env.FLOW_B_PROFIT_PRIORITY_FILE,
+    feedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE,
+    refreshMs: Math.max(0, Number(env.FLOW_B_PROFIT_FILE_REFRESH_MS) || 5_000),
+  }).snapshot();
+  const learnedPriority = (row) => profitPriorityScore(profitSnapshot, row);
   const inputRevision = await fs.stat(inputPath).then((stat) => (
     `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`
   ));
@@ -3649,6 +3660,7 @@ export async function scanSources({
     perSourceLimit: candidatePerSourceDrain,
     sourceKey: (row) => sourceCollectionBlockKey(row?.source_url) || row?.source_url,
     priority: (row) => favoriteLinkPriority(row, titleFamilyScores)
+      + learnedPriority(row)
       + Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
     priorityTier: (row) => Number(candidateSourceScores.get(sourceYieldKey(row?.source_url)) || 0),
   };
@@ -3711,7 +3723,7 @@ export async function scanSources({
   );
   const sourcePagePool = reusablePools.sourcePages;
   const favoriteWorkerPagePool = reusablePools.favoritePages;
-  const collectWithCandidateQueue = async ({ links, onResult = () => {}, ...args }) => {
+  const collectWithCandidateQueue = async ({ links, onResult = () => {}, extraPriority = learnedPriority, ...args }) => {
     const eligibleLinks = filterListingFbsEvidenceLinks(
       links,
       env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1",
@@ -3729,6 +3741,7 @@ export async function scanSources({
         ...args,
         links: eligibleLinks,
         attempted,
+        extraPriority,
         onResult: (result) => {
           const newlyHandled = isNewFavoriteCollectionResult(result);
           if (newlyHandled && ["favorited", "rejected", "failed"].includes(String(result?.status || ""))) {
@@ -3847,6 +3860,7 @@ export async function scanSources({
         retainedRows,
         envNumber(env, "FLOW_B_RETAINED_LINKS_PER_SOURCE", baseLinkLimit * 4),
         titleFamilyScores,
+        learnedPriority,
       );
       const retainedLinks = [];
       const retainedSkus = new Set();
@@ -4034,6 +4048,7 @@ export async function scanSources({
         batchRows.map((row, index) => ({ ...row, source_url: batch[index] })),
         perSourceLinkLimit,
         titleFamilyScores,
+        learnedPriority,
       );
       const requireListingFbsEvidence = env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1";
       const eligibleCollectionLinks = filterListingFbsEvidenceLinks(
@@ -4163,6 +4178,7 @@ export async function scanSources({
         prefetchedRows.map((row, index) => ({ ...row, source_url: prefetchedBatch.batch[index] })),
         perSourceLinkLimit,
         titleFamilyScores,
+        learnedPriority,
       );
       const requireListingFbsEvidence = env.FLOW_B_REQUIRE_LISTING_FBS_EVIDENCE === "1";
       const eligiblePrefetchedLinks = filterListingFbsEvidenceLinks(

@@ -5581,7 +5581,9 @@ test("direct store-limit cancellation leaves queued ERP work durably retryable",
 test("a publish response after midnight keeps the store rejection on the request day", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-midnight-response-"));
   try {
-    let currentTime = new Date("2026-07-31T15:59:59.000Z");
+    // Start one second before the configured 20:00 Shanghai cutoff. The mocked
+    // ERP response is deliberately delayed across local midnight.
+    let currentTime = new Date("2026-07-31T11:59:59.000Z");
     const directRunControl = {
       cancelled: false,
       fatalError: null,

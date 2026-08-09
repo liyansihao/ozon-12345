@@ -20,6 +20,7 @@ import { ozonAccessControllerFor } from "./flow_b_playwright/ozon-access-control
 import { createLowTokenInterventionController } from "./flow_b_playwright/low-token-intervention.mjs";
 import { createPublishRunner } from "./flow_b_playwright/publish-runner.mjs";
 import { createPublishState } from "./flow_b_playwright/publish-state.mjs";
+import { createProfitLearningSidecar } from "./flow_b_playwright/profit-learning-sidecar.mjs";
 import { scanSources } from "./flow_b_playwright/source-scanner.mjs";
 import { runReadOnlyVerification } from "./flow_b_playwright/verification.mjs";
 import {
@@ -363,7 +364,10 @@ async function createPublishingSession(context, options, env, shared) {
       matchPolicyRetentionPercent: Math.max(0, Number(env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT) || 75),
       matchPolicyImageAvailabilityPercent: Math.max(0, Number(env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT) || 90),
       matchPolicyP95Ms: Math.max(1, Number(env.FLOW_B_1688_MATCH_MAX_P95_MS) || 15_000),
+      feedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
+      feedbackRefreshMs: Math.max(0, Number(env.FLOW_B_PROFIT_FILE_REFRESH_MS) || 5_000),
     });
+    await costBridge.refreshProfitFeedback?.({ force: false });
     const detailProvider = createOzonDetailProvider({
       context,
       accessController: ozonAccessControllerFor(context, env),
@@ -438,8 +442,11 @@ async function createPublishingSession(context, options, env, shared) {
       directRunControl: shared.directRunControl || null,
       minimumSameItemMatches: Math.max(1, Number(env.FLOW_B_1688_MIN_MATCHES) || 1),
       costEstimateTimeoutMs: Math.max(1, Number(env.FLOW_B_1688_TOTAL_BUDGET_MS) || 15_000),
+      profitPriorityFile: env.FLOW_B_PROFIT_PRIORITY_FILE || null,
+      profitFeedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
+      profitFileRefreshMs: Math.max(0, Number(env.FLOW_B_PROFIT_FILE_REFRESH_MS) || 5_000),
     });
-    return { maoziPage, costBridge, detailProvider, runner, state };
+    return { maoziPage, client, costBridge, detailProvider, runner, state };
   } catch (error) {
     await state?.close?.().catch(() => {});
     await maoziPage.close().catch(() => {});
@@ -911,6 +918,31 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         session: null,
         directRunControl,
       };
+      const profitLearningSidecar = directEnv.FLOW_B_PROFIT_LEARNING_ENABLED === "1"
+        ? createProfitLearningSidecar({
+            stateRoot: directEnv.FLOW_B_PRODUCTION_STATE_ROOT,
+            runtimeRoot: directEnv.FLOW_B_PROFIT_RUNTIME_ROOT,
+            statusPath: directEnv.FLOW_B_PROFIT_LEARNING_STATUS,
+            reportStatusPath: directEnv.FLOW_B_PROFIT_REPORT_STATUS,
+            outputPath: directEnv.FLOW_B_PROFIT_PRIORITY_FILE,
+            feedbackDir: directEnv.FLOW_B_PROFIT_FEEDBACK_DIR,
+            feedbackFile: directEnv.FLOW_B_PROFIT_FEEDBACK_FILE,
+            feedbackStateFile: directEnv.FLOW_B_PROFIT_FEEDBACK_STATE,
+            artifactRuntimeRoot: directEnv.FLOW_B_PROFIT_ARTIFACT_RUNTIME_ROOT,
+            nodeModules: directEnv.FLOW_B_PROFIT_NODE_MODULES,
+            runtimeDbPath: directEnv.FLOW_B_RUNTIME_STATE_DB,
+            sharedCachePath: directEnv.FLOW_B_1688_SHARED_CACHE,
+            storeIds: parseStoreTargets(directEnv).map((target) => target.id),
+            windowDays: Math.max(1, Number(directEnv.FLOW_B_PROFIT_LOOKBACK_DAYS) || 30),
+            minimumCompletedOrders: Math.max(1, Number(directEnv.FLOW_B_PROFIT_MOTHER_MIN_ORDERS) || 3),
+            pageSize: Math.max(1, Number(directEnv.FLOW_B_PROFIT_ORDER_PAGE_SIZE) || 100),
+            maxPages: Math.max(1, Number(directEnv.FLOW_B_PROFIT_ORDER_MAX_PAGES) || 100),
+            intervalMs: Math.max(1_000, Number(directEnv.FLOW_B_PROFIT_POLL_INTERVAL_MS) || 60_000),
+            timeZone: directEnv.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
+            maoziClientProvider: () => shared.session?.client || null,
+          })
+        : null;
+      profitLearningSidecar?.start();
       let backgroundStop = false;
       let backgroundError = null;
       const runtimeWake = createRuntimeWakeSignal();
@@ -1058,6 +1090,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         }
         return { scan, publish };
       } finally {
+        profitLearningSidecar?.stop();
         producerStop = true;
         backgroundStop = true;
         directRunControl.cancelled = true;

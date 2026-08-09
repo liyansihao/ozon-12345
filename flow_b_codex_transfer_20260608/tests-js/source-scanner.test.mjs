@@ -12,6 +12,7 @@ import {
   hasListingPluginFbsEvidence,
   filterListingFbsEvidenceLinks,
   effectiveFavoriteTotal,
+  collectFavorites,
   excludedSkusFromHistories,
   excludedSkusFromEventHistories,
   favoritedSkusFromHistory,
@@ -2272,6 +2273,78 @@ test("source fairness caps and round-robins sources before combining batches", (
   assert.deepEqual(limitLinksPerSource(rows, 2).map((row) => row.href), ["a-0", "b-0", "a-1", "b-1"]);
 });
 
+async function collectOneCrossSourceFavorite(extraPriority) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-profit-priority-"));
+  const toggled = [];
+  const rows = [
+    {
+      source_url: "source-a",
+      links: [{
+        href: "https://www.ozon.ru/product/ordinary-1001/",
+        text: "Обычный товар",
+        image_url: "https://ir.ozone.ru/ordinary.jpg",
+        card_text: "20 ¥\n发货模式：FBS",
+      }],
+    },
+    {
+      source_url: "source-b",
+      links: [{
+        href: "https://www.ozon.ru/product/learned-1002/",
+        text: "Обычный товар",
+        image_url: "https://ir.ozone.ru/learned.jpg",
+        card_text: "20 ¥\n发货模式：FBS",
+      }],
+    },
+  ];
+  const links = limitLinksPerSource(rows, 1, {}, extraPriority);
+  try {
+    const total = await collectFavorites({
+      context: {
+        newPage: async () => ({ close: async () => {} }),
+      },
+      maozi: {
+        evaluate: async (_operation, payload) => {
+          if (payload) {
+            toggled.push(String(payload.sku));
+            return { code: 1 };
+          }
+          return [];
+        },
+      },
+      links,
+      target: 1,
+      currentTotal: 0,
+      env: {
+        FLOW_B_DIRECT_PUBLISH: "1",
+        FLOW_B_FAVORITE_WORKERS: "2",
+        FLOW_B_FAVORITE_API_INTERVAL_MS: "0",
+        FLOW_B_FBS_SOURCE_HISTORY: path.join(directory, "history.jsonl"),
+      },
+      attempted: new Set(),
+      logFile: path.join(directory, "run", "favorite_collection.jsonl"),
+      log: () => {},
+      extraPriority,
+    });
+    return { toggled, total };
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("multi-source target=1 collects the learned-profit candidate first", async () => {
+  const result = await collectOneCrossSourceFavorite((row) => (
+    String(row?.href || "").includes("learned") ? 10_000 : 0
+  ));
+  assert.equal(result.total, 1);
+  assert.deepEqual(result.toggled, ["1002"]);
+});
+
+test("multi-source target=1 preserves existing order without learned-profit data", async () => {
+  const result = await collectOneCrossSourceFavorite();
+  assert.equal(result.total, 1);
+  assert.deepEqual(result.toggled, ["1001"]);
+});
+
 test("cached fallback uses only unattempted cards with complete exact-FBS evidence", () => {
   const exact = {
     href: "https://www.ozon.ru/product/exact-1001/",
@@ -3125,6 +3198,21 @@ test("favorite collection prioritizes observed profitable title families stably"
     "underwear",
     "hat",
   ]);
+});
+
+test("profit learning adds only a stable soft priority and never removes exploration links", () => {
+  const links = [
+    { href: "explore-a", title: "ordinary cable" },
+    { href: "learned", title: "kitchen organizer" },
+    { href: "explore-b", title: "ordinary lamp" },
+  ];
+  const result = prioritizeFavoriteLinks(
+    links,
+    {},
+    (row) => row.href === "learned" ? 10_000 : 0,
+  );
+  assert.deepEqual(result.map((row) => row.href), ["learned", "explore-a", "explore-b"]);
+  assert.equal(result.length, links.length);
 });
 
 test("listing cards with explicit cross-border delivery outrank ambiguous titles", () => {

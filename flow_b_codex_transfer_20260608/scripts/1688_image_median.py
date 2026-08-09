@@ -668,6 +668,7 @@ def build_same_item_evidence(
     expect_category: str,
     cost_source: str,
     selected_cost: float,
+    selected_offer_id: str,
     selected_cluster_rows: list[dict],
     balanced_match: dict,
 ) -> tuple[str, str]:
@@ -712,6 +713,7 @@ def build_same_item_evidence(
             for row in selected_cluster_rows
         ],
         "selected_cost": float(selected_cost),
+        "selected_offer_id": str(selected_offer_id or "").strip(),
         "balanced_match": {
             "passed": bool(balanced_match.get("passed")),
             "match_type": str(balanced_match.get("match_type") or "rejected"),
@@ -735,8 +737,14 @@ def first_page_p70_cost(
     minimum_matches: int = 3,
     source_image_path: Path | str | None = None,
     image_metrics_by_offer: dict[str, dict] | None = None,
+    excluded_offer_ids: list[str] | set[str] | tuple[str, ...] | None = None,
 ) -> dict:
     required_matches = max(1, int(minimum_matches))
+    blocked_offer_ids = {
+        str(offer_id).strip()
+        for offer_id in (excluded_offer_ids or [])
+        if str(offer_id).strip()
+    }
     first_page = scored_similarity_rows(rows, expect_title, expect_model, expect_category, page_size)
     first_page_prices = [row["price"] for row in first_page if row.get("price") is not None]
     allowed_levels = {"strong"} if any(row["level"] == "strong" for row in first_page) else set()
@@ -757,7 +765,9 @@ def first_page_p70_cost(
             else bool(semantic_hits.get("title"))
         )
         reason = ""
-        if price is None or float(price) <= 0:
+        if offer_id and offer_id in blocked_offer_ids:
+            reason = "manually blocked 1688 offer"
+        elif price is None or float(price) <= 0:
             reason = "missing or invalid price"
         elif row.get("bad_hits"):
             reason = "accessory or packaging title"
@@ -929,6 +939,7 @@ def first_page_p70_cost(
         expect_category=expect_category,
         cost_source=cost_source,
         selected_cost=selected_cost,
+        selected_offer_id=str(selected.get("offerId") or "").strip(),
         selected_cluster_rows=evidence_cluster_rows,
         balanced_match=balanced_match,
     )
@@ -1031,6 +1042,12 @@ def main() -> int:
     parser.add_argument("--expect-category", default="", help="Ozon/Maozi category text for fast match screening")
     parser.add_argument("--match-top", type=int, default=10, help="How many high-sales rows to scan for title/model matches")
     parser.add_argument("--min-matches", type=int, default=3, help="Minimum trustworthy same-item offers required")
+    parser.add_argument(
+        "--exclude-offer-id",
+        action="append",
+        default=[],
+        help="1688 offer ID excluded by confirmed manual feedback (repeatable)",
+    )
     args = parser.parse_args()
 
     image_path = Path(args.image).expanduser().resolve()
@@ -1051,6 +1068,7 @@ def main() -> int:
         expect_category=args.expect_category,
         page_size=args.top,
         minimum_matches=max(1, args.min_matches),
+        excluded_offer_ids=args.exclude_offer_id,
         source_image_path=image_path,
     )
 
@@ -1094,6 +1112,8 @@ def main() -> int:
         print("SAME_ITEM_EVIDENCE", p70["same_item_evidence"])
     if p70.get("match_evidence_key"):
         print("MATCH_EVIDENCE_KEY", p70["match_evidence_key"])
+    if p70.get("selected_offer_id"):
+        print("SELECTED_OFFER_ID", p70["selected_offer_id"])
     if p70.get("balanced_match"):
         print("BALANCED_MATCH_OK", str(bool(p70["balanced_match"].get("passed"))).lower())
         print("BALANCED_MATCH_TYPE", p70["balanced_match"].get("match_type") or "rejected")

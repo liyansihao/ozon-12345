@@ -162,6 +162,34 @@ function expandHome(value) {
   return String(value || "").replaceAll("${HOME}", process.env.HOME || "/Users/mac");
 }
 
+function expandConfigTemplate(value, config = {}) {
+  const appRoot = expandHome(config?.install_root);
+  const stateRoot = expandHome(config?.state_root);
+  return expandHome(value)
+    .replaceAll("${APP_ROOT}", appRoot)
+    .replaceAll("${STATE_ROOT}", stateRoot);
+}
+
+function resolvedProfitLearningConfig(config = {}) {
+  const source = config?.profit_learning || {};
+  const resolved = { ...source };
+  for (const key of [
+    "priority_file",
+    "feedback_file",
+    "feedback_dir",
+    "learning_status",
+    "feedback_status",
+    "runtime_root",
+    "node",
+    "node_modules",
+  ]) {
+    resolved[key] = source[key]
+      ? path.resolve(expandConfigTemplate(source[key], config))
+      : "";
+  }
+  return resolved;
+}
+
 async function readJson(filename, fallback = null) {
   try {
     return JSON.parse(await fsp.readFile(filename, "utf8"));
@@ -169,6 +197,46 @@ async function readJson(filename, fallback = null) {
     if (error.code === "ENOENT" && fallback !== null) return fallback;
     throw error;
   }
+}
+
+async function readSidecarStatus(filename) {
+  if (!filename) return { status: "not-configured", state_file: null };
+  try {
+    const value = JSON.parse(await fsp.readFile(filename, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("sidecar status must be a JSON object");
+    }
+    return { status: String(value.status || "unknown"), ...value, state_file: filename };
+  } catch (error) {
+    if (error.code === "ENOENT") return { status: "not-started", state_file: filename };
+    return {
+      status: "invalid",
+      state_file: filename,
+      error: String(error?.message || error),
+    };
+  }
+}
+
+export async function readProfitLearningStatus(config, paths = null) {
+  const deployment = paths || deploymentPaths(config);
+  const profitConfig = resolvedProfitLearningConfig({
+    ...config,
+    install_root: deployment.appLink || config?.install_root,
+    state_root: deployment.stateRoot || config?.state_root,
+  });
+  if (profitConfig.enabled !== true) return { enabled: false };
+  const [learning, feedbackImport] = await Promise.all([
+    readSidecarStatus(profitConfig.learning_status),
+    readSidecarStatus(profitConfig.feedback_status),
+  ]);
+  return {
+    enabled: true,
+    priority_file: profitConfig.priority_file,
+    feedback_file: profitConfig.feedback_file,
+    feedback_dir: profitConfig.feedback_dir,
+    learning,
+    feedback_import: feedbackImport,
+  };
 }
 
 async function readJsonLines(filename) {
@@ -403,6 +471,45 @@ function validateConfig(config) {
       if (!path.isAbsolute(expandHome(String(value || "")))) {
         throw new Error(`${name} must be an absolute path`);
       }
+    }
+    const profitLearning = resolvedProfitLearningConfig(config);
+    if (profitLearning.enabled !== true) {
+      throw new Error("profit learning sidecars must be enabled");
+    }
+    for (const [name, value] of Object.entries({
+      profit_priority_file: profitLearning.priority_file,
+      profit_feedback_file: profitLearning.feedback_file,
+      profit_feedback_dir: profitLearning.feedback_dir,
+      profit_learning_status: profitLearning.learning_status,
+      profit_feedback_status: profitLearning.feedback_status,
+      profit_runtime_root: profitLearning.runtime_root,
+      profit_node: profitLearning.node,
+      profit_node_modules: profitLearning.node_modules,
+    })) {
+      if (!path.isAbsolute(String(value || ""))) {
+        throw new Error(`${name} must be an absolute path`);
+      }
+    }
+    if (profitLearning.priority_file !== "/Users/mac/Desktop/ozon每日上品/优先母款.json"
+      || profitLearning.feedback_file !== "/Users/mac/Desktop/ozon每日上品/错误货源.json"
+      || profitLearning.feedback_dir !== "/Users/mac/Desktop/ozon每日上品/核价反馈") {
+      throw new Error("profit learning files must use the fixed daily-upload desktop folder");
+    }
+    const expectedProfitStateRoot = path.join(
+      path.resolve(expandHome(config.state_root)),
+      "profit_learning",
+    );
+    if (profitLearning.learning_status !== path.join(expectedProfitStateRoot, "status.json")
+      || profitLearning.feedback_status !== path.join(expectedProfitStateRoot, "feedback_status.json")) {
+      throw new Error("profit learning sidecar states must stay under the production state root");
+    }
+    if (Number(profitLearning.lookback_days) !== 30
+      || Number(profitLearning.minimum_completed_orders) !== 3) {
+      throw new Error("profit learning must use a 30-day window and at least three completed orders");
+    }
+    if (!Number.isFinite(Number(profitLearning.file_refresh_ms))
+      || Number(profitLearning.file_refresh_ms) < 1_000) {
+      throw new Error("profit learning file refresh must be at least 1000ms");
     }
     return config;
   }
@@ -822,6 +929,16 @@ async function promoteCandidate(config) {
   return { ok: true, stable: paths.stable, rollback: await pathExists(paths.rollback) ? paths.rollback : null };
 }
 
+async function optionalJsonObjectIsValid(filename) {
+  if (!filename) return false;
+  try {
+    const value = JSON.parse(await fsp.readFile(filename, "utf8"));
+    return Boolean(value && typeof value === "object" && !Array.isArray(value));
+  } catch (error) {
+    return error.code === "ENOENT";
+  }
+}
+
 async function doctor(config, { appRoot = null } = {}) {
   const paths = deploymentPaths(config);
   const resolvedApp = appRoot ? path.resolve(appRoot) : paths.appLink;
@@ -831,6 +948,7 @@ async function doctor(config, { appRoot = null } = {}) {
   const reportNode = expandHome(reportConfig.node);
   const reportNodeModules = expandHome(reportConfig.node_modules);
   const reportOutputDir = expandHome(reportConfig.output_dir);
+  const profitConfig = resolvedProfitLearningConfig(config);
   const required = {
     app: resolvedApp,
     config: path.join(resolvedApp, "config", "ozon_24h_production.json"),
@@ -847,12 +965,52 @@ async function doctor(config, { appRoot = null } = {}) {
     report_node: reportNode,
     report_node_modules: reportNodeModules,
   };
+  if (profitConfig.enabled === true) {
+    Object.assign(required, {
+      profit_learning_core: path.join(
+        resolvedApp,
+        "scripts",
+        "flow_b_playwright",
+        "profit-learning.mjs",
+      ),
+      profit_learning_sidecar: path.join(
+        resolvedApp,
+        "scripts",
+        "flow_b_playwright",
+        "profit-learning-sidecar.mjs",
+      ),
+      profit_feedback_importer: path.join(resolvedApp, "scripts", "import_profit_feedback.mjs"),
+      profit_node: profitConfig.node,
+      profit_node_modules: profitConfig.node_modules,
+    });
+  }
   for (const [name, filename] of Object.entries(required)) checks[name] = await pathExists(filename);
   if (reportOutputDir) {
     await fsp.mkdir(reportOutputDir, { recursive: true });
     checks.report_output_dir = await pathExists(reportOutputDir);
   } else {
     checks.report_output_dir = false;
+  }
+  if (profitConfig.enabled === true) {
+    const profitDirectories = {
+      profit_output_dir: path.dirname(profitConfig.priority_file),
+      profit_feedback_dir: profitConfig.feedback_dir,
+      profit_runtime_root: profitConfig.runtime_root,
+      profit_state_dir: path.dirname(profitConfig.learning_status),
+    };
+    for (const [name, directory] of Object.entries(profitDirectories)) {
+      if (directory) await fsp.mkdir(directory, { recursive: true });
+      checks[name] = Boolean(directory) && await pathExists(directory);
+    }
+    const profitJsonFiles = {
+      profit_priority_json: profitConfig.priority_file,
+      profit_feedback_json: profitConfig.feedback_file,
+      profit_learning_status_json: profitConfig.learning_status,
+      profit_feedback_status_json: profitConfig.feedback_status,
+    };
+    for (const [name, filename] of Object.entries(profitJsonFiles)) {
+      checks[name] = await optionalJsonObjectIsValid(filename);
+    }
   }
   if (checks.report_node && checks.report_node_modules) {
     const reportRuntime = path.join(paths.stateRoot, "report-runtime");
@@ -1401,6 +1559,7 @@ async function status(config) {
   const checkpoint = current?.run_dir
     ? await readJson(path.join(current.run_dir, "compact_checkpoint.json"), {})
     : {};
+  const profitLearning = await readProfitLearningStatus(config, paths);
   if (config.runtime_mode === "direct" && current?.run_dir) {
     const [funnel, acceptedRows, backgroundRows, matchPolicyState] = await Promise.all([
       readJsonLines(path.join(current.run_dir, "direct_funnel.jsonl")),
@@ -1472,6 +1631,7 @@ async function status(config) {
       by_store_run: byStoreRun,
       daily_submission_window: submissionWindow,
       daily_pricing_report: reportStatus,
+      profit_learning: profitLearning,
       match_policy: {
         configured: matchPolicyState.configured_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
         effective: matchPolicyState.effective_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
@@ -1493,18 +1653,21 @@ async function status(config) {
       },
     };
   }
-  return compactProductionStatus({
-    current,
-    operational,
-    owners: {
-      counts: {
-        supervisor: effectiveOwners.supervisor,
-        worker: effectiveOwners.worker,
-        profile_owner: effectiveOwners.profile,
+  return {
+    ...compactProductionStatus({
+      current,
+      operational,
+      owners: {
+        counts: {
+          supervisor: effectiveOwners.supervisor,
+          worker: effectiveOwners.worker,
+          profile_owner: effectiveOwners.profile,
+        },
       },
-    },
-    checkpoint,
-  });
+      checkpoint,
+    }),
+    profit_learning: profitLearning,
+  };
 }
 
 async function reportStatus(config, dateKey = null) {

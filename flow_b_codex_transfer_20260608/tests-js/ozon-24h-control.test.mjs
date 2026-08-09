@@ -18,6 +18,7 @@ import {
   globalFlowBWorkerPids,
   productionProfileOwnerPids,
   productionSupervisorPids,
+  readProfitLearningStatus,
   refreshCurrentRunSources,
   resumeMode,
   shouldResumeCurrentRun,
@@ -292,6 +293,17 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_SOURCE_PRODUCTIVE_WEIGHT, "3");
   assert.equal(config.flow_env.FLOW_B_SOURCE_EXPLORATION_WEIGHT, "1");
   assert.equal(config.flow_env.FLOW_B_FAVORITE_CACHE_TTL_MS, "30000");
+  assert.equal(config.profit_learning.enabled, true);
+  assert.equal(config.profit_learning.priority_file, "/Users/mac/Desktop/ozon每日上品/优先母款.json");
+  assert.equal(config.profit_learning.feedback_file, "/Users/mac/Desktop/ozon每日上品/错误货源.json");
+  assert.equal(config.profit_learning.feedback_dir, "/Users/mac/Desktop/ozon每日上品/核价反馈");
+  assert.equal(config.profit_learning.learning_status, "${STATE_ROOT}/profit_learning/status.json");
+  assert.equal(config.profit_learning.feedback_status, "${STATE_ROOT}/profit_learning/feedback_status.json");
+  assert.equal(config.profit_learning.lookback_days, 30);
+  assert.equal(config.profit_learning.minimum_completed_orders, 3);
+  assert.equal(config.profit_learning.poll_interval_seconds, 60);
+  assert.equal(config.profit_learning.order_page_size, 100);
+  assert.equal(config.profit_learning.order_max_pages, 100);
   assert.equal(config.candidate_buffer, undefined);
   assert.equal(config.acceptance, undefined);
   assert.deepEqual(config.stores.map((row) => Number(row.id)), [
@@ -380,6 +392,52 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
     }),
     /store targets must match/u,
   );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      profit_learning: {
+        ...config.profit_learning,
+        priority_file: "/tmp/优先母款.json",
+      },
+    }),
+    /fixed daily-upload desktop folder/u,
+  );
+});
+
+test("profit learning status reports both independent sidecars and tolerates a malformed state", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-profit-status-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const stateRoot = path.join(root, "state");
+  const statusDir = path.join(stateRoot, "profit_learning");
+  await fs.mkdir(statusDir, { recursive: true });
+  await fs.writeFile(path.join(statusDir, "status.json"), `${JSON.stringify({
+    status: "completed",
+    completed_at: "2026-08-09T12:30:00.000Z",
+    priority_count: 7,
+  })}\n`);
+  await fs.writeFile(path.join(statusDir, "feedback_status.json"), "{broken-json\n");
+
+  const result = await readProfitLearningStatus({
+    install_root: path.join(root, "app"),
+    state_root: stateRoot,
+    profit_learning: {
+      enabled: true,
+      priority_file: path.join(root, "优先母款.json"),
+      feedback_file: path.join(root, "错误货源.json"),
+      feedback_dir: path.join(root, "核价反馈"),
+      learning_status: "${STATE_ROOT}/profit_learning/status.json",
+      feedback_status: "${STATE_ROOT}/profit_learning/feedback_status.json",
+    },
+  }, {
+    appLink: path.join(root, "app"),
+    stateRoot,
+  });
+
+  assert.equal(result.enabled, true);
+  assert.equal(result.learning.status, "completed");
+  assert.equal(result.learning.priority_count, 7);
+  assert.equal(result.feedback_import.status, "invalid");
+  assert.match(result.feedback_import.error, /JSON/u);
 });
 
 test("doctor expands its Python path without supervisor-only helpers", async (t) => {
@@ -387,11 +445,25 @@ test("doctor expands its Python path without supervisor-only helpers", async (t)
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const stateRoot = path.join(root, "state");
   await fs.mkdir(stateRoot, { recursive: true });
+  const priorityFile = path.join(root, "daily", "优先母款.json");
+  await fs.mkdir(path.dirname(priorityFile), { recursive: true });
+  await fs.writeFile(priorityFile, "{broken-json\n");
   const result = await doctor({
     install_root: path.join(root, "app"),
     state_root: stateRoot,
     flow_env: {
       FLOW_B_PYTHON: "${HOME}/definitely-missing-ozon-python",
+    },
+    profit_learning: {
+      enabled: true,
+      priority_file: priorityFile,
+      feedback_file: path.join(root, "daily", "错误货源.json"),
+      feedback_dir: path.join(root, "daily", "核价反馈"),
+      learning_status: "${STATE_ROOT}/profit_learning/status.json",
+      feedback_status: "${STATE_ROOT}/profit_learning/feedback_status.json",
+      runtime_root: "${STATE_ROOT}/profit_learning",
+      node: process.execPath,
+      node_modules: path.dirname(process.execPath),
     },
     browser: {
       executable: path.join(root, "missing-browser"),
@@ -402,6 +474,12 @@ test("doctor expands its Python path without supervisor-only helpers", async (t)
   }, { appRoot: path.join(root, "candidate") });
   assert.equal(result.ok, false);
   assert.equal(result.checks.python, false);
+  assert.equal(result.checks.profit_priority_json, false);
+  assert.equal(result.checks.profit_feedback_json, true);
+  assert.equal(result.checks.profit_learning_status_json, true);
+  assert.equal(result.checks.profit_feedback_status_json, true);
+  assert.equal(result.checks.profit_feedback_dir, true);
+  assert.equal(result.checks.profit_runtime_root, true);
   assert.equal(result.app_root, path.join(root, "candidate"));
 });
 

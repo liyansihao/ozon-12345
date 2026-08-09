@@ -26,6 +26,23 @@
     "cutoff": "20:00",
     "report_after": "20:30"
   },
+  "profit_learning": {
+    "enabled": true,
+    "priority_file": "/Users/mac/Desktop/ozon每日上品/优先母款.json",
+    "feedback_file": "/Users/mac/Desktop/ozon每日上品/错误货源.json",
+    "feedback_dir": "/Users/mac/Desktop/ozon每日上品/核价反馈",
+    "learning_status": "${STATE_ROOT}/profit_learning/status.json",
+    "feedback_status": "${STATE_ROOT}/profit_learning/feedback_status.json",
+    "runtime_root": "${STATE_ROOT}/profit_learning",
+    "node": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
+    "node_modules": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules",
+    "file_refresh_ms": 5000,
+    "poll_interval_seconds": 60,
+    "lookback_days": 30,
+    "minimum_completed_orders": 3,
+    "order_page_size": 100,
+    "order_max_pages": 100
+  },
   "restart_delays_seconds": [
     5,
     10,

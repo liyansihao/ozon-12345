@@ -21,6 +21,7 @@ import {
   cleanupBrowserProfileCaches,
   cleanupProfileCachesForConfig,
   currentRunDisposition,
+  expandedConfig,
   nextRestartDelaySeconds,
   processOwnershipDecision,
   processOwnershipSnapshot,
@@ -260,6 +261,69 @@ test("direct worker starts from the persisted store and has no strict submission
   assert.equal(environment.FLOW_B_UNLIMITED_PUBLISH, "1");
   assert.equal(environment.FLOW_B_SUBMISSION_GATE_FILE, undefined);
   assert.equal(environment.FLOW_B_VALIDATION_ONLY, "0");
+});
+
+test("profit learning paths expand once and are injected without changing the direct publish contract", () => {
+  const config = expandedConfig({
+    runtime_mode: "direct",
+    publish_target: 0,
+    minimum_profit_rate_exclusive: 30,
+    starting_store_id: 104965,
+    install_root: "/tmp/ozon-app",
+    state_root: "/tmp/ozon-state",
+    browser: {
+      cdp_endpoint: "http://127.0.0.1:9223",
+      extension_dir: "/tmp/extension",
+      executable: "/tmp/chrome",
+      profile_dir: "/tmp/profile",
+    },
+    profit_learning: {
+      enabled: true,
+      priority_file: "${APP_ROOT}/priority.json",
+      feedback_file: "${APP_ROOT}/feedback.json",
+      feedback_dir: "${APP_ROOT}/核价反馈",
+      learning_status: "${STATE_ROOT}/profit_learning/status.json",
+      feedback_status: "${STATE_ROOT}/profit_learning/feedback_status.json",
+      runtime_root: "${STATE_ROOT}/profit_learning",
+      node: "/tmp/node",
+      node_modules: "/tmp/node_modules",
+      file_refresh_ms: 5_000,
+      poll_interval_seconds: 60,
+      lookback_days: 30,
+      minimum_completed_orders: 3,
+      order_page_size: 100,
+      order_max_pages: 100,
+    },
+    flow_env: {
+      FLOW_B_STORE_TARGETS: [{ id: 104965, needle: "丽丽1号" }],
+    },
+  });
+  const environment = workerEnvironment(config, {
+    run_id: "direct-run",
+    run_dir: "/tmp/ozon-state/runs/direct-run",
+    current_store_id: 104965,
+  });
+
+  assert.equal(config.profit_learning.learning_status, "/tmp/ozon-state/profit_learning/status.json");
+  assert.equal(environment.FLOW_B_PROFIT_PRIORITY_FILE, "/tmp/ozon-app/priority.json");
+  assert.equal(environment.FLOW_B_PROFIT_FEEDBACK_FILE, "/tmp/ozon-app/feedback.json");
+  assert.equal(environment.FLOW_B_PROFIT_FEEDBACK_DIR, "/tmp/ozon-app/核价反馈");
+  assert.equal(environment.FLOW_B_PROFIT_LEARNING_STATUS, "/tmp/ozon-state/profit_learning/status.json");
+  assert.equal(environment.FLOW_B_PROFIT_FEEDBACK_STATE, "/tmp/ozon-state/profit_learning/feedback_status.json");
+  assert.equal(environment.FLOW_B_PROFIT_RUNTIME_ROOT, "/tmp/ozon-state/profit_learning");
+  assert.equal(environment.FLOW_B_PROFIT_NODE, "/tmp/node");
+  assert.equal(environment.FLOW_B_PROFIT_NODE_MODULES, "/tmp/node_modules");
+  assert.equal(environment.FLOW_B_PROFIT_FILE_REFRESH_MS, "5000");
+  assert.equal(environment.FLOW_B_PROFIT_LOOKBACK_DAYS, "30");
+  assert.equal(environment.FLOW_B_PROFIT_MOTHER_MIN_ORDERS, "3");
+  assert.equal(environment.FLOW_B_PROFIT_LEARNING_ENABLED, "1");
+  assert.equal(environment.FLOW_B_PROFIT_POLL_INTERVAL_MS, "60000");
+  assert.equal(environment.FLOW_B_PROFIT_ORDER_PAGE_SIZE, "100");
+  assert.equal(environment.FLOW_B_PROFIT_ORDER_MAX_PAGES, "100");
+  assert.equal(environment.FLOW_B_PROFIT_REPORT_STATUS, "/tmp/ozon-state/daily_pricing_report_status.json");
+  assert.equal(environment.FLOW_B_PROFIT_ARTIFACT_RUNTIME_ROOT, "/tmp/ozon-state/profit_learning/artifact-runtime");
+  assert.equal(environment.FLOW_B_DIRECT_PUBLISH, "1");
+  assert.equal(environment.FLOW_B_TARGET_PUBLISH_COUNT, "0");
 });
 
 test("two failed browser recoveries within sixty minutes force a safe stop", () => {

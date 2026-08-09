@@ -49,6 +49,36 @@ test("client paginates favorites and resolves the first normalized publish targe
   );
 });
 
+test("client paginates the lightweight order and refund history endpoints", async () => {
+  const transport = makeTransport({
+    "/api.order.ozon/lists": (_path, request) => ({
+      status: 200,
+      json: {
+        code: 1,
+        data: {
+          data: [{ order_id: `order-${request.query.page}` }],
+          last_page: 2,
+        },
+      },
+    }),
+    "/api.order.refund/list": {
+      status: 200,
+      json: { code: 1, data: { list: [{ order_id: "refund-1" }] } },
+    },
+  });
+  const client = createMaoziClient({ transport });
+  assert.deepEqual(await client.listOrders({
+    pageSize: 1,
+    query: { start_date: "2026-07-10", end_date: "2026-08-09" },
+  }), [{ order_id: "order-1" }, { order_id: "order-2" }]);
+  assert.deepEqual(await client.listRefunds({ pageSize: 100 }), [{ order_id: "refund-1" }]);
+  assert.deepEqual(transport.calls.map(([endpoint, request]) => [endpoint, request.query]), [
+    ["/api.order.ozon/lists", { start_date: "2026-07-10", end_date: "2026-08-09", page: 1, page_size: 1 }],
+    ["/api.order.ozon/lists", { start_date: "2026-07-10", end_date: "2026-08-09", page: 2, page_size: 1 }],
+    ["/api.order.refund/list", { page: 1, page_size: 100 }],
+  ]);
+});
+
 test("publish target rejects empty store or watermark needles", async () => {
   const client = createMaoziClient({ transport: async () => { throw new Error("must not request resources"); } });
   await assert.rejects(

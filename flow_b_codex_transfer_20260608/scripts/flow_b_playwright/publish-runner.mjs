@@ -24,6 +24,7 @@ import {
 import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 import { submissionGatePolicy } from "./live-acceptance-gates.mjs";
 import { productWeightGrams, selectShippingRoute } from "./shipping-route.mjs";
+import { createProfitFilesReader, prioritizeProfitRows } from "./profit-priority.mjs";
 import { dailyWindowState } from "../daily-window.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
@@ -588,6 +589,10 @@ export function prioritizePublishCandidates(items, preflightPureSkus = new Set()
     .map(({ item }) => item);
 }
 
+export function prioritizeProfitCandidates(items, snapshot, storeId) {
+  return prioritizeProfitRows(items, snapshot, { storeId: Number(storeId) });
+}
+
 function interleaveCandidateBatches(primary, secondary, batchSize) {
   const width = Math.max(1, Number(batchSize) || 1);
   const result = [];
@@ -743,6 +748,9 @@ export function createPublishRunner({
   directRunControl = null,
   minimumSameItemMatches = 3,
   costEstimateTimeoutMs = 15_000,
+  profitPriorityFile = null,
+  profitFeedbackFile = null,
+  profitFileRefreshMs = 5_000,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -760,6 +768,11 @@ export function createPublishRunner({
     : null;
   const requiredSameItemMatches = Number(minimumSameItemMatches);
   const configuredCostEstimateTimeoutMs = Number(costEstimateTimeoutMs);
+  const profitFiles = createProfitFilesReader({
+    priorityFile: profitPriorityFile,
+    feedbackFile: profitFeedbackFile,
+    refreshMs: Math.max(0, Number(profitFileRefreshMs) || 0),
+  });
   dailyWindowState({
     now: now(),
     timeZone: dailyStoreTimeZone,
@@ -2541,6 +2554,7 @@ export function createPublishRunner({
       throw new TypeError("run attemptLimit must be a non-negative integer");
     }
     await state.load?.();
+    const profitSnapshot = await profitFiles.snapshot();
     const gate = await activeSubmissionGate();
     const allowedSkus = activeValidationOnly ? null : gate.allowed_skus;
     const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
@@ -3252,12 +3266,12 @@ export function createPublishRunner({
       const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
       return restored?.status !== "published" && restored?.status !== "skipped";
     });
-    const freshCandidates = prioritizePublishCandidates(
+    const freshCandidates = prioritizeProfitCandidates(prioritizePublishCandidates(
       actionableFavorites.filter((item) => !isReconciliationCandidate(item)),
       preflightPureSkus,
       familyScores,
       sourceScores,
-    );
+    ), profitSnapshot, targetConfig.store.id);
     const dueReconciliations = prioritizePublishCandidates(
       (activeValidationOnly || (activeDirectMode && !reconciliationOnly)
         ? []
@@ -3273,6 +3287,19 @@ export function createPublishRunner({
       ...terminalCleanupCandidates,
       ...interleaveCandidateBatches(freshCandidates, dueReconciliations, workerCount),
     ];
+    const terminalCleanupSet = new Set(terminalCleanupCandidates);
+    const reorderRemainingFreshForStore = (fromIndex, storeId) => {
+      const positions = [];
+      const pendingFresh = [];
+      for (let index = Math.max(0, Number(fromIndex) || 0); index < candidates.length; index += 1) {
+        const item = candidates[index];
+        if (terminalCleanupSet.has(item) || isReconciliationCandidate(item)) continue;
+        positions.push(index);
+        pendingFresh.push(item);
+      }
+      const ranked = prioritizeProfitCandidates(pendingFresh, profitSnapshot, storeId);
+      positions.forEach((position, index) => { candidates[position] = ranked[index]; });
+    };
     let published = Number(state.runPublishedCount?.() ?? 0);
     const resolvedRunDir = path.resolve(runDir);
     const acceptedSkus = new Set(
@@ -3961,6 +3988,7 @@ export function createPublishRunner({
           const nextConfig = await advanceStore(haltReason, targetConfig);
           if (!nextConfig) break;
           targetConfig = nextConfig;
+          reorderRemainingFreshForStore(cursor, targetConfig.store.id);
           continue;
         }
         if (haltReason) {
@@ -4028,6 +4056,7 @@ export function createPublishRunner({
           if (nextConfig) {
             unavailableStoreUntil.set(activeStoreId, now().getTime() + Math.max(0, Number(pendingStoreRetryMs) || 0));
             targetConfig = nextConfig;
+            reorderRemainingFreshForStore(cursor, targetConfig.store.id);
             continue schedulerLoop;
           }
           freshSubmissionsPaused = true;
@@ -4054,6 +4083,7 @@ export function createPublishRunner({
             break schedulerLoop;
           }
           targetConfig = nextConfig;
+          reorderRemainingFreshForStore(cursor, targetConfig.store.id);
           continue schedulerLoop;
         }
 
