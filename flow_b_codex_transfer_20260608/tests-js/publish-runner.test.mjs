@@ -4996,6 +4996,46 @@ test("direct cost rejection skips live Ozon detail, profit, and ERP submission",
   }
 });
 
+test("direct mode skips a missing economy quote instead of retrying an exception", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-missing-economy-"));
+  try {
+    const state = fakeState();
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "missing-economy",
+        title: "Безопасный товар без тарифа",
+        cover_image: "https://img.example/missing-economy.jpg",
+        sell_price: 120,
+      }], {
+        calculateProfit: async ({ purchase_price: purchasePrice }) => (
+          Number(purchasePrice) === 0.01 ? economy(45) : { calc_result: [] }
+        ),
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(result.accepted, 0);
+    assert.equal(publishCalls, 0);
+    const skipped = state.entryOf("missing-economy");
+    assert.equal(skipped.status, "skipped");
+    assert.equal(skipped.data.reason, "missing-supported-economy");
+    assert.equal(skipped.data.outcome_status, "skipped_profit");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("a hung cost lookup times out without pinning the rolling publish queue", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-cost-watchdog-"));
   try {

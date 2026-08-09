@@ -2186,6 +2186,11 @@ export function createPublishRunner({
         cnyRubRateConfirmed = true;
       }
       const economy = economyResult(calc, shippingRoute.logistics);
+      if (!economy?.price_list || typeof economy.price_list !== "object") {
+        return skip(item, "missing-supported-economy", {
+          outcome_status: activeDirectMode ? "skipped_profit" : undefined,
+        });
+      }
       const preflightReason = activeDirectMode
         ? null
         : policy.preflightSkipReason({ ...detail, economy });
