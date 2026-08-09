@@ -206,10 +206,11 @@ async function readableFile(filePath) {
   }
 }
 
-async function defaultWriteCache(filename, cache) {
+async function defaultWriteCache(filename, cache, serializedPayload = null) {
   const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await fs.mkdir(path.dirname(filename), { recursive: true });
-  await fs.writeFile(temporary, `${JSON.stringify(cache)}\n`, "utf8");
+  const payload = serializedPayload ?? `${JSON.stringify(cache)}\n`;
+  await fs.writeFile(temporary, payload, "utf8");
   await fs.rename(temporary, filename);
 }
 
@@ -252,6 +253,7 @@ export function createCostBridge({
   const crossRunKeysByRun = new Map();
   let cacheWriteChain = Promise.resolve();
   let pendingCacheGeneration = null;
+  let backgroundCacheWriteError = null;
   let ownedWorkerPool = null;
   let persistentWorkersDisabled = process.env.FLOW_B_1688_PERSISTENT_POOL === "0";
   let workerInfrastructureFailures = 0;
@@ -684,10 +686,23 @@ export function createCostBridge({
     const entries = [...generation.writes.entries()];
     generation.writes.clear();
     const operation = cacheWriteChain.then(async () => {
-      for (const [filename, cache] of entries) await writeCache(filename, cache);
+      const serializedByCache = new Map();
+      for (const [filename, cache] of entries) {
+        let serializedPayload = null;
+        if (writeCache === defaultWriteCache) {
+          if (!serializedByCache.has(cache)) {
+            serializedByCache.set(cache, `${JSON.stringify(cache)}\n`);
+          }
+          serializedPayload = serializedByCache.get(cache);
+        }
+        await writeCache(filename, cache, serializedPayload);
+      }
     });
     generation.operation = operation;
     cacheWriteChain = operation.catch(() => {});
+    operation.catch((error) => {
+      backgroundCacheWriteError ||= error;
+    });
     operation.then(generation.resolve, generation.reject);
     return operation;
   }
@@ -711,14 +726,23 @@ export function createCostBridge({
     for (const filename of new Set(filenames)) {
       generation.writes.set(filename, cache);
     }
+    // Estimates must not spend their public 1688 deadline rewriting the
+    // ever-growing run and shared cache snapshots. The generation remains
+    // tracked and close() still flushes it durably.
+    generation.promise.catch(() => {});
     return generation.promise;
   }
 
   async function flushCacheWrites() {
     while (pendingCacheGeneration) {
-      await beginCacheFlush(pendingCacheGeneration);
+      await beginCacheFlush(pendingCacheGeneration).catch(() => {});
     }
     await cacheWriteChain;
+    if (backgroundCacheWriteError) {
+      const error = backgroundCacheWriteError;
+      backgroundCacheWriteError = null;
+      throw error;
+    }
   }
 
   async function estimateUncached(item, runDir, {
@@ -977,7 +1001,7 @@ export function createCostBridge({
           updated_at: new Date().toISOString(),
         };
         crossRunKeysByRun.get(root)?.delete(key);
-        await saveCache(root, cache);
+        void saveCache(root, cache);
       }
       return { ...result, shared_cache: false, cache_key: key };
     })();
@@ -1088,11 +1112,13 @@ export function createCostBridge({
     },
     estimate,
     async close() {
-      await flushCacheWrites();
-      await matchPolicyWriteChain;
+      let closeError = null;
+      await flushCacheWrites().catch((error) => { closeError ||= error; });
+      await matchPolicyWriteChain.catch((error) => { closeError ||= error; });
       await workerPool?.close?.().catch(() => {});
       await ownedWorkerPool?.close?.().catch(() => {});
       ownedWorkerPool = null;
+      if (closeError) throw closeError;
     },
   };
 }
