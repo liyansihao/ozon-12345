@@ -613,6 +613,15 @@ function validateConfig(config) {
     if (Number(config?.flow_env?.FLOW_B_1688_MIN_MATCHES) !== 1) {
       throw new Error("direct publishing requires one verified 1688 same-item match");
     }
+    const adaptiveActionPolicy = String(
+      config?.flow_env?.FLOW_B_1688_ADAPTIVE_ACTION_POLICY || "",
+    ).trim().toLowerCase();
+    if (!["shadow", "enforce"].includes(adaptiveActionPolicy)) {
+      throw new Error("1688 adaptive action policy must be shadow or enforce");
+    }
+    if (Number(config?.flow_env?.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET) !== 100) {
+      throw new Error("1688 adaptive action evidence target must be 100");
+    }
     if (Number(config?.flow_env?.FLOW_B_TARGET_PUBLISH_COUNT) !== 0
       || String(config?.flow_env?.FLOW_B_UNLIMITED_PUBLISH || "") !== "1") {
       throw new Error("direct publishing must be unlimited");
@@ -1918,6 +1927,26 @@ async function status(config) {
         image_availability_percent: Number(matchPolicyState?.summary?.image_availability_percent || 0),
         p95_ms: Number(matchPolicyState?.summary?.p95_ms || 0),
         promoted_at: matchPolicyState.promoted_at || null,
+        adaptive_action: {
+          configured: matchPolicyState.adaptive_action_policy
+            || config?.flow_env?.FLOW_B_1688_ADAPTIVE_ACTION_POLICY
+            || "shadow",
+          effective: matchPolicyState.adaptive_action_policy
+            || config?.flow_env?.FLOW_B_1688_ADAPTIVE_ACTION_POLICY
+            || "shadow",
+          sample_target: Number(
+            matchPolicyState.adaptive_action_sample_target
+              || config?.flow_env?.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET
+              || 100,
+          ),
+          complete_samples: Number(matchPolicyState?.summary?.complete_action_samples || 0),
+          collection_status: matchPolicyState?.summary?.collection_status || "collecting",
+          allow_count: Number(matchPolicyState?.summary?.action_allow_count || 0),
+          allow_percent: Number(matchPolicyState?.summary?.action_allow_percent || 0),
+          reject_count: Number(matchPolicyState?.summary?.action_reject_count || 0),
+          reject_percent: Number(matchPolicyState?.summary?.action_reject_percent || 0),
+          automatic_enforcement: false,
+        },
       },
       owners: {
         supervisor: effectiveOwners.supervisor,

@@ -26,11 +26,16 @@ function returnedSameItemOutput({
   matchType = "strong_single",
   imageAvailable = true,
   offerIds = null,
+  adaptiveMatch = null,
 } = {}) {
   const normalizedRequest = {
     expect_category: String(request?.expect_category || "").toLocaleLowerCase("und").trim(),
     expect_model: String(request?.expect_model || "").toLocaleLowerCase("und").trim(),
     expect_title: String(request?.expect_title || "").toLocaleLowerCase("und").trim(),
+    expect_price_cny: Number.isFinite(Number(request?.expect_price_cny))
+      && Number(request?.expect_price_cny) > 0
+      ? Number(request.expect_price_cny)
+      : null,
   };
   const modelHit = normalizedRequest.expect_model || "";
   const titleHit = normalizedRequest.expect_title.split(/\s+/u).find((token) => token.length >= 4) || "product";
@@ -82,10 +87,54 @@ function returnedSameItemOutput({
     `SAME_ITEM_EVIDENCE ${evidence}`,
     `MATCH_EVIDENCE_KEY ${key}`,
     `SELECTED_OFFER_ID ${selectedOfferId}`,
+    ...(adaptiveMatch ? [`ADAPTIVE_MATCH_JSON ${JSON.stringify(adaptiveMatch)}`] : []),
     `COST_SOURCE ${source}`,
     `FILTERED_FIRST_PAGE_PRICES ${JSON.stringify(prices)}`,
     `P70_COST ${selectedCost}`,
   ].join("\n");
+}
+
+function cliMatchRequest(args) {
+  const value = (flag) => {
+    const index = args.indexOf(flag);
+    return index >= 0 ? args[index + 1] : "";
+  };
+  return {
+    expect_title: value("--expect-title"),
+    expect_model: value("--expect-model"),
+    expect_category: value("--expect-category"),
+    expect_price_cny: Number(value("--expect-price-cny")) || null,
+  };
+}
+
+function adaptiveV5({
+  action = "ALLOW",
+  decision = action === "REJECT" ? "REJECT" : "FAST",
+  evidenceComplete = true,
+  policyReasons = action === "REJECT" ? ["strict policy rejection"] : ["strict policy allow"],
+  selectedOfferId = "offer-1",
+  priceCny = 100,
+} = {}) {
+  return {
+    version: "adaptive-v5-shadow",
+    decision,
+    score: action === "REJECT" ? 25 : 95,
+    reason: policyReasons[0] || "adaptive v5 decision",
+    hard_conflicts: action === "REJECT" ? ["strict-policy-conflict"] : [],
+    missing_evidence: evidenceComplete ? [] : ["selected_offer_binding"],
+    selected_offer_id: selectedOfferId,
+    supporting_offer_ids: selectedOfferId ? [selectedOfferId] : [],
+    action,
+    policy_version: "adaptive-v5-policy-1",
+    policy_reasons: policyReasons,
+    evidence_complete: evidenceComplete,
+    valuable_digital: {
+      applies: false,
+      category: null,
+      price_cny: priceCny,
+      threshold_cny: 300,
+    },
+  };
 }
 
 test("manual feedback can stop a blocked source before image download or 1688", async () => {
@@ -129,11 +178,7 @@ test("new feedback invalidates an old good match and excludes the bad offer on r
         processes += 1;
         const excludedIndex = args.indexOf("--exclude-offer-id");
         const excluded = excludedIndex >= 0 ? args[excludedIndex + 1] : null;
-        const request = {
-          expect_title: args[args.indexOf("--expect-title") + 1],
-          expect_model: "",
-          expect_category: "",
-        };
+        const request = cliMatchRequest(args);
         return {
           code: 0,
           stdout: returnedSameItemOutput({
@@ -164,6 +209,45 @@ test("new feedback invalidates an old good match and excludes the bad offer on r
     assert.equal(second.ok, true, JSON.stringify(second));
     assert.deepEqual(second.selected_offer_ids, ["offer-2"]);
     assert.equal(processes, 2);
+    await bridge.close();
+  });
+});
+
+test("manual offer blacklist overrides an enforced adaptive REJECT result", async () => {
+  await withTempDir(async (runDir) => {
+    const feedbackFile = path.join(runDir, "错误货源.json");
+    await fs.writeFile(feedbackFile, JSON.stringify({
+      errors: { blocked_offers: [{ selected_offer_id: "offer-1" }] },
+    }));
+    const bridge = createCostBridge({
+      feedbackFile,
+      feedbackRefreshMs: 0,
+      adaptiveActionPolicy: "enforce",
+      minimumSameItemMatches: 1,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async ({ args }) => ({
+        code: 0,
+        stdout: returnedSameItemOutput({
+          request: cliMatchRequest(args),
+          prices: [18],
+          selectedCost: 18,
+          offerIds: ["offer-1"],
+          adaptiveMatch: adaptiveV5({ action: "REJECT", selectedOfferId: "offer-1" }),
+        }),
+        stderr: "",
+      }),
+    });
+    await bridge.refreshProfitFeedback();
+    const result = await bridge.estimate({
+      sku: "manual-priority",
+      cover_image: "https://img.example/manual-priority.jpg",
+      sell_price: 100,
+      expect_title: "same product lamp",
+    }, runDir);
+    assert.equal(result.ok, false);
+    assert.equal(result.feedback_blocked, true);
+    assert.equal(result.adaptive_action_rejected, true);
+    assert.equal(result.reason, "manual-feedback-blocked-1688-offer");
     await bridge.close();
   });
 });
@@ -199,6 +283,7 @@ test("recent normal feedback with exact verified offer and sane cost bypasses th
     const bridge = createCostBridge({
       feedbackFile,
       feedbackRefreshMs: 0,
+      adaptiveActionPolicy: "enforce",
       minimumSameItemMatches: 1,
       now: () => nowMs,
       download: async () => { downloads += 1; },
@@ -215,6 +300,9 @@ test("recent normal feedback with exact verified offer and sane cost bypasses th
     assert.equal(result.cost, 20);
     assert.equal(result.selected_offer_id, "trusted-exact");
     assert.equal(result.manual_feedback_cache, true);
+    assert.equal(result.adaptive_action_override, "ALLOW");
+    assert.equal(result.adaptive_action_override_source, "trusted-verified-feedback");
+    assert.equal(result.adaptive_action_policy_effective, "enforce");
     assert.equal(downloads, 0);
     assert.equal(processes, 0);
     await bridge.close();
@@ -268,7 +356,7 @@ test("stale or invalid normal feedback falls back to the normal matcher", async 
         return {
           code: 0,
           stdout: returnedSameItemOutput({
-            request: { expect_title: args[args.indexOf("--expect-title") + 1] },
+            request: cliMatchRequest(args),
             prices: [18],
             selectedCost: 18,
             offerIds: [`fresh-${processes}`],
@@ -327,6 +415,22 @@ test("verifies returned offer identities, semantics, prices, source and selected
   assert.equal(result.match_evidence_contract, "1688-returned-same-item-v3");
   assert.equal(result.matched_offer_count, 4);
   assert.match(result.match_evidence_key, /^[a-f0-9]{64}$/u);
+});
+
+test("signed evidence cannot be reused when the expected sale price changes", () => {
+  const signedRequest = { expect_title: "same product lamp", expect_price_cny: 100 };
+  const output = returnedSameItemOutput({
+    request: signedRequest,
+    prices: [18],
+    selectedCost: 18,
+  });
+  const result = parseCostOutput(output, 101, {
+    expectedMatchEvidence: { ...signedRequest, expect_price_cny: 101 },
+    requireSameItemEvidence: true,
+    minimumSameItemMatches: 1,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /request (?:does not match|mismatch)/i);
 });
 
 test("direct publishing accepts one verified same-item offer", () => {
@@ -421,11 +525,7 @@ test("shadow records legacy passes and automatically enforces balanced v3 after 
       download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
       runProcess: async ({ args }) => {
         runs += 1;
-        const request = {
-          expect_title: args[args.indexOf("--expect-title") + 1],
-          expect_model: "",
-          expect_category: "",
-        };
+        const request = cliMatchRequest(args);
         return {
           code: 0,
           stdout: returnedSameItemOutput({
@@ -461,6 +561,217 @@ test("shadow records legacy passes and automatically enforces balanced v3 after 
     assert.equal(rejected.ok, false);
     assert.match(rejected.reason, /balanced 1688 match rejected/i);
     await bridge.close();
+  });
+});
+
+test("adaptive v4 REJECT remains telemetry-only in shadow and survives cache reuse", async () => {
+  await withTempDir(async (runDir) => {
+    let runs = 0;
+    const adaptiveMatch = {
+      version: "adaptive-v4-shadow",
+      decision: "REJECT",
+      score: 28.5,
+      reason: "explicit model conflict",
+      hard_conflicts: ["model:x200-fe!=x200s"],
+      missing_evidence: [],
+      selected_offer_id: "offer-1",
+      supporting_offer_ids: ["offer-1"],
+    };
+    const bridge = createCostBridge({
+      matchPolicy: "shadow",
+      matchPolicySampleSize: 10,
+      minimumSameItemMatches: 1,
+      cacheFlushDebounceMs: 0,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async ({ args }) => {
+        runs += 1;
+        return {
+          code: 0,
+          stdout: returnedSameItemOutput({
+            request: cliMatchRequest(args),
+            prices: [18],
+            selectedCost: 18,
+            adaptiveMatch,
+          }),
+          stderr: "",
+        };
+      },
+    });
+    const item = {
+      sku: "adaptive-reject-1",
+      cover_image: "https://img.example/adaptive-reject.jpg",
+      sell_price: 100,
+      expect_title: "same product lamp",
+    };
+    const first = await bridge.estimate(item, runDir);
+    const cached = await bridge.estimate({ ...item, sku: "adaptive-reject-2" }, runDir);
+    await bridge.close();
+
+    assert.equal(first.ok, true, "adaptive REJECT must not change production acceptance in shadow");
+    assert.equal(first.match_policy_effective, "shadow");
+    assert.deepEqual(first.adaptive_match, adaptiveMatch);
+    assert.equal(cached.ok, true);
+    assert.equal(cached.shared_cache, true);
+    assert.deepEqual(cached.adaptive_match, adaptiveMatch);
+    assert.equal(runs, 1);
+
+    const quality = JSON.parse((await fs.readFile(path.join(runDir, "1688_match_quality.jsonl"), "utf8")).trim());
+    const state = JSON.parse(await fs.readFile(path.join(runDir, "1688_match_policy.json"), "utf8"));
+    assert.equal(quality.adaptive_decision, "REJECT");
+    assert.equal(quality.adaptive_score, 28.5);
+    assert.equal(state.summary.adaptive_sample_count, 1);
+    assert.equal(state.summary.fast_count, 0);
+    assert.equal(state.summary.fast_percent, 0);
+    assert.equal(state.summary.review_count, 0);
+    assert.equal(state.summary.review_percent, 0);
+    assert.equal(state.summary.reject_count, 1);
+    assert.equal(state.summary.reject_percent, 100);
+  });
+});
+
+test("adaptive v5 shadow collects complete action samples without auto-enforcing at the target", async () => {
+  await withTempDir(async (runDir) => {
+    const adaptiveMatches = [
+      adaptiveV5({ action: "REJECT", evidenceComplete: false }),
+      {
+        version: "adaptive-v4-shadow",
+        decision: "REVIEW",
+        score: 60,
+        reason: "legacy review",
+        hard_conflicts: [],
+        missing_evidence: ["material"],
+        selected_offer_id: "offer-1",
+        supporting_offer_ids: ["offer-1"],
+      },
+      adaptiveV5({ action: "REJECT" }),
+      adaptiveV5({ action: "ALLOW" }),
+      adaptiveV5({ action: "REJECT" }),
+    ];
+    let runs = 0;
+    const bridge = createCostBridge({
+      adaptiveActionPolicy: "shadow",
+      adaptiveActionSampleTarget: 2,
+      matchPolicy: "shadow",
+      matchPolicySampleSize: 100,
+      minimumSameItemMatches: 1,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async ({ args }) => {
+        const adaptiveMatch = adaptiveMatches[runs++];
+        return {
+          code: 0,
+          stdout: returnedSameItemOutput({
+            request: cliMatchRequest(args),
+            prices: [18],
+            selectedCost: 18,
+            adaptiveMatch,
+          }),
+          stderr: "",
+        };
+      },
+    });
+    const estimate = (index) => bridge.estimate({
+      sku: `v5-shadow-${index}`,
+      cover_image: `https://img.example/v5-shadow-${index}.jpg`,
+      sell_price: 100,
+      expect_title: "same product lamp",
+    }, runDir);
+    const incomplete = await estimate(1);
+    const legacy = await estimate(2);
+    const firstComplete = await estimate(3);
+    const targetComplete = await estimate(4);
+    const afterTarget = await estimate(5);
+    await bridge.close();
+
+    assert.equal(incomplete.ok, true);
+    assert.equal(legacy.ok, true);
+    assert.equal(firstComplete.ok, true);
+    assert.equal(firstComplete.adaptive_action_policy_effective, "shadow");
+    assert.equal(targetComplete.ok, true);
+    assert.equal(afterTarget.ok, true, "finishing collection must not auto-switch action enforcement");
+    const state = JSON.parse(await fs.readFile(path.join(runDir, "1688_match_policy.json"), "utf8"));
+    assert.equal(state.adaptive_action_policy, "shadow");
+    assert.equal(state.action_samples.length, 2);
+    assert.deepEqual(state.action_samples.map((row) => row.adaptive_action), ["REJECT", "ALLOW"]);
+    assert.equal(state.summary.complete_action_samples, 2);
+    assert.equal(state.summary.sample_target, 2);
+    assert.equal(state.summary.collection_status, "complete");
+    assert.equal(state.summary.action_allow_count, 1);
+    assert.equal(state.summary.action_reject_count, 1);
+    assert.equal(state.summary.adaptive_sample_count, 5, "legacy three-state summary remains available");
+  });
+});
+
+test("adaptive v5 enforce blocks only a complete REJECT and bypasses the legacy balanced gate", async () => {
+  await withTempDir(async (runDir) => {
+    const outputs = [
+      { adaptiveMatch: adaptiveV5({ action: "ALLOW" }), balancedPassed: false },
+      { adaptiveMatch: adaptiveV5({ action: "REJECT" }), balancedPassed: true },
+      { adaptiveMatch: adaptiveV5({ action: "REJECT", evidenceComplete: false }), balancedPassed: false },
+      {
+        adaptiveMatch: {
+          version: "adaptive-v4-shadow",
+          decision: "REVIEW",
+          score: 60,
+          reason: "legacy review",
+          hard_conflicts: [],
+          missing_evidence: ["material"],
+          selected_offer_id: "offer-1",
+          supporting_offer_ids: ["offer-1"],
+        },
+        balancedPassed: false,
+      },
+      { adaptiveMatch: adaptiveV5({ action: "REJECT", priceCny: 99 }), balancedPassed: false },
+    ];
+    let runs = 0;
+    const bridge = createCostBridge({
+      adaptiveActionPolicy: "enforce",
+      adaptiveActionSampleTarget: 10,
+      matchPolicy: "balanced",
+      minimumSameItemMatches: 1,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async ({ args }) => {
+        const current = outputs[runs++];
+        return {
+          code: 0,
+          stdout: returnedSameItemOutput({
+            request: cliMatchRequest(args),
+            prices: [18],
+            selectedCost: 18,
+            adaptiveMatch: current.adaptiveMatch,
+            balancedPassed: current.balancedPassed,
+          }),
+          stderr: "",
+        };
+      },
+    });
+    const estimate = (index) => bridge.estimate({
+      sku: `v5-enforce-${index}`,
+      cover_image: `https://img.example/v5-enforce-${index}.jpg`,
+      sell_price: 100,
+      expect_title: "same product lamp",
+    }, runDir);
+    const allowed = await estimate(1);
+    const rejected = await estimate(2);
+    const incomplete = await estimate(3);
+    const legacy = await estimate(4);
+    const priceMismatch = await estimate(5);
+    await bridge.close();
+
+    assert.equal(allowed.ok, true, "v5 ALLOW must survive an old balanced rejection");
+    assert.equal(allowed.balanced_match, false);
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.terminal, true);
+    assert.equal(rejected.adaptive_action_rejected, true);
+    assert.match(rejected.reason, /adaptive 1688 action rejected/i);
+    assert.equal(incomplete.ok, true, "incomplete v5 action must not enforce");
+    assert.equal(incomplete.adaptive_action_complete, false);
+    assert.equal(legacy.ok, true, "v4 telemetry must remain compatible and must not invoke the action gate");
+    assert.equal(priceMismatch.ok, true, "an action detached from the requested price must not enforce");
+    const state = JSON.parse(await fs.readFile(path.join(runDir, "1688_match_policy.json"), "utf8"));
+    assert.equal(state.samples.length, 0, "balanced legacy sampling stays independent");
+    assert.equal(state.action_samples.length, 2);
+    assert.equal(state.summary.complete_action_samples, 2);
+    assert.equal(state.summary.collection_status, "collecting");
   });
 });
 
@@ -602,6 +913,70 @@ test("compact cost evidence preserves reliability parsing without verbose diagno
   assert.equal(compact.includes("TOP_ROWS"), false);
   assert.equal(compact.length < verbose.length / 2, true);
   assert.deepEqual(parseCostOutput(compact, 100), parseCostOutput(verbose, 100));
+});
+
+test("adaptive match JSON is compacted and parsed without weakening its contract", () => {
+  const adaptiveMatch = {
+    version: "adaptive-v4-shadow",
+    decision: "REVIEW",
+    score: 67,
+    reason: "pack quantity is not confirmed",
+    hard_conflicts: [],
+    missing_evidence: ["pack_quantity"],
+    selected_offer_id: null,
+    supporting_offer_ids: ["offer-1"],
+  };
+  const verbose = [
+    `ADAPTIVE_MATCH_JSON ${JSON.stringify(adaptiveMatch)}`,
+    "COST_SOURCE search_first_page_cluster_p70_similarity_filtered",
+    "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+    "P70_COST 11",
+    "TOP_ROWS verbose diagnostics",
+  ].join("\n");
+  const compact = compactCostOutput(verbose);
+  assert.match(compact, /^ADAPTIVE_MATCH_JSON /mu);
+  assert.deepEqual(parseCostOutput(compact, 100).adaptive_match, adaptiveMatch);
+
+  const malformed = compact.replace('"score":67', '"score":101');
+  const parsedMalformed = parseCostOutput(malformed, 100);
+  assert.equal(parsedMalformed.ok, true);
+  assert.equal("adaptive_match" in parsedMalformed, false);
+});
+
+test("adaptive v5 action fields are validated while legacy v4 remains compatible", () => {
+  const adaptiveMatch = adaptiveV5({ action: "ALLOW", priceCny: 420 });
+  const output = [
+    `ADAPTIVE_MATCH_JSON ${JSON.stringify(adaptiveMatch)}`,
+    "COST_SOURCE search_first_page_cluster_p70_similarity_filtered",
+    "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+    "P70_COST 11",
+  ].join("\n");
+  assert.deepEqual(parseCostOutput(output, 100).adaptive_match, adaptiveMatch);
+
+  const malformed = {
+    ...adaptiveMatch,
+    valuable_digital: { ...adaptiveMatch.valuable_digital, threshold_cny: 301 },
+  };
+  const malformedOutput = output.replace(
+    JSON.stringify(adaptiveMatch),
+    JSON.stringify(malformed),
+  );
+  const parsedMalformed = parseCostOutput(malformedOutput, 100);
+  assert.equal(parsedMalformed.ok, true);
+  assert.equal("adaptive_match" in parsedMalformed, false);
+
+  const legacyV4 = {
+    version: "adaptive-v4-shadow",
+    decision: "REVIEW",
+    score: 70,
+    reason: "legacy telemetry",
+    hard_conflicts: [],
+    missing_evidence: ["material"],
+    selected_offer_id: null,
+    supporting_offer_ids: ["offer-1"],
+  };
+  const legacyOutput = output.replace(JSON.stringify(adaptiveMatch), JSON.stringify(legacyV4));
+  assert.deepEqual(parseCostOutput(legacyOutput, 100).adaptive_match, legacyV4);
 });
 
 test("nonzero review decisions preserve the 1688 reliability reason", async () => {
@@ -1281,6 +1656,80 @@ test("the public 1688 deadline releases a hung request and permits the next SKU"
   });
 });
 
+test("cache v7 invalidates v6 entries and isolates otherwise identical requests by sale price", async () => {
+  await withTempDir(async (root) => {
+    const runDir = path.join(root, "run");
+    const sharedCachePath = path.join(root, "shared", "1688_cache.json");
+    const imageUrl = "https://img.example/price-key.jpg";
+    const title = "same product lamp";
+    const legacyOutput = returnedSameItemOutput({
+      request: { expect_title: title, expect_price_cny: 100 },
+      prices: [17],
+      selectedCost: 17,
+    });
+    const legacyV6Payload = JSON.stringify({
+      version: 6,
+      image_url: imageUrl,
+      minimum_same_item_matches: 1,
+      excluded_offer_ids: [],
+      expect_title: title,
+      expect_model: "",
+      expect_category: "",
+    });
+    const legacyKey = crypto.createHash("sha256").update(legacyV6Payload).digest("hex");
+    await fs.mkdir(path.dirname(sharedCachePath), { recursive: true });
+    await fs.writeFile(sharedCachePath, JSON.stringify({
+      version: 1,
+      entries: {
+        [legacyKey]: { output: legacyOutput, terminal: true },
+      },
+    }));
+
+    const seenPrices = [];
+    let runs = 0;
+    const bridge = createCostBridge({
+      sharedCachePath,
+      cacheFlushDebounceMs: 0,
+      minimumSameItemMatches: 1,
+      download: async (_url, destinationPath) => fs.writeFile(destinationPath, "image"),
+      runProcess: async ({ args }) => {
+        runs += 1;
+        const request = cliMatchRequest(args);
+        seenPrices.push(request.expect_price_cny);
+        return {
+          code: 0,
+          stdout: returnedSameItemOutput({
+            request,
+            prices: [18],
+            selectedCost: 18,
+          }),
+          stderr: "",
+        };
+      },
+    });
+    const first = await bridge.estimate({
+      sku: "price-key-100",
+      cover_image: imageUrl,
+      sell_price: 100,
+      expect_title: title,
+    }, runDir);
+    const second = await bridge.estimate({
+      sku: "price-key-200",
+      cover_image: imageUrl,
+      sell_price: 200,
+      expect_title: title,
+    }, runDir);
+    await bridge.close();
+
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+    assert.equal(first.cost, 18, "the legacy v6 entry must not be reused");
+    assert.equal(runs, 2, "different prices must have independent v7 cache keys");
+    assert.deepEqual(seenPrices, [100, 200]);
+    assert.notEqual(first.cache_key, second.cache_key);
+  });
+});
+
 test("semantic match evidence reaches the worker and isolates shared image cache entries", async () => {
   await withTempDir(async (runDir) => {
     const requests = [];
@@ -1317,6 +1766,7 @@ test("semantic match evidence reaches the worker and isolates shared image cache
     assert.equal(requests[0].expect_title, "OMODA S5 уплотнитель");
     assert.equal(requests[0].expect_model, "S5");
     assert.equal(requests[0].expect_category, "Автомобильные аксессуары");
+    assert.equal(requests[0].expect_price_cny, 100);
     assert.notEqual(requests[0].image, undefined);
     await bridge.close();
   });
@@ -1337,6 +1787,7 @@ test("persistent worker infrastructure failure falls back to the one-shot proces
           "--expect-title", "OMODA S5 уплотнитель",
           "--expect-model", "S5",
           "--expect-category", "Автомобильные аксессуары",
+          "--expect-price-cny", "100",
           "--min-matches", "3",
         ]);
         return {
@@ -1346,6 +1797,7 @@ test("persistent worker infrastructure failure falls back to the one-shot proces
               expect_title: "OMODA S5 уплотнитель",
               expect_model: "S5",
               expect_category: "Автомобильные аксессуары",
+              expect_price_cny: 100,
             },
             source: "search_first_page_p70_similarity_filtered",
             selectedCost: 11,

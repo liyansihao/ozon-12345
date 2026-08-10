@@ -22,10 +22,12 @@ export function normalize1688MatchRequest(value = {}) {
     .toLocaleLowerCase("und")
     .replace(/\s+/gu, " ")
     .trim();
+  const price = Number(value?.expect_price_cny);
   return {
     expect_category: normalize(value?.expect_category),
     expect_model: normalize(value?.expect_model),
     expect_title: normalize(value?.expect_title),
+    expect_price_cny: Number.isFinite(price) && price > 0 ? price : null,
   };
 }
 

@@ -28,6 +28,7 @@ export function compactCostOutput(text) {
     "BALANCED_MATCH_TYPE",
     "BALANCED_MATCH_REASON",
     "IMAGE_CHECK_AVAILABLE",
+    "ADAPTIVE_MATCH_JSON",
     "COST_SOURCE",
     "REASON",
     "FILTERED_FIRST_PAGE_PRICES",
@@ -63,6 +64,66 @@ function parsePrices(value) {
   }
 }
 
+function parseAdaptiveMatch(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const version = typeof parsed.version === "string" ? parsed.version.trim() : "";
+    const decision = parsed.decision;
+    const score = parsed.score;
+    const reason = typeof parsed.reason === "string" ? parsed.reason.trim() : "";
+    const stringArrays = [parsed.hard_conflicts, parsed.missing_evidence, parsed.supporting_offer_ids];
+    if (!version
+      || !["FAST", "REVIEW", "REJECT"].includes(decision)
+      || typeof score !== "number"
+      || !Number.isFinite(score)
+      || score < 0
+      || score > 100
+      || !reason
+      || !stringArrays.every((values) => Array.isArray(values) && values.every((entry) => typeof entry === "string"))
+      || !(typeof parsed.selected_offer_id === "string" || parsed.selected_offer_id === null)) {
+      return null;
+    }
+    const hasOwn = (key) => Object.prototype.hasOwnProperty.call(parsed, key);
+    if (hasOwn("action") && !["ALLOW", "REJECT", null].includes(parsed.action)) return null;
+    if (hasOwn("policy_version")
+      && (typeof parsed.policy_version !== "string" || !parsed.policy_version.trim())) return null;
+    if (hasOwn("policy_reasons")
+      && (!Array.isArray(parsed.policy_reasons)
+        || !parsed.policy_reasons.every((entry) => typeof entry === "string"))) return null;
+    if (hasOwn("evidence_complete") && typeof parsed.evidence_complete !== "boolean") return null;
+    if (hasOwn("valuable_digital")) {
+      const valuable = parsed.valuable_digital;
+      if (!valuable
+        || typeof valuable !== "object"
+        || Array.isArray(valuable)
+        || typeof valuable.applies !== "boolean"
+        || !(typeof valuable.category === "string" || valuable.category === null)
+        || !(valuable.price_cny === null
+          || (typeof valuable.price_cny === "number" && Number.isFinite(valuable.price_cny)))
+        || valuable.threshold_cny !== 300) return null;
+    }
+    return {
+      version,
+      decision,
+      score,
+      reason,
+      hard_conflicts: [...parsed.hard_conflicts],
+      missing_evidence: [...parsed.missing_evidence],
+      selected_offer_id: parsed.selected_offer_id,
+      supporting_offer_ids: [...parsed.supporting_offer_ids],
+      ...(hasOwn("action") ? { action: parsed.action } : {}),
+      ...(hasOwn("policy_version") ? { policy_version: parsed.policy_version.trim() } : {}),
+      ...(hasOwn("policy_reasons") ? { policy_reasons: [...parsed.policy_reasons] } : {}),
+      ...(hasOwn("evidence_complete") ? { evidence_complete: parsed.evidence_complete } : {}),
+      ...(hasOwn("valuable_digital") ? { valuable_digital: { ...parsed.valuable_digital } } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function parseCostOutput(text, sellPrice, {
   expectedMatchEvidence = null,
   requireSameItemEvidence = false,
@@ -79,19 +140,22 @@ export function parseCostOutput(text, sellPrice, {
   const prices = parsePrices(lineValue(text, "FILTERED_FIRST_PAGE_PRICES"));
   const sale = Number(sellPrice);
   const explicitReason = lineValue(text, "REASON");
+  const adaptiveMatch = parseAdaptiveMatch(lineValue(text, "ADAPTIVE_MATCH_JSON"));
+  const adaptiveResult = adaptiveMatch ? { adaptive_match: adaptiveMatch } : {};
+  const rejected = (reason) => ({ ok: false, reason, ...adaptiveResult });
 
-  if (!Number.isFinite(cost) || cost <= 0) return { ok: false, reason: explicitReason || "missing or invalid P70 cost" };
-  if (!isReliable1688CostSource(source)) return { ok: false, reason: `unreliable cost source: ${source || "missing"}` };
+  if (!Number.isFinite(cost) || cost <= 0) return rejected(explicitReason || "missing or invalid P70 cost");
+  if (!isReliable1688CostSource(source)) return rejected(`unreliable cost source: ${source || "missing"}`);
   if (prices.length < requiredMatches) {
-    return { ok: false, reason: `filtered first-page insufficient ${prices.length}` };
+    return rejected(`filtered first-page insufficient ${prices.length}`);
   }
-  if (prices.some((price) => !Number.isFinite(price) || price <= 0)) return { ok: false, reason: "invalid filtered first-page prices" };
+  if (prices.some((price) => !Number.isFinite(price) || price <= 0)) return rejected("invalid filtered first-page prices");
   if (source === "search_first_page_p70_similarity_filtered" && Math.max(...prices) / Math.min(...prices) > 5) {
-    return { ok: false, reason: "filtered first-page price spread greater than five" };
+    return rejected("filtered first-page price spread greater than five");
   }
-  if (!Number.isFinite(sale) || sale <= 0) return { ok: false, reason: "invalid sale price" };
-  if (cost < sale * 0.02) return { ok: false, reason: "1688 cost below 2% of sale price is not reliable" };
-  if (cost >= sale * 0.85) return { ok: false, reason: "1688 cost is at least 85% of sale price" };
+  if (!Number.isFinite(sale) || sale <= 0) return rejected("invalid sale price");
+  if (cost < sale * 0.02) return rejected("1688 cost below 2% of sale price is not reliable");
+  if (cost >= sale * 0.85) return rejected("1688 cost is at least 85% of sale price");
   const sameItemProof = verifyReturnedSameItemEvidence({
     encodedEvidence: encodedSameItemEvidence,
     evidenceKey: matchEvidenceKey,
@@ -105,13 +169,14 @@ export function parseCostOutput(text, sellPrice, {
     requireBalancedMatch,
   });
   if (requireSameItemEvidence && !sameItemProof.ok) {
-    return { ok: false, reason: `same-item evidence rejected: ${sameItemProof.reason}` };
+    return rejected(`same-item evidence rejected: ${sameItemProof.reason}`);
   }
   return {
     ok: true,
     cost,
     source,
     prices,
+    ...adaptiveResult,
     ...(sameItemProof.ok ? {
       match_evidence_key: matchEvidenceKey,
       same_item_match: true,
@@ -238,6 +303,8 @@ export function createCostBridge({
   matchPolicyRetentionPercent = Number(process.env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT || 75),
   matchPolicyImageAvailabilityPercent = Number(process.env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT || 90),
   matchPolicyP95Ms = Number(process.env.FLOW_B_1688_MATCH_MAX_P95_MS || 15_000),
+  adaptiveActionPolicy = String(process.env.FLOW_B_1688_ADAPTIVE_ACTION_POLICY || "shadow"),
+  adaptiveActionSampleTarget = Number(process.env.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET || 100),
   feedbackFile = process.env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
   feedbackRefreshMs = Number(process.env.FLOW_B_PROFIT_FILE_REFRESH_MS || 5_000),
   trustedFeedbackMaxAgeMs = Number(process.env.FLOW_B_PROFIT_TRUSTED_MAX_AGE_MS || 30 * 24 * 60 * 60 * 1000),
@@ -259,6 +326,14 @@ export function createCostBridge({
   let workerInfrastructureFailures = 0;
   const matchPolicyByRun = new Map();
   let matchPolicyWriteChain = Promise.resolve();
+  const configuredAdaptiveActionPolicy = String(adaptiveActionPolicy).trim().toLowerCase() === "enforce"
+    ? "enforce"
+    : "shadow";
+  const parsedAdaptiveActionSampleTarget = Number(adaptiveActionSampleTarget);
+  const configuredAdaptiveActionSampleTarget = Number.isFinite(parsedAdaptiveActionSampleTarget)
+    && parsedAdaptiveActionSampleTarget > 0
+    ? Math.max(1, Math.floor(parsedAdaptiveActionSampleTarget))
+    : 100;
   const profitFiles = createProfitFilesReader({
     feedbackFile,
     refreshMs: Math.max(0, Number(feedbackRefreshMs) || 0),
@@ -279,20 +354,27 @@ export function createCostBridge({
 
   function matchEvidence(item) {
     const value = (candidate) => String(candidate ?? "").replace(/\s+/g, " ").trim();
+    const sellPrice = Number(item?.sell_price);
     return {
       expect_title: value(item?.expect_title || item?.title),
       expect_model: value(item?.expect_model || item?.model || item?.model_name || item?.article),
       expect_category: value(item?.expect_category || item?.category_name || item?.cate_name),
+      expect_price_cny: Number.isFinite(sellPrice) && sellPrice > 0 ? sellPrice : null,
     };
   }
 
   function parseOptions(item) {
     const expectedMatchEvidence = matchEvidence(item);
+    const hasSemanticEvidence = [
+      expectedMatchEvidence.expect_title,
+      expectedMatchEvidence.expect_model,
+      expectedMatchEvidence.expect_category,
+    ].some(Boolean);
     return {
       expectedMatchEvidence,
-      requireSameItemEvidence: Object.values(expectedMatchEvidence).some(Boolean),
+      requireSameItemEvidence: hasSemanticEvidence,
       minimumSameItemMatches: Math.max(1, Number(minimumSameItemMatches) || 1),
-      requiredEvidenceContract: Object.values(expectedMatchEvidence).some(Boolean)
+      requiredEvidenceContract: hasSemanticEvidence
         ? "1688-returned-same-item-v3"
         : null,
     };
@@ -346,6 +428,96 @@ export function createCostBridge({
     return sorted[Math.max(0, Math.ceil(sorted.length * 0.95) - 1)] || 0;
   }
 
+  function isCompleteAdaptiveAction(adaptiveMatch, {
+    verifiedSelectedOfferId = null,
+    expectedPriceCny = null,
+  } = {}) {
+    const valuable = adaptiveMatch?.valuable_digital;
+    const selectedOfferId = String(adaptiveMatch?.selected_offer_id || "").trim();
+    const verifiedOfferId = String(verifiedSelectedOfferId || "").trim();
+    const expectedPrice = Number(expectedPriceCny);
+    return adaptiveMatch?.version === "adaptive-v5-shadow"
+      && adaptiveMatch?.policy_version === "adaptive-v5-policy-1"
+      && ["ALLOW", "REJECT"].includes(adaptiveMatch?.action)
+      && Array.isArray(adaptiveMatch?.policy_reasons)
+      && adaptiveMatch.policy_reasons.every((entry) => typeof entry === "string")
+      && adaptiveMatch?.evidence_complete === true
+      && selectedOfferId
+      && verifiedOfferId === selectedOfferId
+      && valuable
+      && typeof valuable === "object"
+      && !Array.isArray(valuable)
+      && typeof valuable.applies === "boolean"
+      && (typeof valuable.category === "string" || valuable.category === null)
+      && (valuable.price_cny === null
+        || (typeof valuable.price_cny === "number" && Number.isFinite(valuable.price_cny)))
+      && Number.isFinite(expectedPrice)
+      && expectedPrice > 0
+      && valuable.price_cny === expectedPrice
+      && valuable.threshold_cny === 300;
+  }
+
+  function isCompleteActionSample(row) {
+    return isCompleteAdaptiveAction({
+      version: row?.adaptive_match_version,
+      policy_version: row?.adaptive_policy_version,
+      action: row?.adaptive_action,
+      policy_reasons: row?.adaptive_policy_reasons,
+      evidence_complete: row?.adaptive_evidence_complete,
+      valuable_digital: row?.adaptive_valuable_digital,
+      selected_offer_id: row?.adaptive_selected_offer_id,
+      supporting_offer_ids: row?.adaptive_supporting_offer_ids,
+    }, {
+      verifiedSelectedOfferId: row?.adaptive_verified_selected_offer_id,
+      expectedPriceCny: row?.adaptive_expected_price_cny,
+    });
+  }
+
+  function summarizeMatchPolicy(samples, actionSamples = []) {
+    const rows = Array.isArray(samples) ? samples : [];
+    const adaptiveRows = rows.filter((row) => ["FAST", "REVIEW", "REJECT"].includes(row?.adaptive_decision));
+    const adaptiveCount = adaptiveRows.length;
+    const decisionCount = (decision) => adaptiveRows.filter((row) => row.adaptive_decision === decision).length;
+    const decisionPercent = (count) => adaptiveCount > 0
+      ? Number((count * 100 / adaptiveCount).toFixed(2))
+      : 0;
+    const fastCount = decisionCount("FAST");
+    const reviewCount = decisionCount("REVIEW");
+    const rejectCount = decisionCount("REJECT");
+    const actionRows = (Array.isArray(actionSamples) ? actionSamples : []).filter(isCompleteActionSample);
+    const actionCount = actionRows.length;
+    const actionCountFor = (action) => actionRows.filter((row) => row.adaptive_action === action).length;
+    const actionPercent = (count) => actionCount > 0
+      ? Number((count * 100 / actionCount).toFixed(2))
+      : 0;
+    const actionAllowCount = actionCountFor("ALLOW");
+    const actionRejectCount = actionCountFor("REJECT");
+    return {
+      sample_count: rows.length,
+      retention_percent: rows.length > 0
+        ? Number((rows.filter((row) => row.balanced_passed).length * 100 / rows.length).toFixed(2))
+        : 0,
+      image_availability_percent: rows.length > 0
+        ? Number((rows.filter((row) => row.image_check_available).length * 100 / rows.length).toFixed(2))
+        : 0,
+      p95_ms: percentile95(rows.map((row) => row.elapsed_ms)),
+      adaptive_sample_count: adaptiveCount,
+      fast_count: fastCount,
+      fast_percent: decisionPercent(fastCount),
+      review_count: reviewCount,
+      review_percent: decisionPercent(reviewCount),
+      reject_count: rejectCount,
+      reject_percent: decisionPercent(rejectCount),
+      complete_action_samples: actionCount,
+      sample_target: configuredAdaptiveActionSampleTarget,
+      collection_status: actionCount >= configuredAdaptiveActionSampleTarget ? "complete" : "collecting",
+      action_allow_count: actionAllowCount,
+      action_allow_percent: actionPercent(actionAllowCount),
+      action_reject_count: actionRejectCount,
+      action_reject_percent: actionPercent(actionRejectCount),
+    };
+  }
+
   async function loadMatchPolicyState(runDir) {
     const root = path.resolve(runDir);
     if (matchPolicyByRun.has(root)) return matchPolicyByRun.get(root);
@@ -357,8 +529,11 @@ export function createCostBridge({
       matcher_version: "balanced-v3.2",
       configured_policy: configured,
       effective_policy: configured,
+      adaptive_action_policy: configuredAdaptiveActionPolicy,
+      adaptive_action_sample_target: configuredAdaptiveActionSampleTarget,
       samples: [],
-      summary: { sample_count: 0, retention_percent: 0, image_availability_percent: 0, p95_ms: 0 },
+      action_samples: [],
+      summary: summarizeMatchPolicy([], []),
       promoted_at: configured === "balanced" ? new Date(now()).toISOString() : null,
     };
     try {
@@ -369,8 +544,17 @@ export function createCostBridge({
           ...parsed,
           configured_policy: configured,
           effective_policy: configured === "balanced" ? "balanced" : parsed.effective_policy,
+          adaptive_action_policy: configuredAdaptiveActionPolicy,
+          adaptive_action_sample_target: configuredAdaptiveActionSampleTarget,
           samples: Array.isArray(parsed.samples) ? parsed.samples : [],
+          action_samples: Array.isArray(parsed.action_samples)
+            ? parsed.action_samples
+            : (Array.isArray(parsed.samples) ? parsed.samples.filter(isCompleteActionSample) : []),
         };
+        state.action_samples = state.action_samples
+          .filter(isCompleteActionSample)
+          .slice(-configuredAdaptiveActionSampleTarget);
+        state.summary = summarizeMatchPolicy(state.samples, state.action_samples);
       }
     } catch (error) {
       if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
@@ -379,12 +563,25 @@ export function createCostBridge({
     return state;
   }
 
-  async function applyMatchPolicy(result, runDir, { elapsedMs = 0, recordShadowSample = false } = {}) {
+  async function applyMatchPolicy(result, runDir, {
+    elapsedMs = 0,
+    recordShadowSample = false,
+    expectedPriceCny = null,
+  } = {}) {
     const root = path.resolve(runDir);
     return (matchPolicyWriteChain = matchPolicyWriteChain.then(async () => {
       const state = await loadMatchPolicyState(root);
       const effectiveBefore = state.effective_policy;
-      if (recordShadowSample && result?.ok && effectiveBefore === "shadow") {
+      const completeAdaptiveAction = isCompleteAdaptiveAction(result?.adaptive_match, {
+        verifiedSelectedOfferId: result?.selected_offer_id,
+        expectedPriceCny,
+      });
+      const recordLegacyShadowSample = recordShadowSample && result?.ok && effectiveBefore === "shadow";
+      const recordAdaptiveActionSample = recordShadowSample
+        && result?.ok
+        && completeAdaptiveAction
+        && state.action_samples.length < configuredAdaptiveActionSampleTarget;
+      if (recordLegacyShadowSample || recordAdaptiveActionSample) {
         const sample = {
           at: new Date(now()).toISOString(),
           matcher_version: state.matcher_version,
@@ -392,17 +589,34 @@ export function createCostBridge({
           balanced_match_type: result?.balanced_match_type || "rejected",
           balanced_match_reason: result?.balanced_match_reason || null,
           image_check_available: result?.image_check_available === true,
+          adaptive_match_version: result?.adaptive_match?.version || null,
+          adaptive_decision: result?.adaptive_match?.decision || null,
+          adaptive_score: Number.isFinite(result?.adaptive_match?.score) ? result.adaptive_match.score : null,
+          adaptive_action: completeAdaptiveAction ? result.adaptive_match.action : null,
+          adaptive_policy_version: completeAdaptiveAction ? result.adaptive_match.policy_version : null,
+          adaptive_policy_reasons: completeAdaptiveAction ? [...result.adaptive_match.policy_reasons] : null,
+          adaptive_evidence_complete: completeAdaptiveAction ? result.adaptive_match.evidence_complete : null,
+          adaptive_selected_offer_id: completeAdaptiveAction ? result.adaptive_match.selected_offer_id : null,
+          adaptive_supporting_offer_ids: completeAdaptiveAction
+            ? [...result.adaptive_match.supporting_offer_ids]
+            : null,
+          adaptive_verified_selected_offer_id: completeAdaptiveAction ? result.selected_offer_id : null,
+          adaptive_expected_price_cny: completeAdaptiveAction ? Number(expectedPriceCny) : null,
+          adaptive_valuable_digital: completeAdaptiveAction
+            ? { ...result.adaptive_match.valuable_digital }
+            : null,
           elapsed_ms: Math.max(0, Number(elapsedMs) || 0),
         };
-        const sampleLimit = Math.max(1, Number(matchPolicySampleSize) || 100);
-        state.samples = [...state.samples, sample].slice(-sampleLimit);
-        state.summary = {
-          sample_count: state.samples.length,
-          retention_percent: Number((state.samples.filter((row) => row.balanced_passed).length * 100 / state.samples.length).toFixed(2)),
-          image_availability_percent: Number((state.samples.filter((row) => row.image_check_available).length * 100 / state.samples.length).toFixed(2)),
-          p95_ms: percentile95(state.samples.map((row) => row.elapsed_ms)),
-        };
-        const healthy = state.samples.length >= sampleLimit
+        const legacySampleLimit = Math.max(1, Number(matchPolicySampleSize) || 100);
+        if (recordLegacyShadowSample) {
+          state.samples = [...state.samples, sample].slice(-legacySampleLimit);
+        }
+        if (recordAdaptiveActionSample) {
+          state.action_samples = [...state.action_samples, sample].slice(-configuredAdaptiveActionSampleTarget);
+        }
+        state.summary = summarizeMatchPolicy(state.samples, state.action_samples);
+        const healthy = recordLegacyShadowSample
+          && state.samples.length >= legacySampleLimit
           && state.summary.retention_percent >= Number(matchPolicyRetentionPercent)
           && state.summary.image_availability_percent >= Number(matchPolicyImageAvailabilityPercent)
           && state.summary.p95_ms <= Number(matchPolicyP95Ms);
@@ -421,8 +635,26 @@ export function createCostBridge({
         match_policy_effective: effectiveBefore,
         match_policy_summary: state.summary,
         match_policy_promoted: effectiveBefore === "shadow" && state.effective_policy === "balanced",
+        adaptive_action_policy_configured: configuredAdaptiveActionPolicy,
+        adaptive_action_policy_effective: configuredAdaptiveActionPolicy,
+        adaptive_action_complete: completeAdaptiveAction,
       };
-      if (effectiveBefore === "balanced" && result?.ok && result?.balanced_match !== true) {
+      if (configuredAdaptiveActionPolicy === "enforce"
+        && completeAdaptiveAction
+        && result?.adaptive_match?.action === "REJECT"
+        && result?.ok) {
+        return {
+          ...policyResult,
+          ok: false,
+          reason: `adaptive 1688 action rejected: ${result.adaptive_match.policy_reasons.join("; ") || result.adaptive_match.reason}`,
+          terminal: true,
+          adaptive_action_rejected: true,
+        };
+      }
+      if (configuredAdaptiveActionPolicy !== "enforce"
+        && effectiveBefore === "balanced"
+        && result?.ok
+        && result?.balanced_match !== true) {
         return {
           ...policyResult,
           ok: false,
@@ -581,8 +813,9 @@ export function createCostBridge({
       ["--expect-title", "expect_title"],
       ["--expect-model", "expect_model"],
       ["--expect-category", "expect_category"],
+      ["--expect-price-cny", "expect_price_cny"],
     ]) {
-      if (evidence[key]) evidenceArgs.push(flag, evidence[key]);
+      if (evidence[key]) evidenceArgs.push(flag, String(evidence[key]));
     }
     evidenceArgs.push("--min-matches", String(Math.max(1, Number(minimumSameItemMatches) || 1)));
     for (const offerId of item?.excluded_1688_offer_ids || []) {
@@ -610,7 +843,7 @@ export function createCostBridge({
     const hasEvidence = Object.values(evidence).some(Boolean);
     const payload = hasEvidence
       ? JSON.stringify({
-        version: 6,
+        version: 7,
         image_url: imageUrl,
         minimum_same_item_matches: Math.max(1, Number(minimumSameItemMatches) || 1),
         excluded_offer_ids: [...new Set((item?.excluded_1688_offer_ids || []).map(String))].sort(),
@@ -773,7 +1006,11 @@ export function createCostBridge({
           const cachedText = await fs.readFile(outputPath, "utf8");
           if (/^P70_COST\s+/m.test(cachedText)) {
             const cached = parseCostOutput(cachedText, item?.sell_price, parseOptions(item));
-            if (cached.ok) return applyMatchPolicy({ ...cached, cached: true, outputPath }, root);
+            if (cached.ok) {
+              return applyMatchPolicy({ ...cached, cached: true, outputPath }, root, {
+                expectedPriceCny: item?.sell_price,
+              });
+            }
           }
         }
 
@@ -805,6 +1042,7 @@ export function createCostBridge({
             reason: transportError
               ? "1688 transient transport failure"
               : lineValue(combined, "REASON") || parsed.reason || `1688 process exited ${result?.code}`,
+            ...(parsed.adaptive_match ? { adaptive_match: parsed.adaptive_match } : {}),
             process_code: Number(result?.code),
             transport_error: transportError,
             retry_count: Number(result?.retry_count) || Number(lineValue(combined, "TRANSIENT_RETRY_COUNT")) || 0,
@@ -822,6 +1060,7 @@ export function createCostBridge({
         return applyMatchPolicy(parsed, root, {
           elapsedMs: Date.now() - estimateStartedAt,
           recordShadowSample: parsed.ok === true,
+          expectedPriceCny: item?.sell_price,
         });
       } catch (error) {
         if (processStarted) {
@@ -887,7 +1126,7 @@ export function createCostBridge({
           shared_cache: true,
           cross_run_cache: crossRunKeysByRun.get(root)?.has(key) === true,
           cache_key: key,
-        }, root);
+        }, root, { expectedPriceCny: item?.sell_price });
       }
     }
     if (inFlight.has(compositeKey)) {
@@ -1053,7 +1292,13 @@ export function createCostBridge({
           reason: trustedDecision.reason,
         };
       }
-      return trusted;
+      return {
+        ...trusted,
+        adaptive_action_override: "ALLOW",
+        adaptive_action_override_source: "trusted-verified-feedback",
+        adaptive_action_policy_configured: configuredAdaptiveActionPolicy,
+        adaptive_action_policy_effective: configuredAdaptiveActionPolicy,
+      };
     }
     const budget = Math.max(1, Number(totalBudgetMs) || 15_000);
     const deadlineAt = Date.now() + budget;
@@ -1068,7 +1313,8 @@ export function createCostBridge({
       }),
       { deadlineAt, budget, onTimeout },
     );
-    if (!result?.ok) return result;
+    const adaptiveActionRejected = result?.adaptive_action_rejected === true;
+    if (!result?.ok && !adaptiveActionRejected) return result;
     const selectedOfferIds = String(result?.selected_offer_id || "").trim()
       ? [String(result.selected_offer_id).trim()]
       : (Array.isArray(result?.selected_offer_ids) && result.selected_offer_ids.length === 1
@@ -1088,6 +1334,7 @@ export function createCostBridge({
         reason: decision.reason,
       };
     }
+    if (adaptiveActionRejected) return result;
     if (Number(decision.cost_override) > 0) {
       return {
         ...result,

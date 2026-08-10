@@ -20,6 +20,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 import requests
@@ -121,6 +122,245 @@ BAD_ACCESSORY_HINTS = [
     "吸尘器",
     "毛刷",
 ]
+
+ADAPTIVE_MATCH_VERSION = "adaptive-v5-shadow"
+ADAPTIVE_POLICY_VERSION = "adaptive-v5-policy-1"
+VALUABLE_DIGITAL_THRESHOLD_CNY = 300.0
+
+# These terms are deliberately narrow.  The legacy decision layer only hard-rejects an
+# explicit contradiction; an unknown translation or an omitted field remains
+# reviewable evidence instead of being treated as a mismatch.
+ADAPTIVE_PRODUCT_GROUPS = {
+    "jewelry_charm": {"charm", "шарм*", "首饰挂件", "饰品挂件", "串珠配件"},
+    "bracelet": {"bracelet", "bangle", "браслет*", "手链", "手镯", "手串"},
+    "toy_building_blocks": {
+        "building blocks", "construction blocks", "строительные блоки", "конструктор",
+        "积木", "拼装积木",
+    },
+    "remote_control": {
+        "remote control", "rc", "дистанционного управления", "дистанционное управление",
+        "радиоуправляем*", "遥控",
+    },
+    "shampoo": {"shampoo", "шампун*", "洗发水", "洗发露", "洗头膏"},
+    "filled_consumable": {
+        "face wash", "cleanser", "massage oil", "perfume", "fragrance", "degreaser",
+        "facial mask", "гел*", "пенк*", "масл*", "парфюм*", "ароматизатор*",
+        "обезжиривател*", "маска для лица", "крем*", "лосьон*", "сыворот*",
+    },
+    "bottle": {
+        "empty bottle", "dispensing bottle", "refill bottle", "分装瓶", "空瓶", "按压瓶",
+        "喷雾瓶", "瓶子", "塑料瓶", "泡沫瓶", "铝瓶", "包装瓶", "包材",
+    },
+    "earbuds": {"earbud", "earbuds", "headphone", "headphones", "airpods*", "наушник*", "耳机", "耳塞"},
+    "earbud_accessory": {
+        "earbud case", "earphone case", "charging case only", "чехол для наушников",
+        "耳机壳", "耳机套", "耳机保护壳", "耳机保护套", "耳机充电盒",
+    },
+    "protective_film": {"protective film", "tempered glass", "стекл*", "пленк*", "плёнк*", "钢化膜", "保护膜", "手机膜"},
+    "phone_case": {
+        "phone case", "protective case", "чехол", "чехл*", "手机壳", "保护壳",
+        "手机保护套", "保护套",
+    },
+    "phone": {"smartphone", "mobile phone", "iphone*", "смартфон*", "телефон*", "智能手机", "手机"},
+    "dummy_phone": {"dummy phone", "mock phone", "муляж", "模型机", "展示机", "样板机"},
+    "tablet": {"tablet", "tablet pc", "ipad*", "планшет*", "平板电脑", "平板"},
+    "tablet_accessory": {
+        "tablet case", "tablet cover", "чехол для планшета", "平板保护壳", "平板保护套",
+        "平板支架",
+    },
+    "computer": {
+        "computer", "laptop", "notebook computer", "desktop pc", "macbook*", "thinkpad*",
+        "ноутбук*", "компьютер*",
+        "笔记本电脑", "台式电脑", "电脑整机",
+    },
+    "computer_accessory": {
+        "laptop case", "laptop sleeve", "laptop stand", "notebook bag", "ноутбук чехол",
+        "电脑包", "笔记本保护套", "笔记本支架",
+    },
+    "watch": {"smartwatch", "smart watch", "watch", "умные часы", "смарт часы", "手表", "智能手表"},
+    "watch_accessory": {
+        "watch bezel", "watch strap", "watch band", "ремешок", "ремешка", "ремень",
+        "браслет для часов", "表圈", "表带", "手表壳", "手表套",
+    },
+    "vr_headset": {"vr headset", "virtual reality headset", "oculus", "quest", "vr очки", "头显", "vr眼镜"},
+    "vr_accessory": {"vr case", "headset case", "storage bag", "carrying case", "收纳包", "头显保护套", "vr保护套"},
+    "drone": {"drone", "quadcopter", "дрон*", "квадрокоптер*", "无人机"},
+    "drone_accessory": {
+        "drone case", "drone propeller", "propeller guard", "чехол для дрона", "пропеллер*",
+        "无人机收纳包", "无人机桨叶", "螺旋桨",
+    },
+    "game_console": {
+        "game console", "gaming console", "игровая приставка", "playstation", "xbox",
+        "nintendo switch", "steam deck", "游戏机", "游戏主机", "掌机",
+    },
+    "game_accessory": {
+        "game controller", "gamepad", "console case", "controller", "геймпад*", "джойстик*",
+        "游戏手柄", "手柄", "游戏机保护套",
+    },
+    "camera": {"digital camera", "камер*", "фотоаппарат*", "数码相机", "照相机"},
+    "camera_accessory": {
+        "camera case", "camera protector", "camera glass", "lens protector", "camera bag",
+        "защита камеры", "защита камер", "стекло камеры", "相机包", "镜头膜", "镜头保护膜",
+        "摄像头膜", "摄像头保护膜",
+    },
+    "lamp": {"lamp", "light", "фонар*", "ламп*", "台灯", "灯具", "手电筒"},
+    "cable": {"cable", "wire", "кабел*", "провод*", "数据线", "充电线"},
+    "adapter": {"adapter", "adaptor", "converter", "адаптер*", "переходник*", "适配器", "转接头"},
+    "sweater": {"sweater", "cardigan", "свитер*", "джемпер*", "毛衣", "毛衫", "针织衫"},
+}
+
+# These are option-defining roles.  When the target explicitly asks for one,
+# a generic product from the same broad category is reviewable evidence, not a
+# confirmed match and not a hard contradiction.
+ADAPTIVE_REQUIRED_PRODUCT_ROLES = {"jewelry_charm", "remote_control"}
+
+VALUABLE_DIGITAL_CORE_ROLES = {
+    "phone": "phone",
+    "tablet": "tablet",
+    "computer": "computer",
+    "camera": "camera",
+    "drone": "drone",
+    "vr_headset": "vr",
+    "game_console": "game_console",
+    "watch": "smartwatch",
+    "earbuds": "branded_earbuds",
+}
+
+VALUABLE_DIGITAL_ACCESSORY_ROLES = {
+    "adapter", "cable", "camera_accessory", "computer_accessory", "drone_accessory",
+    "dummy_phone", "earbud_accessory", "game_accessory", "phone_case", "protective_film",
+    "tablet_accessory", "vr_accessory", "watch_accessory",
+}
+
+ADAPTIVE_STYLE_GROUPS = {
+    "bumper": {"bumper", "бампер*", "边框壳", "边框保护壳"},
+    "case_film_combo": {"case film combo", "壳膜一体", "膜壳一体", "钢化膜一体"},
+    "soft_mesh": {
+        "soft mesh", "mesh band", "мягкая сетка", "мягкой сетки", "мягкую сетку",
+        "милан*", "不锈钢网带", "钢网表带", "网带", "米兰尼斯",
+    },
+    "braided": {"braided", "woven", "плетен*", "编织"},
+    "folio": {"folio case", "book cover", "чехол-книжк*", "翻盖保护套", "皮套"},
+    "magnetic": {"magnetic", "magnet", "магнит*", "с магнитом", "磁吸", "磁性"},
+    "stand": {"stand", "kickstand", "подставк*", "支架"},
+    "auto_wake": {
+        "auto wake", "auto sleep", "sleep wake", "авто сон", "пробуждени*",
+        "自动休眠", "智能休眠", "休眠唤醒", "自动唤醒",
+    },
+}
+
+ADAPTIVE_MODEL_QUALIFIERS = {
+    "air", "edge", "fe", "lite", "max", "mini", "neo", "nfc", "plus", "pro", "promax",
+    "promini", "proplus", "s", "se", "t", "u", "ultra",
+}
+
+ADAPTIVE_SPEC_UNITS = {
+    "w", "v", "a", "mah", "ml", "l", "mm", "cm", "m", "g", "kg",
+    "вт", "в", "а", "мач", "мл", "л", "мм", "см", "м", "г", "кг",
+    "瓦", "伏", "安", "毫安", "毫升", "升", "毫米", "厘米", "米", "克", "千克",
+    "pcs", "pc", "pack", "шт", "штук", "件", "个", "只", "套",
+}
+
+ADAPTIVE_BRAND_ALIASES = {
+    "apple": "apple", "iphone": "apple", "iphone*": "apple", "ipad": "apple", "ipad*": "apple",
+    "macbook": "apple", "macbook*": "apple", "airpods": "apple", "airpods*": "apple",
+    "samsung": "samsung", "galaxy": "samsung",
+    "huawei": "huawei", "honor": "honor",
+    "xiaomi": "xiaomi", "redmi": "redmi", "poco": "poco",
+    "oneplus": "oneplus", "oppo": "oppo", "realme": "realme", "vivo": "vivo",
+    "iqoo": "iqoo", "zte": "zte", "nubia": "nubia", "meizu": "meizu",
+    "motorola": "motorola", "nokia": "nokia", "tecno": "tecno", "infinix": "infinix",
+    "google": "google", "pixel": "google",
+    "sony": "sony", "playstation": "sony",
+    "microsoft": "microsoft", "surface": "microsoft", "xbox": "microsoft",
+    "nintendo": "nintendo", "valve": "valve",
+    "meta": "meta", "oculus": "meta", "dji": "dji",
+    "lenovo": "lenovo", "thinkpad": "lenovo", "legion": "lenovo",
+    "asus": "asus", "acer": "acer", "dell": "dell", "hp": "hp", "msi": "msi", "razer": "razer",
+    "canon": "canon", "nikon": "nikon", "fujifilm": "fujifilm", "panasonic": "panasonic",
+    "olympus": "olympus", "leica": "leica", "gopro": "gopro", "insta360": "insta360",
+    "garmin": "garmin", "amazfit": "amazfit", "huami": "amazfit",
+    "jbl": "jbl", "bose": "bose", "nothing": "nothing", "anker": "anker",
+    "soundcore": "anker", "marshall": "marshall", "beats": "beats", "sennheiser": "sennheiser",
+    "三星": "samsung",
+    "华为": "huawei",
+    "小米": "xiaomi",
+    "红米": "redmi",
+    "荣耀": "honor",
+    "真我": "realme",
+    "一加": "oneplus",
+    "维沃": "vivo",
+    "欧珀": "oppo",
+    "苹果": "apple",
+    "索尼": "sony",
+    "中兴": "zte",
+    "魅族": "meizu", "努比亚": "nubia", "摩托罗拉": "motorola", "诺基亚": "nokia",
+    "谷歌": "google", "微软": "microsoft", "任天堂": "nintendo", "联想": "lenovo",
+    "华硕": "asus", "宏碁": "acer", "戴尔": "dell", "惠普": "hp", "雷蛇": "razer",
+    "佳能": "canon", "尼康": "nikon", "富士": "fujifilm", "松下": "panasonic",
+    "奥林巴斯": "olympus", "徕卡": "leica", "大疆": "dji", "影石": "insta360",
+    "佳明": "garmin", "华米": "amazfit", "森海塞尔": "sennheiser",
+    "самсунг": "samsung", "хуавей": "huawei", "хонор": "honor", "сяоми": "xiaomi",
+    "ксиаоми": "xiaomi", "редми": "redmi", "реалми": "realme", "ванплас": "oneplus",
+    "оппо": "oppo", "виво": "vivo", "эппл": "apple", "айфон": "apple",
+    "сони": "sony", "леново": "lenovo", "асус": "asus", "асер": "acer",
+    "нокиа": "nokia", "моторола": "motorola", "кэнон": "canon", "канон": "canon",
+    "никон": "nikon", "гармин": "garmin", "нинтендо": "nintendo",
+}
+
+# 1688 supplier titles commonly concatenate a Latin brand with a model family
+# and then switch directly into Chinese, for example ``SamsungGalaxyS24手机壳``
+# or ``VivoV70手机壳``.  Keep these continuations explicit and brand-specific:
+# the generic semantic matcher must retain real token boundaries so ordinary
+# words such as ``wireless``, ``honorary`` and ``metadata`` are never mined for
+# embedded product or brand substrings.
+ADAPTIVE_BRAND_COMPACT_FOLLOWERS = {
+    "apple": (r"(?:iphone|ipad|macbook|airpods|watch)",),
+    "meta": (r"quest",),
+    "oculus": (r"quest",),
+    "samsung": (r"galaxy",),
+    "galaxy": (r"(?:buds|watch|tab)\d", r"[sazmf]\d"),
+    "huawei": (r"(?:mate|nova|pura|freebuds|watch|fit|band)",),
+    "honor": (r"(?:magic|play|pad|watch|choice)", r"x\d", r"\d"),
+    "oneplus": (r"(?:nord|ace|open|buds|watch|pad)", r"\d"),
+    "oppo": (r"(?:find|reno|watch|pad)", r"[akf]\d"),
+    "realme": (r"(?:gt|narzo|note|buds|watch|pad)\d", r"c\d", r"\d"),
+    "vivo": (r"[vxyst]\d",),
+    "iqoo": (r"(?:neo|z)\d", r"\d"),
+    "xiaomi": (r"(?:mix|civi|redmi|poco)", r"\d"),
+    "redmi": (r"(?:watch|note|buds)\d", r"[ka]\d", r"\d"),
+    "poco": (r"[xmfc]\d",),
+    "google": (r"pixel\d",),
+    "pixel": (r"\d",),
+    "sony": (r"(?:alpha|xperia|playstation|wh|wf)\d",),
+    "playstation": (r"\d",),
+    "microsoft": (r"(?:surface|xbox)",),
+    "surface": (r"(?:pro|go|laptop|book)\d", r"\d"),
+    "nintendo": (r"switch",),
+    "valve": (r"steamdeck",),
+    "dji": (r"(?:mavic|mini|air|avata|neo|osmo)\d",),
+    "lenovo": (r"(?:legion|yoga|ideapad|loq)\d", r"thinkpad[xtpel]\d"),
+    "thinkpad": (r"[xtpel]\d",),
+    "asus": (r"(?:rog|zenbook|vivobook|tuf)\d",),
+    "canon": (r"(?:eos|powershot)[a-z]?\d",),
+    "nikon": (r"(?:coolpix|z)\d",),
+    "gopro": (r"hero\d",),
+    "garmin": (r"(?:fenix|forerunner|venu|instinct|vivoactive)\d",),
+    "amazfit": (r"(?:bip|gtr|gts|active|balance|trex)\d",),
+}
+
+ADAPTIVE_KNOWN_BRANDS = set(ADAPTIVE_BRAND_ALIASES.values())
+
+# The legacy FAST/REVIEW/REJECT scorer keeps its pre-v5 brand vocabulary so
+# adding policy aliases cannot silently rewrite historical decision semantics.
+ADAPTIVE_LEGACY_BRAND_ALIASES = {
+    "apple": "apple", "honor": "honor", "huawei": "huawei", "oneplus": "oneplus",
+    "oppo": "oppo", "poco": "poco", "realme": "realme", "redmi": "redmi",
+    "samsung": "samsung", "sony": "sony", "vivo": "vivo", "xiaomi": "xiaomi", "zte": "zte",
+    "三星": "samsung", "华为": "huawei", "小米": "xiaomi", "红米": "redmi",
+    "荣耀": "honor", "真我": "realme", "一加": "oneplus", "维沃": "vivo",
+    "欧珀": "oppo", "苹果": "apple", "索尼": "sony", "中兴": "zte",
+}
 
 
 def parse_int(value: object) -> int:
@@ -279,6 +519,1288 @@ def accessory_conflict(expected_text: str, returned_text: str) -> bool:
     expected_hints = {hint for hint in ACCESSORY_INTENT_HINTS if hint in expected}
     returned_hints = {hint for hint in ACCESSORY_INTENT_HINTS if hint in returned}
     return bool(returned_hints and not expected_hints)
+
+
+def _adaptive_text(value: object) -> str:
+    return normalize_text(unicodedata.normalize("NFKC", str(value or "")))
+
+
+def _adaptive_word_tokens(value: object) -> list[str]:
+    return re.findall(r"[a-z0-9]+|[а-яё]+|[\u4e00-\u9fff]+", _adaptive_text(value))
+
+
+def _adaptive_term_matches(text: str, term: str) -> bool:
+    """Match semantic terms without treating a word as an arbitrary substring.
+
+    Chinese product terms intentionally remain substring matches because titles
+    normally concatenate them.  Latin and Cyrillic terms require token
+    boundaries; a terminal ``*`` explicitly opts a Russian stem into suffix
+    matching.  Thus ``wire`` no longer labels ``wireless`` as a cable while
+    ``наушник*`` still covers normal Russian inflections.
+    """
+    normalized = _adaptive_text(term)
+    if not normalized:
+        return False
+    if re.search(r"[\u4e00-\u9fff]", normalized):
+        return normalized in text
+    stem = normalized.endswith("*")
+    if stem:
+        normalized = normalized[:-1]
+    escaped = re.escape(normalized).replace(r"\ ", r"[\s_-]+")
+    suffix = r"[a-zа-яё0-9-]*" if stem else ""
+    return bool(re.search(
+        rf"(?<![a-zа-яё0-9]){escaped}{suffix}(?![a-zа-яё0-9])",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
+def _adaptive_brand_alias_matches(text: str, alias: str) -> bool:
+    """Match one explicit brand alias, including whitelisted compact titles."""
+    if _adaptive_term_matches(text, alias):
+        return True
+    normalized = _adaptive_text(alias)
+    if not normalized or normalized.endswith("*") or not re.fullmatch(r"[a-z0-9]+", normalized):
+        return False
+    followers = ADAPTIVE_BRAND_COMPACT_FOLLOWERS.get(normalized, ())
+    if not followers:
+        return False
+    follower_pattern = "|".join(followers)
+    return bool(re.search(
+        rf"(?<![a-z0-9]){re.escape(normalized)}(?:{follower_pattern})[a-z0-9-]*(?![a-z0-9])",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
+def _adaptive_product_types(value: object) -> set[str]:
+    text = _adaptive_text(value)
+    groups = {
+        group
+        for group, terms in ADAPTIVE_PRODUCT_GROUPS.items()
+        if any(_adaptive_term_matches(text, term) for term in terms)
+    }
+    # Product role wins over a bare noun.  A title such as “чехол для
+    # наушников” describes an earbud case, not the earbuds themselves; the
+    # same applies to camera glass and watch straps.  This prevents correct
+    # accessories from being rejected as accessories of a requested product.
+    russian_case = r"(?<![а-яё])чех(?:ол|л[а-яё-]*)(?![а-яё])"
+    russian_earbud = r"(?<![а-яё])наушник[а-яё-]*(?![а-яё])"
+    earbud_accessory_context = any((
+        re.search(rf"{russian_case}[^\n]{{0,48}}{russian_earbud}", text),
+        re.search(rf"{russian_earbud}[^\n]{{0,48}}{russian_case}", text),
+        re.search(r"(?:earbud|earphone|headphone)[^\n]{0,32}(?:case|cover)", text),
+        re.search(r"(?:case|cover)[^\n]{0,32}(?:earbud|earphone|headphone)", text),
+        re.search(r"耳机[^\n]{0,12}(?:壳|套|保护)", text),
+    ))
+    if earbud_accessory_context:
+        groups.add("earbud_accessory")
+        groups.discard("earbuds")
+        groups.discard("phone_case")
+
+    camera_accessory_context = any((
+        re.search(r"(?:защит|стекл|пленк|плёнк)[а-яё-]*[^\n]{0,32}камер", text),
+        re.search(r"камер[^\n]{0,32}(?:защит|стекл|пленк|плёнк)", text),
+        re.search(r"(?:camera|lens)[^\n]{0,24}(?:protector|glass|film|cover)", text),
+        re.search(r"(?:protector|glass|film|cover)[^\n]{0,24}(?:camera|lens)", text),
+        re.search(r"(?:镜头|摄像头)[^\n]{0,12}(?:膜|保护|玻璃)", text),
+    ))
+    if camera_accessory_context:
+        groups.add("camera_accessory")
+        groups.discard("camera")
+
+    watch_accessory_context = any((
+        re.search(r"ремеш(?:ок|ка|ки|ку|ком|ков)?", text),
+        re.search(r"(?:watch|band)[^\n]{0,28}(?:strap|band|adapter|connector|case)", text),
+        re.search(r"(?:strap|adapter|connector)[^\n]{0,28}(?:watch|band)", text),
+        re.search(r"(?:表带|表圈|手表壳|手表套|连接器|连接头|金属头)", text),
+    ))
+    if watch_accessory_context:
+        groups.add("watch_accessory")
+        groups.discard("watch")
+
+    # English Ozon and supplier titles often identify an accessory as a bare
+    # device family plus ``case``/``cover`` rather than saying “phone case” or
+    # “tablet case”.  Bind that noun to an explicit device family so a costly
+    # accessory never enters the >=CNY300 whole-device gate.  These patterns are
+    # intentionally local product-family dictionaries, not arbitrary brand or
+    # substring inference.
+    accessory_noun = r"(?<![a-z])(?:case|cover|bag|sleeve|stand|protector)s?(?![a-z])"
+
+    def device_accessory_context(device_pattern: str) -> bool:
+        device = rf"(?<![a-z0-9])(?:{device_pattern})"
+        return bool(
+            re.search(rf"{device}[^\n]{{0,48}}{accessory_noun}", text)
+            or re.search(rf"{accessory_noun}[^\n]{{0,48}}{device}", text)
+        )
+
+    if device_accessory_context(
+        r"(?:iphone[a-z0-9-]*|samsung[\s_-]*galaxy[a-z0-9-]*|"
+        r"galaxy[\s_-]*[sazmf]\d[a-z0-9-]*|(?:google[\s_-]*)?pixel[\s_-]*\d[a-z0-9-]*)"
+    ):
+        groups.add("phone_case")
+        groups.discard("phone")
+    if device_accessory_context(r"ipad[a-z0-9-]*"):
+        groups.add("tablet_accessory")
+        groups.discard("tablet")
+    if device_accessory_context(
+        r"(?:macbook[a-z0-9-]*|thinkpad[a-z0-9-]*|"
+        r"(?:microsoft[\s_-]*)?surface(?:[\s_-]*(?:pro|go|laptop|book))?[a-z0-9-]*)"
+    ):
+        groups.add("computer_accessory")
+        groups.discard("computer")
+    if device_accessory_context(
+        r"(?:(?:meta[\s_-]*|oculus[\s_-]*)?quest[a-z0-9-]*|oculus[a-z0-9-]*)"
+    ):
+        groups.add("vr_accessory")
+        groups.discard("vr_headset")
+    if device_accessory_context(
+        r"(?:playstation[a-z0-9-]*|ps\d[a-z0-9-]*|xbox[a-z0-9-]*|"
+        r"(?:nintendo[\s_-]*)?switch[a-z0-9-]*|steam[\s_-]*deck[a-z0-9-]*)"
+    ):
+        groups.add("game_accessory")
+        groups.discard("game_console")
+
+    if "phone_case" in groups:
+        groups.discard("phone")
+    return groups
+
+
+def _adaptive_styles(value: object) -> set[str]:
+    text = _adaptive_text(value)
+    return {
+        style
+        for style, terms in ADAPTIVE_STYLE_GROUPS.items()
+        if any(_adaptive_term_matches(text, term) for term in terms)
+    }
+
+
+def _adaptive_product_conflicts(expected: set[str], returned: set[str]) -> list[str]:
+    conflicts: list[str] = []
+
+    def incompatible(left: str, right: str, *, returned_without: str | None = None) -> None:
+        if left not in expected or right not in returned:
+            return
+        if returned_without and returned_without in returned:
+            return
+        conflicts.append(f"product_accessory:{left}!={right}")
+
+    if "bottle" not in expected:
+        incompatible("shampoo", "bottle")
+        incompatible("filled_consumable", "bottle")
+    if "earbud_accessory" not in expected:
+        incompatible("earbuds", "earbud_accessory")
+    if "phone_case" not in expected:
+        incompatible("phone", "phone_case")
+    if "protective_film" not in expected:
+        incompatible("phone", "protective_film")
+    if "dummy_phone" not in expected:
+        incompatible("phone", "dummy_phone")
+    if "watch_accessory" not in expected:
+        incompatible("watch", "watch_accessory")
+    if "protective_film" not in expected:
+        incompatible("watch", "protective_film")
+    if "vr_accessory" not in expected:
+        incompatible("vr_headset", "vr_accessory")
+    if "camera_accessory" not in expected:
+        incompatible("camera", "camera_accessory")
+    incompatible("protective_film", "phone_case", returned_without="protective_film")
+    incompatible("phone_case", "protective_film", returned_without="phone_case")
+    incompatible("cable", "adapter", returned_without="cable")
+    incompatible("adapter", "cable", returned_without="adapter")
+    return conflicts
+
+
+def _adaptive_brands(value: object) -> set[str]:
+    text = _adaptive_text(value)
+    # v5 brand policy is dictionary-only: every accepted spelling is listed
+    # locally and matched on a real word boundary (Chinese aliases remain
+    # explicit substring entries because supplier titles concatenate words).
+    return {
+        canonical
+        for alias, canonical in ADAPTIVE_BRAND_ALIASES.items()
+        if _adaptive_brand_alias_matches(text, alias)
+    }
+
+
+def _adaptive_legacy_brands(value: object) -> set[str]:
+    text = _adaptive_text(value)
+    return {
+        canonical
+        for alias, canonical in ADAPTIVE_LEGACY_BRAND_ALIASES.items()
+        if _adaptive_brand_alias_matches(text, alias)
+    }
+
+
+def _adaptive_brand_families(brands: set[str]) -> set[str]:
+    # Redmi and Poco are explicit Xiaomi product families in the local policy
+    # dictionary.  No other corporate-ownership inference is performed.
+    return {"xiaomi" if brand in {"redmi", "poco"} else brand for brand in brands}
+
+
+def _adaptive_legacy_brand_families(brands: set[str]) -> set[str]:
+    return {"xiaomi" if brand == "redmi" else brand for brand in brands}
+
+
+def _adaptive_materials(value: object) -> set[str]:
+    text = _adaptive_text(value)
+    materials: set[str] = set()
+    if re.search(r"hydrogel|гидрогел|水凝", text):
+        materials.add("hydrogel")
+    if re.search(r"tempered\s+glass|закаленн[а-яё-]*\s+стекл|钢化(?:膜|玻璃)", text):
+        materials.add("tempered_glass")
+    if re.search(r"(?<![a-z])silicon(?:e)?(?![a-z])|силикон[а-яё-]*|硅胶", text):
+        materials.add("silicone")
+    if re.search(r"(?<![a-z])pc(?![a-z])|polycarbonate|поликарбонат|聚碳酸酯", text):
+        materials.add("polycarbonate")
+    if re.search(r"stainless\s+steel|нержавеющ[а-яё-]*\s+стал[а-яё-]*|不锈钢", text):
+        materials.add("stainless_steel")
+    if re.search(
+        r"(?<![a-z])leather(?![a-z])|"
+        r"(?<![а-яё])(?:кожан[а-яё-]*|кожевенн[а-яё-]*|кож(?:а|и|е|у|ей|ею))(?![а-яё])|"
+        r"真皮|皮革",
+        text,
+    ):
+        materials.add("leather")
+    # Generic metal wording and alloy wording describe the same broad
+    # material family at search-card precision.  Specific stainless steel is
+    # retained separately because it is an option-defining watch-band claim.
+    if re.search(
+        r"(?<![a-z])(?:metal|alloy)(?![a-z])|металл[а-яё-]*|металлическ[а-яё-]*|"
+        r"сплав[а-яё-]*|合金|金属",
+        text,
+    ):
+        materials.add("metal")
+    return materials
+
+
+def _adaptive_model_records(value: object) -> list[dict]:
+    """Extract comparison-safe product model identities, excluding units and years."""
+    text = _adaptive_mask_specs(value)
+    # Treat the two common spellings as one qualifier while keeping them
+    # distinct from the base Pro SKU.  This runs before tokenization so the
+    # punctuation in compact forms such as ``Note15Pro+`` is not discarded.
+    text = re.sub(r"pro(?:\s*\+|\s+plus\b)", "proplus", text)
+    # Brand-product model order: `AirPods Pro 2` / `AirPods Pro2` should bind
+    # to the same exact identity instead of losing `Pro` as a weak token.
+    text = re.sub(
+        r"\bairpods[\s_-]+(pro|max)[\s_-]*(\d{1,3})\b",
+        lambda match: f"airpods{match.group(2)}{match.group(1)}",
+        text,
+    )
+    tokens = re.findall(r"[a-z0-9]+", text)
+    # A bare V-series token (for example V70) is only meaningful as a model
+    # when the surrounding title explicitly names Vivo.  Keep this boolean
+    # deterministic instead of deriving a prefix from unordered brand sets.
+    vivo_context = any(token == "vivo" or token.startswith("vivo") for token in tokens)
+    apple_silicon_context = any(
+        token.startswith(("macbook", "imac", "macmini", "ipad"))
+        for token in tokens
+    )
+    records: list[dict] = []
+
+    def add(family: str, number: str, qualifier: str = "") -> None:
+        family = re.sub(r"[^a-z]", "", family)
+        qualifier = re.sub(r"[^a-z]", "", qualifier)
+        if qualifier == "u":
+            qualifier = "ultra"
+        if not family or not number:
+            return
+        # OBD2 is the diagnostic protocol around an ELM327 adapter, not a
+        # second product model or SKU variant.
+        if family in ADAPTIVE_SPEC_UNITS or family == "obd" or qualifier in ADAPTIVE_SPEC_UNITS:
+            return
+        if len(number) == 4 and 1900 <= int(number) <= 2099:
+            return
+        canonical = f"{family}{number}{qualifier}"
+        record = {
+            "family": family,
+            "number": number.lstrip("0") or "0",
+            "qualifier": qualifier,
+            "canonical": canonical,
+        }
+        if record not in records:
+            records.append(record)
+
+        # 1688 frequently concatenates a brand and model (`vivox200`).  Add a
+        # comparison alias without the known brand so it can match `vivo
+        # x200`, while retaining the original record for auditability.
+        for brand in ADAPTIVE_KNOWN_BRANDS:
+            if family.startswith(brand) and len(family) > len(brand):
+                add(family[len(brand):], number, qualifier)
+                break
+
+    def compound_qualifier(first: str, second: str = "") -> str:
+        if first == "pro" and second in {"max", "mini", "plus"}:
+            return f"pro{second}"
+        return first if first in ADAPTIVE_MODEL_QUALIFIERS else ""
+
+    # Preserve slash-separated compatibility lists such as `Band 10/9/8` and
+    # compact search-card forms such as `watch6/5/4`.
+    # Every listed target variant is allowed; it must not conflict with a
+    # returned Offer merely because another allowed target variant differs.
+    for match in re.finditer(
+        r"(?<![a-z0-9])([a-z]{1,24})\s*(\d+(?:\s*/\s*\d+)+)"
+        r"(?:\s+(pro(?:\s+(?:max|mini|plus))?|proplus|plus|max|mini|lite|ultra|fe|se|nfc))?(?![a-z0-9])",
+        text,
+    ):
+        family, raw_numbers, qualifier = match.groups()
+        normalized_qualifier = re.sub(r"\s+", "", qualifier or "")
+        for number in re.split(r"\s*/\s*", raw_numbers):
+            add(family, number, normalized_qualifier)
+
+    for index, token in enumerate(tokens):
+        compact = re.fullmatch(r"([a-z]{1,16})(\d{1,6})([a-z]{0,12})", token)
+        if compact:
+            family, number, qualifier = compact.groups()
+            if family in ADAPTIVE_SPEC_UNITS:
+                if family == "v" and vivo_context:
+                    family = "vivov"
+                elif family == "m" and apple_silicon_context:
+                    family = "applem"
+                else:
+                    continue
+            if qualifier in ADAPTIVE_SPEC_UNITS:
+                continue
+            if qualifier and qualifier not in ADAPTIVE_MODEL_QUALIFIERS and len(qualifier) > 2:
+                qualifier = ""
+            next_token = tokens[index + 1] if index + 1 < len(tokens) else ""
+            following_token = tokens[index + 2] if index + 2 < len(tokens) else ""
+            if qualifier == "pro" and next_token in {"max", "mini"}:
+                qualifier = f"pro{next_token}"
+            elif not qualifier:
+                qualifier = compound_qualifier(next_token, following_token)
+            add(family, number, qualifier)
+
+    # Separated forms must be locally adjacent in the original text.  Using a
+    # regex instead of the old token look-behind prevents `type-c ... 雷电5`
+    # from inventing a `c5` model after Chinese text was discarded.
+    qualifier_pattern = r"pro(?:\s+(?:max|mini|plus))?|proplus|plus|max|mini|lite|ultra|fe|se|air|neo|nfc"
+    attached_qualifier_pattern = r"proplus|pro|max|mini|lite|ultra|plus|fe|se|nfc"
+    for match in re.finditer(
+        rf"(?<![a-z0-9])([a-z]{{1,20}})\s+(\d{{1,6}})({attached_qualifier_pattern})(?![a-z0-9])",
+        text,
+    ):
+        family, number, qualifier = match.groups()
+        if family not in WEAK_EVIDENCE_TOKENS and family not in ADAPTIVE_SPEC_UNITS:
+            add(family, number, qualifier)
+    for match in re.finditer(
+        rf"\b([a-z]{{1,20}})\s+(\d{{1,6}})(?:\s+({qualifier_pattern}))?\b",
+        text,
+    ):
+        family, number, qualifier = match.groups()
+        if family in WEAK_EVIDENCE_TOKENS or family in ADAPTIVE_SPEC_UNITS:
+            continue
+        add(family, number, re.sub(r"\s+", "", qualifier or ""))
+
+    for match in re.finditer(
+        rf"\b([a-z]{{2,20}})\s+([a-z]{{2,20}})\s+(\d{{1,6}})"
+        rf"(?:\s+({qualifier_pattern}))?\b",
+        text,
+    ):
+        first, second, number, qualifier = match.groups()
+        if second in WEAK_EVIDENCE_TOKENS or second in ADAPTIVE_SPEC_UNITS:
+            continue
+        normalized_qualifier = re.sub(r"\s+", "", qualifier or "")
+        add(second, number, normalized_qualifier)
+        add(f"{first}{second}", number, normalized_qualifier)
+    # Do not collapse an explicitly listed base model plus qualified model
+    # (`Buds 4 / Buds 4 Pro`) into one record.  That list is precisely the SKU
+    # ambiguity the shadow decision must route to REVIEW.
+    return records
+
+
+def _adaptive_family_overlap(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    if min(len(left), len(right)) < 3:
+        return False
+    return left in right or right in left
+
+
+def _adaptive_model_comparison(expected_value: object, returned_value: object) -> dict:
+    expected = _adaptive_model_records(expected_value)
+    returned = _adaptive_model_records(returned_value)
+    exact = []
+    conflicts = []
+    incomplete = []
+
+    def relation(left: dict, right: dict) -> str:
+        if not _adaptive_family_overlap(left["family"], right["family"]):
+            return "unrelated"
+        if left["number"] != right["number"]:
+            return "conflict"
+        left_qualifier = left["qualifier"]
+        right_qualifier = right["qualifier"]
+        if left_qualifier == right_qualifier:
+            return "exact"
+        if bool(left_qualifier) != bool(right_qualifier):
+            return "incomplete"
+        if {left_qualifier, right_qualifier} == {"pro", "proplus"}:
+            return "incomplete"
+        return "conflict"
+
+    # Evaluate each returned variant against the complete set of allowed
+    # target variants.  A target like `Band 10/9/8` therefore accepts Band 8,
+    # while `X200 FE` plus a returned X200S remains an explicit contradiction.
+    for right in returned:
+        related = [left for left in expected if _adaptive_family_overlap(left["family"], right["family"])]
+        relations = [(left, relation(left, right)) for left in related]
+        exact_left = next((left for left, kind in relations if kind == "exact"), None)
+        if exact_left:
+            exact.append(right["canonical"])
+            continue
+        incomplete_left = next((left for left, kind in relations if kind == "incomplete"), None)
+        if incomplete_left:
+            incomplete.append(right["canonical"])
+            continue
+        conflict_left = next((left for left, kind in relations if kind == "conflict"), None)
+        if conflict_left:
+            conflicts.append(
+                f"model:{conflict_left['canonical']}!={right['canonical']}"
+            )
+    related_variant_keys = {
+        (right["number"], right["qualifier"])
+        for right in returned
+        if any(_adaptive_family_overlap(left["family"], right["family"]) for left in expected)
+    }
+    return {
+        "expected": expected,
+        "returned": returned,
+        "exact": list(dict.fromkeys(exact)),
+        "conflicts": list(dict.fromkeys(conflicts)),
+        "incomplete": list(dict.fromkeys(incomplete)),
+        "variant_ambiguity": len(related_variant_keys) > 1,
+    }
+
+
+def _adaptive_network_generations(value: object) -> set[str]:
+    """Return explicit mobile-network generations without parsing weights."""
+    text = _adaptive_text(value)
+    # The non-digit guard covers compact ``pro5g`` but excludes the tail of a
+    # real weight such as ``45g``.  The right guard excludes storage units
+    # such as ``64gb``.
+    return set(re.findall(r"(?<![0-9])([45]g)(?![a-z0-9])", text))
+
+
+def _adaptive_elm327_identity(value: object) -> dict | None:
+    """Extract variant evidence that the shared ELM327 name does not encode."""
+    text = _adaptive_text(value)
+    if not re.search(r"(?<![a-z0-9])elm[\s_-]*327(?![a-z0-9])", text):
+        return None
+
+    versions = set()
+    for raw in re.findall(
+        r"(?<![a-z0-9])v(?:er(?:sion)?)?\s*([0-9]+(?:[.,][0-9]+)?)(?![a-z0-9])",
+        text,
+    ):
+        try:
+            versions.add(f"{float(raw.replace(',', '.')):g}")
+        except ValueError:
+            continue
+    chipsets = {
+        f"pic{match}"
+        for match in re.findall(
+            r"(?<![a-z0-9])pic[\s_-]*([a-z0-9]{4,})(?![a-z0-9])",
+            text,
+        )
+    }
+    return {
+        "versions": versions,
+        "chipsets": chipsets,
+        "mini": _adaptive_term_matches(text, "mini"),
+    }
+
+
+def _adaptive_spec_observations(value: object) -> tuple[str, list[dict]]:
+    """Extract explicit specs and their source spans, including variant lists."""
+    text = _adaptive_text(value)
+    number = r"\d+(?:[.,]\d+)?"
+    definitions = [
+        ("capacity_mah", r"mah|мач|毫安(?:时)?", 1.0),
+        ("length_mm", r"mm|мм|毫米", 1.0),
+        ("length_mm", r"cm|см|厘米", 10.0),
+        ("length_mm", r"m|м|米|метр(?:а|ов|ы|о)?", 1000.0),
+        ("volume_ml", r"ml|мл|毫升", 1.0),
+        ("volume_ml", r"l|л|升", 1000.0),
+        ("weight_g", r"kg|кг|千克", 1000.0),
+        ("weight_g", r"g|г|克", 1.0),
+        ("power_w", r"w|вт|瓦", 1.0),
+        ("voltage_v", r"v|в|伏", 1.0),
+        ("current_a", r"a|а|安", 1.0),
+        ("count", r"pcs?|pack|шт|штук|件|个|只|套", 1.0),
+    ]
+    observations: list[dict] = []
+
+    def observe(kind: str, numeric: str, multiplier: float, span: tuple[int, int]) -> None:
+        try:
+            converted = float(numeric.replace(",", ".")) * multiplier
+        except (TypeError, ValueError):
+            return
+        # A compact single-digit `4g` is overwhelmingly the mobile-network
+        # generation in product titles.  Real weights retain a separator,
+        # larger value, Cyrillic/Chinese unit, or kg form.
+        raw = text[span[0]:span[1]]
+        if kind == "weight_g" and converted <= 5 and re.fullmatch(r"\d(?:[.,]\d+)?g", raw):
+            return
+        normalized = f"{converted:.6f}".rstrip("0").rstrip(".")
+        observations.append({"kind": kind, "value": normalized, "span": span})
+
+    # Bind compact electrical pairs before the single-unit pass.  Search-card
+    # titles commonly concatenate them (`12v55w`, `21v4a`), which must not be
+    # mistaken for a missing 55 W / 4 A specification.
+    pair_units = [
+        ("power_w", r"w|вт|瓦"),
+        ("current_a", r"a|а|安"),
+    ]
+    for right_kind, right_unit in pair_units:
+        pair_pattern = re.compile(
+            rf"(?<![0-9.])(?P<voltage>{number})\s*(?:v|в|伏)\s*"
+            rf"(?P<right>{number})\s*(?:{right_unit})(?![a-zа-яё])",
+            flags=re.IGNORECASE,
+        )
+        for match in pair_pattern.finditer(text):
+            observe("voltage_v", match.group("voltage"), 1.0, match.span())
+            observe(right_kind, match.group("right"), 1.0, match.span())
+
+    for kind, unit, multiplier in definitions:
+        unit_group = rf"(?:{unit})"
+        # Each option repeats its unit: 250ml300ml400ml, 18v21v.
+        direct_chain = re.compile(
+            rf"(?<![a-zа-яё0-9])(?P<body>(?:{number}\s*{unit_group}){{2,}})(?![a-zа-яё0-9])",
+            flags=re.IGNORECASE,
+        )
+        # A final shared unit: 100 120 150 200ml, 20 22mm, 40/44/46mm.
+        shared_unit = re.compile(
+            rf"(?<![a-zа-яё0-9])(?P<body>{number}(?:(?:\s*/\s*|\s+){number})+)"
+            rf"\s*{unit_group}(?![a-zа-яё0-9])",
+            flags=re.IGNORECASE,
+        )
+        single = re.compile(
+            rf"(?<![a-zа-яё0-9])(?P<body>{number})\s*{unit_group}(?![a-zа-яё0-9])",
+            flags=re.IGNORECASE,
+        )
+        for pattern in (direct_chain, shared_unit, single):
+            for match in pattern.finditer(text):
+                if pattern is shared_unit:
+                    body = match.group("body")
+                    if "/" not in body and any(
+                        separator in numeric
+                        for numeric in re.findall(number, body)[:-1]
+                        for separator in (".", ",")
+                    ):
+                        continue
+                for numeric_match in re.finditer(number, match.group("body")):
+                    observe(kind, numeric_match.group(0), multiplier, match.span())
+
+    # A dimension expression describes axes, not competing variants.  Capture
+    # every axis when the unit is written once at the end (`21x0.5 cm`) and
+    # infer an unlabelled pair (`5x210`) only when one side is independently
+    # labelled in the same title (`5 mm`).
+    dimension_pattern = re.compile(
+        rf"(?<![a-zа-яё0-9])(?P<body>{number}(?:\s*[xх×*]\s*{number}){{1,2}})"
+        rf"\s*(?P<unit>mm|мм|毫米|cm|см|厘米|m|м|米)(?![a-zа-яё])",
+        flags=re.IGNORECASE,
+    )
+    unit_multiplier = {
+        "mm": 1.0, "мм": 1.0, "毫米": 1.0,
+        "cm": 10.0, "см": 10.0, "厘米": 10.0,
+        "m": 1000.0, "м": 1000.0, "米": 1000.0,
+    }
+    for match in dimension_pattern.finditer(text):
+        multiplier = unit_multiplier[match.group("unit").lower()]
+        for numeric_match in re.finditer(number, match.group("body")):
+            observe("length_mm", numeric_match.group(0), multiplier, match.span())
+
+    existing_lengths = {
+        observation["value"]
+        for observation in observations
+        if observation["kind"] == "length_mm"
+    }
+    for match in re.finditer(
+        rf"(?<![a-zа-яё0-9])(?P<left>{number})\s*[xх×*]\s*(?P<right>{number})(?![a-zа-яё0-9])",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        raw_values = [match.group("left"), match.group("right")]
+        normalized_values = [
+            f"{float(value.replace(',', '.')):.6f}".rstrip("0").rstrip(".")
+            for value in raw_values
+        ]
+        if not (set(normalized_values) & existing_lengths):
+            continue
+        for raw_value in raw_values:
+            observe("length_mm", raw_value, 1.0, match.span())
+    return text, observations
+
+
+def _adaptive_specs(value: object) -> dict[str, list[str]]:
+    _text, observations = _adaptive_spec_observations(value)
+    specs: dict[str, list[str]] = {}
+    for observation in observations:
+        values = specs.setdefault(observation["kind"], [])
+        if observation["value"] not in values:
+            values.append(observation["value"])
+    return specs
+
+
+def _adaptive_mask_specs(value: object) -> str:
+    """Blank raw specification spans before extracting product models."""
+    text, observations = _adaptive_spec_observations(value)
+    characters = list(text)
+    for observation in observations:
+        start, end = observation["span"]
+        characters[start:end] = " " * (end - start)
+    return "".join(characters)
+
+
+def _adaptive_spec_comparison(expected: dict[str, list[str]], returned: dict[str, list[str]]) -> dict:
+    matched = []
+    missing = []
+    conflicts = []
+    ambiguous = []
+    for kind, expected_values in expected.items():
+        returned_values = returned.get(kind) or []
+        if not returned_values:
+            missing.append(kind)
+        elif set(expected_values).isdisjoint(returned_values):
+            if kind == "length_mm":
+                # A search-card title does not bind length/width/thickness or
+                # watch-case/lug width axes to a concrete SKU.  Keep it in the
+                # review lane instead of turning an axis mismatch into a hard
+                # product rejection.
+                ambiguous.append(kind)
+            else:
+                conflicts.append(
+                    f"spec:{kind}:{'/'.join(expected_values)}!={'/'.join(returned_values)}"
+                )
+        else:
+            matched.append(kind)
+            if len(set(returned_values)) > 1 or set(returned_values) - set(expected_values):
+                ambiguous.append(kind)
+    return {
+        "matched": matched,
+        "missing": missing,
+        "conflicts": conflicts,
+        "ambiguous": ambiguous,
+    }
+
+
+def _adaptive_electrical_pairs(value: object) -> dict[str, set[tuple[str, str]]]:
+    text = _adaptive_text(value)
+    number = r"\d+(?:[.,]\d+)?"
+    pairs = {"voltage_power": set(), "voltage_current": set()}
+
+    def normalized(raw: str) -> str:
+        return f"{float(raw.replace(',', '.')):.6f}".rstrip("0").rstrip(".")
+
+    for kind, right_unit in (
+        ("voltage_power", r"w|вт|瓦"),
+        ("voltage_current", r"a|а|安"),
+    ):
+        pattern = re.compile(
+            rf"(?<![0-9.])({number})\s*(?:v|в|伏)\s*({number})\s*(?:{right_unit})(?![a-zа-яё])",
+            flags=re.IGNORECASE,
+        )
+        for match in pattern.finditer(text):
+            pairs[kind].add((normalized(match.group(1)), normalized(match.group(2))))
+    return pairs
+
+
+def _adaptive_row_value(row: dict, snake: str, camel: str) -> object:
+    return row.get(snake) if row.get(snake) not in (None, "") else row.get(camel)
+
+
+def _adaptive_row_offer_id(row: dict) -> str:
+    return str(_adaptive_row_value(row, "offer_id", "offerId") or "").strip()
+
+
+def _adaptive_row_supplier_id(row: dict) -> str:
+    value = _adaptive_row_value(row, "supplier_id", "shop")
+    return normalize_supplier(value)
+
+
+def _adaptive_row_image(row: dict) -> dict:
+    image = row.get("image")
+    return dict(image) if isinstance(image, dict) else {"available": False}
+
+
+def _adaptive_positive_price(value: object) -> float | None:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    return price if math.isfinite(price) and price > 0 else None
+
+
+def _adaptive_core_digital_category(products: set[str], brands: set[str]) -> str | None:
+    if products & VALUABLE_DIGITAL_ACCESSORY_ROLES:
+        return None
+    for role, category in VALUABLE_DIGITAL_CORE_ROLES.items():
+        if role not in products:
+            continue
+        if role == "earbuds" and not brands:
+            return None
+        return category
+    return None
+
+
+def _adaptive_policy_payload(
+    *,
+    evidence_complete: bool,
+    completeness_reasons: list[str],
+    expect_price_cny: object,
+    expected_products: set[str],
+    selected_products: set[str],
+    expected_brands: set[str],
+    selected_brands: set[str],
+    expected_models: list[dict],
+    model_comparison: dict,
+    hard_conflicts: list[str],
+) -> dict:
+    price_cny = _adaptive_positive_price(expect_price_cny)
+    category = _adaptive_core_digital_category(expected_products, expected_brands)
+    applies = bool(
+        category
+        and price_cny is not None
+        and price_cny >= VALUABLE_DIGITAL_THRESHOLD_CNY
+    )
+    brand_match = None
+    if expected_brands:
+        brand_match = bool(
+            selected_brands
+            and not expected_brands.isdisjoint(selected_brands)
+            and not (selected_brands - expected_brands)
+        )
+    audit_fields = {
+        "policy_version": ADAPTIVE_POLICY_VERSION,
+        "evidence_complete": bool(evidence_complete),
+        "valuable_digital": {
+            "applies": applies,
+            "category": category,
+            "price_cny": price_cny,
+            "threshold_cny": VALUABLE_DIGITAL_THRESHOLD_CNY,
+        },
+        "brand_evidence": {
+            "expected_families": sorted(expected_brands),
+            "selected_families": sorted(selected_brands),
+            "matched": brand_match,
+        },
+        "expected_product_roles": sorted(expected_products),
+        "selected_product_roles": sorted(selected_products),
+        "expected_models": [row["canonical"] for row in expected_models],
+    }
+    if not evidence_complete:
+        return {
+            **audit_fields,
+            "action": None,
+            "policy_reasons": [
+                "evidence_incomplete",
+                *[f"evidence_incomplete:{reason}" for reason in completeness_reasons],
+            ],
+        }
+
+    reject_reasons: list[str] = []
+    reject_reasons.extend(f"hard_conflict:{value}" for value in hard_conflicts)
+
+    # Global, dictionary-only brand policy.  A multi-brand target may bind to
+    # one explicitly listed family, but a missing family, disjoint family, or
+    # an additional unrequested family is not allowed.
+    if expected_brands:
+        if not selected_brands:
+            reject_reasons.append("selected_brand_missing")
+        elif expected_brands.isdisjoint(selected_brands):
+            reject_reasons.append("selected_brand_family_mismatch")
+        elif selected_brands - expected_brands:
+            reject_reasons.append("selected_brand_family_unbound")
+
+    if category and price_cny is None:
+        reject_reasons.append("valuable_digital_price_missing")
+    if applies:
+        if not expected_brands:
+            reject_reasons.append("valuable_digital_target_brand_missing")
+        required_role = next(
+            role
+            for role, mapped_category in VALUABLE_DIGITAL_CORE_ROLES.items()
+            if mapped_category == category
+        )
+        if (
+            required_role not in selected_products
+            or bool(selected_products & VALUABLE_DIGITAL_ACCESSORY_ROLES)
+        ):
+            reject_reasons.append("valuable_digital_product_role_mismatch")
+        if not expected_models:
+            reject_reasons.append("valuable_digital_target_model_missing")
+        else:
+            exact_model_bound = bool(model_comparison.get("exact")) and not any((
+                model_comparison.get("conflicts"),
+                model_comparison.get("incomplete"),
+                model_comparison.get("variant_ambiguity"),
+            ))
+            if not exact_model_bound:
+                reject_reasons.append("valuable_digital_selected_model_mismatch")
+
+    policy_reasons = list(dict.fromkeys(reject_reasons))
+    action = "REJECT" if policy_reasons else "ALLOW"
+    if not policy_reasons:
+        policy_reasons = [
+            "valuable_digital_verified" if applies else "policy_allow"
+        ]
+    return {
+        **audit_fields,
+        "action": action,
+        "policy_reasons": policy_reasons,
+    }
+
+
+def adaptive_same_item_decision(
+    rows: list[dict],
+    *,
+    expect_title: str = "",
+    expect_model: str = "",
+    expect_category: str = "",
+    expect_price_cny: float | None = None,
+    selected_offer_id: str = "",
+    selected_cluster: list[dict] | None = None,
+    selected_cost: float | None = None,
+) -> dict:
+    """Return a shadow-only FAST/REVIEW/REJECT decision for the selected Offer.
+
+    REJECT is reserved for explicit contradictions.  Missing or weak evidence
+    is REVIEW, so the policy can improve precision without shrinking the live
+    hot path before replay/canary evidence says it is safe.
+    """
+    normalized_rows = [row for row in (rows or []) if isinstance(row, dict)]
+    selected_id = str(selected_offer_id or "").strip()
+    selected = next(
+        (row for row in normalized_rows if _adaptive_row_offer_id(row) == selected_id),
+        None,
+    )
+    missing: list[str] = []
+    hard_conflicts: list[str] = []
+    expected_identity_text = " ".join(filter(None, [expect_title, expect_model]))
+    expected_policy_text = " ".join(
+        filter(None, [expect_title, expect_model, expect_category])
+    )
+    expected_products = _adaptive_product_types(expected_identity_text)
+    if not expected_products:
+        expected_products = _adaptive_product_types(expect_category)
+    expected_policy_products = _adaptive_product_types(expected_policy_text)
+    expected_specs = _adaptive_specs(expected_identity_text)
+    expected_models = _adaptive_model_records(" ".join(filter(None, [expect_model, expect_title])))
+    expected_materials = _adaptive_materials(expected_identity_text)
+    expected_styles = _adaptive_styles(expected_identity_text)
+    expected_brands = _adaptive_legacy_brand_families(
+        _adaptive_legacy_brands(expected_identity_text)
+    )
+    expected_policy_brands = _adaptive_brand_families(
+        _adaptive_brands(expected_identity_text)
+    )
+
+    if not selected_id:
+        missing.append("selected_offer_id")
+    if selected is None:
+        missing.append("selected_offer_evidence")
+        completeness_reasons = list(dict.fromkeys(missing))
+        if _adaptive_positive_price(expect_price_cny) is None:
+            completeness_reasons.append("expect_price_cny")
+        policy = _adaptive_policy_payload(
+            evidence_complete=False,
+            completeness_reasons=list(dict.fromkeys(completeness_reasons)),
+            expect_price_cny=expect_price_cny,
+            expected_products=expected_policy_products,
+            selected_products=set(),
+            expected_brands=expected_policy_brands,
+            selected_brands=set(),
+            expected_models=expected_models,
+            model_comparison={
+                "exact": [], "conflicts": [], "incomplete": [], "variant_ambiguity": False,
+            },
+            hard_conflicts=[],
+        )
+        return {
+            "version": ADAPTIVE_MATCH_VERSION,
+            "decision": "REVIEW",
+            "score": 0,
+            "reason": "selected Offer is not bound to returned evidence",
+            "hard_conflicts": [],
+            "missing_evidence": list(dict.fromkeys(missing)),
+            "selected_offer_id": selected_id or None,
+            "supporting_offer_ids": [],
+            **policy,
+        }
+
+    selected_title = str(selected.get("title") or "")
+    if not selected_title.strip():
+        missing.append("selected_offer_title")
+    if not _adaptive_row_supplier_id(selected):
+        missing.append("selected_offer_supplier")
+    try:
+        selected_price = float(selected.get("price"))
+    except (TypeError, ValueError):
+        selected_price = 0.0
+    if not math.isfinite(selected_price) or selected_price <= 0:
+        missing.append("selected_offer_price")
+    selected_products = _adaptive_product_types(selected_title)
+    product_conflicts = _adaptive_product_conflicts(expected_products, selected_products)
+    hard_conflicts.extend(product_conflicts)
+    for role in sorted(
+        (expected_products & ADAPTIVE_REQUIRED_PRODUCT_ROLES) - selected_products
+    ):
+        missing.append(f"product_role:{role}")
+
+    returned_brands = _adaptive_legacy_brand_families(
+        _adaptive_legacy_brands(selected_title)
+    )
+    returned_policy_brands = _adaptive_brand_families(
+        _adaptive_brands(selected_title)
+    )
+    if expected_brands and returned_brands:
+        if expected_brands.isdisjoint(returned_brands):
+            brand_conflict = (
+                f"brand:{'/'.join(sorted(expected_brands))}!="
+                f"{'/'.join(sorted(returned_brands))}"
+            )
+            if expected_models:
+                hard_conflicts.append(brand_conflict)
+            else:
+                # Generic cables, straps and other compatibility-list
+                # accessories routinely name different example brands.  With
+                # no explicit target model, brand alone is insufficient for a
+                # destructive mismatch decision.
+                missing.append("selected_offer_brand_binding")
+        elif returned_brands - expected_brands:
+            missing.append("selected_offer_brand_variant_binding")
+
+    model_comparison = _adaptive_model_comparison(
+        " ".join(filter(None, [expect_model, expect_title])),
+        selected_title,
+    )
+    if model_comparison["exact"] and (
+        model_comparison["conflicts"] or model_comparison["variant_ambiguity"]
+    ):
+        missing.append("selected_offer_model_variant_binding")
+    else:
+        hard_conflicts.extend(model_comparison["conflicts"])
+
+    expected_networks = _adaptive_network_generations(expected_identity_text)
+    selected_networks = _adaptive_network_generations(selected_title)
+    if expected_networks:
+        if (
+            not selected_networks
+            or expected_networks.isdisjoint(selected_networks)
+            or selected_networks - expected_networks
+        ):
+            # 4G/5G labels often identify separate SKUs, but search-card titles
+            # do not reliably bind the label to the selected variation.  Keep
+            # the uncertainty visible without upgrading it to a hard reject.
+            missing.append("selected_offer_network_generation_binding")
+
+    expected_elm327 = _adaptive_elm327_identity(expected_identity_text)
+    selected_elm327 = _adaptive_elm327_identity(selected_title)
+    if expected_elm327:
+        if not selected_elm327:
+            missing.append("selected_offer_elm327_identity")
+        else:
+            for field, evidence_name in (
+                ("versions", "elm327_version_binding"),
+                ("chipsets", "elm327_chipset_binding"),
+            ):
+                expected_values = expected_elm327[field]
+                selected_values = selected_elm327[field]
+                if expected_values != selected_values:
+                    missing.append(evidence_name)
+            if expected_elm327["mini"] != selected_elm327["mini"]:
+                missing.append("elm327_form_factor_binding")
+
+    selected_materials = _adaptive_materials(selected_title)
+    if expected_materials & selected_materials:
+        if selected_materials - expected_materials:
+            missing.append("selected_offer_material_variant_binding")
+    elif expected_materials:
+        if (
+            selected_materials
+            and {"hydrogel", "tempered_glass"}
+            <= expected_materials | selected_materials
+        ):
+            hard_conflicts.append(
+                f"material:{'/'.join(sorted(expected_materials))}!={'/'.join(sorted(selected_materials))}"
+            )
+        else:
+            missing.append("selected_offer_material_binding")
+
+    selected_styles = _adaptive_styles(selected_title)
+    for style in sorted(expected_styles - selected_styles):
+        missing.append(f"style:{style}")
+    selected_specs = _adaptive_specs(selected_title)
+    spec_comparison = _adaptive_spec_comparison(expected_specs, selected_specs)
+    battery_voltage_convention = (
+        "18650" in _adaptive_text(expected_identity_text)
+        and "18650" in _adaptive_text(selected_title)
+        and {"4.2", "3.7"} <= set(expected_specs.get("voltage_v", [])) | set(selected_specs.get("voltage_v", []))
+    )
+    if battery_voltage_convention:
+        spec_comparison["conflicts"] = [
+            conflict
+            for conflict in spec_comparison["conflicts"]
+            if not conflict.startswith("spec:voltage_v:")
+        ]
+        missing.append("battery_voltage_convention_binding")
+    hard_conflicts.extend(spec_comparison["conflicts"])
+    missing.extend(
+        f"spec_variant_binding:{kind}" for kind in spec_comparison["ambiguous"]
+    )
+    expected_electrical_pairs = _adaptive_electrical_pairs(expected_identity_text)
+    selected_electrical_pairs = _adaptive_electrical_pairs(selected_title)
+    for pair_kind in ("voltage_power", "voltage_current"):
+        expected_pairs = expected_electrical_pairs[pair_kind]
+        selected_pairs = selected_electrical_pairs[pair_kind]
+        if not expected_pairs or not selected_pairs:
+            continue
+        if expected_pairs.isdisjoint(selected_pairs):
+            left = "/".join(f"{voltage}+{right}" for voltage, right in sorted(expected_pairs))
+            right = "/".join(f"{voltage}+{value}" for voltage, value in sorted(selected_pairs))
+            hard_conflicts.append(f"spec:{pair_kind}:{left}!={right}")
+        elif selected_pairs - expected_pairs:
+            missing.append(f"spec_variant_binding:{pair_kind}")
+
+    score = 0
+    if expected_products:
+        if expected_products & selected_products and not product_conflicts:
+            score += 20
+        elif not product_conflicts:
+            score += 5
+            missing.append("product_type_match")
+    else:
+        score += 15
+
+    exact_model = bool(model_comparison["exact"])
+    if expected_models:
+        if exact_model:
+            score += 35
+        elif not model_comparison["conflicts"]:
+            missing.append("exact_model_match")
+    else:
+        score += 25
+
+    if expected_specs:
+        matched_count = len(spec_comparison["matched"])
+        score += round(20 * matched_count / len(expected_specs))
+        missing.extend(f"spec:{kind}" for kind in spec_comparison["missing"])
+    else:
+        score += 15
+
+    image = _adaptive_row_image(selected)
+    image_available = image.get("available") is True
+    try:
+        image_score = float(image.get("score")) if image_available else 0.0
+    except (TypeError, ValueError):
+        image_score = 0.0
+    high_image_threshold = 0.68 if exact_model else IMAGE_HIGH_SIMILARITY
+    if not image_available:
+        missing.append("selected_offer_image")
+    elif image_score >= high_image_threshold:
+        score += 20
+    elif image_score >= IMAGE_CORROBORATION_SIMILARITY:
+        score += 12
+    else:
+        score += 4
+        missing.append("selected_offer_image_similarity")
+
+    cluster_rows = [
+        row for row in (selected_cluster or [])
+        if isinstance(row, dict)
+    ]
+    cluster_offer_ids = {
+        str((row or {}).get("offer_id") or (row or {}).get("offerId") or "").strip()
+        for row in cluster_rows
+    }
+    if not cluster_offer_ids or selected_id not in cluster_offer_ids:
+        missing.append("selected_offer_cluster_binding")
+    selected_cluster_row = next(
+        (
+            row for row in cluster_rows
+            if str(row.get("offer_id") or row.get("offerId") or "").strip() == selected_id
+        ),
+        None,
+    )
+    if selected_cluster_row is not None:
+        try:
+            cluster_price = float(selected_cluster_row.get("price"))
+        except (TypeError, ValueError):
+            cluster_price = 0.0
+        if (
+            not math.isfinite(cluster_price)
+            or cluster_price <= 0
+            or abs(cluster_price - selected_price) > 1e-9
+        ):
+            missing.append("selected_offer_cluster_price_binding")
+    if selected_cost is None:
+        missing.append("selected_offer_cost_binding")
+    else:
+        try:
+            emitted_cost = float(selected_cost)
+        except (TypeError, ValueError):
+            emitted_cost = 0.0
+        if (
+            not math.isfinite(emitted_cost)
+            or emitted_cost <= 0
+            or abs(emitted_cost - selected_price) > 1e-9
+        ):
+            missing.append("selected_offer_cost_binding")
+    candidate_rows = [
+        row for row in normalized_rows
+        if not cluster_offer_ids or _adaptive_row_offer_id(row) in cluster_offer_ids
+    ]
+    supporting: list[str] = []
+    seen_suppliers: set[str] = set()
+    for row in sorted(
+        candidate_rows,
+        key=lambda candidate: (
+            _adaptive_row_offer_id(candidate) != selected_id,
+            int(candidate.get("rank") or 9999),
+        ),
+    ):
+        offer_id = _adaptive_row_offer_id(row)
+        supplier_id = _adaptive_row_supplier_id(row)
+        if not offer_id or not supplier_id or supplier_id in seen_suppliers:
+            continue
+        row_title = str(row.get("title") or "")
+        row_products = _adaptive_product_types(row_title)
+        if _adaptive_product_conflicts(expected_products, row_products):
+            continue
+        if expected_products and not (expected_products & row_products):
+            continue
+        if not (
+            expected_products & ADAPTIVE_REQUIRED_PRODUCT_ROLES
+        ).issubset(row_products):
+            continue
+        row_brands = _adaptive_legacy_brand_families(
+            _adaptive_legacy_brands(row_title)
+        )
+        if expected_brands and (
+            not row_brands
+            or expected_brands.isdisjoint(row_brands)
+            or bool(row_brands - expected_brands)
+        ):
+            continue
+        row_materials = _adaptive_materials(row_title)
+        if expected_materials and row_materials != expected_materials:
+            continue
+        row_styles = _adaptive_styles(row_title)
+        if expected_styles and not expected_styles.issubset(row_styles):
+            continue
+        row_networks = _adaptive_network_generations(row_title)
+        if expected_networks and row_networks != expected_networks:
+            continue
+        if expected_elm327:
+            row_elm327 = _adaptive_elm327_identity(row_title)
+            if not row_elm327 or any((
+                row_elm327["versions"] != expected_elm327["versions"],
+                row_elm327["chipsets"] != expected_elm327["chipsets"],
+                row_elm327["mini"] != expected_elm327["mini"],
+            )):
+                continue
+        row_specs = _adaptive_spec_comparison(expected_specs, _adaptive_specs(row_title))
+        if row_specs["conflicts"] or row_specs["missing"] or row_specs["ambiguous"]:
+            continue
+        if expected_models:
+            row_model = _adaptive_model_comparison(
+                " ".join(filter(None, [expect_model, expect_title])), row_title
+            )
+            if (
+                not row_model["exact"]
+                or row_model["conflicts"]
+                or row_model["incomplete"]
+                or row_model["variant_ambiguity"]
+            ):
+                continue
+        seen_suppliers.add(supplier_id)
+        supporting.append(offer_id)
+
+    if len(supporting) >= 2:
+        score += 5
+    else:
+        score += 2 if supporting else 0
+        if not exact_model:
+            missing.append("independent_supplier_corroboration")
+
+    hard_conflicts = list(dict.fromkeys(hard_conflicts))
+    missing = list(dict.fromkeys(missing))
+    basic_evidence_fields = {
+        "selected_offer_id",
+        "selected_offer_evidence",
+        "selected_offer_title",
+        "selected_offer_supplier",
+        "selected_offer_price",
+        "selected_offer_cluster_binding",
+        "selected_offer_cluster_price_binding",
+        "selected_offer_cost_binding",
+    }
+    completeness_reasons = [
+        value for value in missing if value in basic_evidence_fields
+    ]
+    if _adaptive_positive_price(expect_price_cny) is None:
+        completeness_reasons.append("expect_price_cny")
+    completeness_reasons = list(dict.fromkeys(completeness_reasons))
+    policy = _adaptive_policy_payload(
+        evidence_complete=not completeness_reasons,
+        completeness_reasons=completeness_reasons,
+        expect_price_cny=expect_price_cny,
+        expected_products=expected_policy_products,
+        selected_products=selected_products,
+        expected_brands=expected_policy_brands,
+        selected_brands=returned_policy_brands,
+        expected_models=expected_models,
+        model_comparison=model_comparison,
+        hard_conflicts=hard_conflicts,
+    )
+    score = max(0, min(100, int(round(score))))
+    if hard_conflicts:
+        decision = "REJECT"
+        reason = f"explicit contradiction: {hard_conflicts[0]}"
+    elif missing:
+        decision = "REVIEW"
+        reason = f"evidence needs review: {missing[0]}"
+    elif score >= 80:
+        decision = "FAST"
+        reason = (
+            "selected Offer has exact model, product and image evidence"
+            if exact_model
+            else "selected Offer is corroborated by product, image and independent suppliers"
+        )
+    else:
+        decision = "REVIEW"
+        reason = "evidence score below fast-path threshold"
+    return {
+        "version": ADAPTIVE_MATCH_VERSION,
+        "decision": decision,
+        "score": score,
+        "reason": reason,
+        "hard_conflicts": hard_conflicts,
+        "missing_evidence": missing,
+        "selected_offer_id": selected_id or None,
+        "supporting_offer_ids": supporting[:3],
+        **policy,
+    }
+
+
+def adaptive_decision_from_evidence(evidence: dict) -> dict:
+    if not isinstance(evidence, dict):
+        raise TypeError("same-item evidence must be an object")
+    request = evidence.get("request") if isinstance(evidence.get("request"), dict) else {}
+    return adaptive_same_item_decision(
+        evidence.get("rows") if isinstance(evidence.get("rows"), list) else [],
+        expect_title=str(request.get("expect_title") or ""),
+        expect_model=str(request.get("expect_model") or ""),
+        expect_category=str(request.get("expect_category") or ""),
+        expect_price_cny=request.get("expect_price_cny"),
+        selected_offer_id=str(evidence.get("selected_offer_id") or ""),
+        selected_cluster=evidence.get("selected_cluster")
+        if isinstance(evidence.get("selected_cluster"), list)
+        else [],
+        selected_cost=evidence.get("selected_cost"),
+    )
 
 
 def image_fingerprint(image: Image.Image) -> tuple[int, list[float]]:
@@ -708,6 +2230,7 @@ def build_same_item_evidence(
     expect_title: str,
     expect_model: str,
     expect_category: str,
+    expect_price_cny: float | None,
     cost_source: str,
     selected_cost: float,
     selected_offer_id: str,
@@ -722,6 +2245,7 @@ def build_same_item_evidence(
             "expect_category": normalize_text(expect_category),
             "expect_model": normalize_text(expect_model),
             "expect_title": normalize_text(expect_title),
+            "expect_price_cny": _adaptive_positive_price(expect_price_cny),
         },
         "rows": [
             {
@@ -729,6 +2253,8 @@ def build_same_item_evidence(
                 "supplier_id": normalize_supplier(row.get("shop")),
                 "supplier": normalize_text(row.get("shop")),
                 "image_url": str(row.get("pic") or "").strip(),
+                "offer_url": str(row.get("url") or "").strip(),
+                "sale_quantity": parse_int(row.get("saleQuantity")),
                 "price": float(row["price"]),
                 "rank": int(row.get("rank") or 0),
                 "semantic_hits": {
@@ -775,6 +2301,7 @@ def _image_first_page_p70_cost(
     expect_title: str,
     expect_model: str,
     expect_category: str,
+    expect_price_cny: float | None,
     page_size: int,
     source_image_path: Path | str | None,
     excluded_offer_ids: set[str],
@@ -877,12 +2404,14 @@ def _image_first_page_p70_cost(
         expect_title=expect_title,
         expect_model=expect_model,
         expect_category=expect_category,
+        expect_price_cny=expect_price_cny,
         cost_source=cost_source,
         selected_cost=p70_cost,
         selected_offer_id=str(selected.get("offerId") or "").strip(),
         selected_cluster_rows=evidence_cluster_rows,
         balanced_match=balanced_match,
     )
+    adaptive_match = adaptive_decision_from_evidence(json.loads(same_item_evidence))
     return {
         "decision": "LIGHT_ACCEPT",
         "reason": "image-first same-item cluster corroborated by independent suppliers",
@@ -897,6 +2426,7 @@ def _image_first_page_p70_cost(
         "cost_source": cost_source,
         "same_item_evidence": same_item_evidence,
         "match_evidence_key": match_evidence_key,
+        "adaptive_match": adaptive_match,
         "balanced_match": {key: value for key, value in balanced_match.items() if key != "rows"},
         "filtered_rows": image_rows,
         "excluded_rows": [],
@@ -910,6 +2440,7 @@ def first_page_p70_cost(
     expect_title: str = "",
     expect_model: str = "",
     expect_category: str = "",
+    expect_price_cny: float | None = None,
     page_size: int = 10,
     minimum_matches: int = 3,
     source_image_path: Path | str | None = None,
@@ -990,6 +2521,7 @@ def first_page_p70_cost(
             expect_title=expect_title,
             expect_model=expect_model,
             expect_category=expect_category,
+            expect_price_cny=expect_price_cny,
             page_size=page_size,
             source_image_path=source_image_path,
             excluded_offer_ids=blocked_offer_ids,
@@ -1125,12 +2657,14 @@ def first_page_p70_cost(
         expect_title=expect_title,
         expect_model=expect_model,
         expect_category=expect_category,
+        expect_price_cny=expect_price_cny,
         cost_source=cost_source,
         selected_cost=selected_cost,
         selected_offer_id=str(selected.get("offerId") or "").strip(),
         selected_cluster_rows=evidence_cluster_rows,
         balanced_match=balanced_match,
     )
+    adaptive_match = adaptive_decision_from_evidence(json.loads(same_item_evidence))
     return {
         "decision": "LIGHT_ACCEPT",
         "reason": "filtered first-page similarity clustered cost",
@@ -1145,6 +2679,7 @@ def first_page_p70_cost(
         "cost_source": cost_source,
         "same_item_evidence": same_item_evidence,
         "match_evidence_key": match_evidence_key,
+        "adaptive_match": adaptive_match,
         "balanced_match": {
             key: value for key, value in balanced_match.items() if key != "rows"
         },
@@ -1228,6 +2763,12 @@ def main() -> int:
     parser.add_argument("--expect-title", default="", help="Ozon product title for fast match screening")
     parser.add_argument("--expect-model", default="", help="Product model/article/SKU-like text for strong matching")
     parser.add_argument("--expect-category", default="", help="Ozon/Maozi category text for fast match screening")
+    parser.add_argument(
+        "--expect-price-cny",
+        type=float,
+        default=None,
+        help="Target product price in CNY for v5 valuable-digital policy",
+    )
     parser.add_argument("--match-top", type=int, default=10, help="How many high-sales rows to scan for title/model matches")
     parser.add_argument("--min-matches", type=int, default=3, help="Minimum trustworthy same-item offers required")
     parser.add_argument(
@@ -1254,6 +2795,7 @@ def main() -> int:
         expect_title=args.expect_title,
         expect_model=args.expect_model,
         expect_category=args.expect_category,
+        expect_price_cny=args.expect_price_cny,
         page_size=args.top,
         minimum_matches=max(1, args.min_matches),
         excluded_offer_ids=args.exclude_offer_id,
@@ -1279,6 +2821,7 @@ def main() -> int:
         "filtered_rows": p70["filtered_rows"],
         "excluded_rows": p70["excluded_rows"],
         "balanced_match": p70.get("balanced_match"),
+        "adaptive_match": p70.get("adaptive_match"),
         "valid_count": len(rows),
         "top3_prices": [row["price"] for row in top3],
         "median_cost": median,
@@ -1307,6 +2850,11 @@ def main() -> int:
         print("BALANCED_MATCH_TYPE", p70["balanced_match"].get("match_type") or "rejected")
         print("BALANCED_MATCH_REASON", p70["balanced_match"].get("reason") or "")
         print("IMAGE_CHECK_AVAILABLE", str(bool(p70["balanced_match"].get("image_available"))).lower())
+    if p70.get("adaptive_match"):
+        print(
+            "ADAPTIVE_MATCH_JSON",
+            json.dumps(p70["adaptive_match"], ensure_ascii=False, separators=(",", ":")),
+        )
     print("COST_SOURCE", payload["cost_source"])
     print("REASON", payload["reason"])
     for index, row in enumerate(payload["top_rows"], 1):

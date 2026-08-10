@@ -25,6 +25,7 @@ import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 import { submissionGatePolicy } from "./live-acceptance-gates.mjs";
 import { productWeightGrams, selectShippingRoute } from "./shipping-route.mjs";
 import { createProfitFilesReader, prioritizeProfitRows } from "./profit-priority.mjs";
+import { assessProfitSafety } from "./profit-safety.mjs";
 import { dailyWindowState } from "../daily-window.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
@@ -2215,6 +2216,16 @@ export function createPublishRunner({
           outcome_status: activeDirectMode ? "skipped_profit" : undefined,
         });
       }
+      const profitSafetyShadow = assessProfitSafety({
+        profit,
+        cost,
+        packageEvidence: {
+          weight: productInfo.weight ?? detail.weight,
+          length: productInfo.depth ?? productInfo.length ?? detail.depth ?? detail.length,
+          width: productInfo.width ?? detail.width,
+          height: productInfo.height ?? detail.height,
+        },
+      });
       if (activeDirectMode) {
         recordMetric("direct_funnel.jsonl", {
           sku,
@@ -2251,6 +2262,7 @@ export function createPublishRunner({
         fbs_evidence: fbsEvidence,
         content_quality_evidence: contentQuality.evidence,
         ...costEvidence,
+        profit_safety_shadow: profitSafetyShadow,
         submission_intent: true,
         submitted: false,
         submission_pending: false,
@@ -2294,6 +2306,7 @@ export function createPublishRunner({
         cost_verified: costEvidence.cost_verified,
         cost_source: costEvidence.cost_source,
         cost_evidence: costEvidence.cost_evidence,
+        profit_safety_shadow: profitSafetyShadow,
         fbs_evidence: fbsEvidence,
         quality_gate_passed: true,
         quality_checks: submissionState.quality_checks,

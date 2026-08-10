@@ -22,6 +22,16 @@ class WorkerFormattingTests(unittest.TestCase):
                 "reason": "verified",
                 "image_available": True,
             },
+            "adaptive_match": {
+                "version": "adaptive-v4-shadow",
+                "decision": "FAST",
+                "score": 92,
+                "reason": "exact selected Offer",
+                "hard_conflicts": [],
+                "missing_evidence": [],
+                "selected_offer_id": "offer-1",
+                "supporting_offer_ids": ["offer-1"],
+            },
             "cost_source": "search_first_page_cluster_p70_similarity_filtered",
             "reason": "filtered first-page similarity clustered cost",
             "filtered_first_page_prices": [10, 11, 12],
@@ -35,6 +45,10 @@ class WorkerFormattingTests(unittest.TestCase):
         self.assertIn("BALANCED_MATCH_OK true", output)
         self.assertIn("BALANCED_MATCH_TYPE strong_single", output)
         self.assertIn("IMAGE_CHECK_AVAILABLE true", output)
+        self.assertIn(
+            'ADAPTIVE_MATCH_JSON {"version":"adaptive-v4-shadow","decision":"FAST","score":92',
+            output,
+        )
 
 
 class WorkerTransientRecoveryTests(unittest.TestCase):
@@ -55,6 +69,40 @@ class WorkerTransientRecoveryTests(unittest.TestCase):
                 "p70_cost": 11,
             },
         )
+
+    def test_analyze_forwards_expected_price_to_matcher(self):
+        captured = {}
+
+        def first_page_p70_cost(_rows, **kwargs):
+            captured.update(kwargs)
+            return {
+                "cost_source": "search_first_page_p70_similarity_filtered",
+                "reason": "filtered first-page cost",
+                "filtered_first_page_prices": [10, 11, 12],
+                "p70_cost": 11,
+            }
+
+        fake_module = types.SimpleNamespace(
+            normalize_image=lambda image_path, _temp_dir: (image_path, ""),
+            summarize_products=lambda rows: rows,
+            first_page_p70_cost=first_page_p70_cost,
+        )
+
+        class Session:
+            def search_by_image(self, _image):
+                return [{"price": 11}]
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            image = pathlib.Path(temp_name) / "image.jpg"
+            image.write_bytes(b"image")
+            self.module.analyze(fake_module, Session(), {
+                "image": str(image),
+                "expect_title": "same product lamp",
+                "expect_price_cny": "123.45",
+            })
+
+        self.assertEqual(captured["expect_title"], "same product lamp")
+        self.assertEqual(captured["expect_price_cny"], 123.45)
 
     def test_ssl_eof_rebuilds_session_with_bounded_backoff(self):
         sessions = []

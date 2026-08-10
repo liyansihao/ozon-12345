@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import os
 import random
 import statistics
@@ -40,6 +41,11 @@ def format_cost_output(result: dict, recovery: dict | None = None) -> str:
             f"BALANCED_MATCH_REASON {result['balanced_match'].get('reason') or ''}",
             f"IMAGE_CHECK_AVAILABLE {str(bool(result['balanced_match'].get('image_available'))).lower()}",
         ])
+    if result.get("adaptive_match"):
+        evidence_lines.append(
+            "ADAPTIVE_MATCH_JSON "
+            + json.dumps(result["adaptive_match"], ensure_ascii=False, separators=(",", ":"))
+        )
     return "\n".join([
         *evidence_lines,
         f"COST_SOURCE {result.get('cost_source') or 'search_first_page_p70_similarity_filtered'}",
@@ -60,11 +66,18 @@ def analyze(module, session, request: dict) -> dict:
         upload_path, _note = module.normalize_image(image_path, Path(temp_name))
         raw_products = session.search_by_image(str(upload_path))
     rows = module.summarize_products(raw_products)
+    try:
+        expect_price_cny = float(request.get("expect_price_cny"))
+    except (TypeError, ValueError):
+        expect_price_cny = None
+    if expect_price_cny is not None and (not math.isfinite(expect_price_cny) or expect_price_cny <= 0):
+        expect_price_cny = None
     result = module.first_page_p70_cost(
         rows,
         expect_title=str(request.get("expect_title") or ""),
         expect_model=str(request.get("expect_model") or ""),
         expect_category=str(request.get("expect_category") or ""),
+        expect_price_cny=expect_price_cny,
         page_size=max(1, int(request.get("top") or 10)),
         minimum_matches=max(1, int(request.get("minimum_same_item_matches") or 3)),
         excluded_offer_ids=request.get("excluded_offer_ids") or [],

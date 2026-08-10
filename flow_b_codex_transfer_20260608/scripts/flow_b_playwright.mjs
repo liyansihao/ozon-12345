@@ -364,6 +364,11 @@ async function createPublishingSession(context, options, env, shared) {
       matchPolicyRetentionPercent: Math.max(0, Number(env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT) || 75),
       matchPolicyImageAvailabilityPercent: Math.max(0, Number(env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT) || 90),
       matchPolicyP95Ms: Math.max(1, Number(env.FLOW_B_1688_MATCH_MAX_P95_MS) || 15_000),
+      adaptiveActionPolicy: env.FLOW_B_1688_ADAPTIVE_ACTION_POLICY || "shadow",
+      adaptiveActionSampleTarget: Math.max(
+        1,
+        Number(env.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET) || 100,
+      ),
       feedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
       feedbackRefreshMs: Math.max(0, Number(env.FLOW_B_PROFIT_FILE_REFRESH_MS) || 5_000),
     });
@@ -879,6 +884,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
           : "erp_accepted_unique_skus",
         minimum_same_item_matches: 1,
         match_policy: directEnv.FLOW_B_1688_MATCH_POLICY || "shadow",
+        adaptive_action_policy: directEnv.FLOW_B_1688_ADAPTIVE_ACTION_POLICY || "shadow",
+        adaptive_action_sample_target: Math.max(
+          1,
+          Number(directEnv.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET) || 100,
+        ),
       });
       const pageCleanup = directEnv.FLOW_B_PRUNE_ORPHAN_PAGES_ON_START === "1"
         ? await pruneOrphanedFlowPages(context, {

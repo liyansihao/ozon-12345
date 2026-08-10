@@ -286,6 +286,8 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_1688_CACHE_FLUSH_DEBOUNCE_MS, "5000");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_POLICY, "shadow");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_SHADOW_SAMPLES, "100");
+  assert.equal(config.flow_env.FLOW_B_1688_ADAPTIVE_ACTION_POLICY, "enforce");
+  assert.equal(config.flow_env.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET, "100");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT, "75");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT, "90");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MAX_P95_MS, "15000");
@@ -346,6 +348,26 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
       },
     }),
     /one verified 1688/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_1688_ADAPTIVE_ACTION_POLICY: "automatic",
+      },
+    }),
+    /adaptive action policy/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      flow_env: {
+        ...config.flow_env,
+        FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET: "99",
+      },
+    }),
+    /evidence target/u,
   );
   assert.throws(
     () => validateConfig({
