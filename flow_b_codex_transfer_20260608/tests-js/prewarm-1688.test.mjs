@@ -18,6 +18,8 @@ function completeV5Result({
   decision = action === "REJECT" ? "REJECT" : "FAST",
   priceCny = 100,
   selectedOfferId = "offer-1",
+  valuableApplies = false,
+  valuableCategory = null,
 } = {}) {
   return {
     adaptive_action_complete: true,
@@ -36,8 +38,8 @@ function completeV5Result({
       policy_reasons: [action === "REJECT" ? "hard_conflict:model:mismatch" : "policy_allow"],
       evidence_complete: true,
       valuable_digital: {
-        applies: false,
-        category: null,
+        applies: valuableApplies,
+        category: valuableCategory,
         price_cny: priceCny,
         threshold_cny: 300,
       },
@@ -201,6 +203,11 @@ test("prewarm action telemetry counts only normal, fully verified v5 action resu
         delete adaptive.adaptive_match.policy_version;
       } else if (item.sku === "wrong-price") {
         adaptive = completeV5Result({ priceCny: 99 });
+      } else if (item.sku === "blank-category") {
+        adaptive = completeV5Result({
+          valuableApplies: true,
+          valuableCategory: "   ",
+        });
       } else if (item.sku === "unverified") {
         adaptive = { ...completeV5Result(), adaptive_action_complete: false };
       }
@@ -214,7 +221,7 @@ test("prewarm action telemetry counts only normal, fully verified v5 action resu
     },
   };
   const summary = await prewarmCandidateCosts({
-    candidates: ["valid", "legacy", "missing-policy", "wrong-price", "unverified"]
+    candidates: ["valid", "legacy", "missing-policy", "wrong-price", "blank-category", "unverified"]
       .map((sku) => ({ sku, sell_price: 100 })),
     bridge,
     runDir: "/tmp/prewarm-v5-contract",
@@ -224,12 +231,12 @@ test("prewarm action telemetry counts only normal, fully verified v5 action resu
     })(),
   });
 
-  assert.equal(summary.actual_live_attempt_count, 5);
-  assert.equal(summary.normal_process_completion_count, 5);
+  assert.equal(summary.actual_live_attempt_count, 6);
+  assert.equal(summary.normal_process_completion_count, 6);
   assert.equal(summary.adaptive_action_count, 1);
   assert.equal(summary.adaptive_allow_count, 1);
   assert.equal(summary.adaptive_reject_action_count, 0);
-  assert.equal(summary.adaptive_action_unassessable_count, 4);
+  assert.equal(summary.adaptive_action_unassessable_count, 5);
   assert.equal(summary.adaptive_action_per_hour, 1);
 });
 

@@ -114,6 +114,8 @@ function adaptiveV5({
   policyReasons = action === "REJECT" ? ["strict policy rejection"] : ["strict policy allow"],
   selectedOfferId = "offer-1",
   priceCny = 100,
+  valuableApplies = false,
+  valuableCategory = null,
 } = {}) {
   return {
     version: "adaptive-v5-shadow",
@@ -129,8 +131,8 @@ function adaptiveV5({
     policy_reasons: policyReasons,
     evidence_complete: evidenceComplete,
     valuable_digital: {
-      applies: false,
-      category: null,
+      applies: valuableApplies,
+      category: valuableCategory,
       price_cny: priceCny,
       threshold_cny: 300,
     },
@@ -721,6 +723,14 @@ test("adaptive v5 enforce blocks only a complete REJECT and bypasses the legacy 
         balancedPassed: false,
       },
       { adaptiveMatch: adaptiveV5({ action: "REJECT", priceCny: 99 }), balancedPassed: false },
+      {
+        adaptiveMatch: adaptiveV5({
+          action: "REJECT",
+          valuableApplies: true,
+          valuableCategory: "   ",
+        }),
+        balancedPassed: false,
+      },
     ];
     let runs = 0;
     const bridge = createCostBridge({
@@ -755,6 +765,7 @@ test("adaptive v5 enforce blocks only a complete REJECT and bypasses the legacy 
     const incomplete = await estimate(3);
     const legacy = await estimate(4);
     const priceMismatch = await estimate(5);
+    const blankValuableCategory = await estimate(6);
     await bridge.close();
 
     assert.equal(allowed.ok, true, "v5 ALLOW must survive an old balanced rejection");
@@ -767,6 +778,8 @@ test("adaptive v5 enforce blocks only a complete REJECT and bypasses the legacy 
     assert.equal(incomplete.adaptive_action_complete, false);
     assert.equal(legacy.ok, true, "v4 telemetry must remain compatible and must not invoke the action gate");
     assert.equal(priceMismatch.ok, true, "an action detached from the requested price must not enforce");
+    assert.equal(blankValuableCategory.ok, true, "a valuable-digital action with a blank category must not enforce");
+    assert.equal(blankValuableCategory.adaptive_action_complete, false);
     const state = JSON.parse(await fs.readFile(path.join(runDir, "1688_match_policy.json"), "utf8"));
     assert.equal(state.samples.length, 0, "balanced legacy sampling stays independent");
     assert.equal(state.action_samples.length, 2);

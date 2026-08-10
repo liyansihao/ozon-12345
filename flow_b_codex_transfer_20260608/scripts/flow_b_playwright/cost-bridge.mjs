@@ -449,6 +449,8 @@ export function createCostBridge({
       && !Array.isArray(valuable)
       && typeof valuable.applies === "boolean"
       && (typeof valuable.category === "string" || valuable.category === null)
+      && (valuable.applies !== true
+        || (typeof valuable.category === "string" && valuable.category.trim().length > 0))
       && (valuable.price_cny === null
         || (typeof valuable.price_cny === "number" && Number.isFinite(valuable.price_cny)))
       && Number.isFinite(expectedPrice)

@@ -106,6 +106,8 @@ function isCompleteV5AdaptiveAction(result, item) {
     && !Array.isArray(valuable)
     && typeof valuable.applies === "boolean"
     && (typeof valuable.category === "string" || valuable.category === null)
+    && (valuable.applies !== true
+      || (typeof valuable.category === "string" && valuable.category.trim().length > 0))
     && typeof adaptivePrice === "number"
     && Number.isFinite(adaptivePrice)
     && Number.isFinite(expectedPrice)
