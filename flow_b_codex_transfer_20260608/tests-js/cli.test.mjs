@@ -8,6 +8,7 @@ import {
   allDirectStoresRejected,
   parseCli,
   parseDailyStoreUsageSeed,
+  parseProfitSafetyActionPolicy,
   publishAttemptLimit,
   parseStoreTargets,
   parseStoreTotalUsageSeed,
@@ -16,6 +17,17 @@ import {
   sourceScanOutputFile,
   unlimitedPublishTarget,
 } from "../scripts/flow_b_playwright.mjs";
+
+test("profit safety action policy defaults to shadow and requires an explicit enforce value", () => {
+  assert.equal(parseProfitSafetyActionPolicy({}), "shadow");
+  assert.equal(parseProfitSafetyActionPolicy({
+    FLOW_B_PROFIT_SAFETY_ACTION_POLICY: " enforce ",
+  }), "enforce");
+  assert.throws(
+    () => parseProfitSafetyActionPolicy({ FLOW_B_PROFIT_SAFETY_ACTION_POLICY: "automatic" }),
+    /must be shadow or enforce/u,
+  );
+});
 
 test("direct run stops only after every configured store is rejected", () => {
   assert.equal(allDirectStoresRejected({

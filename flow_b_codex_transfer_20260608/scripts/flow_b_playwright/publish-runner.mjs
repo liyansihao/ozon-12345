@@ -25,7 +25,7 @@ import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 import { submissionGatePolicy } from "./live-acceptance-gates.mjs";
 import { productWeightGrams, selectShippingRoute } from "./shipping-route.mjs";
 import { createProfitFilesReader, prioritizeProfitRows } from "./profit-priority.mjs";
-import { assessProfitSafety } from "./profit-safety.mjs";
+import { assessProfitSafety, assessProfitSafetyGate } from "./profit-safety.mjs";
 import { dailyWindowState } from "../daily-window.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
@@ -811,6 +811,7 @@ export function createPublishRunner({
   profitFeedbackFile = null,
   seasonPriorityFile = null,
   profitFileRefreshMs = 5_000,
+  profitSafetyActionPolicy = "shadow",
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
@@ -828,6 +829,9 @@ export function createPublishRunner({
     : null;
   const requiredSameItemMatches = Number(minimumSameItemMatches);
   const configuredCostEstimateTimeoutMs = Number(costEstimateTimeoutMs);
+  const configuredProfitSafetyActionPolicy = String(profitSafetyActionPolicy || "")
+    .trim()
+    .toLowerCase();
   const profitFiles = createProfitFilesReader({
     priorityFile: profitPriorityFile,
     feedbackFile: profitFeedbackFile,
@@ -847,6 +851,9 @@ export function createPublishRunner({
   }
   if (!(configuredCostEstimateTimeoutMs > 0)) {
     throw new TypeError("costEstimateTimeoutMs must be a positive number");
+  }
+  if (!["shadow", "enforce"].includes(configuredProfitSafetyActionPolicy)) {
+    throw new TypeError("profitSafetyActionPolicy must be shadow or enforce");
   }
   const workerCount = Number(concurrency);
   if (!Number.isInteger(workerCount) || workerCount <= 0) throw new TypeError("concurrency must be a positive integer");
@@ -2226,6 +2233,38 @@ export function createPublishRunner({
           height: productInfo.height ?? detail.height,
         },
       });
+      const profitSafetyGate = assessProfitSafetyGate({
+        profitSafety: profitSafetyShadow,
+        cost,
+        policy: configuredProfitSafetyActionPolicy,
+        directMode: activeDirectMode,
+      });
+      if (activeDirectMode) {
+        recordMetric("profit_safety_gate.jsonl", {
+          sku,
+          store_id: Number(targetConfig.store.id),
+          source_url: item.source_url ?? item.seller_url ?? null,
+          profit_safety_gate: profitSafetyGate,
+          profit_safety_shadow: profitSafetyShadow,
+          cost_evidence: {
+            match_evidence_contract: cost.match_evidence_contract ?? null,
+            returned_evidence_verified: cost.returned_evidence_verified === true,
+            selected_offer_id: cost.selected_offer_id ?? null,
+            selected_cluster_prices: Array.isArray(cost.selected_cluster_prices)
+              ? cost.selected_cluster_prices
+              : [],
+            selected_cost: Number.isFinite(Number(cost.cost)) ? Number(cost.cost) : null,
+          },
+        });
+      }
+      if (profitSafetyGate.enforced === true) {
+        return skip(item, "profit-safety-nonpositive-stressed-profit", {
+          profit,
+          profit_safety_shadow: profitSafetyShadow,
+          profit_safety_gate: profitSafetyGate,
+          outcome_status: "skipped_profit",
+        });
+      }
       if (activeDirectMode) {
         recordMetric("direct_funnel.jsonl", {
           sku,
@@ -2263,6 +2302,7 @@ export function createPublishRunner({
         content_quality_evidence: contentQuality.evidence,
         ...costEvidence,
         profit_safety_shadow: profitSafetyShadow,
+        profit_safety_gate: profitSafetyGate,
         submission_intent: true,
         submitted: false,
         submission_pending: false,
@@ -2307,6 +2347,7 @@ export function createPublishRunner({
         cost_source: costEvidence.cost_source,
         cost_evidence: costEvidence.cost_evidence,
         profit_safety_shadow: profitSafetyShadow,
+        profit_safety_gate: profitSafetyGate,
         fbs_evidence: fbsEvidence,
         quality_gate_passed: true,
         quality_checks: submissionState.quality_checks,

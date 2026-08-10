@@ -1,4 +1,6 @@
 const VERSION = "profit-safety-v1-shadow";
+const GATE_VERSION = "profit-safety-gate-v1";
+const GATE_POLICIES = new Set(["shadow", "enforce"]);
 
 export const DEFAULT_PROFIT_SAFETY_POLICY = Object.freeze({
   purchase_buffer_rate: 0.05,
@@ -33,6 +35,91 @@ function rounded(value, digits = 2) {
   if (!Number.isFinite(value)) return null;
   const factor = 10 ** digits;
   return Math.round((value + Number.EPSILON) * factor) / factor;
+}
+
+function cnyCents(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const cents = Math.round(rounded(value, 2) * 100);
+  return Object.is(cents, -0) ? 0 : cents;
+}
+
+/**
+ * Pure action contract for the zero-line profit gate. The action describes
+ * what complete evidence says; `enforced` separately controls production
+ * behavior so shadow collection can never block a submission.
+ */
+export function assessProfitSafetyGate({
+  profitSafety = {},
+  cost = {},
+  policy = "shadow",
+  directMode = false,
+} = {}) {
+  const normalizedGatePolicy = String(policy).trim().toLowerCase();
+  if (!GATE_POLICIES.has(normalizedGatePolicy)) {
+    throw new TypeError("profit safety gate policy must be shadow or enforce");
+  }
+
+  const incompleteReasons = [];
+  if (directMode !== true) {
+    incompleteReasons.push("direct_mode_required");
+  }
+  if (profitSafety?.version !== VERSION) {
+    incompleteReasons.push("profit_safety_version_invalid");
+  }
+  if (!Array.isArray(profitSafety?.missing_evidence)
+    || profitSafety.missing_evidence.length !== 0) {
+    incompleteReasons.push("profit_safety_evidence_incomplete");
+  }
+
+  const stressedProfitCents = cnyCents(profitSafety?.stressed_profit);
+  if (stressedProfitCents === null) {
+    incompleteReasons.push("stressed_profit_invalid");
+  }
+
+  const verifiedV3Cost = cost?.ok === true
+    && cost?.same_item_match === true
+    && cost?.returned_evidence_verified === true
+    && cost?.match_evidence_contract === "1688-returned-same-item-v3"
+    && /^[a-f0-9]{64}$/u.test(String(cost?.match_evidence_key || ""))
+    && Boolean(String(cost?.selected_offer_id || "").trim());
+  if (!verifiedV3Cost) incompleteReasons.push("cost_evidence_not_verified_v3");
+
+  const selectedClusterPrices = cost?.selected_cluster_prices;
+  const validSelectedCluster = Array.isArray(selectedClusterPrices)
+    && selectedClusterPrices.length > 0
+    && selectedClusterPrices.every((value) => (
+      typeof value === "number" && Number.isFinite(value) && value > 0
+    ));
+  if (!validSelectedCluster) incompleteReasons.push("selected_cluster_prices_invalid");
+
+  const selectedCostCents = cnyCents(cost?.cost);
+  const positiveSelectedCost = selectedCostCents !== null && Number(cost.cost) > 0;
+  if (!positiveSelectedCost) {
+    incompleteReasons.push("selected_cost_invalid");
+  } else if (validSelectedCluster && !selectedClusterPrices.some(
+    (value) => cnyCents(value) === selectedCostCents,
+  )) {
+    incompleteReasons.push("selected_cost_not_in_cluster");
+  }
+
+  const evidenceComplete = incompleteReasons.length === 0;
+  const action = evidenceComplete
+    ? (stressedProfitCents <= 0 ? "REJECT" : "ALLOW")
+    : null;
+  const reasons = evidenceComplete
+    ? [action === "REJECT" ? "nonpositive_stressed_profit" : "positive_stressed_profit"]
+    : incompleteReasons;
+
+  return {
+    version: GATE_VERSION,
+    policy: normalizedGatePolicy,
+    action,
+    evidence_complete: evidenceComplete,
+    stressed_profit_cny: stressedProfitCents === null ? null : stressedProfitCents / 100,
+    threshold_cny: 0,
+    enforced: directMode === true && normalizedGatePolicy === "enforce" && action === "REJECT",
+    reasons,
+  };
 }
 
 function normalizedPolicy(overrides = {}) {

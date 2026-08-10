@@ -85,6 +85,16 @@ export function unlimitedPublishTarget(target) {
   return Number(target) === 0;
 }
 
+export function parseProfitSafetyActionPolicy(env = {}) {
+  const policy = String(env.FLOW_B_PROFIT_SAFETY_ACTION_POLICY ?? "shadow")
+    .trim()
+    .toLowerCase();
+  if (!["shadow", "enforce"].includes(policy)) {
+    throw new Error("FLOW_B_PROFIT_SAFETY_ACTION_POLICY must be shadow or enforce");
+  }
+  return policy;
+}
+
 export function allDirectStoresRejected(publish = {}) {
   return ["daily-product-limit", "store-unavailable"].includes(String(publish?.halt_reason || ""))
     && publish?.stores_exhausted?.all === true;
@@ -448,6 +458,7 @@ async function createPublishingSession(context, options, env, shared) {
       directRunControl: shared.directRunControl || null,
       minimumSameItemMatches: Math.max(1, Number(env.FLOW_B_1688_MIN_MATCHES) || 1),
       costEstimateTimeoutMs: Math.max(1, Number(env.FLOW_B_1688_TOTAL_BUDGET_MS) || 15_000),
+      profitSafetyActionPolicy: parseProfitSafetyActionPolicy(env),
       profitPriorityFile: env.FLOW_B_PROFIT_PRIORITY_FILE || null,
       profitFeedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
       seasonPriorityFile: env.FLOW_B_SEASON_PRIORITY_FILE || null,

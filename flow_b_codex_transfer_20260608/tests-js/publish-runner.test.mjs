@@ -294,6 +294,15 @@ const RELIABLE_COST_RESULT = Object.freeze({
   matched_offer_count: 3,
 });
 
+const PROFIT_GATE_COST_RESULT = Object.freeze({
+  ...RELIABLE_COST_RESULT,
+  cost: 0.99,
+  prices: Object.freeze([0.89, 0.99, 1.99]),
+  selected_cluster_prices: Object.freeze([0.89, 0.99]),
+  match_evidence_contract: "1688-returned-same-item-v3",
+  selected_offer_id: "profit-gate-offer",
+});
+
 function fakeState(initial = {}, initialRunPublished = 0) {
   const statuses = new Map(Object.entries(initial).map(([sku, value]) => [sku,
     typeof value === "string" ? { status: value, data: {} } : {
@@ -375,6 +384,36 @@ function economy(rate = 40, overrides = {}) {
       },
     }],
   };
+}
+
+function zeroStressProfitEconomy() {
+  return economy(35.8, {
+    purchase_price: 0.99,
+    sell_price: 11.95,
+    china_fee: 0,
+    logi_fee: 5,
+    cate_fee: 1.43,
+    ad_fee: 0,
+    other_fee: 1,
+    wc_fee: 0.38,
+    total_cost: 8.8,
+    profit: 3.15,
+  });
+}
+
+function positiveStressProfitEconomy() {
+  return economy(200, {
+    purchase_price: 0.99,
+    sell_price: 90,
+    china_fee: 0,
+    logi_fee: 5,
+    cate_fee: 10,
+    ad_fee: 0,
+    other_fee: 1,
+    wc_fee: 1,
+    total_cost: 17.99,
+    profit: 72.01,
+  });
 }
 
 test("1688 failures use bounded summary reasons while retaining raw cost evidence separately", () => {
@@ -4927,6 +4966,278 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
     assert.equal(result.accepted, 1);
     assert.equal(result.remaining, 0);
     assert.equal(state.entryOf("direct-fbo-apparel").data.submitted, true);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("profit safety zero gate records a shadow REJECT without changing direct publication", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-profit-gate-shadow-"));
+  try {
+    const state = fakeState();
+    let favoriteDeletes = 0;
+    let publishCalls = 0;
+    const client = clientFor([{
+      sku: "profit-gate-shadow-zero",
+      title: "Безопасный товар с нулевой стресс-прибылью",
+      cover_image: "https://img.example/profit-gate-shadow-zero.jpg",
+      sell_price: 11.95,
+    }], {
+      getProductDetail: async (sku) => ({
+        sku,
+        mode: "FBS",
+        current_price: 11.95,
+        follow_min: 11.95,
+      }),
+      calculateProfit: async () => zeroStressProfitEconomy(),
+      deleteFavorite: async () => { favoriteDeletes += 1; return true; },
+      publish: async () => {
+        publishCalls += 1;
+        return { ok: true, response: { code: 1 } };
+      },
+    });
+
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...PROFIT_GATE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+      profitSafetyActionPolicy: "shadow",
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(publishCalls, 1);
+    assert.equal(favoriteDeletes, 0);
+    assert.equal(state.selections.length, 1);
+    assert.equal(state.transitions.some((row) => row.status === "skipped"), false);
+    assert.deepEqual(state.selections[0].profit_safety_gate, {
+      version: "profit-safety-gate-v1",
+      policy: "shadow",
+      action: "REJECT",
+      evidence_complete: true,
+      stressed_profit_cny: 0,
+      threshold_cny: 0,
+      enforced: false,
+      reasons: ["nonpositive_stressed_profit"],
+    });
+    const gateRows = (await fs.readFile(path.join(runDir, "profit_safety_gate.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.equal(gateRows.length, 1);
+    assert.deepEqual(gateRows[0].cost_evidence.selected_cluster_prices, [0.89, 0.99]);
+    assert.equal(gateRows[0].profit_safety_gate.enforced, false);
+    const validationRows = (await fs.readFile(path.join(runDir, "validation_gate.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.equal(validationRows[0].profit_safety_gate.action, "REJECT");
+    assert.equal(validationRows[0].profit_safety_gate.policy, "shadow");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("profit safety enforce skips only the nonpositive item and continues the direct batch", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-profit-gate-enforce-"));
+  try {
+    const state = fakeState();
+    const deleted = [];
+    let publishCalls = 0;
+    const client = clientFor([
+      {
+        sku: "profit-gate-enforce-zero",
+        title: "Товар с нулевой стресс-прибылью",
+        cover_image: "https://img.example/profit-gate-enforce-zero.jpg",
+        sell_price: 11.95,
+      },
+      {
+        sku: "profit-gate-enforce-positive",
+        title: "Товар с положительной стресс-прибылью",
+        cover_image: "https://img.example/profit-gate-enforce-positive.jpg",
+        sell_price: 90,
+      },
+    ], {
+      getProductDetail: async (sku) => ({
+        sku,
+        mode: "FBS",
+        current_price: sku.endsWith("zero") ? 11.95 : 90,
+        follow_min: sku.endsWith("zero") ? 11.95 : 90,
+      }),
+      calculateProfit: async ({ sku }) => (
+        sku.endsWith("zero") ? zeroStressProfitEconomy() : positiveStressProfitEconomy()
+      ),
+      deleteFavorite: async (item) => { deleted.push(String(item.sku)); return true; },
+      publish: async () => {
+        publishCalls += 1;
+        return { ok: true, response: { code: 1 } };
+      },
+    });
+
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...PROFIT_GATE_COST_RESULT }) },
+      state,
+      target: 2,
+      runDir,
+      directMode: true,
+      concurrency: 1,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+      profitSafetyActionPolicy: "enforce",
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(publishCalls, 1);
+    assert.deepEqual(deleted, ["profit-gate-enforce-zero"]);
+    assert.equal(state.selections.length, 1);
+    assert.equal(state.selections[0].sku, "profit-gate-enforce-positive");
+    const rejected = state.entryOf("profit-gate-enforce-zero");
+    assert.equal(rejected.status, "skipped");
+    assert.equal(rejected.data.reason, "profit-safety-nonpositive-stressed-profit");
+    assert.equal(rejected.data.outcome_status, "skipped_profit");
+    assert.equal(rejected.data.profit_safety_gate.enforced, true);
+    assert.equal(rejected.data.skip_intent, false);
+    assert.equal(rejected.data.favorite_deleted, true);
+    assert.equal(state.selections.some((row) => row.sku === "profit-gate-enforce-zero"), false);
+    const funnelRows = (await fs.readFile(path.join(runDir, "direct_funnel.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.equal(funnelRows.some((row) => (
+      row.sku === "profit-gate-enforce-zero" && row.stage === "profit_passed"
+    )), false);
+    const gateRows = (await fs.readFile(path.join(runDir, "profit_safety_gate.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.deepEqual(gateRows.map((row) => [
+      row.sku,
+      row.profit_safety_gate.action,
+      row.profit_safety_gate.enforced,
+    ]).sort((left, right) => left[0].localeCompare(right[0])), [
+      ["profit-gate-enforce-positive", "ALLOW", false],
+      ["profit-gate-enforce-zero", "REJECT", true],
+    ]);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("profit safety enforce fails open when selected-cluster evidence is incomplete", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-profit-gate-incomplete-"));
+  try {
+    const state = fakeState();
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "profit-gate-incomplete",
+        title: "Товар с неполным доказательством кластера",
+        cover_image: "https://img.example/profit-gate-incomplete.jpg",
+        sell_price: 11.95,
+      }], {
+        getProductDetail: async (sku) => ({
+          sku,
+          mode: "FBS",
+          current_price: 11.95,
+          follow_min: 11.95,
+        }),
+        calculateProfit: async () => zeroStressProfitEconomy(),
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true, response: { code: 1 } };
+        },
+      }),
+      costBridge: {
+        estimate: async () => ({
+          ...PROFIT_GATE_COST_RESULT,
+          selected_cluster_prices: [],
+        }),
+      },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+      profitSafetyActionPolicy: "enforce",
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(publishCalls, 1);
+    assert.equal(state.selections[0].profit_safety_gate.action, null);
+    assert.equal(state.selections[0].profit_safety_gate.evidence_complete, false);
+    assert.equal(state.selections[0].profit_safety_gate.enforced, false);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("validation-only records an enforced profit rejection without mutating favorites or state", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-profit-gate-validation-"));
+  try {
+    const state = fakeState();
+    let favoriteDeletes = 0;
+    let publishCalls = 0;
+    const client = clientFor([
+      {
+        sku: "profit-gate-validation-zero",
+        title: "Проверка нулевой стресс-прибыли",
+        cover_image: "https://img.example/profit-gate-validation-zero.jpg",
+        sell_price: 100,
+      },
+      {
+        sku: "profit-gate-validation-positive",
+        title: "Проверка положительной стресс-прибыли",
+        cover_image: "https://img.example/profit-gate-validation-positive.jpg",
+        sell_price: 90,
+      },
+    ], {
+      getProductDetail: async (sku) => ({
+        sku,
+        mode: "FBS",
+        current_price: sku.endsWith("zero") ? 11.95 : 90,
+        follow_min: sku.endsWith("zero") ? 11.95 : 90,
+      }),
+      calculateProfit: async ({ sku }) => (
+        sku.endsWith("zero") ? zeroStressProfitEconomy() : positiveStressProfitEconomy()
+      ),
+      deleteFavorite: async () => { favoriteDeletes += 1; return true; },
+      publish: async () => { publishCalls += 1; return { ok: true }; },
+    });
+
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...PROFIT_GATE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      directMode: true,
+      validationOnly: true,
+      validationTarget: 1,
+      concurrency: 1,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+      profitSafetyActionPolicy: "enforce",
+    }).run();
+
+    assert.equal(result.validated, 1);
+    assert.equal(result.published, 0);
+    assert.equal(favoriteDeletes, 0);
+    assert.equal(publishCalls, 0);
+    assert.equal(state.transitions.length, 0);
+    assert.equal(state.selections.length, 0);
+    assert.equal(state.records.length, 0);
+    const rows = (await fs.readFile(path.join(runDir, "validation_gate.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.deepEqual(rows.map((row) => [row.sku, row.status]), [
+      ["profit-gate-validation-zero", "rejected"],
+      ["profit-gate-validation-positive", "validated"],
+    ]);
+    const rejected = rows[0];
+    assert.equal(rejected.reason, "profit-safety-nonpositive-stressed-profit");
+    assert.equal(rejected.profit_safety_shadow.stressed_profit, 0);
+    assert.equal(rejected.profit_safety_gate.action, "REJECT");
+    assert.equal(rejected.profit_safety_gate.enforced, true);
+    assert.equal(rejected.profit.profit_rate, 35.8);
+    assert.equal(rows[1].profit_safety_gate.action, "ALLOW");
+    assert.equal(rows[1].profit_safety_gate.enforced, false);
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }

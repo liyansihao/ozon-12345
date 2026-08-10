@@ -619,6 +619,12 @@ function validateConfig(config) {
     if (!["shadow", "enforce"].includes(adaptiveActionPolicy)) {
       throw new Error("1688 adaptive action policy must be shadow or enforce");
     }
+    const profitSafetyActionPolicy = String(
+      config?.flow_env?.FLOW_B_PROFIT_SAFETY_ACTION_POLICY || "",
+    ).trim().toLowerCase();
+    if (!["shadow", "enforce"].includes(profitSafetyActionPolicy)) {
+      throw new Error("profit safety action policy must be shadow or enforce");
+    }
     if (Number(config?.flow_env?.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET) !== 100) {
       throw new Error("1688 adaptive action evidence target must be 100");
     }
