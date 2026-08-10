@@ -144,7 +144,12 @@ export function assessProfitSafety({
     : statedProfit ?? computedProfit;
   if (baselineProfit === null) missingEvidence.push("profit");
 
-  const supplierPrices = Array.isArray(cost.prices) ? cost.prices : [];
+  const selectedClusterPrices = Array.isArray(cost.selected_cluster_prices)
+    ? cost.selected_cluster_prices.map(positive).filter((value) => value !== null)
+    : [];
+  const supplierPrices = selectedClusterPrices.length > 0
+    ? selectedClusterPrices
+    : (Array.isArray(cost.prices) ? cost.prices : []);
   const supplierP80 = percentile(supplierPrices, 0.8);
   if (supplierP80 === null) missingEvidence.push("supplier_price_range");
   const referencePurchase = purchasePrice === null

@@ -55,6 +55,43 @@ test("complete evidence with negative stressed profit is UNSAFE", () => {
   assert.ok(result.stressed_profit < 0);
 });
 
+test("supplier pressure uses only the verified selected price cluster", () => {
+  const input = {
+    profit: {
+      sell_price: 69.76,
+      purchase_price: 28,
+      china_fee: 0,
+      logi_fee: 8,
+      cate_fee: 8.37,
+      ad_fee: 0,
+      other_fee: 0.7,
+      wc_fee: 2.65,
+      total_cost: 47.72,
+      profit: 22.04,
+      profit_rate: 46.19,
+    },
+    packageEvidence: completePackage,
+  };
+  const unscoped = assessProfitSafety({
+    ...input,
+    cost: { cost: 28, prices: [28, 54.7] },
+  });
+  const selectedCluster = assessProfitSafety({
+    ...input,
+    cost: {
+      cost: 28,
+      prices: [28, 54.7],
+      selected_cluster_prices: [28],
+    },
+  });
+
+  assert.equal(unscoped.decision, "UNSAFE");
+  assert.equal(selectedCluster.decision, "SAFE");
+  assert.equal(selectedCluster.reserves.supplier_price_gap, 0);
+  assert.ok(!selectedCluster.risk_flags.includes("supplier_price_dispersion"));
+  assert.ok(selectedCluster.stressed_profit > 0);
+});
+
 test("missing package evidence routes a possible stress loss to REVIEW, not rejection", () => {
   const result = assessProfitSafety({
     profit: {

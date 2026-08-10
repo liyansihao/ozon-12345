@@ -288,6 +288,7 @@ export function verifyReturnedSameItemEvidence({
     selected_offer_id: emittedSelectedOfferId,
     selected_offer_ids: [emittedSelectedOfferId],
     selected_cluster_offer_ids: [...selectedIds],
+    selected_cluster_prices: selectedCluster.map((row) => Number(row.price)),
     matched_offer_count: rows.length,
     balanced_match: balancedMatch?.passed === true,
     balanced_match_type: balancedMatch?.match_type || null,

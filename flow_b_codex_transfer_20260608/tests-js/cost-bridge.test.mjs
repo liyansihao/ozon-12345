@@ -27,6 +27,7 @@ function returnedSameItemOutput({
   imageAvailable = true,
   offerIds = null,
   adaptiveMatch = null,
+  selectedClusterPrices = null,
 } = {}) {
   const normalizedRequest = {
     expect_category: String(request?.expect_category || "").toLocaleLowerCase("und").trim(),
@@ -61,12 +62,16 @@ function returnedSameItemOutput({
   }));
   const exactSelected = rows.find((row) => Number(row.price) === Number(selectedCost));
   const selectedOfferId = exactSelected?.offer_id || "missing-selected-offer";
+  const selectedCluster = selectedClusterPrices === null
+    ? rows
+    : rows.filter((row) => selectedClusterPrices.includes(Number(row.price)));
   const evidence = JSON.stringify({
     contract: "1688-returned-same-item-v3",
     cost_source: source,
     request: normalizedRequest,
     rows,
-    selected_cluster: rows.map(({ offer_id, supplier_id, price }) => ({ offer_id, supplier_id, price })),
+    selected_cluster: selectedCluster
+      .map(({ offer_id, supplier_id, price }) => ({ offer_id, supplier_id, price })),
     selected_cost: selectedCost,
     selected_offer_id: selectedOfferId,
     balanced_match: {
@@ -404,6 +409,7 @@ test("verifies returned offer identities, semantics, prices, source and selected
   const output = returnedSameItemOutput({
     request,
     prices: [17, 19.8, 21.3, 23.8],
+    selectedClusterPrices: [17, 19.8, 21.3],
     source: "search_first_page_p70_similarity_filtered",
     selectedCost: 21.3,
   });
@@ -416,6 +422,7 @@ test("verifies returned offer identities, semantics, prices, source and selected
   assert.equal(result.returned_evidence_verified, true);
   assert.equal(result.match_evidence_contract, "1688-returned-same-item-v3");
   assert.equal(result.matched_offer_count, 4);
+  assert.deepEqual(result.selected_cluster_prices, [17, 19.8, 21.3]);
   assert.match(result.match_evidence_key, /^[a-f0-9]{64}$/u);
 });
 

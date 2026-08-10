@@ -187,6 +187,7 @@ export function parseCostOutput(text, sellPrice, {
       selected_offer_id: sameItemProof.selected_offer_id,
       selected_offer_ids: sameItemProof.selected_offer_ids,
       selected_cluster_offer_ids: sameItemProof.selected_cluster_offer_ids,
+      selected_cluster_prices: sameItemProof.selected_cluster_prices,
       balanced_match: sameItemProof.balanced_match,
       balanced_match_type: sameItemProof.balanced_match_type,
       balanced_match_reason: sameItemProof.balanced_match_reason,
