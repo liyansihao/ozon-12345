@@ -14,6 +14,7 @@ import {
   resolveBrowserOptions,
 } from "./flow_b_playwright/browser-context.mjs";
 import { createCostBridge } from "./flow_b_playwright/cost-bridge.mjs";
+import { createDirectWorkerHealthTracker } from "./flow_b_playwright/direct-worker-health.mjs";
 import { createMaoziClient, createMaoziPageTransport } from "./flow_b_playwright/maozi-client.mjs";
 import { createOzonDetailProvider } from "./flow_b_playwright/ozon-detail.mjs";
 import { ozonAccessControllerFor } from "./flow_b_playwright/ozon-access-controller.mjs";
@@ -901,6 +902,38 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
           Number(directEnv.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET) || 100,
         ),
       });
+      const producerIntervalMs = Math.max(
+        1_000,
+        Number(directEnv.FLOW_B_PRODUCER_INTERVAL_MS) || 60_000,
+      );
+      const directWorkerHealth = createDirectWorkerHealthTracker({
+        filename: path.join(options.runDir, "direct_worker_health.json"),
+        runId: directEnv.FLOW_B_PRODUCTION_RUN_ID || path.basename(options.runDir),
+        generation: directEnv.FLOW_B_DIRECT_WORKER_GENERATION
+          || `standalone-${process.pid}-${Date.now()}`,
+      });
+      const recordProducerHealth = async (operation) => {
+        try {
+          return await operation();
+        } catch (error) {
+          await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({
+            at: new Date().toISOString(),
+            stage: "direct-worker-health",
+            error: String(error?.message || error),
+          })}\n`).catch(() => {});
+          return null;
+        }
+      };
+      let lastProducerHealthProgressAt = 0;
+      const recordScanProgress = (progress = {}) => {
+        const now = Date.now();
+        if (now - lastProducerHealthProgressAt < 30_000) return;
+        lastProducerHealthProgressAt = now;
+        void recordProducerHealth(() => directWorkerHealth.scanProgress({
+          kind: progress.phase || "candidate-activity",
+        }));
+      };
+      await recordProducerHealth(() => directWorkerHealth.start());
       const pageCleanup = directEnv.FLOW_B_PRUNE_ORPHAN_PAGES_ON_START === "1"
         ? await pruneOrphanedFlowPages(context, {
             preserveOrdinaryPages: Math.max(
@@ -1023,10 +1056,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       let producerError = null;
       const scanTask = runProducerLoop({
         deadlineMs,
-        intervalMs: Math.max(
-          1_000,
-          Number(directEnv.FLOW_B_PRODUCER_INTERVAL_MS) || 60_000,
-        ),
+        intervalMs: producerIntervalMs,
         idleIntervalsMs: emptyBackoffIntervals,
         isIdleResult: (result) => Number(
           result?.candidate_activity_count ?? result?.activity_count ?? 0,
@@ -1039,13 +1069,19 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         ),
         onActivity: async () => { runtimeWake.wake(); },
         scan: async () => {
+          await recordProducerHealth(() => directWorkerHealth.scanStarted());
           scan = await scanSources({
             context,
             urlsFile: options.urlsFile,
             outFile: options.outFile,
             env: directEnv,
-            onCandidateActivity: () => runtimeWake.wake(),
+            onCandidateActivity: () => {
+              runtimeWake.wake();
+              recordScanProgress({ phase: "candidate-activity" });
+            },
+            onProgress: recordScanProgress,
           });
+          await recordProducerHealth(() => directWorkerHealth.scanSucceeded(scan));
           return scan;
         },
         onError: async (error) => {
@@ -1054,6 +1090,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             stage: "direct-source-scan",
             error: String(error?.message || error),
           })}\n`);
+          await recordProducerHealth(() => directWorkerHealth.scanFailed(error, {
+            retryAt: new Date(Date.now() + producerIntervalMs).toISOString(),
+          }));
           if (isFatalBrowserError(error)
             || /captcha|验证码|mfa|verification required|login|登录/iu.test(String(error?.message || error))) {
             producerError = error;

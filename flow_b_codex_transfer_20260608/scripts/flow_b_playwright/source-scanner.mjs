@@ -3405,6 +3405,7 @@ export async function scanSources({
   env = process.env,
   log = console.log,
   onCandidateActivity = () => {},
+  onProgress = () => {},
 }) {
   const emit = createScannerLogger(log, env.FLOW_B_LOG_LEVEL || "verbose");
   const directMode = String(env.FLOW_B_DIRECT_PUBLISH || "") === "1";
@@ -3770,6 +3771,12 @@ export async function scanSources({
           const newlyHandled = isNewFavoriteCollectionResult(result);
           if (newlyHandled && ["favorited", "rejected", "failed"].includes(String(result?.status || ""))) {
             scanActivityCount += 1;
+            try {
+              onProgress({
+                phase: "favorite-result",
+                status: String(result?.status || ""),
+              });
+            } catch {}
           }
           if (newlyHandled && result?.status === "favorited") {
             candidateActivityCount += 1;
@@ -4021,6 +4028,12 @@ export async function scanSources({
       const fatalBatchError = fatalSourceBatchError(batchRows);
       if (fatalBatchError) throw fatalBatchError;
       completedSourceBatches += 1;
+      try {
+        onProgress({
+          phase: "source-batch-completed",
+          completed_batches: completedSourceBatches,
+        });
+      } catch {}
       const previousSourceCooldownState = [
         runtime.sourceSoftBlockStreak,
         runtime.lastSourceSoftBlockAt,
@@ -4231,6 +4244,12 @@ export async function scanSources({
         collection_deferred_to_candidate_queue: true,
       })));
       completedSourceBatches += 1;
+      try {
+        onProgress({
+          phase: "source-lookahead-completed",
+          completed_batches: completedSourceBatches,
+        });
+      } catch {}
       sourceCheckpointDirty = true;
       emit(`persisted lookahead batch candidates=${queued} for the next consumer tranche`);
     }

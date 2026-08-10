@@ -46,6 +46,7 @@ test("daily start resumes the same safely stopped pending or formal run", () => 
   assert.equal(shouldResumeCurrentRun({ status: "WAITING_FOR_QUOTA_RESET" }, current), true);
   assert.equal(shouldResumeCurrentRun({ status: "PREWARMING_CANDIDATES" }, current), true);
   assert.equal(shouldResumeCurrentRun({ status: "PREPARING_CANDIDATE_BUFFER" }, current), true);
+  assert.equal(shouldResumeCurrentRun({ status: "RECOVERY_BACKOFF" }, current), true);
   assert.equal(shouldResumeCurrentRun({
     status: "STOPPED",
     reason: "rolling-120-minute-strict-rate-below-threshold",
@@ -66,6 +67,7 @@ test("resume restarts the same checkpoint after an intentional safe stop", () =>
   assert.equal(resumeMode({ status: "STOPPED" }, current), "restart-current-run");
   assert.equal(resumeMode({ status: "WAITING_FOR_VERIFICATION" }, current), "verification");
   assert.equal(resumeMode({ status: "RUNNING" }, current), "wake-supervisor");
+  assert.equal(resumeMode({ status: "RECOVERY_BACKOFF" }, current), "wake-supervisor");
   assert.equal(resumeMode({ status: "STOPPED" }, { run_id: "partial" }), "wake-supervisor");
 });
 
@@ -289,6 +291,16 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_1688_ADAPTIVE_ACTION_POLICY, "enforce");
   assert.equal(config.flow_env.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET, "100");
   assert.equal(config.flow_env.FLOW_B_PROFIT_SAFETY_ACTION_POLICY, "shadow");
+  assert.deepEqual(config.direct_worker_watchdog, {
+    enabled: true,
+    source_error_threshold: 3,
+    producer_stale_ms: 1_200_000,
+    startup_grace_ms: 180_000,
+    recovery_cooldown_ms: 1_800_000,
+    recovery_window_ms: 7_200_000,
+    max_recoveries_per_window: 2,
+    probe_failure_threshold: 2,
+  });
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT, "75");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT, "90");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MAX_P95_MS, "15000");
@@ -376,6 +388,26 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
       },
     }),
     /profit safety action policy/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      direct_worker_watchdog: {
+        ...config.direct_worker_watchdog,
+        enabled: false,
+      },
+    }),
+    /direct worker watchdog/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      direct_worker_watchdog: {
+        ...config.direct_worker_watchdog,
+        producer_stale_ms: 60_000,
+      },
+    }),
+    /producer_stale_ms=1200000/u,
   );
   assert.throws(
     () => validateConfig({

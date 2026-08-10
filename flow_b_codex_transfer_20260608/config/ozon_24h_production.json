@@ -49,6 +49,16 @@
     10,
     20
   ],
+  "direct_worker_watchdog": {
+    "enabled": true,
+    "source_error_threshold": 3,
+    "producer_stale_ms": 1200000,
+    "startup_grace_ms": 180000,
+    "recovery_cooldown_ms": 1800000,
+    "recovery_window_ms": 7200000,
+    "max_recoveries_per_window": 2,
+    "probe_failure_threshold": 2
+  },
   "minimum_free_disk_kb": 5242880,
   "browser": {
     "cdp_endpoint": "http://127.0.0.1:9223",

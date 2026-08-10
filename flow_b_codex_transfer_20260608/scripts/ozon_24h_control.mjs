@@ -27,6 +27,7 @@ const ACTIVE_STATUSES = new Set([
   "WAITING_FOR_QUOTA_RESET",
   "RUNNING",
   "RECOVERING",
+  "RECOVERY_BACKOFF",
   "WAITING_FOR_VERIFICATION",
 ]);
 const RESUMABLE_STATUSES = new Set([...ACTIVE_STATUSES, "STOPPED"]);
@@ -624,6 +625,24 @@ function validateConfig(config) {
     ).trim().toLowerCase();
     if (!["shadow", "enforce"].includes(profitSafetyActionPolicy)) {
       throw new Error("profit safety action policy must be shadow or enforce");
+    }
+    const directWorkerWatchdog = config?.direct_worker_watchdog || {};
+    const watchdogContract = {
+      source_error_threshold: 3,
+      producer_stale_ms: 1_200_000,
+      startup_grace_ms: 180_000,
+      recovery_cooldown_ms: 1_800_000,
+      recovery_window_ms: 7_200_000,
+      max_recoveries_per_window: 2,
+      probe_failure_threshold: 2,
+    };
+    if (directWorkerWatchdog.enabled !== true) {
+      throw new Error("direct worker watchdog must be enabled");
+    }
+    for (const [name, expected] of Object.entries(watchdogContract)) {
+      if (Number(directWorkerWatchdog[name]) !== expected) {
+        throw new Error(`direct worker watchdog requires ${name}=${expected}`);
+      }
     }
     if (Number(config?.flow_env?.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET) !== 100) {
       throw new Error("1688 adaptive action evidence target must be 100");

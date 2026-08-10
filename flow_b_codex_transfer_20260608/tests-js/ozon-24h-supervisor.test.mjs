@@ -7,6 +7,11 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  createDirectWorkerHealthTracker,
+  directWorkerErrorSignature,
+} from "../scripts/flow_b_playwright/direct-worker-health.mjs";
+
+import {
   browserOwnerPidsForRecovery,
   browserRecoverySafeStopDecision,
   buildLaunchdPlist,
@@ -21,6 +26,8 @@ import {
   cleanupBrowserProfileCaches,
   cleanupProfileCachesForConfig,
   currentRunDisposition,
+  directWorkerHealthDecision,
+  directWatchdogRecoveryDecision,
   expandedConfig,
   nextRestartDelaySeconds,
   processOwnershipDecision,
@@ -1114,9 +1121,274 @@ test("supervisor detects an unresponsive CDP while the worker is still running",
   });
 });
 
+test("direct worker health tracks consecutive scan errors and resets only on empty success", async () => {
+  const writes = [];
+  let tick = 0;
+  const tracker = createDirectWorkerHealthTracker({
+    filename: "/tmp/direct-worker-health.json",
+    runId: "run-1",
+    generation: "generation-1",
+    workerPid: 4321,
+    now: () => new Date(Date.UTC(2026, 7, 10, 10, 0, tick++)),
+    write: async (_filename, value) => { writes.push(structuredClone(value)); },
+  });
+
+  await tracker.start();
+  await tracker.scanStarted();
+  await tracker.scanProgress({ kind: "source-batch-completed" });
+  assert.equal(tracker.snapshot().producer.last_progress_kind, "source-batch-completed");
+  await tracker.scanFailed(new Error("Maximum call stack size exceeded"));
+  await tracker.scanStarted();
+  await tracker.scanFailed(new Error("Maximum   call stack size exceeded"));
+  assert.equal(tracker.snapshot().producer.consecutive_errors, 2);
+  assert.equal(
+    tracker.snapshot().producer.error_signature,
+    directWorkerErrorSignature(new Error("Maximum call stack size exceeded")),
+  );
+
+  await tracker.scanStarted();
+  await tracker.scanFailed(new Error("different scan failure"));
+  assert.equal(tracker.snapshot().producer.consecutive_errors, 3);
+  assert.equal(
+    tracker.snapshot().producer.error_signature,
+    directWorkerErrorSignature(new Error("different scan failure")),
+  );
+  await tracker.scanStarted();
+  await tracker.scanSucceeded({ candidate_activity_count: 0 });
+  assert.equal(tracker.snapshot().producer.phase, "healthy");
+  assert.equal(tracker.snapshot().producer.consecutive_errors, 0);
+  assert.equal(tracker.snapshot().producer.activity_count, 0);
+  assert.ok(writes.length >= 9);
+});
+
+test("direct worker watchdog restarts after three consecutive failures or twenty minutes stale", () => {
+  const workerStartedAt = Date.parse("2026-08-10T10:00:00.000Z");
+  const baseHealth = {
+    schema_version: 1,
+    run_id: "run-1",
+    worker_generation: "generation-1",
+    worker_pid: 4321,
+    heartbeat_at: "2026-08-10T10:02:00.000Z",
+    producer: {
+      phase: "error",
+      consecutive_errors: 2,
+      error_signature: "a".repeat(64),
+    },
+  };
+  const decide = (health, now, extra = {}) => directWorkerHealthDecision({
+    health,
+    expectedRunId: "run-1",
+    expectedGeneration: "generation-1",
+    expectedWorkerPid: 4321,
+    workerStartedAt,
+    now,
+    startupGraceMs: 180_000,
+    staleMs: 1_200_000,
+    errorThreshold: 3,
+    recoveryCooldownMs: 300_000,
+    ...extra,
+  });
+
+  assert.equal(decide(baseHealth, Date.parse("2026-08-10T10:02:15.000Z")).action, "continue");
+  const threeErrors = decide({
+    ...baseHealth,
+    producer: { ...baseHealth.producer, consecutive_errors: 3 },
+  }, Date.parse("2026-08-10T10:02:15.000Z"));
+  assert.equal(threeErrors.action, "restart-worker");
+  assert.equal(threeErrors.reason, "direct-source-scan-consecutive-errors");
+
+  const healthy = {
+    ...baseHealth,
+    heartbeat_at: "2026-08-10T10:10:00.000Z",
+    producer: { phase: "healthy", consecutive_errors: 0 },
+  };
+  assert.equal(
+    decide(healthy, Date.parse("2026-08-10T10:29:59.999Z")).action,
+    "continue",
+  );
+  assert.equal(decide({
+    ...healthy,
+    heartbeat_at: "2026-08-10T10:25:00.000Z",
+    producer: {
+      phase: "scanning",
+      attempt_started_at: "2026-08-10T10:00:00.000Z",
+      last_progress_at: "2026-08-10T10:25:00.000Z",
+      consecutive_errors: 0,
+    },
+  }, Date.parse("2026-08-10T10:30:00.000Z")).action, "continue");
+  const stale = decide(healthy, Date.parse("2026-08-10T10:30:00.000Z"));
+  assert.equal(stale.action, "restart-worker");
+  assert.equal(stale.reason, "direct-producer-progress-stale");
+});
+
+test("direct worker watchdog rejects old generations and respects startup, window, and cooldown gates", () => {
+  const workerStartedAt = Date.parse("2026-08-10T10:00:00.000Z");
+  const oldHealth = {
+    schema_version: 1,
+    run_id: "run-1",
+    worker_generation: "old-generation",
+    worker_pid: 1111,
+    heartbeat_at: "2026-08-10T10:02:00.000Z",
+    producer: { phase: "healthy", consecutive_errors: 0 },
+  };
+  const decide = (now, extra = {}) => directWorkerHealthDecision({
+    health: oldHealth,
+    expectedRunId: "run-1",
+    expectedGeneration: "generation-1",
+    expectedWorkerPid: 4321,
+    workerStartedAt,
+    now,
+    startupGraceMs: 180_000,
+    staleMs: 1_200_000,
+    errorThreshold: 3,
+    recoveryCooldownMs: 300_000,
+    ...extra,
+  });
+
+  assert.equal(
+    decide(Date.parse("2026-08-10T10:02:59.999Z")).reason,
+    "direct-producer-startup-grace",
+  );
+  assert.equal(decide(Date.parse("2026-08-10T10:03:00.000Z")).action, "restart-worker");
+  assert.equal(
+    decide(Date.parse("2026-08-10T10:30:00.000Z"), { eligible: false }).action,
+    "continue",
+  );
+  const cooldown = decide(Date.parse("2026-08-10T10:30:00.000Z"), {
+    lastRecoveryAt: "2026-08-10T10:28:00.000Z",
+  });
+  assert.equal(cooldown.action, "defer-recovery");
+  assert.equal(cooldown.reason, "direct-producer-recovery-cooldown");
+});
+
+test("direct worker recovery budget delays only unhealthy workers and retries automatically", () => {
+  const workerStartedAt = Date.parse("2026-08-10T10:00:00.000Z");
+  const health = {
+    schema_version: 1,
+    run_id: "run-1",
+    worker_generation: "generation-1",
+    worker_pid: 4321,
+    heartbeat_at: "2026-08-10T10:10:00.000Z",
+    producer: { phase: "healthy", consecutive_errors: 0 },
+  };
+  const decide = (candidateHealth, now) => directWorkerHealthDecision({
+    health: candidateHealth,
+    expectedRunId: "run-1",
+    expectedGeneration: "generation-1",
+    expectedWorkerPid: 4321,
+    workerStartedAt,
+    now,
+    staleMs: 1_200_000,
+    recoveryHistory: [
+      { at: "2026-08-10T09:00:00.000Z" },
+      { at: "2026-08-10T09:30:00.000Z" },
+    ],
+    recoveryCooldownMs: 1_800_000,
+    recoveryWindowMs: 7_200_000,
+    maxRecoveriesPerWindow: 2,
+  });
+
+  assert.equal(decide(health, Date.parse("2026-08-10T10:15:00.000Z")).action, "continue");
+  const deferred = decide({
+    ...health,
+    heartbeat_at: "2026-08-10T10:10:00.000Z",
+    producer: { phase: "error", consecutive_errors: 3 },
+  }, Date.parse("2026-08-10T10:15:00.000Z"));
+  assert.equal(deferred.action, "defer-recovery");
+  assert.equal(deferred.reason, "direct-producer-recovery-budget");
+  assert.equal(deferred.trigger_reason, "direct-source-scan-consecutive-errors");
+  const retryInProgress = decide({
+    ...health,
+    heartbeat_at: "2026-08-10T10:14:59.000Z",
+    producer: { phase: "scanning", consecutive_errors: 3 },
+  }, Date.parse("2026-08-10T10:15:00.000Z"));
+  assert.equal(retryInProgress.action, "continue");
+  assert.equal(retryInProgress.reason, "direct-producer-retry-in-progress");
+
+  const retry = decide({
+    ...health,
+    heartbeat_at: "2026-08-10T11:00:00.000Z",
+    producer: { phase: "error", consecutive_errors: 3 },
+  }, Date.parse("2026-08-10T11:00:00.001Z"));
+  assert.equal(retry.action, "restart-worker");
+  assert.equal(retry.reason, "direct-source-scan-consecutive-errors");
+});
+
+test("supervisor restarts only the worker after two unhealthy producer probes", async () => {
+  const worker = new EventEmitter();
+  let probes = 0;
+  const result = await waitForWorkerOrBrowserFailure(worker, {
+    cdpEndpoint: "http://127.0.0.1:9223",
+    probeIntervalMs: 1,
+    probeTimeoutMs: 1,
+    failureThreshold: 2,
+    workerHealthFailureThreshold: 2,
+    cdpReadyFn: async () => true,
+    workerHealthFn: async () => {
+      probes += 1;
+      return {
+        action: "restart-worker",
+        reason: "direct-source-scan-consecutive-errors",
+        consecutive_errors: 3,
+      };
+    },
+    delayFn: async () => {},
+  });
+
+  assert.equal(probes, 2);
+  assert.equal(result.browser_unhealthy, false);
+  assert.equal(result.worker_unhealthy, true);
+  assert.equal(result.worker_health.reason, "direct-source-scan-consecutive-errors");
+});
+
+test("watchdog producer failures preserve the browser unless ownership or verification is unsafe", () => {
+  const workerHealth = { reason: "direct-source-scan-consecutive-errors" };
+  assert.deepEqual(directWatchdogRecoveryDecision({
+    workerUnhealthy: true,
+    workerHealth,
+    classifiedDecision: {
+      action: "restart-browser-and-worker",
+      reason: "browser-or-network-recoverable",
+    },
+  }), {
+    action: "restart-worker",
+    reason: "direct-source-scan-consecutive-errors",
+  });
+  assert.deepEqual(directWatchdogRecoveryDecision({
+    workerUnhealthy: true,
+    workerHealth,
+    classifiedDecision: {
+      action: "fatal-stop",
+      reason: "duplicate-profile-owner-risk",
+    },
+  }), {
+    action: "fatal-stop",
+    reason: "duplicate-profile-owner-risk",
+  });
+  assert.deepEqual(directWatchdogRecoveryDecision({
+    workerUnhealthy: true,
+    workerHealth,
+    classifiedDecision: {
+      action: "wait-for-verification",
+      reason: "security-verification-required",
+    },
+  }), {
+    action: "wait-for-verification",
+    reason: "security-verification-required",
+  });
+});
+
 test("security checks wait in-place and duplicate profile owners hard-stop", () => {
   assert.deepEqual(classifyWorkerFailure({
     message: "Ozon CAPTCHA slider verification required",
+    profileOwnerCount: 1,
+  }), {
+    action: "wait-for-verification",
+    reason: "security-verification-required",
+  });
+
+  assert.deepEqual(classifyWorkerFailure({
+    message: "Maozi login required",
     profileOwnerCount: 1,
   }), {
     action: "wait-for-verification",

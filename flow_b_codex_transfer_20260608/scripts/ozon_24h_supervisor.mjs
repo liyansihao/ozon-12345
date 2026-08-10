@@ -21,6 +21,7 @@ import {
   releaseSubmissionGate,
 } from "./flow_b_playwright/runtime-state.mjs";
 import { hasReliableSameItemCostEvidence } from "./flow_b_playwright/cost-evidence.mjs";
+import { directWorkerHealthDecision } from "./flow_b_playwright/direct-worker-health.mjs";
 import { archiveRestorableProfileSessions } from "./prepare_cdp_profile.mjs";
 import { dailyWindowState } from "./daily-window.mjs";
 import {
@@ -35,8 +36,10 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_LABEL = "com.codex.ozon.24h-production";
 const DEFAULT_INSTALL_ROOT = path.join(process.env.HOME || "/Users/mac", ".ozon-24h-production");
 const PRODUCTION_STORE_IDS = [106637, 106640, 106644, 106646, 104965];
-const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|安全检查|验证码/i;
+const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|login required|sign[- ]?in required|安全检查|验证码|登录失效|需要登录|请登录/i;
 const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|connectOverCDP:\s*Timeout|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
+
+export { directWorkerHealthDecision };
 
 function absolute(value, fallback) {
   return path.resolve(String(value || fallback || ""));
@@ -105,6 +108,21 @@ export function classifyWorkerFailure({ message = "", profileOwnerCount = 0 } = 
     return { action: "restart-browser-and-worker", reason: "browser-or-network-recoverable" };
   }
   return { action: "restart-worker", reason: "ordinary-worker-recoverable" };
+}
+
+export function directWatchdogRecoveryDecision({
+  workerUnhealthy = false,
+  workerHealth = null,
+  classifiedDecision = null,
+} = {}) {
+  if (!workerUnhealthy) return classifiedDecision;
+  if (["fatal-stop", "wait-for-verification"].includes(classifiedDecision?.action)) {
+    return classifiedDecision;
+  }
+  return {
+    action: "restart-worker",
+    reason: workerHealth?.reason || "direct-producer-unhealthy",
+  };
 }
 
 export function browserOwnerPidsForRecovery(decision, owners = []) {
@@ -707,12 +725,18 @@ export async function waitForWorkerOrBrowserFailure(worker, {
   probeIntervalMs = 15_000,
   probeTimeoutMs = 3_000,
   failureThreshold = 2,
+  workerHealthFn = null,
+  workerHealthFailureThreshold = 2,
   cdpReadyFn = cdpReady,
   delayFn = delay,
 } = {}) {
   const interval = Math.max(1, Number(probeIntervalMs) || 15_000);
   const timeout = Math.max(100, Number(probeTimeoutMs) || 3_000);
   const threshold = Math.max(1, Math.floor(Number(failureThreshold) || 2));
+  const workerThreshold = Math.max(
+    1,
+    Math.floor(Number(workerHealthFailureThreshold) || 2),
+  );
   let settled = false;
   return new Promise((resolve) => {
     const finish = (result) => {
@@ -725,15 +749,18 @@ export async function waitForWorkerOrBrowserFailure(worker, {
       signal: null,
       error,
       browser_unhealthy: false,
+      worker_unhealthy: false,
     }));
     worker.once("exit", (code, signal) => finish({
       code: Number(code ?? 1),
       signal,
       error: null,
       browser_unhealthy: false,
+      worker_unhealthy: false,
     }));
     void (async () => {
       let consecutiveFailures = 0;
+      let consecutiveWorkerFailures = 0;
       while (!settled) {
         await delayFn(interval);
         if (settled) return;
@@ -746,6 +773,37 @@ export async function waitForWorkerOrBrowserFailure(worker, {
             signal: null,
             error: new Error(`Chrome CDP health check failed ${consecutiveFailures} consecutive times at ${cdpEndpoint}`),
             browser_unhealthy: true,
+            worker_unhealthy: false,
+          });
+          continue;
+        }
+        if (!healthy || typeof workerHealthFn !== "function") {
+          consecutiveWorkerFailures = 0;
+          continue;
+        }
+        let workerHealth;
+        try {
+          workerHealth = await workerHealthFn();
+        } catch (error) {
+          workerHealth = {
+            action: "restart-worker",
+            reason: "direct-worker-health-probe-failed",
+            error: String(error?.message || error),
+          };
+        }
+        if (settled) return;
+        const workerUnhealthy = workerHealth?.action === "restart-worker";
+        consecutiveWorkerFailures = workerUnhealthy
+          ? consecutiveWorkerFailures + 1
+          : 0;
+        if (consecutiveWorkerFailures >= workerThreshold) {
+          finish({
+            code: 1,
+            signal: null,
+            error: new Error(String(workerHealth?.reason || "direct producer unhealthy")),
+            browser_unhealthy: false,
+            worker_unhealthy: true,
+            worker_health: workerHealth,
           });
         }
       }
@@ -754,6 +812,7 @@ export async function waitForWorkerOrBrowserFailure(worker, {
       signal: null,
       error,
       browser_unhealthy: true,
+      worker_unhealthy: false,
     }));
   });
 }
@@ -2293,6 +2352,52 @@ async function superviseDirectPublishing({
   let reportTimer = null;
   let sourceRefreshTimer = null;
   let sourceRefreshRunning = false;
+  const watchdogConfig = {
+    enabled: config.direct_worker_watchdog?.enabled !== false,
+    errorThreshold: Math.max(
+      1,
+      Number(config.direct_worker_watchdog?.source_error_threshold) || 3,
+    ),
+    startupGraceMs: Math.max(
+      0,
+      Number(config.direct_worker_watchdog?.startup_grace_ms) || 180_000,
+    ),
+    staleMs: Math.max(
+      60_000,
+      Number(config.direct_worker_watchdog?.producer_stale_ms) || 1_200_000,
+    ),
+    recoveryCooldownMs: Math.max(
+      0,
+      Number(config.direct_worker_watchdog?.recovery_cooldown_ms) || 1_800_000,
+    ),
+    recoveryWindowMs: Math.max(
+      60_000,
+      Number(config.direct_worker_watchdog?.recovery_window_ms) || 7_200_000,
+    ),
+    maxRecoveriesPerWindow: Math.max(
+      1,
+      Number(config.direct_worker_watchdog?.max_recoveries_per_window) || 2,
+    ),
+    probeFailureThreshold: Math.max(
+      1,
+      Number(config.direct_worker_watchdog?.probe_failure_threshold) || 2,
+    ),
+  };
+  const watchdogStatePath = path.join(stateRoot, "direct_watchdog_state.json");
+  let watchdogState = await readJson(watchdogStatePath, {
+    schema_version: 1,
+    last_recovery_at: null,
+    recoveries: [],
+  });
+  if (String(watchdogState?.run_id || "") !== String(currentRun.run_id || "")) {
+    watchdogState = {
+      schema_version: 1,
+      run_id: currentRun.run_id,
+      last_recovery_at: null,
+      recoveries: [],
+    };
+  }
+  let lastWatchdogDeferKey = null;
   const refreshSources = async () => {
     if (sourceRefreshRunning || shuttingDown) return null;
     sourceRefreshRunning = true;
@@ -2417,6 +2522,7 @@ async function superviseDirectPublishing({
       const runtimeErrorsOffset = await fileSize(runtimeErrorsPath);
       const stderrFd = fs.openSync(stderrPath, "a");
       const startedAt = Date.now();
+      const workerGeneration = crypto.randomUUID();
       const persistedStore = await readJson(path.join(runDir, "current_store.json"), {});
       const runtimeRun = {
         ...currentRun,
@@ -2429,7 +2535,10 @@ async function superviseDirectPublishing({
         urlsFile,
       ], {
         cwd: appRoot,
-        env: workerEnvironment(config, runtimeRun),
+        env: {
+          ...workerEnvironment(config, runtimeRun),
+          FLOW_B_DIRECT_WORKER_GENERATION: workerGeneration,
+        },
         stdio: ["ignore", stdoutFd, stderrFd],
       });
       fs.closeSync(stdoutFd);
@@ -2456,8 +2565,108 @@ async function superviseDirectPublishing({
         probeIntervalMs: config.browser.cdp_health_interval_ms,
         probeTimeoutMs: config.browser.cdp_health_timeout_ms,
         failureThreshold: config.browser.cdp_health_failure_threshold,
+        workerHealthFailureThreshold: watchdogConfig.probeFailureThreshold,
+        workerHealthFn: async () => {
+          let health = null;
+          try {
+            health = await readJson(path.join(runDir, "direct_worker_health.json"), {});
+          } catch {
+            health = null;
+          }
+          const submissionWindow = dailyWindowState({
+            now: new Date(),
+            timeZone: config.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
+            cutoff: config.flow_env?.FLOW_B_DAILY_SUBMISSION_CUTOFF || "23:00",
+            reportAfter: config.flow_env?.FLOW_B_DAILY_REPORT_AFTER || "23:30",
+          });
+          const healthDecision = directWorkerHealthDecision({
+            health,
+            expectedRunId: currentRun.run_id,
+            expectedGeneration: workerGeneration,
+            expectedWorkerPid: activeWorker.pid,
+            workerStartedAt: startedAt,
+            enabled: watchdogConfig.enabled,
+            eligible: !shuttingDown
+              && !fs.existsSync(stopFile)
+              && submissionWindow.open,
+            startupGraceMs: watchdogConfig.startupGraceMs,
+            staleMs: watchdogConfig.staleMs,
+            errorThreshold: watchdogConfig.errorThreshold,
+            lastRecoveryAt: watchdogState.last_recovery_at,
+            recoveryHistory: watchdogState.recoveries,
+            recoveryCooldownMs: watchdogConfig.recoveryCooldownMs,
+            recoveryWindowMs: watchdogConfig.recoveryWindowMs,
+            maxRecoveriesPerWindow: watchdogConfig.maxRecoveriesPerWindow,
+          });
+          if (healthDecision.action === "defer-recovery") {
+            const deferKey = [
+              workerGeneration,
+              healthDecision.reason,
+              healthDecision.trigger_reason,
+              healthDecision.cooldown_until,
+            ].join(":");
+            if (deferKey !== lastWatchdogDeferKey) {
+              await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+                at: new Date().toISOString(),
+                run_dir: runDir,
+                action: "watchdog-recovery-deferred",
+                reason: healthDecision.reason,
+                trigger_reason: healthDecision.trigger_reason,
+                cooldown_until: healthDecision.cooldown_until || null,
+                worker_generation: workerGeneration,
+                worker_pid: Number(activeWorker.pid) || null,
+              });
+              await updateOperationalState(stateRoot, currentRun, {
+                status: "RECOVERY_BACKOFF",
+                reason: healthDecision.reason,
+                trigger_reason: healthDecision.trigger_reason,
+                retry_at: healthDecision.cooldown_until || null,
+                worker_pid: Number(activeWorker.pid) || null,
+              });
+              lastWatchdogDeferKey = deferKey;
+            }
+          } else if (lastWatchdogDeferKey
+            && healthDecision.action === "continue"
+            && healthDecision.reason === "direct-producer-healthy") {
+            lastWatchdogDeferKey = null;
+            await updateOperationalState(stateRoot, currentRun, {
+              status: "RUNNING",
+              reason: null,
+              worker_pid: Number(activeWorker.pid) || null,
+            });
+          }
+          return healthDecision;
+        },
       });
-      if (result.browser_unhealthy) await stopOwnedWorker(activeWorker);
+      if (result.browser_unhealthy || result.worker_unhealthy) {
+        await stopOwnedWorker(activeWorker);
+      }
+      if (result.worker_unhealthy) {
+        const recoveredAt = new Date().toISOString();
+        const recentRecoveries = (Array.isArray(watchdogState.recoveries)
+          ? watchdogState.recoveries
+          : []).filter((entry) => {
+          const timestamp = Date.parse(String(entry?.at || entry || ""));
+          return Number.isFinite(timestamp)
+            && Date.now() - timestamp < watchdogConfig.recoveryWindowMs;
+        });
+        watchdogState = {
+          schema_version: 1,
+          last_recovery_at: recoveredAt,
+          run_id: currentRun.run_id,
+          worker_generation: workerGeneration,
+          worker_pid: Number(activeWorker.pid) || null,
+          trigger: result.worker_health || null,
+          recoveries: [
+            ...recentRecoveries,
+            {
+              at: recoveredAt,
+              reason: result.worker_health?.reason || "direct-producer-unhealthy",
+            },
+          ],
+        };
+        await writeJsonAtomic(watchdogStatePath, watchdogState);
+      }
       worker = null;
       await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid, workerPid: null });
       const evidence = await readWorkerGenerationEvidence({
@@ -2468,7 +2677,10 @@ async function superviseDirectPublishing({
         error: result.error,
       });
       if (shuttingDown) break;
-      if (result.code === 0 && !result.browser_unhealthy && Number(config.publish_target) > 0) {
+      if (result.code === 0
+        && !result.browser_unhealthy
+        && !result.worker_unhealthy
+        && Number(config.publish_target) > 0) {
         await updateOperationalState(stateRoot, currentRun, {
           status: "TARGET_COMPLETE",
           reason: "erp-accepted-target-reached",
@@ -2486,7 +2698,15 @@ async function superviseDirectPublishing({
         return 0;
       }
       const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
-      const decision = classifyWorkerFailure({ message: evidence, profileOwnerCount: owners.length });
+      const classifiedDecision = classifyWorkerFailure({
+        message: evidence,
+        profileOwnerCount: owners.length,
+      });
+      const decision = directWatchdogRecoveryDecision({
+        workerUnhealthy: result.worker_unhealthy,
+        workerHealth: result.worker_health,
+        classifiedDecision,
+      });
       if (decision.action === "fatal-stop") {
         await updateOperationalState(stateRoot, currentRun, {
           status: "FATAL_STOP",
@@ -2503,6 +2723,15 @@ async function superviseDirectPublishing({
         action: decision.action,
         reason: decision.reason,
         delay_seconds: seconds,
+        ...(result.worker_unhealthy
+          ? {
+              trigger: "direct-worker-watchdog",
+              worker_generation: workerGeneration,
+              worker_pid: Number(activeWorker.pid) || null,
+              worker_health: result.worker_health || null,
+              browser_preserved: decision.action !== "restart-browser-and-worker",
+            }
+          : {}),
       });
       await updateOperationalState(stateRoot, currentRun, {
         status: decision.action === "wait-for-verification"
