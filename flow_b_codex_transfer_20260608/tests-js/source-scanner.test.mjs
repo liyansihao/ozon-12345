@@ -94,6 +94,7 @@ import {
   sourceScanLinkTarget,
   sourceScanLinkTargetForSource,
   normalizeRuntimeSourceYieldRows,
+  loadRuntimeSourceYieldRows,
   boundedEvidenceSourceUrls,
   eligibleLinkCountsBySource,
   exhaustedScanFamilyKeys,
@@ -326,6 +327,25 @@ test("source scan array checkpoints reuse memory and replace files atomically", 
   assert.equal(jsonArrayFileCacheStats(filename).writes, 1);
   assert.deepEqual(JSON.parse(await fs.readFile(filename, "utf8")), [{ source_url: "one" }, { source_url: "two" }]);
   await assert.rejects(fs.access(`${filename}.tmp`));
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("runtime source yield loading does not spread large histories onto the call stack", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-large-source-yield-"));
+  const filename = path.join(dir, "direct_funnel.jsonl");
+  const rowCount = 110_000;
+  const lines = Array.from({ length: rowCount }, (_, index) => JSON.stringify({
+    sku: String(index),
+    status: "submitted",
+  })).join("\n");
+  await fs.writeFile(filename, `${lines}\n`);
+
+  clearJsonLinesFileCache();
+  const rows = await loadRuntimeSourceYieldRows([filename]);
+  assert.equal(rows.length, rowCount);
+  assert.equal(rows[0].sku, "0");
+  assert.equal(rows.at(-1).sku, String(rowCount - 1));
+
   await fs.rm(dir, { recursive: true, force: true });
 });
 

@@ -1182,6 +1182,15 @@ export function normalizeRuntimeSourceYieldRows(rows = []) {
   });
 }
 
+export async function loadRuntimeSourceYieldRows(filenames = []) {
+  const rows = [];
+  for (const filename of filenames || []) {
+    const normalized = normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(filename));
+    for (const row of normalized) rows.push(row);
+  }
+  return rows;
+}
+
 export function sourceCollectionBlockKey(value) {
   return value ? sourceYieldKey(value) : null;
 }
@@ -3454,10 +3463,7 @@ export async function scanSources({
     ...String(env.FLOW_B_SOURCE_YIELD_SEED_FILES || "").split(path.delimiter).filter(Boolean),
     ...String(env.FLOW_B_FAVORITE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
   ].map((value) => path.resolve(value)))];
-  const yieldRows = [];
-  for (const yieldFile of yieldFiles) {
-    yieldRows.push(...normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(yieldFile)));
-  }
+  const yieldRows = await loadRuntimeSourceYieldRows(yieldFiles);
   const liveYieldFile = path.join(path.dirname(outputPath), "source_yield.jsonl");
   const strictFeedbackBaseline = strictSourceFeedbackKeys(normalizeRuntimeSourceYieldRows(
     await readJsonLinesIncremental(liveYieldFile),
