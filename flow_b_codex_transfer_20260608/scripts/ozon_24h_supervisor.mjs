@@ -22,6 +22,11 @@ import {
 } from "./flow_b_playwright/runtime-state.mjs";
 import { hasReliableSameItemCostEvidence } from "./flow_b_playwright/cost-evidence.mjs";
 import { directWorkerHealthDecision } from "./flow_b_playwright/direct-worker-health.mjs";
+import {
+  clearOzonVerificationLockForAutomaticRecovery,
+  readOzonAccessState,
+  resolveOzonAccessStateFile,
+} from "./flow_b_playwright/ozon-access-controller.mjs";
 import { archiveRestorableProfileSessions } from "./prepare_cdp_profile.mjs";
 import { dailyWindowState } from "./daily-window.mjs";
 import {
@@ -94,6 +99,85 @@ export function nextRestartDelaySeconds(attempt, configured = [30, 60, 120]) {
   const delays = values.length > 0 ? values : [30, 60, 120];
   const index = Math.min(Math.max(0, Math.trunc(Number(attempt) || 0)), delays.length - 1);
   return delays[index];
+}
+
+export function verificationAutoRecoverySettings(config = {}) {
+  const value = config?.verification_auto_recovery || {};
+  const delays = Array.isArray(value.probe_delays_seconds)
+    ? value.probe_delays_seconds.map(Number).filter((entry) => Number.isFinite(entry) && entry > 0)
+    : [];
+  return {
+    enabled: value.enabled === true,
+    probeDelaysMs: (delays.length > 0 ? delays : [300, 600, 1_200, 1_800])
+      .map((entry) => Math.max(1_000, entry * 1_000)),
+    readyConfirmations: Math.max(2, Math.floor(Number(value.ready_confirmations) || 2)),
+    confirmationIntervalMs: Math.max(
+      30_000,
+      Number(value.confirmation_interval_seconds) * 1_000 || 30_000,
+    ),
+    confirmationMaxAgeMs: Math.max(
+      60_000,
+      Number(value.confirmation_max_age_seconds) * 1_000 || 90_000,
+    ),
+    probeTimeoutMs: Math.max(10_000, Number(value.probe_timeout_ms) || 45_000),
+    pollIntervalMs: Math.max(500, Number(value.poll_interval_ms) || 2_000),
+    warmupIntervalMs: Math.max(3_000, Number(value.warmup_interval_ms) || 8_000),
+  };
+}
+
+export function verificationLockToken(state = {}) {
+  if (state?.requires_manual_clear !== true) return null;
+  return sha256([
+    String(state.updated_at || ""),
+    String(state.reason || ""),
+    String(state.last_url || ""),
+  ].join("\n"));
+}
+
+export function verificationProbeSchedule({
+  accessState = {},
+  recoveryState = {},
+  settings = {},
+  now = new Date(),
+  submissionWindow = { open: true, next_open_at: null },
+} = {}) {
+  const token = verificationLockToken(accessState);
+  if (!token) return { action: "continue", reason: "verification-lock-not-set" };
+  if (settings.enabled !== true) return { action: "wait", reason: "automatic-recovery-disabled" };
+  const observed = now instanceof Date ? now : new Date(now);
+  const nowMs = observed.getTime();
+  if (!Number.isFinite(nowMs)) throw new TypeError("now must be a valid date");
+  const sameLock = String(recoveryState.lock_token || "") === token;
+  const attempt = sameLock ? Math.max(0, Math.floor(Number(recoveryState.attempt) || 0)) : 0;
+  const lastReadyMs = sameLock
+    ? Date.parse(String(recoveryState.last_ready_at || ""))
+    : Number.NaN;
+  const readyAgeMs = Number.isFinite(lastReadyMs) ? nowMs - lastReadyMs : Number.POSITIVE_INFINITY;
+  const readyConfirmationsFresh = submissionWindow?.open === true
+    && readyAgeMs >= 0
+    && readyAgeMs <= Math.max(60_000, Number(settings.confirmationMaxAgeMs) || 90_000);
+  const delays = Array.isArray(settings.probeDelaysMs) && settings.probeDelaysMs.length > 0
+    ? settings.probeDelaysMs
+    : [300_000, 600_000, 1_200_000, 1_800_000];
+  const detectedMs = Date.parse(String(accessState.verification_last_detected_at || accessState.updated_at || ""));
+  const initialProbeMs = (Number.isFinite(detectedMs) ? detectedMs : nowMs) + delays[0];
+  let nextProbeMs = sameLock && Number.isFinite(Date.parse(String(recoveryState.next_probe_at || "")))
+    ? Date.parse(String(recoveryState.next_probe_at))
+    : initialProbeMs;
+  if (submissionWindow?.open !== true) {
+    const nextOpenMs = Date.parse(String(submissionWindow?.next_open_at || ""));
+    if (Number.isFinite(nextOpenMs)) nextProbeMs = Math.max(nextProbeMs, nextOpenMs);
+  }
+  return {
+    action: nowMs >= nextProbeMs && submissionWindow?.open === true ? "probe" : "wait",
+    reason: submissionWindow?.open === true ? "verification-probe-scheduled" : "submission-window-closed",
+    lock_token: token,
+    attempt,
+    ready_confirmations: sameLock && readyConfirmationsFresh
+      ? Math.max(0, Math.floor(Number(recoveryState.ready_confirmations) || 0))
+      : 0,
+    next_probe_at: new Date(nextProbeMs).toISOString(),
+  };
 }
 
 export function classifyWorkerFailure({ message = "", profileOwnerCount = 0 } = {}) {
@@ -1932,26 +2016,461 @@ async function activateFormalWindow({
   await writeJsonAtomic(path.join(stateRoot, "current_run.json"), currentRun);
 }
 
-async function waitForVerification({
+export async function runOzonVerificationProbe({
+  appRoot,
+  cdpEndpoint,
+  url,
+  timeoutMs = 45_000,
+  signal,
+  execFileFn = execFileAsync,
+} = {}) {
+  const probeScript = path.join(
+    path.resolve(String(appRoot || "")),
+    "scripts",
+    "flow_b_playwright",
+    "ozon-verification-probe.mjs",
+  );
+  const localNoProxy = [...new Set([
+    ...String(process.env.NO_PROXY || process.env.no_proxy || "").split(","),
+    "127.0.0.1",
+    "localhost",
+    "::1",
+  ].map((entry) => entry.trim()).filter(Boolean))].join(",");
+  try {
+    const result = await execFileFn(process.execPath, [
+      probeScript,
+      "--endpoint",
+      String(cdpEndpoint || ""),
+      "--url",
+      String(url || ""),
+      "--timeout-ms",
+      String(Math.max(10_000, Number(timeoutMs) || 45_000)),
+    ], {
+      timeout: Math.max(20_000, Number(timeoutMs) || 45_000) + 10_000,
+      maxBuffer: 1_000_000,
+      env: {
+        ...process.env,
+        NO_PROXY: localNoProxy,
+        no_proxy: localNoProxy,
+      },
+      ...(signal ? { signal } : {}),
+    });
+    const line = String(result?.stdout || "").trim().split(/\r?\n/u).filter(Boolean).at(-1);
+    const parsed = line ? JSON.parse(line) : null;
+    const structured = parsed?.version === "ozon-verification-probe-v1"
+      && ["READY", "BLOCKED", "INDETERMINATE"].includes(parsed?.classification)
+      && typeof parsed?.reason === "string"
+      && parsed.reason.trim().length > 0;
+    const readyStructured = parsed?.classification !== "READY" || (() => {
+      let finalUrl;
+      try {
+        finalUrl = new URL(String(parsed?.final_url || ""));
+      } catch {
+        return false;
+      }
+      const hostname = finalUrl.hostname.toLowerCase();
+      const httpStatus = Number(parsed?.http_status);
+      const structureReady = parsed?.product_evidence === true
+        || Math.max(0, Number(parsed?.product_link_count) || 0) >= 3;
+      return finalUrl.protocol === "https:"
+        && (hostname === "ozon.ru" || hostname.endsWith(".ozon.ru"))
+        && Number.isFinite(httpStatus) && httpStatus >= 200 && httpStatus < 300
+        && structureReady
+        && parsed?.captcha === false
+        && parsed?.authentication === false
+        && parsed?.soft_block === false
+        && /^[a-f0-9]{64}$/u.test(String(parsed?.text_sha256 || ""));
+    })();
+    if (!structured || !readyStructured) {
+      throw new Error("verification probe returned an invalid result");
+    }
+    return parsed;
+  } catch (error) {
+    return {
+      classification: "INDETERMINATE",
+      reason: "probe-process-failed",
+      error: String(error?.message || error).slice(0, 500),
+    };
+  }
+}
+
+export async function waitForVerification({
   stateRoot,
   currentRun,
   appRoot,
   runDir,
   stopFile,
   checkpointEnv = process.env,
+  config = {},
+  now = () => new Date(),
+  delayFn = delay,
+  probeFn = runOzonVerificationProbe,
+  profileOwnersFn = profileOwners,
+  cdpReadyFn = cdpReady,
+  readAccessStateFn = readOzonAccessState,
+  clearLockFn = clearOzonVerificationLockForAutomaticRecovery,
+  runCheckpointFn = runCheckpoint,
+  shouldStopFn = () => false,
 }) {
   const resumeFile = path.join(stateRoot, "resume.request");
+  const recoveryFile = path.join(stateRoot, "verification_recovery_state.json");
+  const auditFile = path.join(stateRoot, "verification_recovery.jsonl");
+  const accessStateFile = resolveOzonAccessStateFile(checkpointEnv);
+  const settings = verificationAutoRecoverySettings(config);
+  const timeZone = config.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai";
+  const cutoff = config.flow_env?.FLOW_B_DAILY_SUBMISSION_CUTOFF || "23:00";
+  const reportAfter = config.flow_env?.FLOW_B_DAILY_REPORT_AFTER || "23:30";
   await clearStaleVerificationResumeRequest(stateRoot);
-  await updateOperationalState(stateRoot, currentRun, {
-    status: "WAITING_FOR_VERIFICATION",
-    reason: "CAPTCHA, slider, MFA, or account security verification is required",
-    resume_file: resumeFile,
-  });
-  while (!fs.existsSync(resumeFile) && !fs.existsSync(stopFile) && !await acceptanceEnded(runDir)) {
-    await delay(2_000);
+  let lastStatusKey = null;
+  while (!shouldStopFn() && !fs.existsSync(stopFile) && !await acceptanceEnded(runDir)) {
+    if (!accessStateFile) {
+      if (fs.existsSync(resumeFile)) break;
+      if (lastStatusKey !== "access-state-unavailable") {
+        lastStatusKey = "access-state-unavailable";
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "WAITING_FOR_VERIFICATION",
+          reason: "CAPTCHA, slider, MFA, or account security verification is required",
+          resume_file: resumeFile,
+          automatic_recovery: false,
+          probe_reason: "access-state-path-unavailable",
+        });
+      }
+      await delayFn(settings.pollIntervalMs);
+      continue;
+    }
+    let accessState;
+    try {
+      accessState = await readAccessStateFn(accessStateFile, { strict: true });
+    } catch (error) {
+      if (lastStatusKey !== "access-state-unreadable") {
+        lastStatusKey = "access-state-unreadable";
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "WAITING_FOR_VERIFICATION",
+          reason: "verification access state is unreadable",
+          automatic_recovery: false,
+          probe_reason: "access-state-unreadable",
+          error: String(error?.message || error).slice(0, 500),
+        });
+      }
+      await delayFn(settings.pollIntervalMs);
+      continue;
+    }
+    if (accessState?.requires_manual_clear !== true) {
+      if (fs.existsSync(resumeFile)) break;
+      if (lastStatusKey !== "non-ozon-security-wait") {
+        lastStatusKey = "non-ozon-security-wait";
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "WAITING_FOR_VERIFICATION",
+          reason: "non-Ozon login, MFA, or account security verification is required",
+          resume_file: resumeFile,
+          automatic_recovery: false,
+          probe_reason: "ozon-verification-lock-not-set",
+        });
+      }
+      await delayFn(settings.pollIntervalMs);
+      continue;
+    }
+    if (fs.existsSync(resumeFile)) {
+      await fsp.unlink(resumeFile).catch(() => {});
+      await appendJsonLine(auditFile, {
+        at: now().toISOString(),
+        run_id: currentRun.run_id,
+        event: "resume-request-ignored",
+        reason: "verification-lock-still-set",
+      });
+    }
+    let recoveryState;
+    try {
+      recoveryState = await readJson(recoveryFile, {});
+    } catch (error) {
+      recoveryState = {};
+      await appendJsonLine(auditFile, {
+        at: now().toISOString(),
+        run_id: currentRun.run_id,
+        event: "recovery-state-reset",
+        reason: "recovery-state-unreadable",
+        error: String(error?.message || error).slice(0, 500),
+      });
+    }
+    const submissionWindow = dailyWindowState({ now: now(), timeZone, cutoff, reportAfter });
+    let schedule = verificationProbeSchedule({
+      accessState,
+      recoveryState,
+      settings,
+      now: now(),
+      submissionWindow,
+    });
+    if (String(recoveryState.run_id || "") !== String(currentRun.run_id || "")
+      || String(recoveryState.lock_token || "") !== String(schedule.lock_token || "")) {
+      recoveryState = {
+        version: 1,
+        run_id: currentRun.run_id,
+        lock_token: schedule.lock_token,
+        attempt: 0,
+        ready_confirmations: 0,
+        next_probe_at: schedule.next_probe_at || null,
+        updated_at: now().toISOString(),
+      };
+      await writeJsonAtomic(recoveryFile, recoveryState);
+      schedule = verificationProbeSchedule({
+        accessState,
+        recoveryState,
+        settings,
+        now: now(),
+        submissionWindow,
+      });
+    }
+    const statusKey = [schedule.reason, schedule.next_probe_at, schedule.attempt].join("|");
+    if (statusKey !== lastStatusKey) {
+      lastStatusKey = statusKey;
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "WAITING_FOR_VERIFICATION",
+        reason: "CAPTCHA, slider, MFA, or account security verification is required",
+        resume_file: resumeFile,
+        automatic_recovery: settings.enabled,
+        next_probe_at: schedule.next_probe_at || null,
+        probe_attempt: schedule.attempt,
+        probe_reason: schedule.reason,
+      });
+    }
+    if (schedule.action !== "probe") {
+      await delayFn(settings.pollIntervalMs);
+      continue;
+    }
+    const owners = await profileOwnersFn(absolute(config.browser?.profile_dir)).catch(() => []);
+    const cdpHealthy = owners.length === 1
+      && await cdpReadyFn(config.browser?.cdp_endpoint, config.browser?.cdp_health_timeout_ms).catch(() => false);
+    if (!cdpHealthy) {
+      const observedAt = now();
+      await writeJsonAtomic(recoveryFile, {
+        ...recoveryState,
+        run_id: currentRun.run_id,
+        lock_token: schedule.lock_token,
+        ready_confirmations: 0,
+        last_ready_at: null,
+        next_probe_at: null,
+        updated_at: observedAt.toISOString(),
+      });
+      await appendJsonLine(auditFile, {
+        at: observedAt.toISOString(),
+        run_id: currentRun.run_id,
+        event: "probe-deferred",
+        lock_token: schedule.lock_token,
+        reason: owners.length === 1 ? "cdp-unhealthy" : "profile-owner-not-unique",
+        profile_owner_count: owners.length,
+        cdp_healthy: false,
+      });
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "RECOVERING",
+        reason: owners.length === 1
+          ? "verification-probe-cdp-unhealthy"
+          : "verification-probe-profile-owner-not-unique",
+        automatic_recovery: true,
+      });
+      break;
+    }
+    const probeAbortController = new AbortController();
+    const stopMonitor = setInterval(() => {
+      if (shouldStopFn() || fs.existsSync(stopFile)) probeAbortController.abort();
+    }, 250);
+    stopMonitor.unref?.();
+    let probe;
+    try {
+      probe = await probeFn({
+        appRoot,
+        cdpEndpoint: config.browser?.cdp_endpoint,
+        url: accessState.last_url,
+        timeoutMs: settings.probeTimeoutMs,
+        signal: probeAbortController.signal,
+      });
+    } finally {
+      clearInterval(stopMonitor);
+    }
+    const probedAt = now();
+    await appendJsonLine(auditFile, {
+      at: probedAt.toISOString(),
+      run_id: currentRun.run_id,
+      event: "probe",
+      lock_token: schedule.lock_token,
+      attempt: schedule.attempt,
+      profile_owner_count: owners.length,
+      cdp_healthy: cdpHealthy,
+      ...probe,
+    });
+    let latestAccessState;
+    try {
+      latestAccessState = await readAccessStateFn(accessStateFile, { strict: true });
+    } catch (error) {
+      await appendJsonLine(auditFile, {
+        at: probedAt.toISOString(),
+        run_id: currentRun.run_id,
+        event: "probe-discarded",
+        reason: "access-state-unreadable-after-probe",
+        error: String(error?.message || error).slice(0, 500),
+      });
+      lastStatusKey = null;
+      await delayFn(settings.pollIntervalMs);
+      continue;
+    }
+    if (verificationLockToken(latestAccessState) !== schedule.lock_token) {
+      await writeJsonAtomic(recoveryFile, {
+        version: 1,
+        run_id: currentRun.run_id,
+        lock_token: verificationLockToken(latestAccessState),
+        attempt: 0,
+        ready_confirmations: 0,
+        next_probe_at: null,
+        updated_at: probedAt.toISOString(),
+      });
+      lastStatusKey = null;
+      continue;
+    }
+    if (shouldStopFn() || fs.existsSync(stopFile) || await acceptanceEnded(runDir)) break;
+    const postProbeWindow = dailyWindowState({ now: now(), timeZone, cutoff, reportAfter });
+    const postProbeOwners = await profileOwnersFn(absolute(config.browser?.profile_dir)).catch(() => []);
+    const postProbeCdpHealthy = postProbeOwners.length === 1
+      && await cdpReadyFn(
+        config.browser?.cdp_endpoint,
+        config.browser?.cdp_health_timeout_ms,
+      ).catch(() => false);
+    if (postProbeWindow.open !== true) {
+      await appendJsonLine(auditFile, {
+        at: now().toISOString(),
+        run_id: currentRun.run_id,
+        event: "probe-discarded",
+        lock_token: schedule.lock_token,
+        reason: "submission-window-closed-after-probe",
+      });
+      probe = {
+        classification: "INDETERMINATE",
+        reason: "submission-window-closed-after-probe",
+      };
+    } else if (!postProbeCdpHealthy) {
+      const resetAt = now();
+      await writeJsonAtomic(recoveryFile, {
+        ...recoveryState,
+        run_id: currentRun.run_id,
+        lock_token: schedule.lock_token,
+        ready_confirmations: 0,
+        last_ready_at: null,
+        next_probe_at: null,
+        updated_at: resetAt.toISOString(),
+      });
+      await appendJsonLine(auditFile, {
+        at: resetAt.toISOString(),
+        run_id: currentRun.run_id,
+        event: "probe-discarded",
+        lock_token: schedule.lock_token,
+        reason: postProbeOwners.length === 1
+          ? "cdp-became-unhealthy-after-probe"
+          : "profile-owner-changed-after-probe",
+        profile_owner_count: postProbeOwners.length,
+        cdp_healthy: false,
+      });
+      await updateOperationalState(stateRoot, currentRun, {
+        status: "RECOVERING",
+        reason: "verification-probe-browser-became-unhealthy",
+        automatic_recovery: true,
+      });
+      break;
+    }
+    if (probe.classification === "READY") {
+      if (shouldStopFn() || fs.existsSync(stopFile) || await acceptanceEnded(runDir)) break;
+      const decisionAt = now();
+      const decisionWindow = dailyWindowState({ now: decisionAt, timeZone, cutoff, reportAfter });
+      if (decisionWindow.open !== true) {
+        await appendJsonLine(auditFile, {
+          at: decisionAt.toISOString(),
+          run_id: currentRun.run_id,
+          event: "probe-discarded",
+          lock_token: schedule.lock_token,
+          reason: "submission-window-closed-before-clear",
+        });
+        recoveryState = {
+          ...recoveryState,
+          ready_confirmations: 0,
+          last_ready_at: null,
+          next_probe_at: decisionWindow.next_open_at || null,
+          updated_at: decisionAt.toISOString(),
+        };
+        await writeJsonAtomic(recoveryFile, recoveryState);
+        lastStatusKey = null;
+        continue;
+      }
+      const priorReadyAt = Date.parse(String(recoveryState.last_ready_at || ""));
+      const priorReadyAgeMs = Number.isFinite(priorReadyAt)
+        ? decisionAt.getTime() - priorReadyAt
+        : Number.POSITIVE_INFINITY;
+      const priorReadyFresh = String(recoveryState.lock_token || "") === schedule.lock_token
+        && priorReadyAgeMs >= settings.confirmationIntervalMs
+        && priorReadyAgeMs <= settings.confirmationMaxAgeMs;
+      const readyConfirmations = (priorReadyFresh
+        ? Math.max(0, Number(recoveryState.ready_confirmations) || 0)
+        : 0) + 1;
+      if (readyConfirmations >= settings.readyConfirmations) {
+        const cleared = await clearLockFn({
+          stateFile: accessStateFile,
+          expectedUpdatedAt: accessState.updated_at,
+          expectedReason: accessState.reason,
+          expectedLastUrl: accessState.last_url,
+          now: decisionAt,
+          warmupIntervalMs: settings.warmupIntervalMs,
+          evidence: {
+            lock_token: schedule.lock_token,
+            ready_confirmations: readyConfirmations,
+            probe_title: probe.title || null,
+            probe_final_url: probe.final_url || null,
+            probe_text_sha256: probe.text_sha256 || null,
+          },
+        });
+        if (cleared.cleared) {
+          await appendJsonLine(auditFile, {
+            at: probedAt.toISOString(),
+            run_id: currentRun.run_id,
+            event: "automatic-recovery",
+            lock_token: schedule.lock_token,
+            ready_confirmations: readyConfirmations,
+            browser_preserved: true,
+            evidence: cleared.evidence,
+          });
+          await updateOperationalState(stateRoot, currentRun, {
+            status: "RECOVERING",
+            reason: "verification-automatically-cleared",
+            automatic_recovery: true,
+          });
+          break;
+        }
+        lastStatusKey = null;
+        continue;
+      }
+      recoveryState = {
+        ...recoveryState,
+        lock_token: schedule.lock_token,
+        ready_confirmations: readyConfirmations,
+        last_ready_at: probedAt.toISOString(),
+        next_probe_at: new Date(probedAt.getTime() + settings.confirmationIntervalMs).toISOString(),
+        last_probe: probe,
+        updated_at: probedAt.toISOString(),
+      };
+    } else {
+      const nextAttempt = Math.max(0, Number(recoveryState.attempt) || 0) + 1;
+      const delayMs = settings.probeDelaysMs[Math.min(nextAttempt, settings.probeDelaysMs.length - 1)];
+      recoveryState = {
+        ...recoveryState,
+        lock_token: schedule.lock_token,
+        attempt: nextAttempt,
+        ready_confirmations: 0,
+        last_ready_at: null,
+        next_probe_at: new Date(probedAt.getTime() + delayMs).toISOString(),
+        last_probe: probe,
+        updated_at: probedAt.toISOString(),
+      };
+    }
+    await writeJsonAtomic(recoveryFile, recoveryState);
+    lastStatusKey = null;
   }
   if (fs.existsSync(resumeFile)) await fsp.unlink(resumeFile).catch(() => {});
-  await runCheckpoint(appRoot, runDir, "verification-wait", checkpointEnv);
+  await runCheckpointFn(appRoot, runDir, "verification-wait", checkpointEnv);
 }
 
 export async function clearStaleVerificationResumeRequest(stateRoot) {
@@ -2508,10 +3027,42 @@ async function superviseDirectPublishing({
             runDir,
             stopFile,
             checkpointEnv: workerEnvironment(config, currentRun),
+            config,
+            shouldStopFn: () => shuttingDown,
           });
         } else {
           await delay(seconds * 1000);
         }
+        continue;
+      }
+
+      const accessStateFile = resolveOzonAccessStateFile(workerEnvironment(config, currentRun));
+      let persistedAccessState;
+      try {
+        persistedAccessState = await readOzonAccessState(accessStateFile, { strict: true });
+      } catch (error) {
+        await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid });
+        await updateOperationalState(stateRoot, currentRun, {
+          status: "WAITING_FOR_VERIFICATION",
+          reason: "verification access state is unreadable",
+          automatic_recovery: false,
+          error: String(error?.message || error).slice(0, 500),
+        });
+        await delay(5_000);
+        continue;
+      }
+      if (persistedAccessState?.requires_manual_clear === true) {
+        await writeProcessOwners({ stateRoot, currentRun, browserPid: browserOwner.pid });
+        await waitForVerification({
+          stateRoot,
+          currentRun,
+          appRoot,
+          runDir,
+          stopFile,
+          checkpointEnv: workerEnvironment(config, currentRun),
+          config,
+          shouldStopFn: () => shuttingDown,
+        });
         continue;
       }
 
@@ -2748,6 +3299,8 @@ async function superviseDirectPublishing({
           runDir,
           stopFile,
           checkpointEnv: workerEnvironment(config, currentRun),
+          config,
+          shouldStopFn: () => shuttingDown,
         });
       } else {
         for (const pid of browserOwnerPidsForRecovery(decision, owners)) {
@@ -3174,6 +3727,8 @@ export async function supervise(configPath) {
             runDir,
             stopFile,
             checkpointEnv: checkpointEnvironment(config, currentRun),
+            config,
+            shouldStopFn: () => shuttingDown,
           });
           continue;
         }
@@ -3701,6 +4256,8 @@ export async function supervise(configPath) {
           runDir,
           stopFile,
           checkpointEnv: checkpointEnvironment(config, currentRun),
+          config,
+          shouldStopFn: () => shuttingDown,
         });
         restartAttempt = 0;
         continue;

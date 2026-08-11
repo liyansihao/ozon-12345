@@ -5,11 +5,13 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  clearOzonVerificationLockForAutomaticRecovery,
   createOzonAccessController,
   isOzonAuthenticationText,
   isOzonCaptchaText,
   isOzonAccessStoppedError,
   ozonAccessControllerFor,
+  readOzonAccessState,
   resolveOzonAccessStateFile,
 } from "../scripts/flow_b_playwright/ozon-access-controller.mjs";
 
@@ -323,7 +325,7 @@ test("a stale manual stop caused only by access denied is automatically recovere
   await fs.rm(dir, { recursive: true, force: true });
 });
 
-test("one CAPTCHA immediately persists a manual stop without an automated retry", async () => {
+test("one CAPTCHA immediately persists a verification stop without replaying the operation", async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-captcha-"));
   const stateFile = path.join(dir, "ozon_access_state.json");
   const logFile = path.join(dir, "ozon_access_timeline.jsonl");
@@ -350,8 +352,81 @@ test("one CAPTCHA immediately persists a manual stop without an automated retry"
   assert.equal(saved.requires_manual_clear, true);
   assert.equal(saved.captcha_retry_pending, false);
   assert.equal(saved.captcha_retry_count, 1);
+  assert.equal(saved.verification_retry_pending, true);
+  assert.equal(saved.verification_consecutive_failures, 1);
   const timeline = (await fs.readFile(logFile, "utf8")).trim().split("\n").map(JSON.parse);
   assert.deepEqual(timeline.map((row) => row.event), ["started", "stopped"]);
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("automatic recovery clears only the exact probed lock and restarts in safe warmup", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-auto-recovery-"));
+  const stateFile = path.join(dir, "ozon_access_state.json");
+  const locked = {
+    version: 2,
+    updated_at: "2026-08-11T12:58:23.739Z",
+    requires_manual_clear: true,
+    reason: "Ozon CAPTCHA required",
+    last_url: "https://www.ozon.ru/seller/example/",
+    current_interval_ms: 3_000,
+    warmup_complete: true,
+    verification_consecutive_failures: 2,
+  };
+  await fs.writeFile(stateFile, `${JSON.stringify(locked)}\n`);
+
+  const stale = await clearOzonVerificationLockForAutomaticRecovery({
+    stateFile,
+    expectedUpdatedAt: locked.updated_at,
+    expectedReason: "different lock",
+    expectedLastUrl: locked.last_url,
+  });
+  assert.equal(stale.cleared, false);
+  assert.equal(stale.reason, "verification-lock-changed");
+
+  const recovered = await clearOzonVerificationLockForAutomaticRecovery({
+    stateFile,
+    expectedUpdatedAt: locked.updated_at,
+    expectedReason: locked.reason,
+    expectedLastUrl: locked.last_url,
+    now: new Date("2026-08-11T13:30:00.000Z"),
+    warmupIntervalMs: 8_000,
+    evidence: { ready_confirmations: 2, lock_token: "token" },
+  });
+  assert.equal(recovered.cleared, true);
+  const saved = await readOzonAccessState(stateFile);
+  assert.equal(saved.requires_manual_clear, false);
+  assert.equal(saved.reason, null);
+  assert.equal(saved.current_interval_ms, 8_000);
+  assert.equal(saved.warmup_complete, false);
+  assert.equal(saved.warmup_successes, 0);
+  assert.equal(saved.stable_successes, 0);
+  assert.equal(saved.next_allowed_at_ms, Date.parse("2026-08-11T13:30:08.000Z"));
+  assert.equal(saved.verification_consecutive_failures, 2);
+  assert.equal(saved.verification_auto_recovery_evidence.ready_confirmations, 2);
+
+  let clock = Date.parse("2026-08-11T13:30:08.000Z");
+  const controller = createOzonAccessController({
+    stateFile,
+    baselineIntervalMs: 3_000,
+    warmupIntervalMs: 4_000,
+    maxIntervalMs: 8_000,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  });
+  await controller.run({ kind: "source", url: locked.last_url }, async () => ({ ok: true }));
+  const afterSuccess = await controller.snapshot();
+  assert.equal(afterSuccess.verification_consecutive_failures, 0);
+  assert.equal(afterSuccess.verification_retry_pending, false);
+  assert.equal(afterSuccess.verification_last_recovered_at, "2026-08-11T13:30:08.000Z");
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+test("strict access-state reads fail closed on corrupt JSON", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-ozon-corrupt-state-"));
+  const stateFile = path.join(dir, "ozon_access_state.json");
+  await fs.writeFile(stateFile, "{not-json\n");
+  await assert.rejects(readOzonAccessState(stateFile, { strict: true }), SyntaxError);
+  assert.deepEqual(await readOzonAccessState(stateFile), {});
   await fs.rm(dir, { recursive: true, force: true });
 });
 

@@ -38,6 +38,7 @@ import {
   resolveProductionLayout,
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
+  runOzonVerificationProbe,
   runDirectSourceRefresh,
   runFormalSourceRefresh,
   runInitialSourceRefresh,
@@ -47,6 +48,10 @@ import {
   stopOwnedWorker,
   submissionGateConvergenceDecision,
   supervisorShouldHonorSafeStop,
+  verificationAutoRecoverySettings,
+  verificationLockToken,
+  verificationProbeSchedule,
+  waitForVerification,
   waitForWorkerOrBrowserFailure,
   workerEnvironment,
 } from "../scripts/ozon_24h_supervisor.mjs";
@@ -1413,6 +1418,294 @@ test("verification wait discards a stale resume request before accepting a new o
   await assert.rejects(fs.access(resumeFile), { code: "ENOENT" });
   assert.equal(await clearStaleVerificationResumeRequest(stateRoot), false);
 
+  await fs.rm(stateRoot, { recursive: true, force: true });
+});
+
+test("verification recovery schedules only inside the submission window", () => {
+  const settings = verificationAutoRecoverySettings({
+    verification_auto_recovery: {
+      enabled: true,
+      probe_delays_seconds: [300, 600, 1200, 1800],
+      ready_confirmations: 2,
+      confirmation_interval_seconds: 30,
+      confirmation_max_age_seconds: 90,
+    },
+  });
+  const accessState = {
+    requires_manual_clear: true,
+    updated_at: "2026-08-11T10:00:00.000Z",
+    reason: "Ozon CAPTCHA required",
+    last_url: "https://www.ozon.ru/seller/example/",
+  };
+  const token = verificationLockToken(accessState);
+  assert.match(token, /^[a-f0-9]{64}$/u);
+  assert.equal(verificationProbeSchedule({
+    accessState,
+    settings,
+    now: new Date("2026-08-11T10:04:59.999Z"),
+    submissionWindow: { open: true },
+  }).action, "wait");
+  assert.equal(verificationProbeSchedule({
+    accessState,
+    settings,
+    now: new Date("2026-08-11T10:05:00.000Z"),
+    submissionWindow: { open: true },
+  }).action, "probe");
+  const closed = verificationProbeSchedule({
+    accessState,
+    settings,
+    now: new Date("2026-08-11T15:30:00.000Z"),
+    submissionWindow: { open: false, next_open_at: "2026-08-11T16:00:00.000Z" },
+  });
+  assert.equal(closed.action, "wait");
+  assert.equal(closed.next_probe_at, "2026-08-11T16:00:00.000Z");
+
+  const recoveryState = {
+    lock_token: token,
+    ready_confirmations: 1,
+    last_ready_at: "2026-08-11T10:05:00.000Z",
+    next_probe_at: "2026-08-11T10:05:30.000Z",
+  };
+  assert.equal(verificationProbeSchedule({
+    accessState,
+    recoveryState,
+    settings,
+    now: new Date("2026-08-11T10:05:30.000Z"),
+    submissionWindow: { open: true },
+  }).ready_confirmations, 1);
+  assert.equal(verificationProbeSchedule({
+    accessState,
+    recoveryState,
+    settings,
+    now: new Date("2026-08-11T10:06:31.000Z"),
+    submissionWindow: { open: true },
+  }).ready_confirmations, 0);
+  assert.equal(verificationProbeSchedule({
+    accessState,
+    recoveryState,
+    settings,
+    now: new Date("2026-08-11T15:30:00.000Z"),
+    submissionWindow: { open: false, next_open_at: "2026-08-11T16:00:00.000Z" },
+  }).ready_confirmations, 0);
+});
+
+test("verification probe subprocess accepts only a structured tri-state result", async () => {
+  let execOptions;
+  const ready = await runOzonVerificationProbe({
+    appRoot: "/app",
+    cdpEndpoint: "http://127.0.0.1:9223",
+    url: "https://www.ozon.ru/seller/example/",
+    execFileFn: async (_executable, _arguments, options) => {
+      execOptions = options;
+      return {
+        stdout: `warning\n${JSON.stringify({
+        version: "ozon-verification-probe-v1",
+        classification: "READY",
+        reason: "listing-structure-ready",
+        final_url: "https://www.ozon.ru/seller/example/",
+        http_status: 200,
+        product_link_count: 3,
+        product_evidence: false,
+        captcha: false,
+        authentication: false,
+        soft_block: false,
+        text_sha256: "a".repeat(64),
+        })}\n`,
+      };
+    },
+  });
+  assert.equal(ready.classification, "READY");
+  assert.match(execOptions.env.NO_PROXY, /(?:^|,)127\.0\.0\.1(?:,|$)/u);
+  assert.match(execOptions.env.no_proxy, /(?:^|,)localhost(?:,|$)/u);
+
+  const malformed = await runOzonVerificationProbe({
+    appRoot: "/app",
+    cdpEndpoint: "http://127.0.0.1:9223",
+    url: "https://www.ozon.ru/seller/example/",
+    execFileFn: async () => ({ stdout: "{}\n" }),
+  });
+  assert.equal(malformed.classification, "INDETERMINATE");
+  assert.equal(malformed.reason, "probe-process-failed");
+});
+
+test("verification wait requires two READY probes for the same lock before automatic recovery", async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-verification-auto-"));
+  const runDir = path.join(stateRoot, "runs", "run");
+  const profileDir = path.join(stateRoot, "profiles", "profile");
+  const accessStateFile = path.join(path.dirname(profileDir), "ozon_access_state.json");
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.mkdir(path.dirname(profileDir), { recursive: true });
+  await fs.writeFile(accessStateFile, `${JSON.stringify({
+    version: 2,
+    updated_at: "2026-08-11T01:00:00.000Z",
+    verification_last_detected_at: "2026-08-11T01:00:00.000Z",
+    requires_manual_clear: true,
+    reason: "Ozon CAPTCHA required",
+    last_url: "https://www.ozon.ru/seller/example/",
+    current_interval_ms: 3_000,
+    warmup_complete: true,
+  })}\n`);
+  await fs.writeFile(path.join(stateRoot, "verification_recovery_state.json"), "{invalid-json\n");
+  let clock = Date.parse("2026-08-11T02:00:00.000Z");
+  let probes = 0;
+  await waitForVerification({
+    stateRoot,
+    currentRun: { run_id: "run", run_dir: runDir },
+    appRoot: path.resolve(import.meta.dirname, ".."),
+    runDir,
+    stopFile: path.join(stateRoot, "stop.request"),
+    checkpointEnv: { FLOW_B_PW_PROFILE: profileDir },
+    config: {
+      browser: { profile_dir: profileDir, cdp_endpoint: "http://127.0.0.1:9223" },
+      flow_env: {
+        FLOW_B_DAILY_STORE_TIMEZONE: "Asia/Shanghai",
+        FLOW_B_DAILY_SUBMISSION_CUTOFF: "23:00",
+        FLOW_B_DAILY_REPORT_AFTER: "23:30",
+      },
+      verification_auto_recovery: {
+        enabled: true,
+        probe_delays_seconds: [300, 600, 1_200, 1_800],
+        ready_confirmations: 2,
+        confirmation_interval_seconds: 30,
+        confirmation_max_age_seconds: 90,
+        probe_timeout_ms: 45_000,
+        poll_interval_ms: 500,
+        warmup_interval_ms: 8_000,
+      },
+    },
+    now: () => new Date(clock),
+    delayFn: async (ms) => { clock += ms; },
+    profileOwnersFn: async () => [{ pid: 123 }],
+    cdpReadyFn: async () => true,
+    probeFn: async () => {
+      probes += 1;
+      if (probes === 2) clock += 61_000;
+      return {
+        classification: "READY",
+        reason: "listing-structure-ready",
+        final_url: "https://www.ozon.ru/seller/example/",
+        title: "Example — OZON",
+        text_sha256: "a".repeat(64),
+      };
+    },
+    runCheckpointFn: async () => {},
+  });
+  assert.equal(probes, 3);
+  const saved = JSON.parse(await fs.readFile(accessStateFile, "utf8"));
+  assert.equal(saved.requires_manual_clear, false);
+  assert.equal(saved.warmup_complete, false);
+  assert.equal(saved.current_interval_ms, 8_000);
+  const audit = (await fs.readFile(path.join(stateRoot, "verification_recovery.jsonl"), "utf8"))
+    .trim().split("\n").map(JSON.parse);
+  assert.deepEqual(audit.map((row) => row.event), [
+    "recovery-state-reset",
+    "probe",
+    "probe",
+    "probe",
+    "automatic-recovery",
+  ]);
+  await fs.rm(stateRoot, { recursive: true, force: true });
+});
+
+test("non-Ozon security waits for an explicit resume instead of entering the Ozon probe loop", async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-non-ozon-verification-"));
+  const runDir = path.join(stateRoot, "runs", "run");
+  const profileDir = path.join(stateRoot, "profiles", "profile");
+  const accessStateFile = path.join(path.dirname(profileDir), "ozon_access_state.json");
+  const resumeFile = path.join(stateRoot, "resume.request");
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.mkdir(path.dirname(profileDir), { recursive: true });
+  await fs.writeFile(accessStateFile, `${JSON.stringify({
+    version: 2,
+    requires_manual_clear: false,
+  })}\n`);
+  let probeCalls = 0;
+  let delays = 0;
+  await waitForVerification({
+    stateRoot,
+    currentRun: { run_id: "run", run_dir: runDir },
+    appRoot: path.resolve(import.meta.dirname, ".."),
+    runDir,
+    stopFile: path.join(stateRoot, "stop.request"),
+    checkpointEnv: { FLOW_B_PW_PROFILE: profileDir },
+    config: {
+      verification_auto_recovery: { enabled: true },
+      flow_env: {},
+    },
+    delayFn: async () => {
+      delays += 1;
+      await fs.writeFile(resumeFile, "resume\n");
+    },
+    probeFn: async () => {
+      probeCalls += 1;
+      return { classification: "READY" };
+    },
+    runCheckpointFn: async () => {},
+  });
+  assert.equal(delays, 1);
+  assert.equal(probeCalls, 0);
+  await assert.rejects(fs.access(resumeFile), { code: "ENOENT" });
+  await fs.rm(stateRoot, { recursive: true, force: true });
+});
+
+test("a READY probe that crosses the submission cutoff cannot clear the verification lock", async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-verification-cutoff-"));
+  const runDir = path.join(stateRoot, "runs", "run");
+  const profileDir = path.join(stateRoot, "profiles", "profile");
+  const accessStateFile = path.join(path.dirname(profileDir), "ozon_access_state.json");
+  const stopFile = path.join(stateRoot, "stop.request");
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.mkdir(path.dirname(profileDir), { recursive: true });
+  await fs.writeFile(accessStateFile, `${JSON.stringify({
+    version: 2,
+    updated_at: "2026-08-11T14:00:00.000Z",
+    verification_last_detected_at: "2026-08-11T14:00:00.000Z",
+    requires_manual_clear: true,
+    reason: "Ozon CAPTCHA required",
+    last_url: "https://www.ozon.ru/seller/example/",
+  })}\n`);
+  let clock = Date.parse("2026-08-11T14:59:50.000Z");
+  await waitForVerification({
+    stateRoot,
+    currentRun: { run_id: "run", run_dir: runDir },
+    appRoot: path.resolve(import.meta.dirname, ".."),
+    runDir,
+    stopFile,
+    checkpointEnv: { FLOW_B_PW_PROFILE: profileDir },
+    config: {
+      browser: { profile_dir: profileDir, cdp_endpoint: "http://127.0.0.1:9223" },
+      flow_env: {
+        FLOW_B_DAILY_STORE_TIMEZONE: "Asia/Shanghai",
+        FLOW_B_DAILY_SUBMISSION_CUTOFF: "23:00",
+        FLOW_B_DAILY_REPORT_AFTER: "23:30",
+      },
+      verification_auto_recovery: {
+        enabled: true,
+        probe_delays_seconds: [300, 600, 1_200, 1_800],
+        ready_confirmations: 2,
+        confirmation_interval_seconds: 30,
+        confirmation_max_age_seconds: 90,
+        poll_interval_ms: 500,
+      },
+    },
+    now: () => new Date(clock),
+    delayFn: async (ms) => {
+      clock += ms;
+      await fs.writeFile(stopFile, "stop\n");
+    },
+    profileOwnersFn: async () => [{ pid: 123 }],
+    cdpReadyFn: async () => true,
+    probeFn: async () => {
+      clock += 20_000;
+      return { classification: "READY", reason: "listing-structure-ready" };
+    },
+    runCheckpointFn: async () => {},
+  });
+  const saved = JSON.parse(await fs.readFile(accessStateFile, "utf8"));
+  assert.equal(saved.requires_manual_clear, true);
+  const audit = (await fs.readFile(path.join(stateRoot, "verification_recovery.jsonl"), "utf8"))
+    .trim().split("\n").map(JSON.parse);
+  assert.equal(audit.some((row) => row.reason === "submission-window-closed-after-probe"), true);
   await fs.rm(stateRoot, { recursive: true, force: true });
 });
 

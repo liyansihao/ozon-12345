@@ -301,6 +301,16 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
     max_recoveries_per_window: 2,
     probe_failure_threshold: 2,
   });
+  assert.deepEqual(config.verification_auto_recovery, {
+    enabled: true,
+    probe_delays_seconds: [300, 600, 1_200, 1_800],
+    ready_confirmations: 2,
+    confirmation_interval_seconds: 30,
+    confirmation_max_age_seconds: 90,
+    probe_timeout_ms: 45_000,
+    poll_interval_ms: 2_000,
+    warmup_interval_ms: 8_000,
+  });
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_RETENTION_PERCENT, "75");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MIN_IMAGE_PERCENT, "90");
   assert.equal(config.flow_env.FLOW_B_1688_MATCH_MAX_P95_MS, "15000");
@@ -408,6 +418,26 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
       },
     }),
     /producer_stale_ms=1200000/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      verification_auto_recovery: {
+        ...config.verification_auto_recovery,
+        enabled: false,
+      },
+    }),
+    /automatic verification recovery/u,
+  );
+  assert.throws(
+    () => validateConfig({
+      ...config,
+      verification_auto_recovery: {
+        ...config.verification_auto_recovery,
+        ready_confirmations: 1,
+      },
+    }),
+    /ready_confirmations=2/u,
   );
   assert.throws(
     () => validateConfig({

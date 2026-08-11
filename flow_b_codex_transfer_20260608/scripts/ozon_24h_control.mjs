@@ -644,6 +644,24 @@ function validateConfig(config) {
         throw new Error(`direct worker watchdog requires ${name}=${expected}`);
       }
     }
+    const verificationRecovery = config?.verification_auto_recovery || {};
+    const verificationContract = {
+      ready_confirmations: 2,
+      confirmation_interval_seconds: 30,
+      confirmation_max_age_seconds: 90,
+      probe_timeout_ms: 45_000,
+      poll_interval_ms: 2_000,
+      warmup_interval_ms: 8_000,
+    };
+    if (verificationRecovery.enabled !== true
+      || JSON.stringify(verificationRecovery.probe_delays_seconds) !== JSON.stringify([300, 600, 1_200, 1_800])) {
+      throw new Error("automatic verification recovery must be enabled with 300/600/1200/1800 second probes");
+    }
+    for (const [name, expected] of Object.entries(verificationContract)) {
+      if (Number(verificationRecovery[name]) !== expected) {
+        throw new Error(`automatic verification recovery requires ${name}=${expected}`);
+      }
+    }
     if (Number(config?.flow_env?.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET) !== 100) {
       throw new Error("1688 adaptive action evidence target must be 100");
     }

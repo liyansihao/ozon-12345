@@ -87,6 +87,74 @@ async function writeState(filename, state) {
   }
 }
 
+export async function readOzonAccessState(filename, { strict = false } = {}) {
+  const resolved = filename ? path.resolve(filename) : null;
+  if (!strict) return readState(resolved);
+  if (!resolved) return {};
+  try {
+    const value = JSON.parse(await fs.readFile(resolved, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new TypeError("Ozon access state must be a JSON object");
+    }
+    return value;
+  } catch (error) {
+    if (error?.code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+export async function clearOzonVerificationLockForAutomaticRecovery({
+  stateFile,
+  expectedUpdatedAt,
+  expectedReason,
+  expectedLastUrl,
+  evidence = {},
+  now = new Date(),
+  warmupIntervalMs = 8_000,
+} = {}) {
+  const filename = stateFile ? path.resolve(stateFile) : null;
+  if (!filename) return { cleared: false, reason: "access-state-path-unavailable" };
+  const prior = await readOzonAccessState(filename, { strict: true });
+  if (prior?.requires_manual_clear !== true) {
+    return { cleared: false, reason: "verification-lock-not-set", filename };
+  }
+  if (String(prior.updated_at || "") !== String(expectedUpdatedAt || "")
+    || String(prior.reason || "") !== String(expectedReason || "")
+    || String(prior.last_url || "") !== String(expectedLastUrl || "")) {
+    return { cleared: false, reason: "verification-lock-changed", filename };
+  }
+  const observed = now instanceof Date ? now : new Date(now);
+  if (!Number.isFinite(observed.getTime())) throw new TypeError("now must be a valid date");
+  const recoveredAt = observed.toISOString();
+  const intervalMs = Math.max(1_000, Number(warmupIntervalMs) || 8_000);
+  const recoveryEvidence = {
+    recovered_at: recoveredAt,
+    source: "supervisor-automatic-verification-recovery",
+    prior_reason: String(prior.reason || "verification required"),
+    prior_url: String(prior.last_url || "") || null,
+    ...evidence,
+  };
+  const next = {
+    ...prior,
+    updated_at: recoveredAt,
+    requires_manual_clear: false,
+    captcha_retry_pending: false,
+    captcha_retry_at: null,
+    reason: null,
+    current_interval_ms: Math.max(Number(prior.current_interval_ms) || 0, intervalMs),
+    warmup_started_at_ms: observed.getTime(),
+    warmup_successes: 0,
+    warmup_complete: false,
+    stable_successes: 0,
+    next_allowed_at_ms: observed.getTime() + intervalMs,
+    verification_retry_pending: false,
+    verification_auto_recovered_at: recoveredAt,
+    verification_auto_recovery_evidence: recoveryEvidence,
+  };
+  await writeState(filename, next);
+  return { cleared: true, filename, evidence: recoveryEvidence, state: next };
+}
+
 export function createOzonAccessController({
   stateFile = null,
   logFile = null,
@@ -200,6 +268,12 @@ export function createOzonAccessController({
     return Number.isFinite(value) && value >= 0 ? value : warmupInterval;
   };
   const recordSuccess = (completedAt) => {
+    if (state.verification_retry_pending || Number(state.verification_consecutive_failures) > 0) {
+      state.verification_retry_pending = false;
+      state.verification_retry_at = null;
+      state.verification_consecutive_failures = 0;
+      state.verification_last_recovered_at = new Date(completedAt).toISOString();
+    }
     if (!state.warmup_complete) {
       state.warmup_successes = Math.max(0, Number(state.warmup_successes) || 0) + 1;
       state.stable_successes = Math.max(0, Number(state.stable_successes) || 0) + 1;
@@ -346,6 +420,11 @@ export function createOzonAccessController({
           captcha_retry_count: isOzonCaptchaError(failure)
             ? Math.max(0, Number(state?.captcha_retry_count) || 0) + 1
             : Math.max(0, Number(state?.captcha_retry_count) || 0),
+          verification_retry_pending: true,
+          verification_retry_at: null,
+          verification_consecutive_failures:
+            Math.max(0, Number(state?.verification_consecutive_failures) || 0) + 1,
+          verification_last_detected_at: new Date(detectedAt).toISOString(),
           reason: String(failure?.message || failure),
         };
         await persist();

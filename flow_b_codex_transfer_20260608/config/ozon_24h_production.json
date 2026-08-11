@@ -59,6 +59,21 @@
     "max_recoveries_per_window": 2,
     "probe_failure_threshold": 2
   },
+  "verification_auto_recovery": {
+    "enabled": true,
+    "probe_delays_seconds": [
+      300,
+      600,
+      1200,
+      1800
+    ],
+    "ready_confirmations": 2,
+    "confirmation_interval_seconds": 30,
+    "confirmation_max_age_seconds": 90,
+    "probe_timeout_ms": 45000,
+    "poll_interval_ms": 2000,
+    "warmup_interval_ms": 8000
+  },
   "minimum_free_disk_kb": 5242880,
   "browser": {
     "cdp_endpoint": "http://127.0.0.1:9223",
