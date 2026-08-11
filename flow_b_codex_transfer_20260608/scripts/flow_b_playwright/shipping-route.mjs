@@ -27,8 +27,6 @@ export function selectShippingRoute({
   const uralId = Number(uralWarehouseId);
   if (!Number.isFinite(weight) || weight < 0) throw new TypeError("product weight must be a non-negative number");
   if (!(Number.isFinite(threshold) && threshold > 0)) throw new TypeError("weight threshold must be positive");
-  if (!(postalId > 0)) throw new TypeError("postal warehouse ID must be positive");
-
   const forced = Boolean(forceUral);
   const heavy = Boolean(weightRouting) && weight > threshold;
   const useUral = forced || heavy;
@@ -46,6 +44,7 @@ export function selectShippingRoute({
       routeReason,
     };
   }
+  if (!useUral && !(postalId > 0)) throw new TypeError("postal warehouse ID must be positive");
   return {
     available: true,
     route: useUral ? "ural" : "postal",

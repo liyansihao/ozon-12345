@@ -55,6 +55,11 @@ test("building-block categories force Ural even when ERP weight is below 500g", 
     thresholdGrams: 500,
     routeReason: "building-block-category",
   });
+  assert.equal(selectShippingRoute({
+    weightGrams: 400,
+    uralWarehouseId: 202,
+    forceUral: true,
+  }).warehouseId, 202);
 });
 
 test("product weight prefers ERP category specifications and missing Ural fails closed", () => {

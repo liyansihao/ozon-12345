@@ -1831,6 +1831,18 @@ export function createPublishRunner({
         if (shippingRoute) return shippingRoute;
         const weightGrams = productWeightGrams(productInfo, detail || item);
         const forceUral = isBuildingBlockCategory(category?.labels);
+        if (targetConfig.weightRouting !== true && !forceUral) {
+          shippingRoute = {
+            available: true,
+            route: "postal",
+            logistics: "CEL",
+            warehouseId: Number(targetConfig.warehouseId || 0) || null,
+            weightGrams,
+            thresholdGrams: Number(targetConfig.weightThresholdGrams || 500),
+            routeReason: "postal-default",
+          };
+          return shippingRoute;
+        }
         shippingRoute = selectShippingRoute({
           weightGrams,
           postalWarehouseId: targetConfig.postalWarehouseId || targetConfig.warehouseId,
