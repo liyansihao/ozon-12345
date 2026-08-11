@@ -63,6 +63,43 @@ function isTransientNavigationContextError(error) {
     .test(String(error?.message || error || ""));
 }
 
+export const MAOZI_REQUEST_TIMEOUT_CODE = "MAOZI_REQUEST_TIMEOUT";
+export const DEFAULT_MAOZI_REQUEST_TIMEOUT_MS = 30_000;
+export const MAX_MAOZI_GET_TOTAL_BUDGET_MS = 120_000;
+
+function positiveMilliseconds(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.ceil(parsed) : fallback;
+}
+
+function maoziRequestTimeoutError({
+  endpoint,
+  method,
+  phase,
+  timeoutMs,
+  scope = "attempt",
+  totalBudgetMs = null,
+}) {
+  const normalizedMethod = String(method || "GET").toUpperCase();
+  const normalizedTimeoutMs = Math.max(1, Math.ceil(Number(timeoutMs) || 1));
+  const error = new Error(
+    `Maozi ${normalizedMethod} ${endpoint} timed out during ${phase} after ${normalizedTimeoutMs}ms`,
+  );
+  error.name = "MaoziRequestTimeoutError";
+  error.code = MAOZI_REQUEST_TIMEOUT_CODE;
+  error.endpoint = String(endpoint || "");
+  error.method = normalizedMethod;
+  error.phase = String(phase || "request");
+  error.timeout_ms = normalizedTimeoutMs;
+  error.timeout_scope = scope;
+  if (totalBudgetMs !== null) error.total_budget_ms = Number(totalBudgetMs);
+  return error;
+}
+
+function isMaoziRequestTimeoutError(error) {
+  return error?.code === MAOZI_REQUEST_TIMEOUT_CODE;
+}
+
 export function createMaoziClient({ transport }) {
   if (typeof transport !== "function") throw new TypeError("Maozi transport must be a function");
 
@@ -340,11 +377,61 @@ export function createMaoziPageTransport({
   context,
   baseUrl = "https://api.maozierp.com",
   maxGetAttempts = 6,
-  retrySleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  requestTimeoutMs = DEFAULT_MAOZI_REQUEST_TIMEOUT_MS,
+  getTotalBudgetMs = MAX_MAOZI_GET_TOTAL_BUDGET_MS,
+  scheduleTimeout = setTimeout,
+  cancelTimeout = clearTimeout,
+  now = Date.now,
+  retrySleep = (ms) => new Promise((resolve) => scheduleTimeout(resolve, ms)),
   recoverUnauthorized = null,
 }) {
   if (!page || typeof page.evaluate !== "function") throw new TypeError("A Playwright Maozi page is required");
-  const evaluate = (activePage, request) => activePage.evaluate(async (input) => {
+  if (typeof scheduleTimeout !== "function") throw new TypeError("scheduleTimeout must be a function");
+  if (typeof cancelTimeout !== "function") throw new TypeError("cancelTimeout must be a function");
+  if (typeof now !== "function") throw new TypeError("now must be a function");
+  const configuredRequestTimeoutMs = positiveMilliseconds(
+    requestTimeoutMs,
+    DEFAULT_MAOZI_REQUEST_TIMEOUT_MS,
+  );
+  const configuredGetTotalBudgetMs = Math.min(
+    MAX_MAOZI_GET_TOTAL_BUDGET_MS,
+    positiveMilliseconds(getTotalBudgetMs, MAX_MAOZI_GET_TOTAL_BUDGET_MS),
+  );
+  const currentTimeMs = () => {
+    const observed = now();
+    const timestamp = observed instanceof Date ? observed.getTime() : Number(observed);
+    if (!Number.isFinite(timestamp)) throw new TypeError("now must return a finite timestamp");
+    return timestamp;
+  };
+  const withHardTimeout = (operation, timeoutMs, details) => {
+    const boundedTimeoutMs = Math.max(1, Math.ceil(Number(timeoutMs) || 1));
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = scheduleTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(maoziRequestTimeoutError({ ...details, timeoutMs: boundedTimeoutMs }));
+      }, boundedTimeoutMs);
+      Promise.resolve()
+        .then(operation)
+        .then(
+          (value) => {
+            if (settled) return;
+            settled = true;
+            cancelTimeout(timer);
+            resolve(value);
+          },
+          (error) => {
+            if (settled) return;
+            settled = true;
+            cancelTimeout(timer);
+            reject(error);
+          },
+        );
+    });
+  };
+  const evaluate = async (activePage, request, timeoutMs, runWithTimeout) => {
+    const result = await runWithTimeout(() => activePage.evaluate(async (input) => {
     let token = "";
     try {
       token = JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "";
@@ -365,6 +452,13 @@ export function createMaoziPageTransport({
       init.body = JSON.stringify(input.body);
     }
 
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    let requestTimedOut = false;
+    const timeout = setTimeout(() => {
+      requestTimedOut = true;
+      controller?.abort();
+    }, input.timeout_ms);
+    if (controller) init.signal = controller.signal;
     try {
       const response = await fetch(url.toString(), init);
       const text = await response.text();
@@ -376,57 +470,35 @@ export function createMaoziPageTransport({
       }
       return { status: response.status, json };
     } catch (error) {
-      return { status: 0, json: { error: String(error?.message || error) } };
+      return {
+        status: 0,
+        json: { error: String(error?.message || error) },
+        request_timed_out: requestTimedOut || controller?.signal?.aborted === true,
+      };
+    } finally {
+      clearTimeout(timeout);
     }
-  }, request);
-  const contextRequest = async (activePage, request) => {
-    if (!context?.request || typeof context.request.fetch !== "function") return null;
-    const identity = await activePage.evaluate(() => {
-      try {
-        return {
-          token: JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "",
-          userAgent: navigator.userAgent || "",
-        };
-      } catch {
-        return { token: "", userAgent: "" };
-      }
-    });
-    const url = new URL(request.endpoint, request.baseUrl);
-    for (const [key, value] of Object.entries(request.query || {})) {
-      for (const entry of Array.isArray(value) ? value : [value]) {
-        if (entry !== undefined && entry !== null) url.searchParams.append(key, String(entry));
-      }
+    }, { ...request, timeout_ms: timeoutMs }), timeoutMs, "page-fetch");
+    if (result?.request_timed_out === true) {
+      throw maoziRequestTimeoutError({
+        endpoint: request.endpoint,
+        method: request.method,
+        phase: "page-fetch",
+        timeoutMs,
+      });
     }
-    const headers = {
-      "Accept-Language": "zh-CN",
-      Client: "pc",
-      Origin: "https://ozon.maozierp.com",
-      Referer: "https://ozon.maozierp.com/",
-    };
-    if (identity?.token) headers.Authorization = `Bearer ${identity.token}`;
-    if (identity?.userAgent) headers["User-Agent"] = identity.userAgent;
-    const options = { method: request.method, headers, failOnStatusCode: false };
-    if (request.body !== undefined && request.body !== null && request.method !== "GET") {
-      headers["Content-Type"] = "application/json";
-      options.data = request.body;
-    }
-    const response = await context.request.fetch(url.toString(), options);
-    const text = await response.text();
-    let json;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = { raw: text };
-    }
-    return { status: typeof response.status === "function" ? response.status() : Number(response.status), json };
+    return result;
   };
   let httpZeroRecovery = null;
-  const recoverStalePage = async (failedPage) => {
+  const recoverStalePage = async (failedPage, timeoutMs) => {
     if (page !== failedPage) return page;
     if (typeof failedPage?.reload !== "function") return null;
     if (!httpZeroRecovery) {
       httpZeroRecovery = (async () => {
-        await failedPage.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
+        await failedPage.reload({
+          waitUntil: "domcontentloaded",
+          timeout: Math.max(1, Math.min(60_000, Number(timeoutMs) || 1)),
+        });
         return failedPage;
       })();
     }
@@ -447,57 +519,242 @@ export function createMaoziPageTransport({
       body,
       headers: {},
     };
+    const isGet = request.method === "GET";
+    const getDeadlineAt = isGet ? currentTimeMs() + configuredGetTotalBudgetMs : null;
+    const remainingGetBudgetMs = () => (
+      isGet ? Math.max(0, Math.ceil(getDeadlineAt - currentTimeMs())) : null
+    );
+    const getBudgetTimeout = (phase) => maoziRequestTimeoutError({
+      endpoint: request.endpoint,
+      method: request.method,
+      phase,
+      timeoutMs: configuredGetTotalBudgetMs,
+      scope: "get-total-budget",
+      totalBudgetMs: configuredGetTotalBudgetMs,
+    });
+    const timeoutForPhase = (phase) => {
+      if (!isGet) return configuredRequestTimeoutMs;
+      const remaining = remainingGetBudgetMs();
+      if (!(remaining > 0)) throw getBudgetTimeout(phase);
+      return Math.max(1, Math.min(configuredRequestTimeoutMs, remaining));
+    };
+    const runWithTimeout = (operation, timeoutMs, phase, scope = "attempt") => withHardTimeout(
+      operation,
+      timeoutMs,
+      {
+        endpoint: request.endpoint,
+        method: request.method,
+        phase,
+        scope,
+        totalBudgetMs: isGet ? configuredGetTotalBudgetMs : null,
+      },
+    );
+    const evaluateRequest = (activePage, phase = "page-fetch") => {
+      const timeoutMs = timeoutForPhase(phase);
+      return evaluate(
+        activePage,
+        request,
+        timeoutMs,
+        (operation, boundedTimeoutMs) => runWithTimeout(
+          operation,
+          boundedTimeoutMs,
+          phase,
+        ),
+      );
+    };
+    const sleepWithinGetBudget = async (delayMs, phase) => {
+      const remaining = remainingGetBudgetMs();
+      if (!(remaining > 0)) throw getBudgetTimeout(phase);
+      const boundedDelay = Math.max(0, Math.min(Number(delayMs) || 0, remaining - 1));
+      if (!(boundedDelay > 0)) throw getBudgetTimeout(phase);
+      await runWithTimeout(
+        () => retrySleep(boundedDelay),
+        remaining,
+        phase,
+        "get-total-budget",
+      );
+    };
+    const contextRequest = async (activePage) => {
+      if (!context?.request || typeof context.request.fetch !== "function") return null;
+      const identityTimeoutMs = timeoutForPhase("context-identity");
+      const identity = await runWithTimeout(() => activePage.evaluate(() => {
+        try {
+          return {
+            token: JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "",
+            userAgent: navigator.userAgent || "",
+          };
+        } catch {
+          return { token: "", userAgent: "" };
+        }
+      }), identityTimeoutMs, "context-identity");
+      const url = new URL(request.endpoint, request.baseUrl);
+      for (const [key, value] of Object.entries(request.query || {})) {
+        for (const entry of Array.isArray(value) ? value : [value]) {
+          if (entry !== undefined && entry !== null) url.searchParams.append(key, String(entry));
+        }
+      }
+      const headers = {
+        "Accept-Language": "zh-CN",
+        Client: "pc",
+        Origin: "https://ozon.maozierp.com",
+        Referer: "https://ozon.maozierp.com/",
+      };
+      if (identity?.token) headers.Authorization = `Bearer ${identity.token}`;
+      if (identity?.userAgent) headers["User-Agent"] = identity.userAgent;
+      const fetchTimeoutMs = timeoutForPhase("context-fetch");
+      const options = {
+        method: request.method,
+        headers,
+        failOnStatusCode: false,
+        timeout: fetchTimeoutMs,
+      };
+      if (request.body !== undefined && request.body !== null && request.method !== "GET") {
+        headers["Content-Type"] = "application/json";
+        options.data = request.body;
+      }
+      let response;
+      try {
+        response = await runWithTimeout(
+          () => context.request.fetch(url.toString(), options),
+          fetchTimeoutMs,
+          "context-fetch",
+        );
+      } catch (error) {
+        if (isMaoziRequestTimeoutError(error)) throw error;
+        if (/timeout.*exceeded|timed?\s*out/iu.test(String(error?.message || error))) {
+          throw maoziRequestTimeoutError({
+            endpoint: request.endpoint,
+            method: request.method,
+            phase: "context-fetch",
+            timeoutMs: fetchTimeoutMs,
+            totalBudgetMs: isGet ? configuredGetTotalBudgetMs : null,
+          });
+        }
+        throw error;
+      }
+      const bodyTimeoutMs = timeoutForPhase("context-response-body");
+      const text = await runWithTimeout(
+        () => response.text(),
+        bodyTimeoutMs,
+        "context-response-body",
+      );
+      let json;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {
+        json = { raw: text };
+      }
+      return {
+        status: typeof response.status === "function" ? response.status() : Number(response.status),
+        json,
+      };
+    };
     let lastError;
     let unauthorizedRetried = false;
-    const attempts = request.method === "GET" ? Math.max(1, Number(maxGetAttempts) || 1) : 1;
+    const attempts = isGet ? Math.max(1, Math.floor(Number(maxGetAttempts) || 1)) : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        let result = await evaluate(page, { ...request, headers: {} });
-        if (!unauthorizedRetried
+        let result = await evaluateRequest(page);
+        if (isGet
+          && !unauthorizedRetried
           && (Number(result?.status) === 401 || Number(result?.status) === 403)
           && typeof recoverUnauthorized === "function") {
           unauthorizedRetried = true;
-          const recoveredPage = await recoverUnauthorized(page, {
-            endpoint: request.endpoint,
-            method: request.method,
-            status: Number(result.status),
-          });
+          const recoveryTimeoutMs = timeoutForPhase("unauthorized-recovery");
+          const recoveredPage = await runWithTimeout(
+            () => recoverUnauthorized(page, {
+              endpoint: request.endpoint,
+              method: request.method,
+              status: Number(result.status),
+            }),
+            recoveryTimeoutMs,
+            "unauthorized-recovery",
+          );
           if (recoveredPage) page = recoveredPage;
-          result = await evaluate(page, { ...request, headers: {} });
+          result = await evaluateRequest(page);
         }
-        const transientGet = request.method === "GET" && (
+        const transientGet = isGet && (
           Number(result?.status) === 0
           || /请求过于频繁|too many requests|rate.?limit|failed to fetch/i.test(String(result?.json?.msg || result?.json?.message || result?.json?.error || ""))
         );
         if (!transientGet || attempt + 1 >= attempts) {
           if (Number(result?.status) === 0) {
             const failedPage = page;
-            const recovered = request.method === "GET"
-              ? await recoverStalePage(failedPage).catch(() => null)
-              : null;
-            if (recovered) {
-              const retry = await evaluate(page, { ...request, headers: {} });
-              if (Number(retry?.status) !== 0) return retry;
+            let timeoutFailure = null;
+            let recovered = null;
+            if (isGet) {
+              try {
+                const recoveryTimeoutMs = timeoutForPhase("page-recovery");
+                recovered = await runWithTimeout(
+                  () => recoverStalePage(failedPage, recoveryTimeoutMs),
+                  recoveryTimeoutMs,
+                  "page-recovery",
+                );
+              } catch (error) {
+                if (isMaoziRequestTimeoutError(error)) timeoutFailure = error;
+              }
             }
-            const fallback = await contextRequest(page, request).catch(() => null);
-            if (fallback) return fallback;
+            if (recovered) {
+              try {
+                const retry = await evaluateRequest(page, "page-recovery-fetch");
+                if (Number(retry?.status) !== 0) return retry;
+              } catch (error) {
+                if (isMaoziRequestTimeoutError(error)) timeoutFailure = error;
+              }
+            }
+            if (isGet) {
+              try {
+                const fallback = await contextRequest(page);
+                if (fallback) return fallback;
+              } catch (error) {
+                if (isMaoziRequestTimeoutError(error)) timeoutFailure = error;
+              }
+            }
+            if (timeoutFailure) throw timeoutFailure;
           }
           return result;
         }
-        await retrySleep(Math.min(5_000, 750 * (2 ** attempt)));
+        await sleepWithinGetBudget(Math.min(5_000, 750 * (2 ** attempt)), "get-retry-backoff");
       } catch (error) {
         lastError = error;
-        if (request.method === "GET"
+        if (isGet && isMaoziRequestTimeoutError(error)) {
+          if (remainingGetBudgetMs() > 0 && attempt + 1 < attempts) {
+            await sleepWithinGetBudget(
+              Math.min(5_000, 750 * (2 ** attempt)),
+              "get-timeout-retry-backoff",
+            );
+            continue;
+          }
+          if (remainingGetBudgetMs() > 0
+            && ["page-fetch", "page-recovery-fetch"].includes(String(error?.phase || ""))) {
+            try {
+              const fallback = await contextRequest(page);
+              if (fallback) return fallback;
+            } catch (fallbackError) {
+              lastError = fallbackError;
+            }
+          }
+          if (!(remainingGetBudgetMs() > 0)) throw getBudgetTimeout("get-total-budget");
+          throw lastError;
+        }
+        if (isGet
           && isTransientNavigationContextError(error)
           && attempt + 1 < attempts) {
           // ERP route changes can replace the page execution context while a
           // read-only request is being prepared. Retrying the GET on the new
           // context is safe; POST requests remain single-shot and are never
           // replayed because their server-side status could be unknown.
-          await retrySleep(Math.min(2_000, 250 * (attempt + 1)));
+          await sleepWithinGetBudget(
+            Math.min(2_000, 250 * (attempt + 1)),
+            "navigation-retry-backoff",
+          );
           continue;
         }
-        if (!context || !/target page|context or browser has been closed/i.test(String(error?.message || error))) throw error;
+        if (!isGet
+          || !context
+          || !/target page|context or browser has been closed/i.test(String(error?.message || error))) {
+          throw error;
+        }
         const previous = page;
         let replacement = null;
         for (let poll = 0; poll < 20 && !replacement; poll += 1) {
@@ -510,12 +767,25 @@ export function createMaoziPageTransport({
               return false;
             }
           });
-          if (!replacement) await new Promise((resolve) => setTimeout(resolve, 100));
+          if (!replacement) await sleepWithinGetBudget(100, "replacement-page-poll");
         }
         if (!replacement) {
-          replacement = await context.newPage();
-          await replacement.goto("https://ozon.maozierp.com/#/dashboard", { waitUntil: "domcontentloaded", timeout: 60000 });
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          const newPageTimeoutMs = timeoutForPhase("replacement-page-create");
+          replacement = await runWithTimeout(
+            () => context.newPage(),
+            newPageTimeoutMs,
+            "replacement-page-create",
+          );
+          const navigationTimeoutMs = timeoutForPhase("replacement-page-navigation");
+          await runWithTimeout(
+            () => replacement.goto("https://ozon.maozierp.com/#/dashboard", {
+              waitUntil: "domcontentloaded",
+              timeout: navigationTimeoutMs,
+            }),
+            navigationTimeoutMs,
+            "replacement-page-navigation",
+          );
+          await sleepWithinGetBudget(500, "replacement-page-settle");
         }
         page = replacement;
       }

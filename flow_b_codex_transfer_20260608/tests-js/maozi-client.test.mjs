@@ -16,6 +16,54 @@ function makeTransport(fixtures) {
   return transport;
 }
 
+function createControlledClock() {
+  let timestamp = 0;
+  let sequence = 0;
+  const timers = new Map();
+  return {
+    now: () => timestamp,
+    scheduleTimeout(callback, delayMs) {
+      sequence += 1;
+      timers.set(sequence, {
+        at: timestamp + Math.max(0, Number(delayMs) || 0),
+        callback,
+      });
+      return sequence;
+    },
+    cancelTimeout(timer) {
+      timers.delete(timer);
+    },
+    pendingCount: () => timers.size,
+    async runNext() {
+      const next = [...timers.entries()]
+        .sort((left, right) => left[1].at - right[1].at || left[0] - right[0])[0];
+      if (!next) throw new Error("controlled clock has no pending timer");
+      const [timer, value] = next;
+      timers.delete(timer);
+      timestamp = value.at;
+      value.callback();
+      for (let index = 0; index < 100; index += 1) await Promise.resolve();
+    },
+  };
+}
+
+async function settleWithControlledClock(promise, clock, maximumTimers = 20) {
+  let outcome = null;
+  promise.then(
+    (value) => { outcome = { value }; },
+    (error) => { outcome = { error }; },
+  );
+  for (let index = 0; index <= maximumTimers && !outcome; index += 1) {
+    for (let flush = 0; flush < 100 && !outcome; flush += 1) await Promise.resolve();
+    if (outcome) break;
+    if (clock.pendingCount() === 0) throw new Error("promise remained pending without a controlled timer");
+    await clock.runNext();
+  }
+  if (!outcome) throw new Error(`promise did not settle after ${maximumTimers} controlled timers`);
+  if (outcome.error) throw outcome.error;
+  return outcome.value;
+}
+
 test("client paginates favorites and resolves the first normalized publish target", async () => {
   const transport = makeTransport({
     "/api.product.favorite/lists": (path, request, calls) => {
@@ -440,10 +488,13 @@ test("browser page transport includes Maozi headers and safely parses non-JSON e
       requests.push(request);
       const savedFetch = globalThis.fetch;
       const savedLocalStorage = globalThis.localStorage;
-      globalThis.fetch = async () => ({
-        status: 502,
-        text: async () => "<html>Bad Gateway</html>",
-      });
+      globalThis.fetch = async (_url, init) => {
+        assert.equal(init.signal instanceof AbortSignal, true);
+        return {
+          status: 502,
+          text: async () => "<html>Bad Gateway</html>",
+        };
+      };
       globalThis.localStorage = {
         getItem: () => JSON.stringify({ accessToken: "abc123" }),
       };
@@ -468,6 +519,193 @@ test("browser page transport includes Maozi headers and safely parses non-JSON e
   assert.equal(requests[0].headers["Accept-Language"], "zh-CN");
   assert.equal(requests[0].headers.Client, "pc");
   assert.equal(requests[0].headers.Authorization, "Bearer abc123");
+  assert.equal(requests[0].timeout_ms, 30_000);
+});
+
+test("browser transport hard-times out one POST without replaying it", async () => {
+  const clock = createControlledClock();
+  let calls = 0;
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      return new Promise(() => {});
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    requestTimeoutMs: 30_000,
+    scheduleTimeout: clock.scheduleTimeout,
+    cancelTimeout: clock.cancelTimeout,
+    now: clock.now,
+  });
+
+  await assert.rejects(
+    settleWithControlledClock(
+      transport("/api.selection.follow/import", { method: "POST", body: { rows: [] } }),
+      clock,
+    ),
+    (error) => error?.code === "MAOZI_REQUEST_TIMEOUT"
+      && error?.method === "POST"
+      && error?.phase === "page-fetch"
+      && error?.timeout_ms === 30_000,
+  );
+  assert.equal(calls, 1);
+  assert.equal(clock.now(), 30_000);
+  assert.equal(clock.pendingCount(), 0);
+});
+
+test("browser transport never falls back through context request for a POST HTTP 0", async () => {
+  let pageCalls = 0;
+  let contextCalls = 0;
+  const page = {
+    evaluate: async () => {
+      pageCalls += 1;
+      return { status: 0, json: { error: "Failed to fetch" } };
+    },
+  };
+  const context = {
+    request: {
+      fetch: async () => {
+        contextCalls += 1;
+        throw new Error("POST fallback must not run");
+      },
+    },
+  };
+  const transport = createMaoziPageTransport({ page, context });
+
+  assert.deepEqual(
+    await transport("/api.selection.follow/import", { method: "POST", body: { rows: [] } }),
+    { status: 0, json: { error: "Failed to fetch" } },
+  );
+  assert.equal(pageCalls, 1);
+  assert.equal(contextCalls, 0);
+});
+
+test("browser transport never replays an unauthorized POST during session recovery", async () => {
+  let calls = 0;
+  let recoveryCalls = 0;
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      return { status: 403, json: { message: "Unauthenticated" } };
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    recoverUnauthorized: async () => { recoveryCalls += 1; },
+  });
+
+  assert.deepEqual(
+    await transport("/api.selection.follow/import", { method: "POST", body: { rows: [] } }),
+    { status: 403, json: { message: "Unauthenticated" } },
+  );
+  assert.equal(calls, 1);
+  assert.equal(recoveryCalls, 0);
+});
+
+test("browser transport caps all GET page attempts at the 120 second total budget", async () => {
+  const clock = createControlledClock();
+  let calls = 0;
+  const page = {
+    evaluate: async () => {
+      calls += 1;
+      return new Promise(() => {});
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    maxGetAttempts: 10,
+    retrySleep: async () => {},
+    scheduleTimeout: clock.scheduleTimeout,
+    cancelTimeout: clock.cancelTimeout,
+    now: clock.now,
+  });
+
+  await assert.rejects(
+    settleWithControlledClock(transport("/api.shop/lists"), clock),
+    (error) => error?.code === "MAOZI_REQUEST_TIMEOUT"
+      && error?.method === "GET"
+      && error?.timeout_scope === "get-total-budget"
+      && error?.total_budget_ms === 120_000,
+  );
+  assert.equal(calls, 4);
+  assert.equal(clock.now(), 120_000);
+  assert.equal(clock.pendingCount(), 0);
+});
+
+test("browser transport hard-times out the authenticated context request", async () => {
+  const clock = createControlledClock();
+  const fetchOptions = [];
+  const page = {
+    evaluate: async (_fn, request) => request
+      ? ({ status: 0, json: { error: "Failed to fetch" } })
+      : ({ token: "token-from-page", userAgent: "Chrome Test Agent" }),
+  };
+  const context = {
+    request: {
+      fetch: async (_url, options) => {
+        fetchOptions.push(options);
+        return new Promise(() => {});
+      },
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    context,
+    maxGetAttempts: 1,
+    scheduleTimeout: clock.scheduleTimeout,
+    cancelTimeout: clock.cancelTimeout,
+    now: clock.now,
+  });
+
+  await assert.rejects(
+    settleWithControlledClock(transport("/api.shop/lists"), clock),
+    (error) => error?.code === "MAOZI_REQUEST_TIMEOUT"
+      && error?.method === "GET"
+      && error?.phase === "context-fetch",
+  );
+  assert.equal(fetchOptions.length, 1);
+  assert.equal(fetchOptions[0].timeout, 30_000);
+  assert.equal(clock.now(), 30_000);
+  assert.equal(clock.pendingCount(), 0);
+});
+
+test("browser transport also bounds a stalled context response body", async () => {
+  const clock = createControlledClock();
+  let fetchCalls = 0;
+  const page = {
+    evaluate: async (_fn, request) => request
+      ? ({ status: 0, json: { error: "Failed to fetch" } })
+      : ({ token: "token-from-page", userAgent: "Chrome Test Agent" }),
+  };
+  const context = {
+    request: {
+      fetch: async () => {
+        fetchCalls += 1;
+        return {
+          status: () => 200,
+          text: async () => new Promise(() => {}),
+        };
+      },
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    context,
+    maxGetAttempts: 1,
+    scheduleTimeout: clock.scheduleTimeout,
+    cancelTimeout: clock.cancelTimeout,
+    now: clock.now,
+  });
+
+  await assert.rejects(
+    settleWithControlledClock(transport("/api.shop/lists"), clock),
+    (error) => error?.code === "MAOZI_REQUEST_TIMEOUT"
+      && error?.phase === "context-response-body",
+  );
+  assert.equal(fetchCalls, 1);
+  assert.equal(clock.now(), 30_000);
+  assert.equal(clock.pendingCount(), 0);
 });
 
 test("browser transport retries on the replacement Maozi page after SSO closes", async () => {
