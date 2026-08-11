@@ -302,7 +302,8 @@ export function preSubmitContentQuality({
 export function preSubmitTechnicalQuality(input = {}) {
   const quality = preSubmitContentQuality(input);
   let reason = null;
-  if (!quality.title) reason = "missing-title";
+  if (quality.reason === "prohibited-category") reason = "prohibited-category";
+  else if (!quality.title) reason = "missing-title";
   else if (!quality.checks.title) reason = "invalid-title";
   else if (!quality.image) reason = "missing-cover-image";
   else if (!quality.checks.image) reason = "invalid-cover-image-url";
@@ -317,7 +318,6 @@ export function preSubmitTechnicalQuality(input = {}) {
     reason,
     checks: {
       ...quality.checks,
-      prohibited_category: true,
     },
   };
 }

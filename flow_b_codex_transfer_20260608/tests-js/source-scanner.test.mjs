@@ -2823,11 +2823,13 @@ test("favorite preflight accepts only an explicit pure FBS mode", () => {
   assert.equal(favoriteModeSkipReason(null), "missing-shipping-mode");
 });
 
-test("direct discovery does not reject shipping mode, category, title family, or source price", () => {
+test("direct discovery bypasses transport telemetry but never prohibited categories", () => {
   assert.equal(favoriteModeSkipReason("FBO", { directMode: true }), null);
   assert.equal(favoriteModeSkipReason(null, { directMode: true }), null);
   assert.equal(listingModeSkipReason("商品\n发货模式：FBO\n库存", { directMode: true }), null);
-  assert.equal(favoriteTitleSkipReason("Одежда и обувь", { directMode: true }), null);
+  assert.equal(favoriteTitleSkipReason("Одежда и обувь", { directMode: true }), "prohibited-category");
+  assert.equal(favoriteTitleSkipReason("Кофе молотый 250г", { directMode: true }), "prohibited-category");
+  assert.equal(favoriteTitleSkipReason("Игрушка антистресс", { directMode: true }), null);
   assert.equal(favoritePriceSkipReason({
     price_info: { currency: "CNY", sell_price: 99999 },
   }, 1000, { directMode: true }), null);

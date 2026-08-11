@@ -818,10 +818,10 @@ export function favoritePriceSkipReason(productInfo, maxPrice = 1000, { directMo
 }
 
 export function favoriteTitleSkipReason(value, { directMode = false } = {}) {
-  if (directMode) return null;
   const title = String(value || "");
   const prohibitedReason = prohibitedCategorySkipReason(title);
   if (prohibitedReason) return prohibitedReason;
+  if (directMode) return null;
   if (/зеркал|ванн(?:а|ы|ой|ую|е|у)|раковин|пианино|спортивн\w*\s+площад|турник.*брусь|(?:wall|bathroom)\s+mirror|bath\s*tub|digital\s+piano/i.test(title)) {
     return "oversized-low-yield-title";
   }

@@ -37,6 +37,11 @@ test("only pure FBS mode is accepted", () => {
 
 test("preflight rejects prohibited categories", () => {
   assert.equal(preflightSkipReason({ mode: "FBS", title: "food storage", category: "" }), "prohibited-category");
+  assert.equal(preflightSkipReason({
+    mode: "FBS",
+    title: "Кофе молотый 250г, 100% Арабика, Итальянская обжарка",
+    category: "",
+  }), "prohibited-category");
   for (const title of [
     "Комплект трусов бикини, 4 шт",
     "Комплект нижнего белья SYJWY",

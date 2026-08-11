@@ -16,6 +16,7 @@ import {
   offerIdForSku,
   onlineSyncRetryAfterMs,
   preSubmitContentQuality,
+  preSubmitTechnicalQuality,
   prioritizeProfitCandidates,
   prioritizePublishCandidates,
   restoredDailyStoreUsage,
@@ -174,6 +175,13 @@ test("pre-submit content quality requires title, HTTP image, category, and safe 
         children: [{ label: "售价 ≤ 1500₽", value: "1,12.00" }],
       }],
     }],
+  }).reason, "prohibited-category");
+  assert.equal(preSubmitTechnicalQuality({
+    ...valid,
+    item: {
+      ...valid.item,
+      title: "Кофе молотый 250г, 100% Арабика",
+    },
   }).reason, "prohibited-category");
 
   const productionShape = preSubmitContentQuality({
@@ -4915,8 +4923,8 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
     let publishCalls = 0;
     const client = clientFor([
       {
-        sku: "direct-fbo-apparel",
-        title: "Одежда для дома",
+        sku: "direct-fbo-safe-item",
+        title: "Игрушка антистресс для детей",
         cover_image: "https://img.example/direct.jpg",
         sell_price: 100,
       },
@@ -4932,7 +4940,7 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
       getProductDetail: async (sku) => ({
         sku,
         mode: "FBO",
-        title: "Одежда для дома",
+        title: "Игрушка антистресс для детей",
         cover_image: "https://img.example/direct.jpg",
         current_price: 100,
         follow_min: 90,
@@ -4965,7 +4973,7 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
     assert.equal(confirmationChecks, 0);
     assert.equal(result.accepted, 1);
     assert.equal(result.remaining, 0);
-    assert.equal(state.entryOf("direct-fbo-apparel").data.submitted, true);
+    assert.equal(state.entryOf("direct-fbo-safe-item").data.submitted, true);
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }
