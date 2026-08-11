@@ -23,7 +23,11 @@ import {
 } from "./cost-evidence.mjs";
 import { isOzonSoftBlockError } from "./ozon-access-controller.mjs";
 import { submissionGatePolicy } from "./live-acceptance-gates.mjs";
-import { productWeightGrams, selectShippingRoute } from "./shipping-route.mjs";
+import {
+  isBuildingBlockCategory,
+  productWeightGrams,
+  selectShippingRoute,
+} from "./shipping-route.mjs";
 import { createProfitFilesReader, prioritizeProfitRows } from "./profit-priority.mjs";
 import { assessProfitSafety, assessProfitSafetyGate } from "./profit-safety.mjs";
 import { dailyWindowState } from "../daily-window.mjs";
@@ -1826,23 +1830,14 @@ export function createPublishRunner({
       const applyShippingRoute = () => {
         if (shippingRoute) return shippingRoute;
         const weightGrams = productWeightGrams(productInfo, detail || item);
-        if (targetConfig.weightRouting !== true) {
-          shippingRoute = {
-            available: true,
-            route: "postal",
-            logistics: "CEL",
-            warehouseId: Number(targetConfig.warehouseId || 0) || null,
-            weightGrams,
-            thresholdGrams: Number(targetConfig.weightThresholdGrams || 500),
-          };
-          return shippingRoute;
-        }
+        const forceUral = isBuildingBlockCategory(category?.labels);
         shippingRoute = selectShippingRoute({
           weightGrams,
           postalWarehouseId: targetConfig.postalWarehouseId || targetConfig.warehouseId,
           uralWarehouseId: targetConfig.uralWarehouseId,
           thresholdGrams: targetConfig.weightThresholdGrams,
-          weightRouting: true,
+          weightRouting: targetConfig.weightRouting === true,
+          forceUral,
         });
         if (!shippingRoute.available) {
           const error = new Error(`Ural warehouse is unavailable for store ${targetConfig?.store?.id || "unknown"}`);
@@ -2291,6 +2286,7 @@ export function createPublishRunner({
         watermark_id: targetConfig.watermark.id,
         warehouse_id: shippingRoute.warehouseId,
         shipping_route: shippingRoute.route,
+        shipping_route_reason: shippingRoute.routeReason,
         logistics_provider: shippingRoute.logistics,
         package_weight_grams: shippingRoute.weightGrams,
         weight_threshold_grams: shippingRoute.thresholdGrams,

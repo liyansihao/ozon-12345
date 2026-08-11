@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  isBuildingBlockCategory,
   productWeightGrams,
   selectShippingRoute,
   URAL_WEIGHT_THRESHOLD_GRAMS,
@@ -23,6 +24,7 @@ test("weight routing sends up to 500g to postal and above 500g to Ural", () => {
     warehouseId: 101,
     weightGrams: 499,
     thresholdGrams: 500,
+    routeReason: "postal-default",
   });
   assert.equal(route(500).route, "postal");
   assert.equal(route(500).warehouseId, 101);
@@ -30,6 +32,29 @@ test("weight routing sends up to 500g to postal and above 500g to Ural", () => {
   assert.equal(route(501).route, "ural");
   assert.equal(route(501).warehouseId, 202);
   assert.equal(route(501).logistics, "Ural");
+  assert.equal(route(501).routeReason, "weight-threshold");
+});
+
+test("building-block categories force Ural even when ERP weight is below 500g", () => {
+  assert.equal(isBuildingBlockCategory(["儿童用品", "积木玩具套装"]), true);
+  assert.equal(isBuildingBlockCategory(["Игрушки", "Конструктор"]), true);
+  assert.equal(isBuildingBlockCategory(["儿童用品", "桌游"]), false);
+  assert.deepEqual(selectShippingRoute({
+    weightGrams: 400,
+    postalWarehouseId: 101,
+    uralWarehouseId: 202,
+    thresholdGrams: 500,
+    weightRouting: true,
+    forceUral: true,
+  }), {
+    available: true,
+    route: "ural",
+    logistics: "Ural",
+    warehouseId: 202,
+    weightGrams: 400,
+    thresholdGrams: 500,
+    routeReason: "building-block-category",
+  });
 });
 
 test("product weight prefers ERP category specifications and missing Ural fails closed", () => {
@@ -48,5 +73,6 @@ test("product weight prefers ERP category specifications and missing Ural fails 
     warehouseId: null,
     weightGrams: 605,
     thresholdGrams: 500,
+    routeReason: "weight-threshold",
   });
 });

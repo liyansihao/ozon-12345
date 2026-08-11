@@ -5577,6 +5577,83 @@ test("direct mode uses the weight-selected warehouse and matching profit provide
   }
 });
 
+test("direct mode forces a low-weight building-block category to the Ural warehouse", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-building-block-ural-"));
+  try {
+    const state = fakeState();
+    const profitInputs = [];
+    const client = clientFor([{
+      sku: "1786972403",
+      title: "Конструктор Техник Ford GT, совместим с 42154",
+      cover_image: "https://img.example/ford-gt.jpg",
+      sell_price: 130.4,
+    }], {
+      getCategoryBySku: async () => ({
+        cate: [11, 22, "1,14.00"],
+        product_info: { weight: 400, depth: 20, width: 10, height: 5 },
+      }),
+      listCategoryCommissions: async () => [{
+        cate_id: 11,
+        label: "儿童用品",
+        children: [{
+          cate_id: 22,
+          label: "积木玩具套装",
+          children: [{ label: "售价 ≤ 1500₽", value: "1,14.00" }],
+        }],
+      }],
+      calculateProfit: async (input) => {
+        profitInputs.push(input);
+        return {
+          calc_result: [{
+            name: "Ural",
+            speed: "economy",
+            title: "Ural Economy",
+            price_list: {
+              logistics_name: "Ural",
+              logistics_speed: "economy",
+              purchase_price: 20,
+              sell_price: 90,
+              cate_rate: 14,
+              cate_fee: 8,
+              profit_rate: 40,
+            },
+          }],
+        };
+      },
+    });
+
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+      storeTargets: [{
+        id: 7,
+        needle: "丽丽1号",
+        warehouseId: 101,
+        uralWarehouseId: 202,
+        weightThresholdGrams: 500,
+        weightRouting: true,
+        requireWarehouse: true,
+      }],
+    }).run();
+
+    assert.equal(result.accepted, 1);
+    assert.equal(profitInputs.length, 1);
+    assert.equal(profitInputs[0].logistics, "Ural");
+    assert.equal(state.selections[0].warehouse_id, 202);
+    assert.equal(state.selections[0].shipping_route, "ural");
+    assert.equal(state.selections[0].shipping_route_reason, "building-block-category");
+    assert.equal(state.selections[0].package_weight_grams, 400);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("direct mode does not accept a snapshot fallback as a confirmed live Ozon price", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-live-price-required-"));
   try {
