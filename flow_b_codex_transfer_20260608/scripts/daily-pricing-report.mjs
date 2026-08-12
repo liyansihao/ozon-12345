@@ -25,29 +25,38 @@ function skuText(value) {
   return Number.isFinite(result) && result > 0 ? String(Math.trunc(result)) : "";
 }
 
-function readRuntimeStates(runtimeDbPath) {
+const RUNTIME_STATE_QUERY_CHUNK_SIZE = 400;
+
+function readRuntimeStates(runtimeDbPath, skus = []) {
+  const requestedSkus = [...new Set([...skus].map((sku) => text(sku)).filter(Boolean))];
+  if (requestedSkus.length === 0) return new Map();
   const rawPath = String(runtimeDbPath || "").trim();
   if (!rawPath) return new Map();
   const filename = path.resolve(rawPath);
   if (!fsSync.existsSync(filename)) return new Map();
   const database = new DatabaseSync(filename, { readOnly: true });
   try {
-    const rows = database.prepare(`
-      SELECT sku, stage, terminal, reason, updated_at, data_json
-      FROM sku_state
-    `).all();
     const states = new Map();
-    for (const row of rows) {
-      let data = {};
-      try { data = JSON.parse(row.data_json || "{}"); } catch {}
-      states.set(String(row.sku), {
-        sku: String(row.sku),
-        stage: String(row.stage || ""),
-        terminal: Number(row.terminal) === 1,
-        reason: text(row.reason),
-        updated_at: text(row.updated_at),
-        data,
-      });
+    for (let offset = 0; offset < requestedSkus.length; offset += RUNTIME_STATE_QUERY_CHUNK_SIZE) {
+      const chunk = requestedSkus.slice(offset, offset + RUNTIME_STATE_QUERY_CHUNK_SIZE);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = database.prepare(`
+        SELECT sku, stage, terminal, reason, updated_at, data_json
+        FROM sku_state
+        WHERE sku IN (${placeholders})
+      `).all(...chunk);
+      for (const row of rows) {
+        let data = {};
+        try { data = JSON.parse(row.data_json || "{}"); } catch {}
+        states.set(String(row.sku), {
+          sku: String(row.sku),
+          stage: String(row.stage || ""),
+          terminal: Number(row.terminal) === 1,
+          reason: text(row.reason),
+          updated_at: text(row.updated_at),
+          data,
+        });
+      }
     }
     return states;
   } finally {
@@ -161,7 +170,6 @@ export function readDailyPricingScope({
   const targetDate = String(dateKey || window.date);
   if (!/^\d{4}-\d{2}-\d{2}$/u.test(targetDate)) throw new TypeError("dateKey must use YYYY-MM-DD");
   const storeById = storeMap(stores);
-  const stateBySku = readRuntimeStates(runtimeDbPath);
   const acceptedRows = readJsonLinesSync(path.join(path.resolve(runDir), "erp_accepted.jsonl"));
   const latest = new Map();
   for (const accepted of acceptedRows) {
@@ -173,6 +181,7 @@ export function readDailyPricingScope({
     const prior = latest.get(key);
     if (!prior || String(acceptedAt(accepted)) > String(acceptedAt(prior))) latest.set(key, { ...accepted, store_id: storeId, sku });
   }
+  const stateBySku = readRuntimeStates(runtimeDbPath, [...latest.values()].map((accepted) => accepted.sku));
   const rows = [];
   const exceptions = [];
   for (const accepted of latest.values()) {

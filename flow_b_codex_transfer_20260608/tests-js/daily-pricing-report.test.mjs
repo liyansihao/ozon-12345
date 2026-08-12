@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   readDailyPricingScope,
+  readRuntimeStates,
   reportOutputPath,
   reportScopeReady,
 } from "../scripts/daily-pricing-report.mjs";
@@ -120,4 +121,110 @@ test("report output names are stable and date-scoped", () => {
     reportOutputPath("/tmp/Ozon每日核价", "2026-08-09"),
     "/tmp/Ozon每日核价/Ozon人工核价_2026-08-09.xlsx",
   );
+});
+
+test("daily scope only loads accepted states when the runtime DB contains many large unrelated rows", async () => {
+  const value = await fixture();
+  const database = new DatabaseSync(value.runtimeDbPath);
+  const insert = database.prepare("INSERT INTO sku_state VALUES (?, ?, ?, ?, ?, ?)");
+  const unrelatedData = JSON.stringify({ payload: "x".repeat(16_384) });
+  database.exec("BEGIN");
+  try {
+    for (let index = 0; index < 512; index += 1) {
+      insert.run(`UNRELATED-${index}`, "ignored", 0, "", "2026-08-08T13:00:00.000Z", unrelatedData);
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  } finally {
+    database.close();
+  }
+
+  const selectedStates = readRuntimeStates(value.runtimeDbPath, ["SRC-001", "SRC-002", "SRC-003"]);
+  assert.deepEqual([...selectedStates.keys()].sort(), ["SRC-001", "SRC-002", "SRC-003"]);
+
+  const scope = readDailyPricingScope({
+    ...value,
+    stores,
+    dateKey: "2026-08-08",
+    now: new Date("2026-08-08T12:30:00Z"),
+  });
+  assert.equal(scope.accepted_count, 3);
+  assert.equal(scope.rows.length, 2);
+  assert.equal(scope.exceptions.length, 1);
+});
+
+test("missing accepted input does not open or query the runtime DB", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-daily-report-empty-test-"));
+  const runDir = path.join(root, "run");
+  const runtimeDbPath = path.join(root, "not-a-database.sqlite");
+  await fs.mkdir(runDir, { recursive: true });
+  await fs.writeFile(runtimeDbPath, "this file must not be opened as SQLite", "utf8");
+
+  const scope = readDailyPricingScope({
+    runDir,
+    runtimeDbPath,
+    stores,
+    dateKey: "2026-08-08",
+    now: new Date("2026-08-08T12:30:00Z"),
+  });
+  assert.equal(scope.accepted_count, 0);
+  assert.equal(scope.rows.length, 0);
+  assert.equal(scope.exceptions.length, 0);
+  assert.equal(scope.ready, true);
+});
+
+test("daily scope reads more than 400 accepted states across query chunks", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-daily-report-chunks-test-"));
+  const runDir = path.join(root, "run");
+  const runtimeDbPath = path.join(root, "runtime.sqlite");
+  await fs.mkdir(runDir, { recursive: true });
+
+  const accepted = [];
+  const database = new DatabaseSync(runtimeDbPath);
+  database.exec(`CREATE TABLE sku_state (
+    sku TEXT PRIMARY KEY,
+    stage TEXT,
+    terminal INTEGER,
+    reason TEXT,
+    updated_at TEXT,
+    data_json TEXT
+  )`);
+  const insert = database.prepare("INSERT INTO sku_state VALUES (?, ?, ?, ?, ?, ?)");
+  database.exec("BEGIN");
+  try {
+    for (let index = 0; index < 405; index += 1) {
+      const sku = `BATCH-${String(index).padStart(3, "0")}`;
+      const acceptedAt = new Date(Date.parse("2026-08-08T13:00:00.000Z") + index).toISOString();
+      accepted.push({ sku, store_id: 104965, offer_id: `OFFER-${index}`, accepted_at: acceptedAt });
+      insert.run(
+        sku,
+        "published",
+        0,
+        "",
+        acceptedAt,
+        JSON.stringify({ store_id: 104965, store_sku: String(9_000_000_000 + index) }),
+      );
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  } finally {
+    database.close();
+  }
+  await fs.writeFile(path.join(runDir, "erp_accepted.jsonl"), `${accepted.map((row) => JSON.stringify(row)).join("\n")}\n`);
+
+  const scope = readDailyPricingScope({
+    runDir,
+    runtimeDbPath,
+    stores,
+    dateKey: "2026-08-08",
+    now: new Date("2026-08-08T12:30:00Z"),
+  });
+  assert.equal(scope.accepted_count, 405);
+  assert.equal(scope.sku_generated_count, 405);
+  assert.equal(scope.pending_count, 0);
+  assert.equal(scope.ready, true);
 });
