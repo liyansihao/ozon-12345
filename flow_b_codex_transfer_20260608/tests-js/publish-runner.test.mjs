@@ -4817,7 +4817,7 @@ test("SQLite submission intent is authoritative over the idempotent selected aud
     }
   });
 
-  await t.test("submission intent transition false", async () => {
+  await t.test("submission intent transition false leaves no selected audit gap", async () => {
     const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-intent-cas-"));
     try {
       const state = fakeState();
@@ -4840,13 +4840,152 @@ test("SQLite submission intent is authoritative over the idempotent selected aud
         runDir,
       }).run();
 
-      assert.equal(state.selections.length, 1);
+      assert.equal(state.selections.length, 0);
       assert.equal(publishCalls, 0);
       assert.equal(result.published, 0);
     } finally {
       await fs.rm(runDir, { recursive: true, force: true });
     }
   });
+});
+
+test("accepted ERP commit survives a failed decorative transition and projects once", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-accepted-decoration-"));
+  try {
+    const state = fakeState();
+    const transition = state.transition;
+    let submittedTransitions = 0;
+    state.transition = async (sku, status, data) => {
+      if (data?.submitted === true) {
+        submittedTransitions += 1;
+        if (submittedTransitions > 1) return false;
+      }
+      return transition(sku, status, data);
+    };
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([{
+        sku: "accepted-decoration",
+        title: "Безопасный товар атомарное принятие",
+        cover_image: "https://img.example/accepted-decoration.jpg",
+        sell_price: 100,
+      }], {
+        publish: async () => {
+          publishCalls += 1;
+          return { ok: true, response: { code: 1 } };
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(publishCalls, 1);
+    assert.equal(submittedTransitions, 1);
+    assert.equal(result.accepted, 1);
+    assert.equal(state.entryOf("accepted-decoration").data.submitted, true);
+    const acceptedRows = (await fs.readFile(path.join(runDir, "erp_accepted.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.equal(acceptedRows.length, 1);
+    assert.equal(acceptedRows[0].sku, "accepted-decoration");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("restart backfills a missing ERP accepted projection without another POST", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-accepted-backfill-"));
+  const runDir = path.join(root, "run");
+  const publishedCsv = path.join(root, "published.csv");
+  const runtimeStateDbPath = path.join(root, "runtime", "state.sqlite");
+  let reader = null;
+  try {
+    const writer = createPublishState({ runDir, publishedCsv, runtimeStateDbPath });
+    const durableEvidence = {
+      title: "Безопасный товар восстановление принятия",
+      store_id: 7,
+      offer_id: "mz-accepted-backfill",
+      mode: "FBS",
+      shipping_mode: "FBS",
+      preflight_mode: "FBS",
+      fbs_evidence: {
+        ...VALID_FBS_EVIDENCE,
+        observations: VALID_FBS_EVIDENCE.observations.map((row) => ({ ...row })),
+      },
+      purchase_price: 20,
+      profit_rate: 40,
+      cost_verified: true,
+      cost_source: RELIABLE_COST_RESULT.source,
+      cost: { ...RELIABLE_COST_RESULT, prices: [...RELIABLE_COST_RESULT.prices] },
+      cost_evidence: {
+        contract: "1688-same-item-v1",
+        source: RELIABLE_COST_RESULT.source,
+        reliable_source: true,
+        same_item_match: true,
+        match_evidence_key: RELIABLE_COST_RESULT.match_evidence_key,
+        filtered_price_count: RELIABLE_COST_RESULT.prices.length,
+        returned_evidence_verified: true,
+        match_evidence_contract: RELIABLE_COST_RESULT.match_evidence_contract,
+        matched_offer_count: RELIABLE_COST_RESULT.matched_offer_count,
+      },
+      quality_gate_passed: true,
+      api_call_attempts_total: 1,
+    };
+    assert.equal(await writer.transition("accepted-backfill", "processing", {
+      ...durableEvidence,
+      reason: "submission-intent",
+      submission_intent: true,
+      submitted: false,
+    }), true);
+    assert.equal(await writer.transition("accepted-backfill", "processing", {
+      ...durableEvidence,
+      reason: "erp-submission-accepted",
+      submission_intent: false,
+      submitted: true,
+      submission_pending: false,
+      api_call_accepted_at: "2026-08-12T03:10:00.000Z",
+      api_call_completed_at: "2026-08-12T03:10:00.000Z",
+    }), true);
+    await writer.close();
+    await fs.rm(path.join(runDir, "erp_accepted.jsonl"));
+
+    reader = createPublishState({ runDir, publishedCsv, runtimeStateDbPath });
+    let publishCalls = 0;
+    const result = await createPublishRunner({
+      client: clientFor([], {
+        publish: async () => {
+          publishCalls += 1;
+          throw new Error("a submitted reservation must never POST again");
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state: reader,
+      target: 1,
+      runDir,
+      directMode: true,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    }).run();
+
+    assert.equal(publishCalls, 0);
+    assert.equal(result.accepted, 1);
+    assert.equal(reader.entryOf("accepted-backfill").data.api_call_attempts_total, 1);
+    const acceptedRows = (await fs.readFile(path.join(runDir, "erp_accepted.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.equal(acceptedRows.length, 1);
+    assert.equal(acceptedRows[0].sku, "accepted-backfill");
+  } finally {
+    await reader?.close().catch(() => {});
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("fresh runner intent, accepted marker, and strict publication complete through SQLite state", async () => {

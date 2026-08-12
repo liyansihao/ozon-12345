@@ -1024,6 +1024,25 @@ export function createPublishRunner({
     });
   }
 
+  async function projectErpAccepted(row) {
+    try {
+      if (typeof state.recordErpAccepted === "function") {
+        await state.recordErpAccepted(row);
+      } else {
+        recordMetric("erp_accepted.jsonl", row);
+      }
+    } catch (error) {
+      // The submitted reservation is authoritative. A compatibility audit
+      // projection can be repaired from SQLite on load and must not reclassify
+      // an accepted POST as failed or invite another POST.
+      recordMetric("runtime_errors.jsonl", {
+        stage: "erp-accepted-projection",
+        sku: row?.sku ?? null,
+        error: String(error?.message || error),
+      });
+    }
+  }
+
   function directStoreFreezeReason(storeId) {
     const normalizedStoreId = Number(storeId || 0);
     if (!activeDirectMode || !(normalizedStoreId > 0) || !directRejectedStoreIds.has(normalizedStoreId)) {
@@ -1280,7 +1299,7 @@ export function createPublishRunner({
     const acceptedAt = now().toISOString();
     const acceptedState = {
       ...submissionState,
-      reason: "submission-accepted",
+      reason: activeDirectMode ? "erp-submission-accepted" : "submission-accepted",
       submission_intent: false,
       submitted: true,
       submission_pending: false,
@@ -1288,6 +1307,18 @@ export function createPublishRunner({
       api_call_accepted_at: acceptedAt,
       api_call_completed_at: acceptedAt,
       publish_result: publishResult ?? null,
+      ...(activeDirectMode ? {
+        reconcile_only: true,
+        accepted_at: acceptedAt,
+        next_reconcile_at: new Date(Date.parse(acceptedAt) + 10_000).toISOString(),
+        outcome_status: "submitted",
+        background_status: {
+          imported: false,
+          online: false,
+          stock_updated: false,
+          rejected: false,
+        },
+      } : {}),
     };
     const recorded = await state.transition(sku, "processing", acceptedState);
     if (recorded === false) {
@@ -1594,54 +1625,26 @@ export function createPublishRunner({
       const acceptedAt = acceptedState.api_call_completed_at
         || acceptedState.submitted_at
         || now().toISOString();
-      const recorded = await state.transition(sku, "processing", {
-        ...submissionState,
-        ...acceptedState,
-        reason: "erp-submission-accepted",
-        submission_intent: false,
-        submitted: true,
-        submission_pending: false,
-        reconcile_only: true,
-        accepted_at: acceptedAt,
-        next_reconcile_at: new Date(now().getTime() + 10_000).toISOString(),
-        background_status: {
-          imported: false,
-          online: false,
-          stock_updated: false,
-          rejected: false,
-        },
+      recordMetric("direct_funnel.jsonl", {
+        sku,
+        stage: "erp_accepted",
+        source_url: submissionState.source_url ?? submissionState.seller_url ?? null,
+        store_id: Number(submissionState.store_id),
         outcome_status: "submitted",
-        final_result: finalResult ?? null,
       });
-      if (recorded !== false) {
-        recordMetric("direct_funnel.jsonl", {
-          sku,
-          stage: "erp_accepted",
-          source_url: submissionState.source_url ?? submissionState.seller_url ?? null,
-          store_id: Number(submissionState.store_id),
-          outcome_status: "submitted",
-        });
-        recordMetric("erp_accepted.jsonl", {
-          sku,
-          store_id: Number(submissionState.store_id),
-          accepted_at: acceptedAt,
-          offer_id: submissionState.offer_id,
-        });
-      }
-      return recorded === false
-        ? {
-          status: "ignored",
-          sku,
-          source_url: item?.source_url ?? submissionState.source_url ?? null,
-          reason: "submission-acceptance-already-recorded",
-        }
-        : {
-          status: "submitted",
-          accepted: true,
-          sku,
-          source_url: item?.source_url ?? submissionState.source_url ?? null,
-          reason: "erp-submission-accepted",
-        };
+      await projectErpAccepted({
+        sku,
+        store_id: Number(submissionState.store_id),
+        accepted_at: acceptedAt,
+        offer_id: submissionState.offer_id,
+      });
+      return {
+        status: "submitted",
+        accepted: true,
+        sku,
+        source_url: item?.source_url ?? submissionState.source_url ?? null,
+        reason: "erp-submission-accepted",
+      };
     }
     if (activeDirectMode && finalResult?.not_submitted === true) {
       const reason = finalResult?.reason || "submission-not-sent";
@@ -2367,9 +2370,6 @@ export function createPublishRunner({
         await metricsChain;
         return { status: "validated", sku, source_url: item.source_url ?? null };
       }
-      if (typeof state.recordSelected === "function") {
-        await state.recordSelected(submissionState);
-      }
       const reserved = await state.transition(sku, "processing", {
         ...submissionState,
         reason: "submission-intent",
@@ -2381,6 +2381,9 @@ export function createPublishRunner({
           source_url: item.source_url ?? null,
           reason: "submission-reservation-not-acquired",
         };
+      }
+      if (typeof state.recordSelected === "function") {
+        await state.recordSelected(submissionState);
       }
       const persistedIntent = typeof state.entryOf === "function"
         ? state.entryOf(sku)

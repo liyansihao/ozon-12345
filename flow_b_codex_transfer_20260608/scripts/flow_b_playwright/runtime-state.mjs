@@ -1438,6 +1438,13 @@ export function createRuntimeState({
   const selectReservation = database.prepare(`
     SELECT * FROM submission_reservations WHERE sku = ?
   `);
+  const selectSubmittedReservationsForRun = database.prepare(`
+    SELECT *
+    FROM submission_reservations
+    WHERE status = 'submitted'
+      AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
+    ORDER BY updated_at, sku
+  `);
   const selectActiveTitleReservation = database.prepare(`
     SELECT sku, owner_id, generation_id, status
     FROM submission_reservations
@@ -2506,6 +2513,13 @@ export function createRuntimeState({
     return getReservation(normalizeSku(rawSku));
   }
 
+  function submittedReservations(runDir) {
+    assertOpen();
+    const normalizedRunDir = normalizedDirectRunDir(runDir);
+    if (!normalizedRunDir) return [];
+    return selectSubmittedReservationsForRun.all(normalizedRunDir).map(rowToReservation);
+  }
+
   function auditEvents() {
     assertOpen();
     return database.prepare("SELECT * FROM events ORDER BY id").all().map(rowToEvent);
@@ -2575,6 +2589,7 @@ export function createRuntimeState({
     strictCount,
     strictPublications,
     submissionReservation,
+    submittedReservations,
     directTargetUsage,
     directAcceptedCount,
     auditEvents,

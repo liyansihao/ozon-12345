@@ -9,6 +9,7 @@ const TERMINAL_STATUSES = new Set(["published", "failed", "skipped"]);
 const VALID_STATUSES = new Set(["processing", ...TERMINAL_STATUSES]);
 const CANONICAL_LINK_HEADERS = new Set(["product_link", "canonical_product_link"]);
 const PRODUCT_URL_PATTERN = /https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s]+)/iu;
+const ERP_ACCEPTED_PROJECTION_CHAINS = new Map();
 
 function normalizeSku(value) {
   if (value === null || value === undefined) return null;
@@ -19,6 +20,54 @@ function normalizeSku(value) {
 function eventData(data) {
   if (data && typeof data === "object" && !Array.isArray(data)) return { ...data };
   return data === undefined ? {} : { value: data };
+}
+
+function enqueueErpAcceptedProjection(filename, operation) {
+  const previous = ERP_ACCEPTED_PROJECTION_CHAINS.get(filename) || Promise.resolve();
+  const queued = previous.catch(() => {}).then(operation);
+  ERP_ACCEPTED_PROJECTION_CHAINS.set(filename, queued);
+  queued.then(
+    () => {
+      if (ERP_ACCEPTED_PROJECTION_CHAINS.get(filename) === queued) {
+        ERP_ACCEPTED_PROJECTION_CHAINS.delete(filename);
+      }
+    },
+    () => {
+      if (ERP_ACCEPTED_PROJECTION_CHAINS.get(filename) === queued) {
+        ERP_ACCEPTED_PROJECTION_CHAINS.delete(filename);
+      }
+    },
+  );
+  return queued;
+}
+
+function erpAcceptedProjectionRow(value) {
+  const data = value?.data && typeof value.data === "object" ? value.data : value;
+  const sku = normalizeSku(value?.sku ?? data?.sku);
+  const storeId = Number(data?.store_id);
+  if (!sku || !(storeId > 0)) return null;
+  const acceptedAt = String(
+    data?.accepted_at
+      || data?.api_call_completed_at
+      || data?.api_call_accepted_at
+      || data?.submitted_at
+      || value?.updatedAt
+      || new Date().toISOString(),
+  );
+  return {
+    at: String(data?.at || acceptedAt),
+    sku,
+    store_id: storeId,
+    accepted_at: acceptedAt,
+    offer_id: data?.offer_id ?? null,
+  };
+}
+
+function erpAcceptedProjectionKey(value) {
+  const data = value?.data && typeof value.data === "object" ? value.data : value;
+  const sku = normalizeSku(value?.sku ?? data?.sku);
+  const storeId = Number(data?.store_id);
+  return sku && storeId > 0 ? `${storeId}:${sku}` : null;
 }
 
 function canonicalSkuFromUrl(value) {
@@ -189,6 +238,7 @@ export function createPublishState({
   const failedPath = path.join(resolvedRunDir, "failed.jsonl");
   const skippedPath = path.join(resolvedRunDir, "skipped.jsonl");
   const selectedPath = path.join(resolvedRunDir, "selected.jsonl");
+  const erpAcceptedPath = path.join(resolvedRunDir, "erp_accepted.jsonl");
   const summaryPath = path.join(resolvedRunDir, "summary.json");
   const runtimeAuditPath = path.join(resolvedRunDir, "runtime_state_audit.jsonl");
   const runtimeState = runtimeStateDbPath
@@ -207,6 +257,7 @@ export function createPublishState({
   let closing = null;
   let acceptingOperations = true;
   let lastStrictAuditReconciliation = null;
+  let lastErpAcceptedAuditReconciliation = null;
   const activeOperations = new Set();
 
   function trackOperation(task) {
@@ -655,13 +706,12 @@ export function createPublishState({
           data: runtimeData,
         });
         if (!confirmed.recorded) return confirmed;
-        runtimeData = {
-          ...(confirmed.state?.data || runtimeData),
-          ...runtimeData,
-          submitted: true,
-          submission_intent: false,
-          submission_pending: false,
-        };
+        // Confirmation is the irreversible ERP acceptance commit. Do not run
+        // a second eligibility-checked processing transition: concurrent
+        // reconciliation may have exhausted that retry budget after the POST,
+        // and must never turn a successfully submitted reservation into a
+        // reported persistence failure.
+        return confirmed;
       }
     }
     if (status === "failed") {
@@ -711,6 +761,7 @@ export function createPublishState({
         loaded = true;
         try {
           lastStrictAuditReconciliation = await reconcileStrictAuditOutputsInternal();
+          lastErpAcceptedAuditReconciliation = await reconcileErpAcceptedAuditOutputsInternal();
         } catch (error) {
           loaded = false;
           throw error;
@@ -789,6 +840,7 @@ export function createPublishState({
       loaded = true;
       try {
         lastStrictAuditReconciliation = await reconcileStrictAuditOutputsInternal();
+        lastErpAcceptedAuditReconciliation = await reconcileErpAcceptedAuditOutputsInternal();
       } catch (error) {
         loaded = false;
         throw error;
@@ -870,6 +922,45 @@ export function createPublishState({
       states.set(sku, { status: "published", data });
     }
     return result;
+  }
+
+  async function appendErpAcceptedAuditRows(rows) {
+    const candidates = (Array.isArray(rows) ? rows : [rows])
+      .map(erpAcceptedProjectionRow)
+      .filter(Boolean);
+    if (candidates.length === 0) return { submitted: 0, added: 0 };
+    return enqueueErpAcceptedProjection(erpAcceptedPath, async () => {
+      const existingText = await readTextIfPresent(erpAcceptedPath);
+      const known = new Set(
+        parseJsonLines(existingText).map(erpAcceptedProjectionKey).filter(Boolean),
+      );
+      const additions = [];
+      for (const row of candidates) {
+        const key = erpAcceptedProjectionKey(row);
+        if (!key || known.has(key)) continue;
+        known.add(key);
+        additions.push(row);
+      }
+      if (additions.length > 0) {
+        await fs.mkdir(resolvedRunDir, { recursive: true });
+        const separator = existingText && !existingText.endsWith("\n") && !existingText.endsWith("\r")
+          ? "\n"
+          : "";
+        await fs.appendFile(
+          erpAcceptedPath,
+          `${separator}${additions.map((row) => JSON.stringify(row)).join("\n")}\n`,
+          "utf8",
+        );
+      }
+      return { submitted: candidates.length, added: additions.length };
+    });
+  }
+
+  async function reconcileErpAcceptedAuditOutputsInternal() {
+    if (!runtimeState || typeof runtimeState.submittedReservations !== "function") {
+      return { submitted: 0, added: 0 };
+    }
+    return appendErpAcceptedAuditRows(runtimeState.submittedReservations(resolvedRunDir));
   }
 
   async function transitionInternal(skuValue, status, data = {}) {
@@ -1087,11 +1178,27 @@ export function createPublishState({
     }));
   }
 
+  function recordErpAccepted(item) {
+    return trackOperation(async () => {
+      await loadInternal();
+      const result = await appendErpAcceptedAuditRows(item);
+      return result.added > 0;
+    });
+  }
+
   function reconcileStrictAuditOutputs() {
     return trackOperation(async () => {
       await loadInternal();
       lastStrictAuditReconciliation = await reconcileStrictAuditOutputsInternal();
       return lastStrictAuditReconciliation;
+    });
+  }
+
+  function reconcileErpAcceptedAuditOutputs() {
+    return trackOperation(async () => {
+      await loadInternal();
+      lastErpAcceptedAuditReconciliation = await reconcileErpAcceptedAuditOutputsInternal();
+      return lastErpAcceptedAuditReconciliation;
     });
   }
 
@@ -1121,6 +1228,10 @@ export function createPublishState({
         try {
           const reconciliation = await capture(reconcileStrictAuditOutputsInternal());
           if (reconciliation) lastStrictAuditReconciliation = reconciliation;
+          const acceptedReconciliation = await capture(reconcileErpAcceptedAuditOutputsInternal());
+          if (acceptedReconciliation) {
+            lastErpAcceptedAuditReconciliation = acceptedReconciliation;
+          }
           await capture(writeChain);
           if (exportRuntimeAuditOnClose) {
             await capture(runtimeState.exportAuditJsonl(runtimeAuditPath));
@@ -1140,6 +1251,12 @@ export function createPublishState({
       : null;
   }
 
+  function erpAcceptedAuditReconciliation() {
+    return lastErpAcceptedAuditReconciliation
+      ? { ...lastErpAcceptedAuditReconciliation }
+      : null;
+  }
+
   const api = {
     load,
     transition,
@@ -1155,8 +1272,11 @@ export function createPublishState({
     summary,
     recordPublished,
     recordSelected,
+    recordErpAccepted,
     reconcileStrictAuditOutputs,
+    reconcileErpAcceptedAuditOutputs,
     strictAuditReconciliation,
+    erpAcceptedAuditReconciliation,
     close,
   };
   return api;

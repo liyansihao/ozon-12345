@@ -412,6 +412,139 @@ test("SQLite-backed publish state terminalizes deterministic failures and enforc
   });
 });
 
+test("confirmed ERP submission stays accepted when a decorative processing transition is ineligible", async () => {
+  await withTempDir(async (dir) => {
+    const runDir = path.join(dir, "run");
+    const dbPath = path.join(dir, "external-state", "runtime.sqlite");
+    const state = createPublishState({
+      runDir,
+      publishedCsv: path.join(dir, "published.csv"),
+      runtimeStateDbPath: dbPath,
+    });
+
+    assert.equal(await state.transition("atomic-accepted", "processing", {
+      reason: "submission-intent",
+      submission_intent: true,
+      submitted: false,
+      store_id: 106637,
+      offer_id: "mz-atomic-accepted",
+      api_call_attempts_total: 1,
+    }), true);
+
+    // Simulate concurrent reconciliation exhausting the ordinary processing
+    // retry budget after the POST reservation but before the accepted response
+    // is persisted. Confirmation must remain the authoritative commit point.
+    const concurrent = createRuntimeState({
+      dbPath,
+      ownerId: "concurrent-reconciliation",
+      generationId: "concurrent-generation",
+    });
+    const retryAt = new Date(Date.now() - 1_000).toISOString();
+    assert.equal(concurrent.recordFailure("atomic-accepted", {
+      reason: "publish-final-status-timeout",
+      kind: "transient",
+      nextEligibleAt: retryAt,
+      data: { api_call_started_at: "2026-08-12T02:59:59.000Z" },
+    }).recorded, true);
+    assert.equal(concurrent.recordFailure("atomic-accepted", {
+      reason: "publish-final-status-timeout",
+      kind: "transient",
+      nextEligibleAt: retryAt,
+      data: { api_call_started_at: "2026-08-12T02:59:59.000Z" },
+    }).recorded, true);
+    concurrent.close();
+
+    assert.equal(await state.transition("atomic-accepted", "processing", {
+      reason: "submission-accepted",
+      submitted: true,
+      submission_intent: false,
+      submission_pending: false,
+      store_id: 106637,
+      offer_id: "mz-atomic-accepted",
+      api_call_accepted_at: "2026-08-12T03:00:00.000Z",
+      api_call_completed_at: "2026-08-12T03:00:00.000Z",
+      api_call_attempts_total: 1,
+    }), true);
+
+    const observer = createRuntimeState({
+      dbPath,
+      ownerId: "acceptance-observer",
+      generationId: "acceptance-observer-generation",
+    });
+    assert.equal(observer.submissionReservation("atomic-accepted").status, "submitted");
+    assert.equal(observer.submissionReservation("atomic-accepted").data.api_call_attempts_total, 1);
+    observer.close();
+    assert.equal(state.entryOf("atomic-accepted").data.submitted, true);
+    await state.close();
+  });
+});
+
+test("load idempotently projects missing submitted reservations to ERP accepted audit", async () => {
+  await withTempDir(async (dir) => {
+    const runDir = path.join(dir, "run");
+    const dbPath = path.join(dir, "external-state", "runtime.sqlite");
+    const publishedCsv = path.join(dir, "published.csv");
+    const runtime = createRuntimeState({
+      dbPath,
+      ownerId: "projection-publisher",
+      generationId: "projection-generation",
+    });
+    assert.equal(runtime.reserveSubmission("projection-missing", {
+      reason: "submission-intent",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        offer_id: "mz-projection-missing",
+        api_call_attempts_total: 1,
+      },
+    }).recorded, true);
+    assert.equal(runtime.confirmSubmission("projection-missing", {
+      reason: "erp-submission-accepted",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        offer_id: "mz-projection-missing",
+        submitted: true,
+        api_call_accepted_at: "2026-08-12T03:05:00.000Z",
+        api_call_completed_at: "2026-08-12T03:05:00.000Z",
+        api_call_attempts_total: 1,
+      },
+    }).recorded, true);
+    runtime.close();
+
+    const concurrentStates = Array.from({ length: 2 }, () => createPublishState({
+      runDir,
+      publishedCsv,
+      runtimeStateDbPath: dbPath,
+    }));
+    await Promise.all(concurrentStates.map((state) => state.load()));
+    await Promise.all(concurrentStates.map((state) => state.close()));
+    const restarted = createPublishState({ runDir, publishedCsv, runtimeStateDbPath: dbPath });
+    await restarted.load();
+    await restarted.close();
+
+    const acceptedRows = (await fs.readFile(path.join(runDir, "erp_accepted.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.deepEqual(acceptedRows, [{
+      at: "2026-08-12T03:05:00.000Z",
+      sku: "projection-missing",
+      store_id: 106637,
+      accepted_at: "2026-08-12T03:05:00.000Z",
+      offer_id: "mz-projection-missing",
+    }]);
+
+    const observer = createRuntimeState({
+      dbPath,
+      ownerId: "projection-observer",
+      generationId: "projection-observer-generation",
+    });
+    assert.equal(observer.submissionReservation("projection-missing").data.api_call_attempts_total, 1);
+    observer.close();
+  });
+});
+
 test("SQLite-backed strict publication rejects weakened quality evidence before writing compatibility files", async () => {
   await withTempDir(async (dir) => {
     const runDir = path.join(dir, "run");
