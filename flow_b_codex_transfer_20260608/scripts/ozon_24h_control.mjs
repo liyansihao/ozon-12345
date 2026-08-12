@@ -8,16 +8,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import {
-  buildLaunchdPlist,
-  productionRunContractDecision,
-  resolveProductionLayout,
-  runDailyPricingReportCheck,
-} from "./ozon_24h_supervisor.mjs";
+import { loadControlStatusIndex } from "./control-status-index.mjs";
 import { dailyWindowState } from "./daily-window.mjs";
-import { reportOutputPath } from "./daily-pricing-report.mjs";
 
 const execFileAsync = promisify(execFile);
+let supervisorModulePromise;
+const DEFAULT_REPORT_DIR = "/Users/mac/Desktop/ozon每日上品";
+
+function loadSupervisorModule() {
+  supervisorModulePromise ||= import("./ozon_24h_supervisor.mjs");
+  return supervisorModulePromise;
+}
+
+function reportOutputPath(reportDir, dateKey) {
+  return path.join(path.resolve(reportDir || DEFAULT_REPORT_DIR), `Ozon人工核价_${dateKey}.xlsx`);
+}
 const LABEL = "com.codex.ozon.24h-production";
 const ACTIVE_STATUSES = new Set([
   "STARTING",
@@ -1232,6 +1237,7 @@ async function promoteCandidate(config) {
   const promotion = await run("/usr/bin/rsync", ["-a", "--delete", `${paths.candidate}/`, `${paths.stable}/`]);
   if (!promotion.ok) throw new Error(`candidate promotion failed: ${promotion.stderr || promotion.error}`);
   await replaceAppSymlink(paths.appLink, paths.stable);
+  const { buildLaunchdPlist, resolveProductionLayout } = await loadSupervisorModule();
   const layout = resolveProductionLayout({ installRoot: paths.base });
   const plist = buildLaunchdPlist({
     label: config.launchd_label || LABEL,
@@ -1504,6 +1510,7 @@ async function start(config) {
       throw error;
     }
     if (config.runtime_mode !== "direct") {
+      const { productionRunContractDecision } = await loadSupervisorModule();
       const contract = productionRunContractDecision({
         currentRun: current,
         pendingManifest: await readJson(path.join(runDir, "pending_manifest.json"), {}),
@@ -1891,22 +1898,51 @@ async function status(config) {
     : {};
   const profitLearning = await readProfitLearningStatus(config, paths);
   if (config.runtime_mode === "direct" && current?.run_dir) {
-    const [funnel, acceptedRows, backgroundRows, matchPolicyState] = await Promise.all([
-      readJsonLines(path.join(current.run_dir, "direct_funnel.jsonl")),
-      readJsonLines(path.join(current.run_dir, "erp_accepted.jsonl")),
-      readJsonLines(path.join(current.run_dir, "background_status.jsonl")),
-      readJson(path.join(current.run_dir, "1688_match_policy.json"), {}),
-    ]);
-    const stageCount = (stage) => uniqueSkuCount(funnel.filter((row) => row?.stage === stage));
-    const runAccepted = uniqueSkuCount(acceptedRows);
-    const byStoreRun = {};
-    for (const row of acceptedRows) {
-      const key = String(Number(row?.store_id) || "unknown");
-      byStoreRun[key] = Number(byStoreRun[key] || 0) + 1;
+    const acceptedTimeZone = String(
+      config?.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
+    );
+    const configuredIndexFile = String(process.env.OZON_CONTROL_STATUS_INDEX_FILE || "").trim();
+    const indexFile = configuredIndexFile
+      ? path.resolve(configuredIndexFile)
+      : path.join(paths.stateRoot, "control_status_index_v1.json");
+    let directMetrics;
+    try {
+      directMetrics = await loadControlStatusIndex(current.run_dir, {
+        indexFile,
+        timeZone: acceptedTimeZone,
+      });
+    } catch {
+      // Preserve status availability if the optional cache cannot be read. The
+      // JSONL evidence remains authoritative and this is the prior exact path.
+      const [funnel, acceptedRows, backgroundRows] = await Promise.all([
+        readJsonLines(path.join(current.run_dir, "direct_funnel.jsonl")),
+        readJsonLines(path.join(current.run_dir, "erp_accepted.jsonl")),
+        readJsonLines(path.join(current.run_dir, "background_status.jsonl")),
+      ]);
+      const byStoreRun = {};
+      for (const row of acceptedRows) {
+        const key = String(Number(row?.store_id) || "unknown");
+        byStoreRun[key] = Number(byStoreRun[key] || 0) + 1;
+      }
+      directMetrics = {
+        stage_counts: Object.fromEntries([
+          "candidate_required_fields_passed",
+          "snapshot_category_passed",
+          "cost_passed",
+          "live_price_confirmed",
+          "profit_passed",
+        ].map((stage) => [stage, uniqueSkuCount(funnel.filter((row) => row?.stage === stage))])),
+        run_accepted: uniqueSkuCount(acceptedRows),
+        by_store_run: byStoreRun,
+        today: dailyAcceptedSummary(acceptedRows, { timeZone: acceptedTimeZone }),
+        online: uniqueSkuCount(backgroundRows.filter((row) => row?.online === true)),
+      };
     }
-    const today = dailyAcceptedSummary(acceptedRows, {
-      timeZone: String(config?.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai"),
-    });
+    const matchPolicyState = await readJson(path.join(current.run_dir, "1688_match_policy.json"), {});
+    const stageCount = (stage) => Number(directMetrics?.stage_counts?.[stage] || 0);
+    const runAccepted = Number(directMetrics.run_accepted || 0);
+    const byStoreRun = directMetrics.by_store_run || {};
+    const today = directMetrics.today;
     const dailyTimeZone = String(config?.daily_pricing_report?.time_zone
       || config?.flow_env?.FLOW_B_DAILY_STORE_TIMEZONE
       || "Asia/Shanghai");
@@ -1954,7 +1990,7 @@ async function status(config) {
         live_price_confirmed: stageCount("live_price_confirmed"),
         profit_passed: stageCount("profit_passed"),
         erp_accepted: today.accepted,
-        online: uniqueSkuCount(backgroundRows.filter((row) => row?.online === true)),
+        online: Number(directMetrics.online || 0),
       },
       by_store: today.by_store,
       daily_by_store: dailyByStore,
@@ -2046,6 +2082,7 @@ async function manualGenerateReport(config, dateKey = null) {
   const paths = deploymentPaths(config);
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   if (!current?.run_dir) throw new Error("current production run is unavailable");
+  const { runDailyPricingReportCheck } = await loadSupervisorModule();
   const result = await runDailyPricingReportCheck({
     config,
     stateRoot: paths.stateRoot,
