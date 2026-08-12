@@ -1112,6 +1112,25 @@ test("operational state entries compact ordinary terminal evidence without weake
         terminal_payload: terminalPayload,
       },
     });
+    state.recordFailure("legacy-terminal-submitted", {
+      reason: "historical-submission-failure",
+      kind: "deterministic",
+      data: {
+        runtime_run_dir: path.join(dir, "legacy-submitted-run"),
+        store_id: 106637,
+        submitted: true,
+        submitted_at: "2026-08-12T04:01:00.000Z",
+        terminal_payload: terminalPayload,
+      },
+    });
+    state.recordSkip("terminal-selected-only", {
+      reason: "historical-selection-skip",
+      data: {
+        store_id: 106637,
+        selected_at: "2026-08-12T04:02:00.000Z",
+        terminal_payload: terminalPayload,
+      },
+    });
     state.recordProcessing("previous-run-reconciliation", {
       reason: "reconciliation-import-pending",
       data: {
@@ -1150,7 +1169,7 @@ test("operational state entries compact ordinary terminal evidence without weake
     });
 
     const operationalEntries = state.operationalStateEntries();
-    assert.equal(operationalEntries.length, 135);
+    assert.equal(operationalEntries.length, 137);
     const operationalBySku = new Map(operationalEntries.map((entry) => [entry.sku, entry]));
     assert.deepEqual(operationalBySku.get("terminal-skip-127").data, {});
     assert.deepEqual(operationalBySku.get("terminal-failure").data, {});
@@ -1161,8 +1180,18 @@ test("operational state entries compact ordinary terminal evidence without weake
     assert.equal(operationalBySku.get("terminal-submitted").data.submitted, true);
     assert.equal(operationalBySku.get("terminal-submitted").data.store_id, 106637);
     assert.equal(state.submissionReservation("terminal-submitted").status, "closed");
+    assert.equal(state.submissionReservation("legacy-terminal-submitted"), null);
+    assert.equal(operationalBySku.get("legacy-terminal-submitted").data.submitted, true);
+    assert.equal(operationalBySku.get("legacy-terminal-submitted").data.store_id, 106637);
+    assert.equal(
+      operationalBySku.get("legacy-terminal-submitted").data.terminal_payload,
+      terminalPayload,
+    );
+    assert.equal(state.submissionReservation("terminal-selected-only"), null);
+    assert.equal(operationalBySku.get("terminal-selected-only").data.selected_at, "2026-08-12T04:02:00.000Z");
+    assert.equal(operationalBySku.get("terminal-selected-only").data.terminal_payload, terminalPayload);
     const allEntries = state.stateEntries();
-    assert.equal(allEntries.length, 135);
+    assert.equal(allEntries.length, 137);
     assert.equal(allEntries.find((entry) => entry.sku === "terminal-skip-127").data.terminal_payload, terminalPayload);
     assert.equal(allEntries.find((entry) => entry.sku === "terminal-failure").data.terminal_payload, terminalPayload);
     state.close();

@@ -209,6 +209,25 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
         terminal_payload: terminalPayload,
       },
     });
+    runtime.recordFailure("legacy-terminal-submitted", {
+      reason: "historical-submission-failure",
+      kind: "deterministic",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        submitted: true,
+        submitted_at: "2026-08-12T04:01:00.000Z",
+        terminal_payload: terminalPayload,
+      },
+    });
+    runtime.recordSkip("terminal-selected-only", {
+      reason: "historical-selection-skip",
+      data: {
+        store_id: 106637,
+        selected_at: "2026-08-12T04:02:00.000Z",
+        terminal_payload: terminalPayload,
+      },
+    });
     runtime.recordProcessing("prior-run-pending", {
       reason: "reconciliation-import-pending",
       data: {
@@ -246,7 +265,7 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
     });
     await restored.load();
     const startupEntries = restored.entries();
-    assert.equal(startupEntries.length, 68);
+    assert.equal(startupEntries.length, 70);
     const startupBySku = new Map(startupEntries.map((entry) => [entry.sku, entry]));
     assert.deepEqual(startupBySku.get("terminal-history-63").data, {
       reason: "historical-policy-rejection",
@@ -256,15 +275,18 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
     });
     assert.equal(startupBySku.get("terminal-submitted").data.submitted, true);
     assert.equal(startupBySku.get("terminal-submitted").data.store_id, 106637);
+    assert.equal(startupBySku.get("legacy-terminal-submitted").data.submitted, true);
+    assert.equal(startupBySku.get("legacy-terminal-submitted").data.store_id, 106637);
+    assert.equal(startupBySku.get("terminal-selected-only").data.selected_at, "2026-08-12T04:02:00.000Z");
     assert.equal(
       restoredDailyStoreUsage(startupEntries, 106637, new Date("2026-08-12T06:00:00.000Z")),
-      2,
+      3,
     );
     assert.equal(restored.runPublishedCount(), 1);
     assert.deepEqual(restored.summary(100), {
       published: 1,
-      failed: 1,
-      skipped: 64,
+      failed: 2,
+      skipped: 65,
       remaining: 99,
     });
     assert.equal(restored.entryOf("prior-run-pending").data.submission_pending, true);
@@ -275,6 +297,10 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
     assert.equal(restored.statusOf("terminal-history-63"), "skipped");
     assert.equal(restored.entryOf("terminal-history-63").data.terminal_payload, terminalPayload);
     assert.equal(restored.canAttempt("terminal-history-63").allowed, false);
+    assert.equal(await restored.recordSelected({
+      sku: "terminal-selected-only",
+      store_id: 106637,
+    }), false);
     await restored.close();
   });
 });

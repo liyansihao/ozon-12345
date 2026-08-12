@@ -19,6 +19,16 @@ const LEGACY_STATUSES = new Set([
 ]);
 const CANONICAL_LINK_HEADERS = new Set(["product_link", "canonical_product_link"]);
 const PRODUCT_URL_PATTERN = /https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s]+)/iu;
+const OPERATIONAL_TERMINAL_DATA_INDEX = "sku_state_operational_terminal_data";
+const OPERATIONAL_TERMINAL_DATA_PREDICATE = `
+  terminal = 1 AND (
+    coalesce(CAST(json_extract(data_json, '$.submitted') AS INTEGER), 0) = 1 OR
+    coalesce(CAST(json_extract(data_json, '$.submission_pending') AS INTEGER), 0) = 1 OR
+    coalesce(CAST(json_extract(data_json, '$.submission_intent') AS INTEGER), 0) = 1 OR
+    coalesce(length(trim(CAST(json_extract(data_json, '$.selected_at') AS TEXT))), 0) > 0 OR
+    coalesce(length(trim(CAST(json_extract(data_json, '$.prepared_at') AS TEXT))), 0) > 0
+  )
+`;
 const STAGE_PRIORITY = new Map([
   ["processing", 1],
   ["submitted", 2],
@@ -951,6 +961,10 @@ export function createRuntimeState({
         PRIMARY KEY (sku, shanghai_day)
       ) STRICT, WITHOUT ROWID;
 
+      CREATE INDEX IF NOT EXISTS ${OPERATIONAL_TERMINAL_DATA_INDEX}
+      ON sku_state(sku)
+      WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE};
+
       CREATE TABLE IF NOT EXISTS strict_publications (
         sku TEXT PRIMARY KEY,
         event_id INTEGER NOT NULL UNIQUE,
@@ -1145,9 +1159,11 @@ export function createRuntimeState({
         WHEN s.terminal = 0
           OR s.stage = 'published'
           OR s.strict = 1
-          OR coalesce(CAST(json_extract(s.data_json, '$.submitted') AS INTEGER), 0) = 1
-          OR coalesce(CAST(json_extract(s.data_json, '$.submission_pending') AS INTEGER), 0) = 1
-          OR coalesce(CAST(json_extract(s.data_json, '$.submission_intent') AS INTEGER), 0) = 1
+          OR s.sku IN (
+            SELECT sku
+            FROM sku_state INDEXED BY ${OPERATIONAL_TERMINAL_DATA_INDEX}
+            WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE}
+          )
         THEN s.data_json
         ELSE '{}'
       END AS data_json,
