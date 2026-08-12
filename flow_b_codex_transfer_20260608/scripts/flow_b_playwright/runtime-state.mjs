@@ -26,6 +26,21 @@ const OPERATIONAL_TERMINAL_DATA_INDEX = "sku_state_operational_terminal_data";
 const OPERATIONAL_PAYLOAD_TABLE = "sku_state_operational_payloads";
 const OPERATIONAL_PAYLOAD_FORMAT_METADATA_KEY = "operational_payload_format_version";
 const OPERATIONAL_PAYLOAD_FORMAT_VERSION = "2";
+const ACCEPTED_AUDIT_RESERVATION_INDEX = "submission_reservations_accepted_audit_by_run";
+const ACCEPTED_AUDIT_RUN_DIR_SQL = "CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT)";
+const ACCEPTED_AUDIT_TIMESTAMP_SQL = `
+  COALESCE(
+    NULLIF(CAST(json_extract(data_json, '$.accepted_at') AS TEXT), ''),
+    NULLIF(CAST(json_extract(data_json, '$.api_call_completed_at') AS TEXT), ''),
+    NULLIF(CAST(json_extract(data_json, '$.api_call_accepted_at') AS TEXT), ''),
+    NULLIF(CAST(json_extract(data_json, '$.submitted_at') AS TEXT), '')
+  )
+`;
+const ACCEPTED_AUDIT_PREDICATE_SQL = `
+  status IN ('submitted', 'closed')
+  AND json_type(data_json, '$.submitted') = 'true'
+  AND (${ACCEPTED_AUDIT_TIMESTAMP_SQL}) IS NOT NULL
+`;
 
 export function runtimeSourceExcludedSkus(dbPath) {
   const configuredPath = String(dbPath ?? "").trim();
@@ -1240,6 +1255,18 @@ export function createRuntimeState({
         )
       ) STRICT;
 
+      CREATE INDEX IF NOT EXISTS ${ACCEPTED_AUDIT_RESERVATION_INDEX}
+      ON submission_reservations (
+        ${ACCEPTED_AUDIT_RUN_DIR_SQL},
+        updated_at,
+        sku,
+        CAST(json_extract(data_json, '$.store_id') AS INTEGER),
+        (${ACCEPTED_AUDIT_TIMESTAMP_SQL}),
+        json_extract(data_json, '$.offer_id'),
+        json_extract(data_json, '$.at')
+      )
+      WHERE ${ACCEPTED_AUDIT_PREDICATE_SQL};
+
       CREATE TABLE IF NOT EXISTS strict_title_claims (
         title_key TEXT PRIMARY KEY,
         sku TEXT NOT NULL UNIQUE,
@@ -1458,18 +1485,23 @@ export function createRuntimeState({
   const selectReservation = database.prepare(`
     SELECT * FROM submission_reservations WHERE sku = ?
   `);
+  const selectAcceptedReservationProjectionsForRun = database.prepare(`
+    SELECT
+      sku,
+      CAST(json_extract(data_json, '$.store_id') AS INTEGER) AS store_id,
+      (${ACCEPTED_AUDIT_TIMESTAMP_SQL}) AS accepted_at,
+      json_extract(data_json, '$.offer_id') AS offer_id,
+      json_extract(data_json, '$.at') AS at
+    FROM submission_reservations INDEXED BY ${ACCEPTED_AUDIT_RESERVATION_INDEX}
+    WHERE ${ACCEPTED_AUDIT_PREDICATE_SQL}
+      AND ${ACCEPTED_AUDIT_RUN_DIR_SQL} = ?
+    ORDER BY updated_at, sku
+  `);
   const selectSubmittedReservationsForRun = database.prepare(`
     SELECT *
-    FROM submission_reservations
-    WHERE status IN ('submitted', 'closed')
-      AND json_type(data_json, '$.submitted') = 'true'
-      AND (
-        NULLIF(CAST(json_extract(data_json, '$.accepted_at') AS TEXT), '') IS NOT NULL
-        OR NULLIF(CAST(json_extract(data_json, '$.api_call_completed_at') AS TEXT), '') IS NOT NULL
-        OR NULLIF(CAST(json_extract(data_json, '$.api_call_accepted_at') AS TEXT), '') IS NOT NULL
-        OR NULLIF(CAST(json_extract(data_json, '$.submitted_at') AS TEXT), '') IS NOT NULL
-      )
-      AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
+    FROM submission_reservations INDEXED BY ${ACCEPTED_AUDIT_RESERVATION_INDEX}
+    WHERE ${ACCEPTED_AUDIT_PREDICATE_SQL}
+      AND ${ACCEPTED_AUDIT_RUN_DIR_SQL} = ?
     ORDER BY updated_at, sku
   `);
   const selectActiveTitleReservation = database.prepare(`
@@ -2551,6 +2583,16 @@ export function createRuntimeState({
     return getReservation(normalizeSku(rawSku));
   }
 
+  function acceptedReservationProjections(runDir) {
+    assertOpen();
+    const normalizedRunDir = normalizedDirectRunDir(runDir);
+    if (!normalizedRunDir) return [];
+    return selectAcceptedReservationProjectionsForRun.all(normalizedRunDir);
+  }
+
+  // Compatibility access for callers that need the complete durable
+  // reservation. Startup audit repair uses the compact projection above so it
+  // never hydrates every accepted reservation's large data_json into Node.
   function submittedReservations(runDir) {
     assertOpen();
     const normalizedRunDir = normalizedDirectRunDir(runDir);
@@ -2628,6 +2670,7 @@ export function createRuntimeState({
     strictCount,
     strictPublications,
     submissionReservation,
+    acceptedReservationProjections,
     submittedReservations,
     directTargetUsage,
     directAcceptedCount,

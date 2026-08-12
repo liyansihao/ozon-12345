@@ -324,6 +324,129 @@ test("submission reservations use an owner generation lease and become permanent
   });
 });
 
+test("accepted audit repair uses a compact indexed projection and excludes uncertain closures", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "runtime.sqlite");
+    const runDir = path.join(dir, "active-run");
+    const otherRunDir = path.join(dir, "other-run");
+    const state = createRuntimeState({
+      dbPath,
+      ownerId: "accepted-audit-owner",
+      generationId: "accepted-audit-generation",
+    });
+
+    const accept = (sku, targetRunDir, acceptedAt) => {
+      assert.equal(state.reserveSubmission(sku, {
+        reason: "submission-intent",
+        data: {
+          runtime_run_dir: targetRunDir,
+          store_id: 106637,
+          offer_id: `mz-${sku}`,
+          api_call_attempts_total: 1,
+        },
+      }).recorded, true);
+      assert.equal(state.confirmSubmission(sku, {
+        reason: "erp-submission-accepted",
+        data: {
+          runtime_run_dir: targetRunDir,
+          store_id: 106637,
+          offer_id: `mz-${sku}`,
+          at: acceptedAt,
+          submitted: true,
+          api_call_completed_at: acceptedAt,
+          api_call_attempts_total: 1,
+        },
+      }).recorded, true);
+    };
+
+    accept("accepted-open", runDir, "2026-08-12T03:00:00.000Z");
+    accept("accepted-closed", runDir, "2026-08-12T03:01:00.000Z");
+    assert.equal(state.recordTerminalOutcome("accepted-closed", {
+      reason: "background-online",
+      stage: "online",
+      data: { outcome_status: "online" },
+    }).recorded, true);
+    accept("accepted-other-run", otherRunDir, "2026-08-12T03:02:00.000Z");
+
+    assert.equal(state.reserveSubmission("uncertain-closed", {
+      reason: "submission-intent",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        offer_id: "mz-uncertain-closed",
+        api_call_attempts_total: 0,
+      },
+    }).recorded, true);
+    assert.equal(state.recordSkip("uncertain-closed", {
+      reason: "reconciliation-age-exhausted",
+      data: { outcome_status: "indeterminate" },
+    }).recorded, true);
+
+    assert.deepEqual(
+      state.acceptedReservationProjections(runDir).map((row) => ({ ...row })),
+      [
+        {
+          sku: "accepted-open",
+          store_id: 106637,
+          accepted_at: "2026-08-12T03:00:00.000Z",
+          offer_id: "mz-accepted-open",
+          at: "2026-08-12T03:00:00.000Z",
+        },
+        {
+          sku: "accepted-closed",
+          store_id: 106637,
+          accepted_at: "2026-08-12T03:01:00.000Z",
+          offer_id: "mz-accepted-closed",
+          at: "2026-08-12T03:01:00.000Z",
+        },
+      ],
+    );
+    assert.deepEqual(
+      state.submittedReservations(runDir).map((row) => row.sku),
+      ["accepted-open", "accepted-closed"],
+    );
+    assert.equal(state.submissionReservation("uncertain-closed").data.submitted, false);
+    state.close();
+
+    const database = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const plan = database.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT
+          sku,
+          CAST(json_extract(data_json, '$.store_id') AS INTEGER) AS store_id,
+          COALESCE(
+            NULLIF(CAST(json_extract(data_json, '$.accepted_at') AS TEXT), ''),
+            NULLIF(CAST(json_extract(data_json, '$.api_call_completed_at') AS TEXT), ''),
+            NULLIF(CAST(json_extract(data_json, '$.api_call_accepted_at') AS TEXT), ''),
+            NULLIF(CAST(json_extract(data_json, '$.submitted_at') AS TEXT), '')
+          ) AS accepted_at,
+          json_extract(data_json, '$.offer_id') AS offer_id,
+          json_extract(data_json, '$.at') AS at
+        FROM submission_reservations INDEXED BY submission_reservations_accepted_audit_by_run
+        WHERE status IN ('submitted', 'closed')
+          AND json_type(data_json, '$.submitted') = 'true'
+          AND COALESCE(
+            NULLIF(CAST(json_extract(data_json, '$.accepted_at') AS TEXT), ''),
+            NULLIF(CAST(json_extract(data_json, '$.api_call_completed_at') AS TEXT), ''),
+            NULLIF(CAST(json_extract(data_json, '$.api_call_accepted_at') AS TEXT), ''),
+            NULLIF(CAST(json_extract(data_json, '$.submitted_at') AS TEXT), '')
+          ) IS NOT NULL
+          AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
+        ORDER BY updated_at, sku
+      `).all(runDir).map((row) => String(row.detail)).join("\n");
+      assert.match(
+        plan,
+        /SEARCH submission_reservations USING INDEX submission_reservations_accepted_audit_by_run/u,
+      );
+      assert.doesNotMatch(plan, /SCAN submission_reservations/u);
+      assert.doesNotMatch(plan, /USE TEMP B-TREE/u);
+    } finally {
+      database.close();
+    }
+  });
+});
+
 test("direct target slots are atomic across main and background runtime-state owners", async () => {
   await withTempDir(async (dir) => {
     const dbPath = path.join(dir, "runtime.sqlite");

@@ -968,10 +968,10 @@ export function createPublishState({
   }
 
   async function reconcileErpAcceptedAuditOutputsInternal() {
-    if (!runtimeState || typeof runtimeState.submittedReservations !== "function") {
+    if (!runtimeState || typeof runtimeState.acceptedReservationProjections !== "function") {
       return { submitted: 0, added: 0 };
     }
-    return appendErpAcceptedAuditRows(runtimeState.submittedReservations(resolvedRunDir));
+    return appendErpAcceptedAuditRows(runtimeState.acceptedReservationProjections(resolvedRunDir));
   }
 
   async function transitionInternal(skuValue, status, data = {}) {
