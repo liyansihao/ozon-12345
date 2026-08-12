@@ -6,6 +6,7 @@ import {
   acceptanceSourceConfig,
   acceptanceRoundPlan,
   allDirectStoresRejected,
+  isRecoverableForegroundFavoritesTimeout,
   parseCli,
   parseDailyStoreUsageSeed,
   parseProfitSafetyActionPolicy,
@@ -14,9 +15,72 @@ import {
   parseStoreTotalUsageSeed,
   publishedCsvPath,
   resumedAcceptanceWindow,
+  runForegroundPublishAttempt,
   sourceScanOutputFile,
   unlimitedPublishTarget,
 } from "../scripts/flow_b_playwright.mjs";
+
+function maoziTimeout(overrides = {}) {
+  return Object.assign(new Error("Maozi GET favorites timed out"), {
+    code: "MAOZI_REQUEST_TIMEOUT",
+    endpoint: "/api.product.favorite/lists",
+    method: "GET",
+    phase: "context-fetch",
+    timeout_ms: 30_000,
+    ...overrides,
+  });
+}
+
+test("foreground recovery only accepts a structured favorites GET timeout", async () => {
+  const timeout = maoziTimeout();
+  assert.equal(isRecoverableForegroundFavoritesTimeout(timeout), true);
+  for (const error of [
+    maoziTimeout({ method: "POST" }),
+    maoziTimeout({ endpoint: "/api.product.import_logs/index" }),
+    maoziTimeout({ code: "OTHER_TIMEOUT" }),
+    Object.assign(new Error("Maozi favorites request failed: Unauthenticated"), { status: 401 }),
+    maoziTimeout({ message: "Target page, context or browser has been closed" }),
+  ]) {
+    assert.equal(isRecoverableForegroundFavoritesTimeout(error), false);
+    await assert.rejects(
+      runForegroundPublishAttempt(async () => { throw error; }),
+      (observed) => observed === error,
+    );
+  }
+});
+
+test("foreground favorites timeout discards its session and retries without cancelling the run", async () => {
+  const directRunControl = { cancelled: false, fatalError: null };
+  const shared = { session: { id: 1 } };
+  let closed = 0;
+  let recoveries = 0;
+  let attempts = 0;
+  const publishRound = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      shared.session = null;
+      closed += 1;
+      throw maoziTimeout();
+    }
+    shared.session = { id: 2 };
+    return { accepted: 1 };
+  };
+
+  const first = await runForegroundPublishAttempt(publishRound, {
+    onRecoverableTimeout: async () => {
+      recoveries += 1;
+      assert.equal(shared.session, null);
+    },
+  });
+  assert.equal(first.retry, true);
+  assert.equal(closed, 1);
+  assert.equal(recoveries, 1);
+  assert.deepEqual(directRunControl, { cancelled: false, fatalError: null });
+
+  const second = await runForegroundPublishAttempt(publishRound);
+  assert.deepEqual(second, { retry: false, value: { accepted: 1 } });
+  assert.equal(attempts, 2);
+});
 
 test("profit safety action policy defaults to shadow and requires an explicit enforce value", () => {
   assert.equal(parseProfitSafetyActionPolicy({}), "shadow");

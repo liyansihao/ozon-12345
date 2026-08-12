@@ -15,7 +15,12 @@ import {
 } from "./flow_b_playwright/browser-context.mjs";
 import { createCostBridge } from "./flow_b_playwright/cost-bridge.mjs";
 import { createDirectWorkerHealthTracker } from "./flow_b_playwright/direct-worker-health.mjs";
-import { createMaoziClient, createMaoziPageTransport } from "./flow_b_playwright/maozi-client.mjs";
+import {
+  createMaoziClient,
+  createMaoziPageTransport,
+  MAOZI_FAVORITES_ENDPOINT,
+  MAOZI_REQUEST_TIMEOUT_CODE,
+} from "./flow_b_playwright/maozi-client.mjs";
 import { createOzonDetailProvider } from "./flow_b_playwright/ozon-detail.mjs";
 import { ozonAccessControllerFor } from "./flow_b_playwright/ozon-access-controller.mjs";
 import { createLowTokenInterventionController } from "./flow_b_playwright/low-token-intervention.mjs";
@@ -99,6 +104,29 @@ export function parseProfitSafetyActionPolicy(env = {}) {
 export function allDirectStoresRejected(publish = {}) {
   return ["daily-product-limit", "store-unavailable"].includes(String(publish?.halt_reason || ""))
     && publish?.stores_exhausted?.all === true;
+}
+
+export function isRecoverableForegroundFavoritesTimeout(error) {
+  return error?.code === MAOZI_REQUEST_TIMEOUT_CODE
+    && String(error?.method || "").toUpperCase() === "GET"
+    && String(error?.endpoint || "") === MAOZI_FAVORITES_ENDPOINT
+    && !isFatalBrowserError(error);
+}
+
+export async function runForegroundPublishAttempt(operation, {
+  onRecoverableTimeout = async () => {},
+} = {}) {
+  if (typeof operation !== "function") throw new TypeError("foreground publish operation is required");
+  if (typeof onRecoverableTimeout !== "function") {
+    throw new TypeError("onRecoverableTimeout must be a function");
+  }
+  try {
+    return { retry: false, value: await operation() };
+  } catch (error) {
+    if (!isRecoverableForegroundFavoritesTimeout(error)) throw error;
+    await onRecoverableTimeout(error);
+    return { retry: true, error };
+  }
 }
 
 async function writeDailySubmissionWindowMarker(runDir, publish, {
@@ -1112,13 +1140,42 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
           if (backgroundError) throw backgroundError;
           if (producerError) throw producerError;
           if (directRunControl.fatalError) throw directRunControl.fatalError;
-          publish = await publishWithContext(
-            context,
-            options,
-            directEnv,
-            shared,
-            { attemptLimit: publishAttemptLimit(directEnv) },
+          const retryDelayMs = runtimeIdleDelay(idleStreak + 1, emptyBackoffIntervals);
+          const foregroundAttempt = await runForegroundPublishAttempt(
+            () => publishWithContext(
+              context,
+              options,
+              directEnv,
+              shared,
+              { attemptLimit: publishAttemptLimit(directEnv) },
+            ),
+            {
+              onRecoverableTimeout: async (error) => {
+                const observedAt = new Date();
+                await fs.appendFile(path.join(options.runDir, "runtime_recovery.jsonl"), `${JSON.stringify({
+                  at: observedAt.toISOString(),
+                  stage: "foreground-favorites-list",
+                  action: "recreate-maozi-session-and-retry",
+                  reason: "maozi-favorites-get-timeout",
+                  error_code: String(error.code),
+                  endpoint: String(error.endpoint),
+                  method: String(error.method).toUpperCase(),
+                  phase: String(error.phase || "request"),
+                  timeout_ms: Number(error.timeout_ms) || null,
+                  retry_in_ms: retryDelayMs,
+                  retry_at: new Date(observedAt.getTime() + retryDelayMs).toISOString(),
+                  browser_preserved: true,
+                  session_discarded: shared.session === null,
+                })}\n`);
+              },
+            },
           );
+          if (foregroundAttempt.retry) {
+            idleStreak += 1;
+            await runtimeWake.wait(retryDelayMs);
+            continue;
+          }
+          publish = foregroundAttempt.value;
           await writeDailySubmissionWindowMarker(options.runDir, publish, {
             timeZone: directEnv.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
           });

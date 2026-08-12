@@ -1142,6 +1142,18 @@ test("Maozi extension startup failures recycle the browser without broad timeout
   }
 });
 
+test("a foreground Maozi favorites GET timeout is worker-only when CDP remains owned", () => {
+  const decision = classifyWorkerFailure({
+    message: "Maozi GET /api.product.favorite/lists timed out during get-total-budget after 120000ms",
+    profileOwnerCount: 1,
+  });
+  assert.deepEqual(decision, {
+    action: "restart-worker",
+    reason: "ordinary-worker-recoverable",
+  });
+  assert.deepEqual(browserOwnerPidsForRecovery(decision, [{ pid: 92462 }]), []);
+});
+
 test("owner and security risks take priority over Maozi extension recovery", () => {
   const popupTimeout = [
     "page.goto: Timeout 10000ms exceeded.",

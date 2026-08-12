@@ -641,14 +641,24 @@ test("browser page transport includes Maozi headers and safely parses non-JSON e
 test("browser transport hard-times out one POST without replaying it", async () => {
   const clock = createControlledClock();
   let calls = 0;
+  let contextCalls = 0;
   const page = {
     evaluate: async () => {
       calls += 1;
       return new Promise(() => {});
     },
   };
+  const context = {
+    request: {
+      fetch: async () => {
+        contextCalls += 1;
+        throw new Error("POST context fallback must not run");
+      },
+    },
+  };
   const transport = createMaoziPageTransport({
     page,
+    context,
     requestTimeoutMs: 30_000,
     scheduleTimeout: clock.scheduleTimeout,
     cancelTimeout: clock.cancelTimeout,
@@ -666,7 +676,180 @@ test("browser transport hard-times out one POST without replaying it", async () 
       && error?.timeout_ms === 30_000,
   );
   assert.equal(calls, 1);
+  assert.equal(contextCalls, 0);
   assert.equal(clock.now(), 30_000);
+  assert.equal(clock.pendingCount(), 0);
+});
+
+test("browser transport immediately falls back to authenticated context after a GET page timeout", async () => {
+  const clock = createControlledClock();
+  let pageFetchCalls = 0;
+  let identityCalls = 0;
+  let contextCalls = 0;
+  const page = {
+    evaluate: async (_fn, request) => {
+      if (request) {
+        pageFetchCalls += 1;
+        return new Promise(() => {});
+      }
+      identityCalls += 1;
+      return { token: "favorite-token", userAgent: "Chrome Favorite Agent" };
+    },
+  };
+  const context = {
+    request: {
+      fetch: async (_url, options) => {
+        contextCalls += 1;
+        assert.equal(options.method, "GET");
+        assert.equal(options.timeout > 0 && options.timeout <= 30_000, true);
+        return {
+          status: () => 200,
+          text: async () => JSON.stringify({ code: 1, data: { data: [], last_page: 1 } }),
+        };
+      },
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    context,
+    maxGetAttempts: 6,
+    scheduleTimeout: clock.scheduleTimeout,
+    cancelTimeout: clock.cancelTimeout,
+    now: clock.now,
+  });
+
+  assert.deepEqual(
+    await settleWithControlledClock(transport("/api.product.favorite/lists"), clock),
+    { status: 200, json: { code: 1, data: { data: [], last_page: 1 } } },
+  );
+  assert.equal(pageFetchCalls, 1);
+  assert.equal(identityCalls, 1);
+  assert.equal(contextCalls, 1);
+  assert.equal(clock.now(), 30_000);
+  assert.equal(clock.pendingCount(), 0);
+});
+
+test("a context timeout after a GET page timeout preserves structured evidence", async () => {
+  const clock = createControlledClock();
+  let pageFetchCalls = 0;
+  let contextCalls = 0;
+  const page = {
+    evaluate: async (_fn, request) => {
+      if (request) {
+        pageFetchCalls += 1;
+        return new Promise(() => {});
+      }
+      return { token: "favorite-token", userAgent: "Chrome Favorite Agent" };
+    },
+  };
+  const context = {
+    request: {
+      fetch: async () => {
+        contextCalls += 1;
+        return new Promise(() => {});
+      },
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    context,
+    maxGetAttempts: 6,
+    scheduleTimeout: clock.scheduleTimeout,
+    cancelTimeout: clock.cancelTimeout,
+    now: clock.now,
+  });
+
+  await assert.rejects(
+    settleWithControlledClock(transport("/api.product.favorite/lists"), clock),
+    (error) => error?.code === "MAOZI_REQUEST_TIMEOUT"
+      && error?.endpoint === "/api.product.favorite/lists"
+      && error?.method === "GET"
+      && error?.phase === "context-fetch",
+  );
+  assert.equal(pageFetchCalls, 1);
+  assert.equal(contextCalls, 1);
+  assert.equal(clock.now(), 60_000);
+  assert.equal(clock.pendingCount(), 0);
+});
+
+test("GET recovery retries the page when fallback identity is replaced by navigation", async () => {
+  const clock = createControlledClock();
+  let pageFetchCalls = 0;
+  let identityCalls = 0;
+  const page = {
+    evaluate: async (_fn, request) => {
+      if (request) {
+        pageFetchCalls += 1;
+        if (pageFetchCalls === 1) return new Promise(() => {});
+        return { status: 200, json: { code: 1, data: [] } };
+      }
+      identityCalls += 1;
+      throw new Error("Execution context was destroyed, most likely because of a navigation");
+    },
+  };
+  const context = {
+    request: {
+      fetch: async () => { throw new Error("context fetch must not run without identity"); },
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    context,
+    maxGetAttempts: 3,
+    scheduleTimeout: clock.scheduleTimeout,
+    cancelTimeout: clock.cancelTimeout,
+    now: clock.now,
+    retrySleep: (ms) => new Promise((resolve) => clock.scheduleTimeout(resolve, ms)),
+  });
+
+  assert.deepEqual(
+    await settleWithControlledClock(transport("/api.product.favorite/lists"), clock),
+    { status: 200, json: { code: 1, data: [] } },
+  );
+  assert.equal(pageFetchCalls, 2);
+  assert.equal(identityCalls, 1);
+  assert.equal(clock.now(), 30_250);
+  assert.equal(clock.pendingCount(), 0);
+});
+
+test("context network failure after a page timeout stays in bounded GET recovery", async () => {
+  const clock = createControlledClock();
+  let pageFetchCalls = 0;
+  let contextCalls = 0;
+  const page = {
+    evaluate: async (_fn, request) => request
+      ? (pageFetchCalls += 1, new Promise(() => {}))
+      : ({ token: "favorite-token", userAgent: "Chrome Favorite Agent" }),
+  };
+  const context = {
+    request: {
+      fetch: async () => {
+        contextCalls += 1;
+        throw new Error("getaddrinfo ENOTFOUND api.maozierp.com");
+      },
+    },
+  };
+  const transport = createMaoziPageTransport({
+    page,
+    context,
+    maxGetAttempts: 2,
+    scheduleTimeout: clock.scheduleTimeout,
+    cancelTimeout: clock.cancelTimeout,
+    now: clock.now,
+    retrySleep: (ms) => new Promise((resolve) => clock.scheduleTimeout(resolve, ms)),
+  });
+
+  await assert.rejects(
+    settleWithControlledClock(transport("/api.product.favorite/lists"), clock),
+    (error) => error?.code === "MAOZI_REQUEST_TIMEOUT"
+      && error?.endpoint === "/api.product.favorite/lists"
+      && error?.method === "GET"
+      && error?.phase === "page-fetch"
+      && /ENOTFOUND/u.test(String(error?.context_fallback_error || "")),
+  );
+  assert.equal(pageFetchCalls, 2);
+  assert.equal(contextCalls, 2);
+  assert.equal(clock.now(), 60_750);
   assert.equal(clock.pendingCount(), 0);
 });
 

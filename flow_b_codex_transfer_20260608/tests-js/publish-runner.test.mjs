@@ -28,6 +28,7 @@ import {
   normalizeProfitPriority,
   normalizeSeasonPriority,
 } from "../scripts/flow_b_playwright/profit-priority.mjs";
+import { runForegroundPublishAttempt } from "../scripts/flow_b_playwright.mjs";
 
 test("1688 concurrency gate waits for a real worker slot before starting queued work", async () => {
   const gate = createConcurrencyGate(1);
@@ -1169,6 +1170,79 @@ function clientFor(items, overrides = {}) {
     ...overrides,
   };
 }
+
+test("foreground favorites timeout preserves durable state and publishes once after a safe retry", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-favorites-timeout-retry-"));
+  try {
+    const durablePending = {
+      status: "processing",
+      data: {
+        sku: "durable-pending",
+        submitted: true,
+        submission_pending: true,
+        offer_id: "mz-durable-pending",
+        next_reconcile_at: "2099-01-01T00:00:00.000Z",
+      },
+    };
+    const state = fakeState({ "durable-pending": durablePending });
+    const directRunControl = { cancelled: false, fatalError: null };
+    let listCalls = 0;
+    let publishCalls = 0;
+    const item = {
+      sku: "fresh-after-timeout",
+      title: "Безопасный товар после таймаута",
+      cover_image: "https://img.example/fresh-after-timeout.jpg",
+      sell_price: 100,
+    };
+    const client = clientFor([], {
+      listFavorites: async () => {
+        listCalls += 1;
+        if (listCalls === 1) {
+          throw Object.assign(new Error("Maozi favorites GET timed out"), {
+            code: "MAOZI_REQUEST_TIMEOUT",
+            endpoint: "/api.product.favorite/lists",
+            method: "GET",
+            phase: "context-fetch",
+          });
+        }
+        return [item];
+      },
+      publish: async () => {
+        publishCalls += 1;
+        return { ok: true, response: { code: 1 } };
+      },
+    });
+    const runner = createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 1,
+      runDir,
+      directMode: true,
+      directRunControl,
+      minimumSameItemMatches: 1,
+      requireReliableCostContract: true,
+    });
+
+    const timedOut = await runForegroundPublishAttempt(() => runner.run());
+    assert.equal(timedOut.retry, true);
+    assert.equal(publishCalls, 0);
+    assert.equal(state.entryOf("fresh-after-timeout"), null);
+    assert.equal(state.entryOf("durable-pending").data.submission_pending, true);
+    assert.equal(directRunControl.cancelled, false);
+    assert.equal(directRunControl.fatalError, null);
+
+    const recovered = await runForegroundPublishAttempt(() => runner.run());
+    assert.equal(recovered.retry, false);
+    assert.equal(recovered.value.accepted, 1);
+    assert.equal(listCalls, 2);
+    assert.equal(publishCalls, 1);
+    assert.equal(state.entryOf("fresh-after-timeout").data.submitted, true);
+    assert.equal(state.selections.length, 1);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
 
 test("runner rejects incomplete favorite content before 1688 or publish work", async () => {
   const state = fakeState();

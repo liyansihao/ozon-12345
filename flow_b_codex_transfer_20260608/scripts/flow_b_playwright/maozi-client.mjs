@@ -1,7 +1,9 @@
 import { selectNamedResource } from "./publish-policy.mjs";
 
+export const MAOZI_FAVORITES_ENDPOINT = "/api.product.favorite/lists";
+
 const ENDPOINTS = Object.freeze({
-  favorites: "/api.product.favorite/lists",
+  favorites: MAOZI_FAVORITES_ENDPOINT,
   favoriteToggle: "/api.product.favorite/toggle",
   shops: "/api.shop/lists",
   watermarks: "/api.watermark/templates",
@@ -61,6 +63,13 @@ function stringQuery(input) {
 function isTransientNavigationContextError(error) {
   return /execution context was destroyed|cannot find context with specified id|most likely because of a navigation|frame was detached/iu
     .test(String(error?.message || error || ""));
+}
+
+function isAuthenticationFailure(error) {
+  const status = Number(error?.status ?? error?.statusCode ?? error?.response?.status);
+  return [401, 403].includes(status)
+    || /unauthenticated|unauthori[sz]ed|forbidden|login required|access\s*token/iu
+      .test(String(error?.message || error || ""));
 }
 
 export const MAOZI_REQUEST_TIMEOUT_CODE = "MAOZI_REQUEST_TIMEOUT";
@@ -757,21 +766,49 @@ export function createMaoziPageTransport({
       } catch (error) {
         lastError = error;
         if (isGet && isMaoziRequestTimeoutError(error)) {
+          if (remainingGetBudgetMs() > 0
+            && ["page-fetch", "page-recovery-fetch"].includes(String(error?.phase || ""))) {
+            // A hanging in-page fetch does not establish that Chrome or the
+            // authenticated Maozi session is unhealthy. Try the independent,
+            // read-only APIRequestContext once immediately; waiting for every
+            // page retry would otherwise consume the whole GET budget. POSTs
+            // never enter this branch and remain strictly single-shot.
+            try {
+              const fallback = await contextRequest(page);
+              if (fallback) return fallback;
+            } catch (fallbackError) {
+              if (isTransientNavigationContextError(fallbackError)
+                && remainingGetBudgetMs() > 0
+                && attempt + 1 < attempts) {
+                lastError = fallbackError;
+                await sleepWithinGetBudget(
+                  Math.min(2_000, 250 * (attempt + 1)),
+                  "context-navigation-retry-backoff",
+                );
+                continue;
+              }
+              if (isMaoziRequestTimeoutError(fallbackError)
+                || /target (?:page, )?context or browser has been closed|browser has been closed/iu
+                  .test(String(fallbackError?.message || fallbackError || ""))
+                || isAuthenticationFailure(fallbackError)) {
+                // Preserve structured timeout, browser, and authentication
+                // evidence. The foreground loop retries only the first case;
+                // the other two retain their existing fail-closed behavior.
+                throw fallbackError;
+              }
+              // A context-side network failure alone does not prove that the
+              // browser is unhealthy. Keep retrying the idempotent page GET;
+              // if it remains hung, throw the original structured page timeout
+              // so the foreground loop replaces only this Maozi session.
+              error.context_fallback_error = String(fallbackError?.message || fallbackError);
+            }
+          }
           if (remainingGetBudgetMs() > 0 && attempt + 1 < attempts) {
             await sleepWithinGetBudget(
               Math.min(5_000, 750 * (2 ** attempt)),
               "get-timeout-retry-backoff",
             );
             continue;
-          }
-          if (remainingGetBudgetMs() > 0
-            && ["page-fetch", "page-recovery-fetch"].includes(String(error?.phase || ""))) {
-            try {
-              const fallback = await contextRequest(page);
-              if (fallback) return fallback;
-            } catch (fallbackError) {
-              lastError = fallbackError;
-            }
           }
           if (!(remainingGetBudgetMs() > 0)) throw getBudgetTimeout("get-total-budget");
           throw lastError;
