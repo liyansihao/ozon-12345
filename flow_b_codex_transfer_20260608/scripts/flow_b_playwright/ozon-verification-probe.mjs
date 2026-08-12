@@ -14,6 +14,49 @@ import {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+function timeoutError(operation, timeoutMs) {
+  const error = new Error(`verification probe ${operation} timed out after ${timeoutMs}ms`);
+  error.code = "OZON_VERIFICATION_PROBE_TIMEOUT";
+  error.operation = operation;
+  return error;
+}
+
+async function runWithinDeadline(operation, deadlineAt, execute) {
+  const remainingMs = Math.max(0, Math.floor(deadlineAt - Date.now()));
+  if (remainingMs <= 0) throw timeoutError(operation, 0);
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => execute(remainingMs)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(timeoutError(operation, remainingMs)), remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function closeOwnPageWithin(page, timeoutMs) {
+  if (!page?.close) return;
+  const boundedMs = Math.max(1, Math.floor(Number(timeoutMs) || 1));
+  let timer;
+  try {
+    await Promise.race([
+      Promise.resolve().then(() => page.close({ runBeforeUnload: false })),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, boundedMs);
+      }),
+    ]);
+  } catch {
+    // A failed cleanup must not suppress a conclusive probe result. The CLI
+    // exits immediately after printing, which disconnects its CDP session
+    // without closing the shared browser.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function ozonHost(value) {
   try {
     const hostname = new URL(String(value || "")).hostname.toLowerCase();
@@ -93,26 +136,30 @@ export async function probeOzonVerification({
   const endpoint = String(cdpEndpoint || "").trim();
   if (!/^https?:\/\//iu.test(endpoint)) throw new TypeError("valid CDP endpoint is required");
   if (!ozonHost(url)) throw new TypeError("verification probe URL must be an Ozon URL");
-  const timeout = Math.max(5_000, Number(timeoutMs) || 45_000);
+  const timeout = Math.max(100, Number(timeoutMs) || 45_000);
   const startedAt = Date.now();
   const deadlineAt = startedAt + timeout;
+  const cleanupBudgetMs = Math.min(2_000, Math.max(50, Math.floor(timeout * 0.1)));
+  const operationDeadlineAt = deadlineAt - cleanupBudgetMs;
   let page;
   try {
-    const browser = await browserType.connectOverCDP(endpoint, { timeout });
+    const browser = await runWithinDeadline("CDP connection", operationDeadlineAt, (remainingMs) => (
+      browserType.connectOverCDP(endpoint, { timeout: remainingMs })
+    ));
     const context = browser.contexts()[0];
     if (!context) throw new Error("CDP browser has no default context");
-    page = await context.newPage();
-    const navigationTimeout = deadlineAt - Date.now();
-    if (navigationTimeout <= 0) throw new Error("verification probe deadline expired before navigation");
-    const response = await page.goto(String(url), {
-      waitUntil: "domcontentloaded",
-      timeout: navigationTimeout,
-    });
+    page = await runWithinDeadline("page creation", operationDeadlineAt, () => context.newPage());
+    const response = await runWithinDeadline("page navigation", operationDeadlineAt, (remainingMs) => (
+      page.goto(String(url), {
+        waitUntil: "domcontentloaded",
+        timeout: remainingMs,
+      })
+    ));
     const httpStatus = response?.status?.() ?? null;
     const pollMs = Math.min(2_000, Math.max(100, Number(settleMs) || 2_000));
     let lastResult;
     do {
-      const snapshot = await page.evaluate(() => {
+      const snapshot = await runWithinDeadline("page inspection", operationDeadlineAt, () => page.evaluate(() => {
         const bodyText = String(document.body?.innerText || "").slice(0, 20_000);
         const isVisible = (entry) => {
           const style = getComputedStyle(entry);
@@ -147,16 +194,16 @@ export async function probeOzonVerification({
           product_link_count: productLinks.size,
           product_evidence: productEvidence,
         };
-      });
+      }));
       lastResult = classifyOzonVerificationSnapshot({
         ...snapshot,
         http_status: httpStatus,
       });
       if (lastResult.classification !== "INDETERMINATE") return lastResult;
-      const remainingMs = deadlineAt - Date.now();
+      const remainingMs = operationDeadlineAt - Date.now();
       if (remainingMs <= 0) break;
       await delay(Math.min(pollMs, remainingMs));
-    } while (Date.now() < deadlineAt);
+    } while (Date.now() < operationDeadlineAt);
     return lastResult;
   } catch (error) {
     return classifyOzonVerificationSnapshot({
@@ -164,7 +211,8 @@ export async function probeOzonVerification({
       error: String(error?.message || error),
     });
   } finally {
-    await page?.close?.().catch(() => {});
+    const cleanupRemainingMs = Math.max(1, Math.min(cleanupBudgetMs, deadlineAt - Date.now()));
+    await closeOwnPageWithin(page, cleanupRemainingMs);
     // This command always runs in a dedicated subprocess. Exiting that process
     // disconnects CDP without sending a close command to the shared browser.
   }

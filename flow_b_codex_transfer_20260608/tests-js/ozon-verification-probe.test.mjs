@@ -126,3 +126,73 @@ test("verification probe closes only its own page and never closes the shared br
   assert.equal(pageCloseCalls, 1);
   assert.equal(browserCloseCalls, 0);
 });
+
+test("verification probe enforces its deadline when page inspection and cleanup hang", async () => {
+  let pageCloseCalls = 0;
+  let browserCloseCalls = 0;
+  const page = {
+    url: () => "https://www.ozon.ru/seller/example/",
+    goto: async () => ({ status: () => 200 }),
+    evaluate: async () => new Promise(() => {}),
+    close: async () => {
+      pageCloseCalls += 1;
+      return new Promise(() => {});
+    },
+  };
+  const browserType = {
+    connectOverCDP: async () => ({
+      contexts: () => [{ newPage: async () => page }],
+      close: async () => { browserCloseCalls += 1; },
+    }),
+  };
+  const startedAt = Date.now();
+  const result = await probeOzonVerification({
+    cdpEndpoint: "http://127.0.0.1:9223",
+    url: "https://www.ozon.ru/seller/example/",
+    timeoutMs: 250,
+    settleMs: 10,
+    browserType,
+  });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(result.classification, "INDETERMINATE");
+  assert.equal(result.reason, "probe-technical-error");
+  assert.match(result.error, /page inspection timed out/iu);
+  assert.ok(elapsedMs < 1_000, `probe exceeded its deadline: ${elapsedMs}ms`);
+  assert.equal(pageCloseCalls, 1);
+  assert.equal(browserCloseCalls, 0);
+});
+
+test("a hanging own-page close cannot suppress a conclusive probe result", async () => {
+  let pageCloseCalls = 0;
+  const page = {
+    goto: async () => ({ status: () => 200 }),
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/seller/example/",
+      title: "Example — OZON",
+      text: "Товары",
+      security_text: "",
+      product_link_count: 3,
+      product_evidence: false,
+    }),
+    close: async () => {
+      pageCloseCalls += 1;
+      return new Promise(() => {});
+    },
+  };
+  const startedAt = Date.now();
+  const result = await probeOzonVerification({
+    cdpEndpoint: "http://127.0.0.1:9223",
+    url: "https://www.ozon.ru/seller/example/",
+    timeoutMs: 250,
+    settleMs: 10,
+    browserType: {
+      connectOverCDP: async () => ({
+        contexts: () => [{ newPage: async () => page }],
+      }),
+    },
+  });
+  const elapsedMs = Date.now() - startedAt;
+  assert.equal(result.classification, "READY");
+  assert.ok(elapsedMs < 1_000, `cleanup suppressed the result: ${elapsedMs}ms`);
+  assert.equal(pageCloseCalls, 1);
+});
