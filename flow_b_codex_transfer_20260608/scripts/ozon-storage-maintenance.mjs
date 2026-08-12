@@ -847,7 +847,13 @@ export async function restoreArchive({
     await fs.chmod(temporary, record.source.mode || 0o600);
     const mtime = new Date(Number(record.source.mtime_ms));
     await fs.utimes(temporary, mtime, mtime);
-    await fs.rename(temporary, target);
+    try {
+      await fs.link(temporary, target);
+    } catch (error) {
+      if (error?.code === "EEXIST") throw new Error(`restore target already exists: ${target}`);
+      throw error;
+    }
+    await fs.unlink(temporary);
     await fsyncDirectory(path.dirname(target));
     return { ...plan, status: "restored", restored_size_bytes: restored.size_bytes };
   } finally {

@@ -198,6 +198,34 @@ test("archive is gzip-verified and manifested before optional source removal, th
   });
 });
 
+test("restore never overwrites a target created during validation", async () => {
+  await withTempState(async (stateRoot) => {
+    const source = path.join(stateRoot, "runtime", "flow_b_state.sqlite.schema-v3.backup.sqlite");
+    await fs.mkdir(path.dirname(source), { recursive: true });
+    await fs.writeFile(source, "original-archive-data");
+    await fs.utimes(source, new Date(0), new Date(0));
+    const archived = await archiveStaticFile({
+      stateRoot,
+      source,
+      execute: true,
+      removeSource: true,
+      minimumAgeMs: 0,
+      openStatus: closedFile,
+      sqliteValidation: validSqlite,
+    });
+    await assert.rejects(restoreArchive({
+      stateRoot,
+      archiveId: archived.archive_id,
+      execute: true,
+      sqliteValidation: async () => {
+        await fs.writeFile(source, "concurrent-new-file");
+        return validSqlite();
+      },
+    }), /restore target already exists/u);
+    assert.equal(await fs.readFile(source, "utf8"), "concurrent-new-file");
+  });
+});
+
 test("compatibility audit export cannot be archived without a real safe stop", async () => {
   await withTempState(async (stateRoot) => {
     const source = path.join(stateRoot, "runs", "run-1", "runtime_state_audit.jsonl");

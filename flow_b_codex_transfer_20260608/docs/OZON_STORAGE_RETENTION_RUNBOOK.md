@@ -24,7 +24,7 @@ The archive sequence is: validate allowlist and age; prove the source is not ope
 - warning: less than 10 GiB available or at least 95% used;
 - critical: less than 5 GiB available or at least 98% used;
 - health scan: every 5 minutes in direct mode;
-- cleanup attempt while storage is warning/critical: at most every 6 hours;
+- cleanup attempt while storage is warning: at most every 6 hours; critical storage retries at most every 5 minutes;
 - only closed, allowlisted temporary files at least 24 hours old are eligible.
 
 The supervisor writes the compact current snapshot to `storage_status.json` and records severity transitions in `storage_alerts.jsonl`. Cleanup is non-fatal: failure is reported but never broadens the deletion allowlist or stops the worker.
