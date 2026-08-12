@@ -1195,9 +1195,42 @@ test("operational state entries compact ordinary terminal evidence without weake
     assert.equal(allEntries.length, 137);
     assert.equal(allEntries.find((entry) => entry.sku === "terminal-skip-127").data.terminal_payload, terminalPayload);
     assert.equal(allEntries.find((entry) => entry.sku === "terminal-failure").data.terminal_payload, terminalPayload);
+    state.recordSkip("projection-membership-transition", {
+      reason: "historical-policy-rejection",
+      data: { projection_marker: "terminal-omitted" },
+    });
+    assert.deepEqual(
+      state.operationalStateEntries().find((entry) => entry.sku === "projection-membership-transition").data,
+      {},
+    );
+    assert.equal(state.reopenDirectCandidate("projection-membership-transition").reopened, true);
+    assert.equal(
+      state.operationalStateEntries().find((entry) => entry.sku === "projection-membership-transition").data.projection_marker,
+      "terminal-omitted",
+    );
+    state.recordSkip("projection-membership-transition", {
+      reason: "historical-policy-rejection",
+      data: { projection_marker: "terminal-omitted-again" },
+    });
+    assert.deepEqual(
+      state.operationalStateEntries().find((entry) => entry.sku === "projection-membership-transition").data,
+      {},
+    );
+    state.recordProcessing("projection-update-delete", {
+      reason: "projection-test",
+      data: { projection_version: 1 },
+    });
+    state.recordProcessing("projection-update-delete", {
+      reason: "projection-test",
+      data: { projection_version: 2 },
+    });
+    assert.equal(
+      state.operationalStateEntries().find((entry) => entry.sku === "projection-update-delete").data.projection_version,
+      2,
+    );
     state.close();
 
-    const database = new DatabaseSync(dbPath, { readOnly: true });
+    const database = new DatabaseSync(dbPath);
     try {
       const metadataPlan = database.prepare(`
         EXPLAIN QUERY PLAN
@@ -1215,41 +1248,67 @@ test("operational state entries compact ordinary terminal evidence without weake
 
       const payloadPlan = database.prepare(`
         EXPLAIN QUERY PLAN
-        WITH hydration_skus AS (
-          SELECT sku
-          FROM sku_state INDEXED BY sku_state_operational_metadata
-          WHERE terminal = 0 OR stage = 'published' OR strict = 1
-          UNION
-          SELECT sku
-          FROM sku_state INDEXED BY sku_state_operational_terminal_data
-          WHERE terminal = 1 AND (
-            coalesce(CAST(json_extract(data_json, '$.submitted') AS INTEGER), 0) = 1 OR
-            coalesce(CAST(json_extract(data_json, '$.submission_pending') AS INTEGER), 0) = 1 OR
-            coalesce(CAST(json_extract(data_json, '$.submission_intent') AS INTEGER), 0) = 1 OR
-            coalesce(length(trim(CAST(json_extract(data_json, '$.selected_at') AS TEXT))), 0) > 0 OR
-            coalesce(length(trim(CAST(json_extract(data_json, '$.prepared_at') AS TEXT))), 0) > 0
-          )
-        )
-        SELECT s.sku, s.data_json
-        FROM hydration_skus AS h
-        CROSS JOIN sku_state AS s INDEXED BY sqlite_autoindex_sku_state_1
-          ON s.sku = h.sku
-        ORDER BY s.sku
+        SELECT sku, data_json
+        FROM sku_state_operational_payloads
+        ORDER BY sku
       `).all().map((row) => String(row.detail)).join("\n");
       assert.match(
         payloadPlan,
-        /SCAN sku_state USING COVERING INDEX sku_state_operational_metadata/u,
+        /SCAN sku_state_operational_payloads/u,
       );
-      assert.match(
+      assert.doesNotMatch(
         payloadPlan,
-        /SCAN sku_state USING INDEX sku_state_operational_terminal_data/u,
+        /SEARCH sku_state/u,
       );
-      assert.match(
-        payloadPlan,
-        /SEARCH s USING INDEX sqlite_autoindex_sku_state_1 \(sku=\?\)/u,
+      assert.equal(
+        JSON.parse(database.prepare(`
+          SELECT data_json
+          FROM sku_state_operational_payloads
+          WHERE sku = 'projection-update-delete'
+        `).get().data_json).projection_version,
+        2,
       );
+      database.prepare("DELETE FROM sku_state WHERE sku = ?").run("projection-update-delete");
+      assert.equal(database.prepare(`
+        SELECT 1 AS present
+        FROM sku_state_operational_payloads
+        WHERE sku = 'projection-update-delete'
+      `).get(), undefined);
+
+      database.exec(`
+        DROP TRIGGER sku_state_operational_payload_insert;
+        DROP TRIGGER sku_state_operational_payload_update;
+        DROP TRIGGER sku_state_operational_payload_delete;
+        DROP TABLE sku_state_operational_payloads;
+      `);
     } finally {
       database.close();
+    }
+
+    const reopened = createRuntimeState({ dbPath });
+    try {
+      const reopenedEntries = reopened.operationalStateEntries();
+      const reopenedBySku = new Map(reopenedEntries.map((entry) => [entry.sku, entry]));
+      assert.deepEqual(reopenedBySku.get("terminal-skip-127").data, {});
+      assert.equal(reopenedBySku.get("previous-run-reconciliation").data.submission_pending, true);
+      assert.equal(reopenedBySku.get("legacy-terminal-submitted").data.submitted, true);
+      assert.equal(reopenedBySku.get("terminal-selected-only").data.selected_at, "2026-08-12T04:02:00.000Z");
+      assert.equal(reopenedBySku.get("legacy-published").data.runtime_run_dir, path.join(dir, "legacy-published-run"));
+      assert.equal(reopenedBySku.get("published-history").data.runtime_run_dir, path.join(dir, "published-run"));
+      assert.deepEqual(reopenedBySku.get("projection-membership-transition").data, {});
+      assert.equal(reopenedBySku.has("projection-update-delete"), false);
+
+      const concurrentlyReopened = createRuntimeState({ dbPath });
+      try {
+        assert.deepEqual(
+          concurrentlyReopened.operationalStateEntries(),
+          reopenedEntries,
+        );
+      } finally {
+        concurrentlyReopened.close();
+      }
+    } finally {
+      reopened.close();
     }
   });
 });

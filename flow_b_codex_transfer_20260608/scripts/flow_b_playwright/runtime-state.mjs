@@ -21,15 +21,32 @@ const CANONICAL_LINK_HEADERS = new Set(["product_link", "canonical_product_link"
 const PRODUCT_URL_PATTERN = /https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s]+)/iu;
 const OPERATIONAL_METADATA_INDEX = "sku_state_operational_metadata";
 const OPERATIONAL_TERMINAL_DATA_INDEX = "sku_state_operational_terminal_data";
-const OPERATIONAL_TERMINAL_DATA_PREDICATE = `
-  terminal = 1 AND (
-    coalesce(CAST(json_extract(data_json, '$.submitted') AS INTEGER), 0) = 1 OR
-    coalesce(CAST(json_extract(data_json, '$.submission_pending') AS INTEGER), 0) = 1 OR
-    coalesce(CAST(json_extract(data_json, '$.submission_intent') AS INTEGER), 0) = 1 OR
-    coalesce(length(trim(CAST(json_extract(data_json, '$.selected_at') AS TEXT))), 0) > 0 OR
-    coalesce(length(trim(CAST(json_extract(data_json, '$.prepared_at') AS TEXT))), 0) > 0
+const OPERATIONAL_PAYLOAD_TABLE = "sku_state_operational_payloads";
+
+function operationalTerminalDataPredicate(row = "") {
+  const column = (name) => `${row ? `${row}.` : ""}${name}`;
+  return `
+  ${column("terminal")} = 1 AND (
+    coalesce(CAST(json_extract(${column("data_json")}, '$.submitted') AS INTEGER), 0) = 1 OR
+    coalesce(CAST(json_extract(${column("data_json")}, '$.submission_pending') AS INTEGER), 0) = 1 OR
+    coalesce(CAST(json_extract(${column("data_json")}, '$.submission_intent') AS INTEGER), 0) = 1 OR
+    coalesce(length(trim(CAST(json_extract(${column("data_json")}, '$.selected_at') AS TEXT))), 0) > 0 OR
+    coalesce(length(trim(CAST(json_extract(${column("data_json")}, '$.prepared_at') AS TEXT))), 0) > 0
   )
 `;
+}
+
+function operationalPayloadPredicate(row = "") {
+  const column = (name) => `${row ? `${row}.` : ""}${name}`;
+  return `
+    ${column("terminal")} = 0 OR
+    ${column("stage")} = 'published' OR
+    ${column("strict")} = 1 OR
+    (${operationalTerminalDataPredicate(row)})
+  `;
+}
+
+const OPERATIONAL_TERMINAL_DATA_PREDICATE = operationalTerminalDataPredicate();
 const STAGE_PRIORITY = new Map([
   ["processing", 1],
   ["submitted", 2],
@@ -827,6 +844,11 @@ export function createRuntimeState({
     }
     database.exec("BEGIN IMMEDIATE");
     migrationTransactionOpen = true;
+    const operationalPayloadTableExists = Boolean(database.prepare(`
+      SELECT 1 AS present
+      FROM sqlite_master
+      WHERE type = 'table' AND name = ?
+    `).get(OPERATIONAL_PAYLOAD_TABLE));
     database.exec(`
 
       CREATE TABLE IF NOT EXISTS metadata (
@@ -971,6 +993,38 @@ export function createRuntimeState({
       ON sku_state(sku)
       WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE};
 
+      CREATE TABLE IF NOT EXISTS ${OPERATIONAL_PAYLOAD_TABLE} (
+        sku TEXT PRIMARY KEY,
+        stage TEXT NOT NULL,
+        data_json TEXT NOT NULL CHECK (json_valid(data_json))
+      ) STRICT, WITHOUT ROWID;
+
+      CREATE TRIGGER IF NOT EXISTS sku_state_operational_payload_insert
+      AFTER INSERT ON sku_state
+      FOR EACH ROW
+      WHEN ${operationalPayloadPredicate("NEW")}
+      BEGIN
+        INSERT INTO ${OPERATIONAL_PAYLOAD_TABLE} (sku, stage, data_json)
+        VALUES (NEW.sku, NEW.stage, NEW.data_json);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS sku_state_operational_payload_update
+      AFTER UPDATE OF sku, stage, terminal, strict, data_json ON sku_state
+      FOR EACH ROW
+      BEGIN
+        DELETE FROM ${OPERATIONAL_PAYLOAD_TABLE} WHERE sku = OLD.sku;
+        INSERT INTO ${OPERATIONAL_PAYLOAD_TABLE} (sku, stage, data_json)
+        SELECT NEW.sku, NEW.stage, NEW.data_json
+        WHERE ${operationalPayloadPredicate("NEW")};
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS sku_state_operational_payload_delete
+      AFTER DELETE ON sku_state
+      FOR EACH ROW
+      BEGIN
+        DELETE FROM ${OPERATIONAL_PAYLOAD_TABLE} WHERE sku = OLD.sku;
+      END;
+
       CREATE TABLE IF NOT EXISTS strict_publications (
         sku TEXT PRIMARY KEY,
         event_id INTEGER NOT NULL UNIQUE,
@@ -1046,6 +1100,24 @@ export function createRuntimeState({
         SELECT RAISE(ABORT, 'strict publication event mismatch');
       END;
     `);
+    if (!operationalPayloadTableExists) {
+      database.exec(`
+        INSERT OR REPLACE INTO ${OPERATIONAL_PAYLOAD_TABLE} (sku, stage, data_json)
+        WITH hydration_skus AS (
+          SELECT sku
+          FROM sku_state INDEXED BY ${OPERATIONAL_METADATA_INDEX}
+          WHERE terminal = 0 OR stage = 'published' OR strict = 1
+          UNION
+          SELECT sku
+          FROM sku_state INDEXED BY ${OPERATIONAL_TERMINAL_DATA_INDEX}
+          WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE}
+        )
+        SELECT s.sku, s.stage, s.data_json
+        FROM hydration_skus AS h
+        CROSS JOIN sku_state AS s INDEXED BY sqlite_autoindex_sku_state_1
+          ON s.sku = h.sku;
+      `);
+    }
     ensureSubmissionGateTables(database);
     database.exec(`
       CREATE TRIGGER IF NOT EXISTS events_strict_same_item_cost_insert
@@ -1161,20 +1233,9 @@ export function createRuntimeState({
     ORDER BY sku
   `);
   const selectOperationalPayloads = database.prepare(`
-    WITH hydration_skus AS (
-      SELECT sku
-      FROM sku_state INDEXED BY ${OPERATIONAL_METADATA_INDEX}
-      WHERE terminal = 0 OR stage = 'published' OR strict = 1
-      UNION
-      SELECT sku
-      FROM sku_state INDEXED BY ${OPERATIONAL_TERMINAL_DATA_INDEX}
-      WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE}
-    )
-    SELECT s.sku, s.data_json
-    FROM hydration_skus AS h
-    CROSS JOIN sku_state AS s INDEXED BY sqlite_autoindex_sku_state_1
-      ON s.sku = h.sku
-    ORDER BY s.sku
+    SELECT sku, data_json
+    FROM ${OPERATIONAL_PAYLOAD_TABLE}
+    ORDER BY sku
   `);
   const selectNativeRuntimeEvent = database.prepare(`
     SELECT 1 AS present
@@ -1293,7 +1354,7 @@ export function createRuntimeState({
         AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
       UNION
       SELECT sku
-      FROM sku_state
+      FROM ${OPERATIONAL_PAYLOAD_TABLE}
       WHERE CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
         AND (
           stage = 'published'
@@ -1311,7 +1372,7 @@ export function createRuntimeState({
         AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
       UNION
       SELECT sku
-      FROM sku_state
+      FROM ${OPERATIONAL_PAYLOAD_TABLE}
       WHERE CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
         AND (
           stage = 'published'
