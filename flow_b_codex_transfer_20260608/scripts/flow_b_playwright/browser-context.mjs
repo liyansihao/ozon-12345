@@ -4,6 +4,8 @@ import path from "node:path";
 import { chromium } from "playwright";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const MAOZI_FAVORITE_URL = "https://ozon.maozierp.com/#/product/favorite";
+const failedMaoziNavigationPages = new WeakSet();
 
 function requiredPath(value, name) {
   const normalized = String(value || "").trim();
@@ -31,6 +33,29 @@ function readManifest(extensionDir) {
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : fallback;
+}
+
+async function navigateMaoziFavorite(page, timeoutMs) {
+  const timeout = positiveInteger(timeoutMs, 15_000);
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => page.goto(MAOZI_FAVORITE_URL, {
+        waitUntil: "commit",
+        timeout,
+      })),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          reject(Object.assign(
+            new Error(`Maozi page navigation timed out after ${timeout}ms`),
+            { code: "MAOZI_PAGE_NAVIGATION_TIMEOUT" },
+          ));
+        }, timeout);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export function resolveBrowserOptions(env = process.env, defaultExecutable = chromium.executablePath()) {
@@ -314,27 +339,22 @@ export async function openMaoziPage(context, {
   forceNew = false,
   recoveryTimeoutMs = 5000,
   recoveryPollMs = 100,
+  navigationTimeoutMs = 15_000,
+  navigationCleanupTimeoutMs = 2_000,
 } = {}) {
-  const available = () => context.pages().filter((page) => typeof page.isClosed !== "function" || !page.isClosed());
-  const navigable = () => available().filter((page) => !targetUrl(page).startsWith("chrome-extension://"));
+  const available = () => context.pages().filter((page) => (
+    !failedMaoziNavigationPages.has(page)
+    && (typeof page.isClosed !== "function" || !page.isClosed())
+  ));
   const pagesBeforeOpen = new Set(available());
   let page = forceNew ? null : available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
   if (!page) {
-    let createdPage = false;
-    if (forceNew) {
-      page = await context.newPage();
-      createdPage = true;
-    } else {
-      page = navigable()[0];
-      if (!page) {
-        page = await context.newPage();
-        createdPage = true;
-      }
-    }
+    page = await context.newPage();
     try {
-      await page.goto("https://ozon.maozierp.com/#/product/favorite", { waitUntil: "domcontentloaded", timeout: 60000 });
+      await navigateMaoziFavorite(page, navigationTimeoutMs);
     } catch (error) {
-      if (createdPage) await page.close().catch(() => {});
+      failedMaoziNavigationPages.add(page);
+      await closePageWithin(page, positiveInteger(navigationCleanupTimeoutMs, 2_000));
       throw error;
     }
   }
