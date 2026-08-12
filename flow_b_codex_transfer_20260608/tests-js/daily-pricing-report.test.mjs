@@ -93,6 +93,142 @@ test("daily scope waits for non-terminal own SKU but admits terminal failure", a
   assert.equal(reportScopeReady(scope), false);
 });
 
+test("daily scope resolves a same-store nested online SKU from reconciliation evidence", async () => {
+  const value = await fixture();
+  const database = new DatabaseSync(value.runtimeDbPath);
+  database.prepare("UPDATE sku_state SET terminal=0, reason=?, data_json=? WHERE sku=?").run(
+    "online-product-not-selling",
+    JSON.stringify({
+      store_id: 106637,
+      offer_id: "OWN-003",
+      final_result: {
+        online_product: {
+          sku: 900000000003,
+          shop_id: 106637,
+          online_status: "ready_to_sell",
+          stock: 0,
+        },
+      },
+    }),
+    "SRC-003",
+  );
+  database.close();
+
+  const scope = readDailyPricingScope({
+    ...value,
+    stores,
+    dateKey: "2026-08-08",
+    now: new Date("2026-08-08T12:30:00Z"),
+  });
+  const row = scope.rows.find((entry) => entry.source_sku === "SRC-003");
+  assert.equal(row.own_ozon_sku, "900000000003");
+  assert.equal(row.status, "已生成本店SKU");
+  assert.equal(row.has_own_sku, true);
+  assert.equal(scope.sku_generated_count, 2);
+  assert.equal(scope.pending_count, 0);
+});
+
+test("daily scope never attributes nested online SKU evidence from another store", async () => {
+  const value = await fixture();
+  const database = new DatabaseSync(value.runtimeDbPath);
+  database.prepare("UPDATE sku_state SET terminal=0, reason=?, data_json=? WHERE sku=?").run(
+    "online-product-not-selling",
+    JSON.stringify({
+      store_id: 106637,
+      offer_id: "OWN-003",
+      final_result: {
+        online_product: {
+          sku: 900000000003,
+          shop_id: 104965,
+          online_status: "ready_to_sell",
+          stock: 0,
+        },
+      },
+    }),
+    "SRC-003",
+  );
+  database.close();
+
+  const scope = readDailyPricingScope({
+    ...value,
+    stores,
+    dateKey: "2026-08-08",
+    now: new Date("2026-08-08T12:30:00Z"),
+  });
+  const row = scope.rows.find((entry) => entry.source_sku === "SRC-003");
+  assert.equal(row.own_ozon_sku, "");
+  assert.equal(row.status, "等待本店SKU");
+  assert.equal(scope.sku_generated_count, 1);
+  assert.equal(scope.pending_count, 1);
+});
+
+test("daily scope classifies durable submitted failure evidence even when legacy terminal is false", async () => {
+  const value = await fixture();
+  const database = new DatabaseSync(value.runtimeDbPath);
+  database.prepare("UPDATE sku_state SET terminal=0, reason=?, data_json=? WHERE sku=?").run(
+    "import-failed",
+    JSON.stringify({
+      store_id: 106637,
+      submitted: true,
+      reason: "import-failed",
+      import_log: { import_status: "all_failed", error_msg: "invalid product attributes" },
+    }),
+    "SRC-003",
+  );
+  database.close();
+
+  const scope = readDailyPricingScope({
+    ...value,
+    stores,
+    dateKey: "2026-08-08",
+    now: new Date("2026-08-08T12:30:00Z"),
+  });
+  const terminal = scope.exceptions.find((entry) => entry.source_sku === "SRC-003");
+  assert.equal(terminal.status, "终态失败");
+  assert.equal(terminal.failure_reason, "import-failed");
+  assert.equal(scope.terminal_failed_count, 2);
+  assert.equal(scope.pending_count, 0);
+});
+
+test("daily scope keeps transient or cross-store legacy failure evidence pending", async () => {
+  const value = await fixture();
+  const database = new DatabaseSync(value.runtimeDbPath);
+  database.prepare("UPDATE sku_state SET terminal=0, reason=?, data_json=? WHERE sku=?").run(
+    "online-product-rejected",
+    JSON.stringify({
+      store_id: 104965,
+      submitted: true,
+      reason: "online-product-rejected",
+      final_result: { online_product: { shop_id: 106637, sku: 900000000002 } },
+    }),
+    "SRC-002",
+  );
+  database.prepare("UPDATE sku_state SET terminal=0, reason=?, data_json=? WHERE sku=?").run(
+    "import-failed",
+    JSON.stringify({
+      store_id: 106637,
+      submitted: true,
+      reason: "import-failed",
+      import_log: { import_status: "all_failed", error_msg: "HTTP 503 gateway timeout" },
+    }),
+    "SRC-003",
+  );
+  database.close();
+
+  const scope = readDailyPricingScope({
+    ...value,
+    stores,
+    dateKey: "2026-08-08",
+    now: new Date("2026-08-08T12:30:00Z"),
+  });
+  assert.equal(scope.terminal_failed_count, 0);
+  assert.equal(scope.pending_count, 2);
+  assert.deepEqual(
+    scope.rows.filter((entry) => !entry.has_own_sku).map((entry) => entry.source_sku).sort(),
+    ["SRC-002", "SRC-003"],
+  );
+});
+
 test("store ID mismatch blocks a report instead of mis-assigning a row", async () => {
   const value = await fixture();
   const database = new DatabaseSync(value.runtimeDbPath);

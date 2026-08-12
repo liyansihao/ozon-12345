@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { dailyWindowState, localDateKeyFor } from "./daily-window.mjs";
+import { isTerminalSubmittedFailure } from "./flow_b_playwright/submission-evidence.mjs";
 
 export const DEFAULT_REPORT_DIR = "/Users/mac/Desktop/ozon每日上品";
 export const REPORT_STATE_DIRNAME = "daily_pricing_reports";
@@ -85,9 +86,26 @@ function stateStoreId(state) {
   return numeric(state?.data?.store_id);
 }
 
-function rowStatus(state) {
-  if (skuText(state?.data?.store_sku)) return "已生成本店SKU";
-  if (state?.terminal === true) return "终态失败";
+function resolveOwnSku(state, acceptedStoreId) {
+  const data = state?.data || {};
+  const canonical = skuText(data.store_sku);
+  if (canonical) return canonical;
+  for (const product of [data.final_result?.online_product, data.online_product]) {
+    const nestedSku = skuText(product?.sku);
+    const evidenceStoreId = numeric(product?.shop_id);
+    if (nestedSku && acceptedStoreId > 0 && evidenceStoreId === acceptedStoreId) return nestedSku;
+  }
+  return "";
+}
+
+function isDurableTerminalFailure(state) {
+  if (state?.terminal === true) return true;
+  return state?.data?.submitted === true && isTerminalSubmittedFailure(state);
+}
+
+function rowStatus({ ownSku, terminal }) {
+  if (ownSku) return "已生成本店SKU";
+  if (terminal) return "终态失败";
   return "等待本店SKU";
 }
 
@@ -106,11 +124,12 @@ function warehouseLabel(state, store) {
 function normalizedRecord(accepted, state, store) {
   const data = state?.data || {};
   const acceptedTimestamp = acceptedAt(accepted);
-  const ownSku = skuText(data.store_sku);
   const acceptedStoreId = numeric(accepted.store_id);
+  const ownSku = resolveOwnSku(state, acceptedStoreId);
+  const terminal = isDurableTerminalFailure(state);
   const stateId = stateStoreId(state);
   const mismatch = state && stateId && acceptedStoreId && stateId !== acceptedStoreId;
-  const status = mismatch ? "店铺ID不匹配" : rowStatus(state);
+  const status = mismatch ? "店铺ID不匹配" : rowStatus({ ownSku, terminal });
   return {
     store_id: acceptedStoreId,
     store_name: text(store?.name || data.store_name || accepted.store_name),
@@ -136,7 +155,7 @@ function normalizedRecord(accepted, state, store) {
     status,
     failure_reason: status === "终态失败" ? terminalReason(state) : mismatch ? `state-store-id=${stateId}` : "",
     state_stage: text(state?.stage),
-    terminal: state?.terminal === true,
+    terminal,
     has_own_sku: Boolean(ownSku),
     mismatch,
   };
