@@ -319,18 +319,19 @@ export function publishedCsvPath(env = process.env) {
   return path.resolve(env.FLOW_B_PUBLISHED_CSV || path.join(ROOT, "data/flow_b/published_links.csv"));
 }
 
-function createRuntimeMaoziTransport(page, context, env) {
+function createRuntimeMaoziTransport(page, context, env, initialAccessToken = "") {
   return createMaoziPageTransport({
     page,
     context,
+    initialAccessToken,
     recoverUnauthorized: async (activePage) => {
       await activePage.reload({ waitUntil: "domcontentloaded", timeout: 60_000 });
       const recoveredPage = await openMaoziPage(context, { settleMs: 1_000 });
-      await ensureMaoziLogin(recoveredPage, {
+      const accessToken = await ensureMaoziLogin(recoveredPage, {
         continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1",
         timeout: 60_000,
       });
-      return recoveredPage;
+      return { page: recoveredPage, accessToken };
     },
   });
 }
@@ -361,8 +362,10 @@ async function createPublishingSession(context, options, env, shared) {
   const maoziPage = await openMaoziPage(context, { forceNew: true });
   let state = null;
   try {
-    await ensureMaoziLogin(maoziPage, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
-    const client = createMaoziClient({ transport: createRuntimeMaoziTransport(maoziPage, context, env) });
+    const accessToken = await ensureMaoziLogin(maoziPage, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
+    const client = createMaoziClient({
+      transport: createRuntimeMaoziTransport(maoziPage, context, env, accessToken),
+    });
     const runtimeStateDbPath = String(env.FLOW_B_RUNTIME_STATE_DB || "").trim();
     const resolvedRuntimeStateDbPath = runtimeStateDbPath ? path.resolve(runtimeStateDbPath) : null;
     if (
@@ -535,9 +538,11 @@ async function withContext(env, operation) {
 async function verifyWithContext(context, options, env) {
   const page = await openMaoziPage(context);
   try {
-    await ensureMaoziLogin(page, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
+    const accessToken = await ensureMaoziLogin(page, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
     await ensureMaoziPluginLogin(context, { continueDeviceLogin: env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1" });
-    const client = createMaoziClient({ transport: createRuntimeMaoziTransport(page, context, env) });
+    const client = createMaoziClient({
+      transport: createRuntimeMaoziTransport(page, context, env, accessToken),
+    });
     const manifest = JSON.parse(await fs.readFile(path.join(browserOptions(env).extensionDir, "manifest.json"), "utf8"));
     return runReadOnlyVerification({
       client,
@@ -698,12 +703,12 @@ async function runAcceptance(context, options, env) {
       : Number(minimumAverageRaw);
   const authPage = await openMaoziPage(context, { forceNew: true, settleMs: 1500 });
   try {
-    await ensureMaoziLogin(authPage, { continueDeviceLogin: true, timeout: 60000 });
+    const accessToken = await ensureMaoziLogin(authPage, { continueDeviceLogin: true, timeout: 60000 });
     await ensureMaoziPluginLogin(context, { continueDeviceLogin: true, timeout: 60000 });
     const authClient = createMaoziClient({ transport: createRuntimeMaoziTransport(authPage, context, {
       ...env,
       FLOW_B_MAOZI_CONTINUE_LOGIN: "1",
-    }) });
+    }, accessToken) });
     await Promise.all([authClient.listShops(), authClient.listWatermarks()]);
   } finally {
     await authPage.close().catch(() => {});
