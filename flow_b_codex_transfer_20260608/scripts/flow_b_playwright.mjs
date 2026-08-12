@@ -432,6 +432,12 @@ async function createPublishingSession(context, options, env, shared) {
       importedFavoriteCleanupLimit: Math.max(0, Number(env.FLOW_B_IMPORTED_FAVORITE_CLEANUP_LIMIT) || 0),
       confirmationAttempts: Math.max(1, Number(env.FLOW_B_CONFIRMATION_ATTEMPTS) || 6),
       confirmationIntervalMs: Math.max(0, Number(env.FLOW_B_CONFIRMATION_INTERVAL_MS) || 2000),
+      reconciliationMaxAttempts: String(env.FLOW_B_RECONCILIATION_MAX_ATTEMPTS || "").trim()
+        ? Number(env.FLOW_B_RECONCILIATION_MAX_ATTEMPTS)
+        : 240,
+      reconciliationMaxAgeMs: String(env.FLOW_B_RECONCILIATION_MAX_AGE_MS || "").trim()
+        ? Number(env.FLOW_B_RECONCILIATION_MAX_AGE_MS)
+        : 24 * 60 * 60 * 1000,
       onlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_ONLINE_SYNC_INTERVAL_MS) || 1_800_000),
       urgentOnlineSyncIntervalMs: Math.max(0, Number(env.FLOW_B_URGENT_ONLINE_SYNC_INTERVAL_MS) || 600_000),
       urgentOnlineSyncPendingCount: Math.max(1, Number(env.FLOW_B_URGENT_ONLINE_SYNC_PENDING_COUNT) || 20),

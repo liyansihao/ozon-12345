@@ -16,6 +16,8 @@ const LEGACY_STATUSES = new Set([
   "published",
   "failed",
   "skipped",
+  "online",
+  "stock_updated",
 ]);
 const CANONICAL_LINK_HEADERS = new Set(["product_link", "canonical_product_link"]);
 const PRODUCT_URL_PATTERN = /https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s]+)/iu;
@@ -184,7 +186,10 @@ const STAGE_PRIORITY = new Map([
   ["failed", 4],
   ["skipped", 5],
   ["published", 6],
+  ["online", 7],
+  ["stock_updated", 7],
 ]);
+const TERMINAL_OUTCOME_STAGES = new Set(["online", "stock_updated"]);
 const DIRECT_FINAL_OUTCOMES = new Set([
   "submitted",
   "imported",
@@ -193,6 +198,7 @@ const DIRECT_FINAL_OUTCOMES = new Set([
   "rejected",
   "skipped_cost",
   "skipped_profit",
+  "indeterminate",
 ]);
 
 export function directCandidateReopenDecision(state) {
@@ -812,6 +818,20 @@ function legacyTransition(value, kind, fallbackOccurredAt) {
       failureClass: null,
       terminal: true,
       strict: isStrictPublicationData(data),
+      nextEligibleAt: null,
+      data,
+      occurredAt,
+      occurredAtInferred: parsedOccurredAt === null,
+    };
+  }
+  if (TERMINAL_OUTCOME_STAGES.has(stage)) {
+    return {
+      sku,
+      stage,
+      reason,
+      failureClass: null,
+      terminal: true,
+      strict: false,
       nextEligibleAt: null,
       data,
       occurredAt,
@@ -2066,6 +2086,17 @@ export function createRuntimeState({
     });
   }
 
+  function recordTerminalOutcome(sku, options = {}) {
+    const stage = String(options.stage || options.data?.outcome_status || "").trim();
+    if (!TERMINAL_OUTCOME_STAGES.has(stage)) {
+      throw new TypeError("terminal outcome stage must be online or stock_updated");
+    }
+    return recordTransition(sku, options, {
+      stage,
+      terminal: true,
+    });
+  }
+
   function recordDelay(sku, options = {}) {
     const reason = requireReason(options.reason);
     const nextEligibleAt = timestamp(options.nextEligibleAt, "nextEligibleAt");
@@ -2575,6 +2606,7 @@ export function createRuntimeState({
     reserveSubmission,
     confirmSubmission,
     recordProcessing,
+    recordTerminalOutcome,
     recordFailure,
     recordSkip,
     recordDelay,

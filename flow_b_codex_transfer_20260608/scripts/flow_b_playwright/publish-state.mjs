@@ -714,6 +714,17 @@ export function createPublishState({
         return confirmed;
       }
     }
+    if (
+      status === "processing"
+      && runtimeData.reconciliation_terminal === true
+      && ["online", "stock_updated"].includes(String(runtimeData.outcome_status || ""))
+    ) {
+      return runtimeState.recordTerminalOutcome(sku, {
+        reason,
+        stage: runtimeData.outcome_status,
+        data: runtimeData,
+      });
+    }
     if (status === "failed") {
       const kind = durableFailureKind(reason, data);
       if (kind !== "transient") {

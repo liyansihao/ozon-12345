@@ -3154,7 +3154,7 @@ test("runner reconciles a delayed submission against its original store after ro
   }).run();
 
   assert.equal(result.published, 1);
-  assert.deepEqual(checkedShopIds, [106637, 106637]);
+  assert.deepEqual(checkedShopIds, [106637]);
   assert.equal(state.records[0].store_id, 106637);
 });
 
@@ -6198,6 +6198,7 @@ test("direct mode keeps an unknown prior API request in reconciliation without r
       state,
       target: 1,
       runDir,
+      now: () => new Date("2026-07-30T04:00:10.000Z"),
       directMode: true,
       reconciliationOnly: true,
       confirmationAttempts: 1,
@@ -6211,6 +6212,58 @@ test("direct mode keeps an unknown prior API request in reconciliation without r
     assert.equal(unknown.data.reason, "submission-api-status-unknown");
     assert.equal(unknown.data.submission_intent, true);
     assert.equal(unknown.data.reconcile_only, true);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("reconciliation-only keeps a pre-call submission intent read-only and never POSTs it", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-readonly-intent-"));
+  try {
+    const sku = "readonly-intent";
+    const offerId = "mz-readonly-intent";
+    const state = fakeState({
+      [sku]: {
+        status: "processing",
+        data: {
+          sku,
+          submission_intent: true,
+          submitted: false,
+          submission_pending: false,
+          api_call_attempts_total: 0,
+          offer_id: offerId,
+          store_id: 7,
+          submission_payload: { rows: [{ sku, offer_id: offerId }] },
+        },
+      },
+    });
+    let publishCalls = 0;
+    let importLogCalls = 0;
+    await createPublishRunner({
+      client: clientFor([], {
+        findImportLog: async () => { importLogCalls += 1; return null; },
+        findOnlineProduct: async () => null,
+        publish: async () => { publishCalls += 1; return { ok: true }; },
+      }),
+      costBridge: { estimate: async () => { throw new Error("intent recovery must not source"); } },
+      state,
+      target: 1,
+      runDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+      directMode: true,
+      reconciliationOnly: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(importLogCalls, 1);
+    assert.equal(publishCalls, 0);
+    const pending = state.entryOf(sku);
+    assert.equal(pending.status, "processing");
+    assert.equal(pending.data.submission_intent, true);
+    assert.equal(pending.data.reconcile_only, true);
+    assert.equal(pending.data.reconcile_attempts, 1);
+    assert.ok(Date.parse(pending.data.next_reconcile_at) > Date.parse("2026-08-12T12:00:00.000Z"));
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }
@@ -6830,7 +6883,7 @@ test("direct mode stops after every configured store returns a real publish reje
   }
 });
 
-test("direct background reconciliation records online state without changing ERP acceptance count", async () => {
+test("direct background reconciliation records one terminal online outcome across repeated rounds", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-"));
   try {
     const state = fakeState({
@@ -6862,23 +6915,31 @@ test("direct background reconciliation records online state without changing ERP
       },
     });
     let publishCalls = 0;
-    const result = await createPublishRunner({
+    let importLogCalls = 0;
+    let onlineProductCalls = 0;
+    const runner = createPublishRunner({
       client: clientFor([], {
         publish: async () => {
           publishCalls += 1;
           return { ok: true };
         },
-        findImportLog: async () => ({
-          sku: "direct-background",
-          offer_id: "mz-direct-background",
-          import_status: "all_imported",
-        }),
-        findOnlineProduct: async () => ({
-          sku: 900001,
-          offer_id: "mz-direct-background",
-          online_status: "selling",
-          stock: 1,
-        }),
+        findImportLog: async () => {
+          importLogCalls += 1;
+          return {
+            sku: "direct-background",
+            offer_id: "mz-direct-background",
+            import_status: "all_imported",
+          };
+        },
+        findOnlineProduct: async () => {
+          onlineProductCalls += 1;
+          return {
+            sku: 900001,
+            offer_id: "mz-direct-background",
+            online_status: "selling",
+            stock: 1,
+          };
+        },
       }),
       costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
       state,
@@ -6890,12 +6951,350 @@ test("direct background reconciliation records online state without changing ERP
       requireReliableCostContract: true,
       confirmationAttempts: 1,
       confirmationIntervalMs: 0,
+    });
+    const results = [await runner.run(), await runner.run(), await runner.run()];
+
+    assert.equal(publishCalls, 0);
+    assert.deepEqual(results.map((result) => result.accepted), [1, 1, 1]);
+    assert.equal(importLogCalls, 1);
+    assert.equal(onlineProductCalls, 1);
+    assert.equal(state.entryOf("direct-background").data.outcome_status, "online");
+    assert.equal(state.entryOf("direct-background").data.background_status.online, true);
+    assert.equal(state.entryOf("direct-background").data.terminal, true);
+    assert.equal(state.entryOf("direct-background").data.reconcile_only, false);
+    assert.equal(state.entryOf("direct-background").data.next_reconcile_at, null);
+    const backgroundRows = (await fs.readFile(path.join(runDir, "background_status.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(backgroundRows.length, 1);
+    assert.equal(backgroundRows[0].stage, "online");
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("SQLite persists a direct online reconciliation outcome as an idempotent terminal state", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-sqlite-"));
+  const runDir = path.join(root, "run");
+  const dbPath = path.join(root, "runtime", "state.sqlite");
+  let state = createPublishState({
+    runDir,
+    publishedCsv: path.join(root, "published.csv"),
+    runtimeStateDbPath: dbPath,
+  });
+  try {
+    const sku = "direct-background-sqlite";
+    const common = {
+      sku,
+      store_id: 7,
+      offer_id: `mz-${sku}`,
+      submitted: false,
+      submission_pending: false,
+    };
+    assert.equal(await state.transition(sku, "processing", {
+      ...common,
+      reason: "submission-api-call-started",
+      submission_intent: true,
+      api_call_started_at: "2026-08-12T12:00:00.000Z",
+    }), true);
+    assert.equal(await state.transition(sku, "processing", {
+      ...common,
+      reason: "erp-submission-accepted",
+      submission_intent: false,
+      submitted: true,
+      api_call_completed_at: "2026-08-12T12:00:01.000Z",
+    }), true);
+    const terminalData = {
+      ...state.entryOf(sku).data,
+      reason: "background-online",
+      submitted: true,
+      submission_intent: false,
+      submission_pending: false,
+      reconcile_only: false,
+      reconciliation_terminal: true,
+      terminal: true,
+      outcome_status: "online",
+      online_status: "selling",
+      stock: 1,
+      next_reconcile_at: null,
+    };
+    assert.equal(await state.transition(sku, "processing", terminalData), true);
+    assert.equal(await state.transition(sku, "processing", terminalData), false);
+    assert.equal(state.entryOf(sku).status, "processing");
+    assert.equal(state.entryOf(sku).data.terminal, true);
+    assert.equal(state.entryOf(sku).data.outcome_status, "online");
+
+    await state.close();
+    state = createPublishState({
+      runDir,
+      publishedCsv: path.join(root, "published.csv"),
+      runtimeStateDbPath: dbPath,
+    });
+    await state.load();
+    assert.equal(state.entryOf(sku).status, "processing");
+    assert.equal(state.entryOf(sku).data.terminal, true);
+    assert.equal(state.entryOf(sku).data.outcome_status, "online");
+  } finally {
+    await state.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("background reconciliation excludes durable rejected outcomes before querying ERP", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-rejected-"));
+  try {
+    const state = fakeState({
+      "direct-rejected": {
+        status: "processing",
+        data: {
+          sku: "direct-rejected",
+          submitted: true,
+          reconcile_only: true,
+          terminal: true,
+          outcome_status: "rejected",
+          reason: "online-product-rejected",
+          store_id: 7,
+          offer_id: "mz-direct-rejected",
+        },
+      },
+    });
+    let importLogCalls = 0;
+    await createPublishRunner({
+      client: clientFor([], {
+        findImportLog: async () => {
+          importLogCalls += 1;
+          return null;
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      directMode: true,
+      reconciliationOnly: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(importLogCalls, 0);
+    assert.equal(state.transitions.length, 0);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("background reconciliation neither syncs nor queries submissions before their due time", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-not-due-"));
+  try {
+    const state = fakeState({
+      "direct-not-due": {
+        status: "processing",
+        data: {
+          sku: "direct-not-due",
+          submitted: true,
+          reconcile_only: true,
+          store_id: 7,
+          offer_id: "mz-direct-not-due",
+          next_reconcile_at: "2026-08-12T12:01:00.000Z",
+        },
+      },
+    });
+    let importLogCalls = 0;
+    let syncCalls = 0;
+    await createPublishRunner({
+      client: clientFor([], {
+        syncOnlineShops: async () => { syncCalls += 1; },
+        findImportLog: async () => {
+          importLogCalls += 1;
+          return null;
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+      directMode: true,
+      reconciliationOnly: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+      onlineSyncIntervalMs: 0,
+      urgentOnlineSyncIntervalMs: 0,
+    }).run();
+
+    assert.equal(importLogCalls, 0);
+    assert.equal(syncCalls, 0);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("background reconciliation bounds each due batch to the configured attempt limit or worker count", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-cap-"));
+  try {
+    const initial = Object.fromEntries(Array.from({ length: 7 }, (_, index) => {
+      const sku = `direct-due-${index}`;
+      return [sku, {
+        status: "processing",
+        data: {
+          sku,
+          submitted: true,
+          reconcile_only: true,
+          store_id: 7,
+          offer_id: `mz-${sku}`,
+          next_reconcile_at: "2026-08-12T11:59:00.000Z",
+        },
+      }];
+    }));
+    const state = fakeState(initial);
+    const queried = [];
+    const runner = createPublishRunner({
+      client: clientFor([], {
+        findImportLog: async ({ sku }) => {
+          queried.push(sku);
+          return null;
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+      directMode: true,
+      reconciliationOnly: true,
+      concurrency: 2,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    });
+
+    await runner.run();
+    assert.deepEqual(queried, ["direct-due-0", "direct-due-1"]);
+
+    queried.length = 0;
+    await runner.run({ attemptLimit: 1 });
+    assert.deepEqual(queried, ["direct-due-2"]);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("background reconciliation terminalizes imported not-selling work at its attempt limit", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-attempt-expiry-"));
+  try {
+    const sku = "direct-not-selling-expired";
+    const state = fakeState({
+      [sku]: {
+        status: "processing",
+        data: {
+          sku,
+          submitted: true,
+          reconcile_only: true,
+          store_id: 7,
+          offer_id: `mz-${sku}`,
+          outcome_status: "imported",
+          reason: "online-product-not-selling",
+          reconcile_attempts: 1,
+          reconciliation_started_at: "2026-08-12T11:00:00.000Z",
+          next_reconcile_at: "2026-08-12T11:59:00.000Z",
+        },
+      },
+    });
+    let publishCalls = 0;
+    let importLogCalls = 0;
+    await createPublishRunner({
+      client: clientFor([], {
+        publish: async () => { publishCalls += 1; },
+        findImportLog: async () => {
+          importLogCalls += 1;
+          return { sku, offer_id: `mz-${sku}`, import_status: "all_imported" };
+        },
+        findOnlineProduct: async () => ({
+          sku: 900010,
+          offer_id: `mz-${sku}`,
+          online_status: "ready_to_sell",
+          stock: 1,
+        }),
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+      directMode: true,
+      reconciliationOnly: true,
+      reconciliationMaxAttempts: 2,
+      reconciliationMaxAgeMs: 24 * 60 * 60_000,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
     }).run();
 
     assert.equal(publishCalls, 0);
-    assert.equal(result.accepted, 1);
-    assert.equal(state.entryOf("direct-background").data.outcome_status, "online");
-    assert.equal(state.entryOf("direct-background").data.background_status.online, true);
+    assert.equal(importLogCalls, 1);
+    const expired = state.entryOf(sku);
+    assert.equal(expired.status, "failed");
+    assert.equal(expired.data.reason, "reconciliation-max-attempts-exhausted");
+    assert.equal(expired.data.original_reason, "online-product-not-selling");
+    assert.equal(expired.data.reconcile_attempts, 2);
+    assert.equal(expired.data.terminal, true);
+    assert.equal(expired.data.outcome_status, "indeterminate");
+    assert.equal(expired.data.next_reconcile_at, null);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("background reconciliation terminalizes over-age uncertain work without POST or ERP queries", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-age-expiry-"));
+  try {
+    const sku = "direct-uncertain-expired";
+    const state = fakeState({
+      [sku]: {
+        status: "processing",
+        data: {
+          sku,
+          submission_intent: true,
+          submitted: false,
+          submission_pending: false,
+          reconcile_only: true,
+          api_call_started_at: "2026-08-12T10:00:00.000Z",
+          store_id: 7,
+          offer_id: `mz-${sku}`,
+          next_reconcile_at: "2026-08-12T11:59:00.000Z",
+        },
+      },
+    });
+    let publishCalls = 0;
+    let importLogCalls = 0;
+    await createPublishRunner({
+      client: clientFor([], {
+        publish: async () => { publishCalls += 1; },
+        findImportLog: async () => {
+          importLogCalls += 1;
+          return null;
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+      directMode: true,
+      reconciliationOnly: true,
+      reconciliationMaxAttempts: 240,
+      reconciliationMaxAgeMs: 60 * 60_000,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(publishCalls, 0);
+    assert.equal(importLogCalls, 0);
+    const expired = state.entryOf(sku);
+    assert.equal(expired.status, "failed");
+    assert.equal(expired.data.reason, "reconciliation-max-age-exhausted");
+    assert.equal(expired.data.submission_intent, true);
+    assert.equal(expired.data.terminal, true);
+    assert.equal(expired.data.outcome_status, "indeterminate");
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }

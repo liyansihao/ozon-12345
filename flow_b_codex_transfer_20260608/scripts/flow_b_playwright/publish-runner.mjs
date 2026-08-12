@@ -39,6 +39,14 @@ const ECONOMY_SENTINEL = Object.freeze({
 const observedPublishFeedbackCompositeCache = new Map();
 const MIN_URGENT_ONLINE_SYNC_INTERVAL_MS = 180_000;
 const MAX_ONLINE_SYNC_SERVER_BACKOFF_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_RECONCILIATION_MAX_ATTEMPTS = 240;
+const DEFAULT_RECONCILIATION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const DIRECT_RECONCILIATION_FINAL_OUTCOMES = new Set([
+  "online",
+  "stock_updated",
+  "rejected",
+  "indeterminate",
+]);
 let currentStoreWriteSequence = 0;
 const FATAL_RUNNER_STATE_CODES = new Set([
   "SUBMISSION_ACCEPTANCE_PERSIST_FAILED",
@@ -607,6 +615,45 @@ function reconciliationBackoffMs(attempts) {
   return Math.min(180_000, 60_000 + (count - 10) * 30_000);
 }
 
+function isDurableReconciliationFinal(entry) {
+  const data = entry?.data || entry || {};
+  if (["published", "skipped"].includes(String(entry?.status || ""))) return true;
+  if (data.terminal === true) return true;
+  return DIRECT_RECONCILIATION_FINAL_OUTCOMES.has(String(data.outcome_status || ""));
+}
+
+function reconciliationStartedAtMs(item) {
+  const timestamps = [
+    item?.reconciliation_started_at,
+    item?.accepted_at,
+    item?.erp_accepted_at,
+    item?.api_call_started_at,
+    item?.api_call_completed_at,
+    item?.submitted_at,
+    item?.prepared_at,
+    item?.selected_at,
+  ]
+    .map((value) => Date.parse(String(value || "")))
+    .filter(Number.isFinite);
+  return timestamps.length > 0 ? Math.min(...timestamps) : null;
+}
+
+function reconciliationExpiryReason(item, {
+  attempts,
+  nowMs,
+  maxAttempts,
+  maxAgeMs,
+}) {
+  if (Math.max(0, Number(attempts) || 0) >= maxAttempts) {
+    return "reconciliation-max-attempts-exhausted";
+  }
+  const startedAt = reconciliationStartedAtMs(item);
+  if (startedAt !== null && nowMs >= startedAt && nowMs - startedAt >= maxAgeMs) {
+    return "reconciliation-max-age-exhausted";
+  }
+  return null;
+}
+
 export function prioritizePublishCandidates(items, preflightPureSkus = new Set(), familyScores = {}, sourceScores = new Map()) {
   return [...items]
     .map((item, index) => ({
@@ -784,6 +831,8 @@ export function createPublishRunner({
   importedFavoriteCleanupLimit = 0,
   confirmationAttempts = 6,
   confirmationIntervalMs = 2000,
+  reconciliationMaxAttempts = DEFAULT_RECONCILIATION_MAX_ATTEMPTS,
+  reconciliationMaxAgeMs = DEFAULT_RECONCILIATION_MAX_AGE_MS,
   onlineSyncIntervalMs = 1_800_000,
   urgentOnlineSyncIntervalMs = 600_000,
   urgentOnlineSyncPendingCount = 20,
@@ -833,6 +882,8 @@ export function createPublishRunner({
     : null;
   const requiredSameItemMatches = Number(minimumSameItemMatches);
   const configuredCostEstimateTimeoutMs = Number(costEstimateTimeoutMs);
+  const configuredReconciliationMaxAttempts = Number(reconciliationMaxAttempts);
+  const configuredReconciliationMaxAgeMs = Number(reconciliationMaxAgeMs);
   const configuredProfitSafetyActionPolicy = String(profitSafetyActionPolicy || "")
     .trim()
     .toLowerCase();
@@ -855,6 +906,12 @@ export function createPublishRunner({
   }
   if (!(configuredCostEstimateTimeoutMs > 0)) {
     throw new TypeError("costEstimateTimeoutMs must be a positive number");
+  }
+  if (!Number.isInteger(configuredReconciliationMaxAttempts) || configuredReconciliationMaxAttempts <= 0) {
+    throw new TypeError("reconciliationMaxAttempts must be a positive integer");
+  }
+  if (!Number.isFinite(configuredReconciliationMaxAgeMs) || configuredReconciliationMaxAgeMs <= 0) {
+    throw new TypeError("reconciliationMaxAgeMs must be a positive number");
   }
   if (!["shadow", "enforce"].includes(configuredProfitSafetyActionPolicy)) {
     throw new TypeError("profitSafetyActionPolicy must be shadow or enforce");
@@ -1142,7 +1199,10 @@ export function createPublishRunner({
       .finally(() => clearTimeout(timer));
   }
 
-  async function confirmPublication(sku, payload, targetConfig, { attempts: attemptOverride = null } = {}) {
+  async function confirmPublication(sku, payload, targetConfig, {
+    attempts: attemptOverride = null,
+    initialImportLog = null,
+  } = {}) {
     const offerId = payload.rows[0].offer_id;
     const attempts = Math.max(1, Number(attemptOverride ?? confirmationAttempts) || 1);
     let lastImportLog = null;
@@ -1151,7 +1211,9 @@ export function createPublishRunner({
     const stockAttempts = new Set();
     const targetWarehouseId = Number(targetConfig.warehouseId || 0);
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const importLog = await client.findImportLog({ shopId: targetConfig.store.id, sku, offerId });
+      const importLog = attempt === 0 && initialImportLog
+        ? initialImportLog
+        : await client.findImportLog({ shopId: targetConfig.store.id, sku, offerId });
       lastImportLog = importLog || lastImportLog;
       const status = normalizedImportStatus(importLog);
       if (["all_failed", "failed"].includes(status)) {
@@ -2479,10 +2541,82 @@ export function createPublishRunner({
     }
   }
 
+  function reconciliationStartIso(item) {
+    const startedAt = reconciliationStartedAtMs(item);
+    return new Date(startedAt ?? now().getTime()).toISOString();
+  }
+
+  async function terminalizeDirectReconciliation(item, reconciliationTarget, {
+    reason,
+    attempts = Math.max(0, Number(item?.reconcile_attempts) || 0),
+    importLog = item?.import_log || null,
+    finalResult = item?.final_result || null,
+  }) {
+    const sku = asSku(item);
+    const currentEntry = state.entryOf?.(sku);
+    if (isDurableReconciliationFinal(currentEntry)) {
+      return { status: "ignored", sku, reason: "background-final-already-recorded" };
+    }
+    const recorded = await state.transition(sku, "failed", {
+      ...item,
+      reason,
+      original_reason: String(item?.reason || "").trim() || null,
+      import_log: importLog,
+      final_result: finalResult,
+      store_id: Number(reconciliationTarget.store.id),
+      store_name: reconciliationTarget.store.name ?? reconciliationTarget.store.title ?? item.store_name ?? "",
+      reconcile_attempts: Math.max(0, Number(attempts) || 0),
+      reconciliation_started_at: reconciliationStartIso(item),
+      reconciliation_expired_at: now().toISOString(),
+      reconcile_only: false,
+      next_reconcile_at: null,
+      retry_at: null,
+      terminal: true,
+      failure_class: "deterministic",
+      outcome_status: "indeterminate",
+      background_status: {
+        imported: Boolean(importLog),
+        online: false,
+        stock_updated: false,
+        rejected: false,
+        expired: true,
+      },
+      reconciled_at: now().toISOString(),
+    });
+    if (recorded === false) {
+      return { status: "ignored", sku, reason: "background-final-already-recorded" };
+    }
+    recordMetric("background_status.jsonl", {
+      sku,
+      stage: "expired",
+      store_id: Number(reconciliationTarget.store.id),
+      imported: Boolean(importLog),
+      online: false,
+      stock_updated: false,
+      rejected: false,
+      expired: true,
+      reason,
+    });
+    return { status: "ignored", sku, reason };
+  }
+
   async function recoverSubmissionIntent(item, targetConfig, batchControl = null) {
     const sku = asSku(item);
     const payload = item?.submission_payload;
     const offerId = String(item?.offer_id || payload?.rows?.[0]?.offer_id || "").trim();
+    const currentReconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0);
+    const currentExpiryReason = reconciliationExpiryReason(item, {
+      attempts: currentReconcileAttempts,
+      nowMs: now().getTime(),
+      maxAttempts: configuredReconciliationMaxAttempts,
+      maxAgeMs: configuredReconciliationMaxAgeMs,
+    });
+    if (currentExpiryReason) {
+      return terminalizeDirectReconciliation(item, targetConfig, {
+        reason: currentExpiryReason,
+        attempts: currentReconcileAttempts,
+      });
+    }
     const lease = await state.transition(sku, "processing", {
       ...item,
       reason: "submission-intent-recovery",
@@ -2490,6 +2624,7 @@ export function createPublishRunner({
       submitted: false,
       submission_pending: false,
       reconcile_only: true,
+      reconciliation_started_at: reconciliationStartIso(item),
     });
     if (lease === false) {
       return {
@@ -2597,8 +2732,23 @@ export function createPublishRunner({
       });
     }
 
-    if (activeDirectMode && item?.api_call_started_at) {
-      const nextReconcileAt = new Date(now().getTime() + 30_000).toISOString();
+    if (activeDirectMode && (reconciliationOnly || item?.api_call_started_at)) {
+      const reconcileAttempts = currentReconcileAttempts + 1;
+      const expiryReason = reconciliationExpiryReason(item, {
+        attempts: reconcileAttempts,
+        nowMs: now().getTime(),
+        maxAttempts: configuredReconciliationMaxAttempts,
+        maxAgeMs: configuredReconciliationMaxAgeMs,
+      });
+      if (expiryReason) {
+        return terminalizeDirectReconciliation(item, targetConfig, {
+          reason: expiryReason,
+          attempts: reconcileAttempts,
+        });
+      }
+      const nextReconcileAt = new Date(
+        now().getTime() + reconciliationBackoffMs(reconcileAttempts),
+      ).toISOString();
       await state.transition(sku, "processing", {
         ...item,
         reason: "submission-api-status-unknown",
@@ -2606,6 +2756,8 @@ export function createPublishRunner({
         submitted: false,
         submission_pending: false,
         reconcile_only: true,
+        reconcile_attempts: reconcileAttempts,
+        reconciliation_started_at: reconciliationStartIso(item),
         verification_completed_at: now().toISOString(),
         next_reconcile_at: nextReconcileAt,
       });
@@ -3360,6 +3512,7 @@ export function createPublishRunner({
     const delayedSubmissions = (activeValidationOnly ? [] : restoredEntries)
       .filter((entry) => ["processing", "failed"].includes(entry.status)
         && (!allowedSkus || allowedSkus.has(String(entry.sku)))
+        && !isDurableReconciliationFinal(entry)
         && !(entry.status === "failed" && isTerminalSubmittedFailure(entry))
         && !favoriteSkus.has(String(entry.sku))
         && (entry.data?.submitted === true
@@ -3371,20 +3524,11 @@ export function createPublishRunner({
         sku: String(entry.sku),
         reconcile_only: true,
       }, facts.get(String(entry.sku)) || {}));
-    if (delayedSubmissions.length > 0) {
-      const delayedCountByStore = new Map();
-      for (const item of delayedSubmissions) {
-        if (item?.submitted !== true && item?.submission_pending !== true) continue;
-        const delayedStoreId = Number(item.store_id) || Number(targetConfig.store.id);
-        delayedCountByStore.set(delayedStoreId, Number(delayedCountByStore.get(delayedStoreId) || 0) + 1);
-      }
-      for (const [delayedStoreId, pendingCount] of delayedCountByStore) {
-        await maybeSyncOnlineShop({ store: { id: delayedStoreId } }, { pendingCount });
-      }
-    }
     const nonTerminalFavorites = favorites.filter((item) => {
       const restored = restoredBySku.get(String(item?.sku ?? item?.id ?? ""));
-      return !(restored?.status === "failed" && isTerminalSubmittedFailure(restored));
+      if (["published", "skipped"].includes(String(restored?.status || ""))) return true;
+      return !isDurableReconciliationFinal(restored)
+        && !(restored?.status === "failed" && isTerminalSubmittedFailure(restored));
     });
     const runnableFavorites = activeValidationOnly
       ? nonTerminalFavorites.filter((item) => {
@@ -3422,7 +3566,7 @@ export function createPublishRunner({
       familyScores,
       sourceScores,
     ), profitSnapshot, targetConfig.store.id);
-    const dueReconciliations = prioritizePublishCandidates(
+    const rankedDueReconciliations = prioritizePublishCandidates(
       (activeValidationOnly || (activeDirectMode && !reconciliationOnly)
         ? []
         : [...delayedSubmissions, ...actionableFavorites.filter(isReconciliationCandidate)]).filter((item) => {
@@ -3433,6 +3577,27 @@ export function createPublishRunner({
       familyScores,
       sourceScores,
     );
+    const dueReconciliationLimit = reconciliationOnly
+      ? (activeAttemptLimit > 0 ? activeAttemptLimit : workerCount)
+      : rankedDueReconciliations.length;
+    const dueReconciliations = rankedDueReconciliations.slice(0, dueReconciliationLimit);
+    if (dueReconciliations.length > 0) {
+      const delayedCountByStore = new Map();
+      for (const item of dueReconciliations) {
+        if (item?.submitted !== true && item?.submission_pending !== true) continue;
+        if (activeDirectMode && reconciliationExpiryReason(item, {
+          attempts: Math.max(0, Number(item.reconcile_attempts) || 0),
+          nowMs: now().getTime(),
+          maxAttempts: configuredReconciliationMaxAttempts,
+          maxAgeMs: configuredReconciliationMaxAgeMs,
+        })) continue;
+        const delayedStoreId = Number(item.store_id) || Number(targetConfig.store.id);
+        delayedCountByStore.set(delayedStoreId, Number(delayedCountByStore.get(delayedStoreId) || 0) + 1);
+      }
+      for (const [delayedStoreId, pendingCount] of delayedCountByStore) {
+        await maybeSyncOnlineShop({ store: { id: delayedStoreId } }, { pendingCount });
+      }
+    }
     const candidates = [
       ...terminalCleanupCandidates,
       ...interleaveCandidateBatches(freshCandidates, dueReconciliations, workerCount),
@@ -3502,13 +3667,35 @@ export function createPublishRunner({
       const sku = asSku(item);
       const online = isEffectiveOnlineProduct(existing);
       const stockUpdated = Number(existing?.stock) > 0;
-      await state.transition(sku, "processing", {
+      const currentEntry = state.entryOf?.(sku);
+      if (online && isDurableReconciliationFinal(currentEntry)) {
+        return { status: "ignored", sku, reason: "background-final-already-recorded" };
+      }
+      const reconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0) + 1;
+      const expiryReason = online ? null : reconciliationExpiryReason(item, {
+        attempts: reconcileAttempts,
+        nowMs: now().getTime(),
+        maxAttempts: configuredReconciliationMaxAttempts,
+        maxAgeMs: configuredReconciliationMaxAgeMs,
+      });
+      if (expiryReason) {
+        return terminalizeDirectReconciliation(item, reconciliationTarget, {
+          reason: expiryReason,
+          attempts: reconcileAttempts,
+          importLog,
+          finalResult: extra?.final_result || null,
+        });
+      }
+      const recorded = await state.transition(sku, "processing", {
         ...item,
         ...extra,
         reason: online ? "background-online" : "background-imported",
         submitted: true,
         submission_pending: false,
         reconcile_only: !online,
+        reconciliation_terminal: online,
+        terminal: online,
+        failure_class: null,
         outcome_status: online ? "online" : "imported",
         store_id: Number(reconciliationTarget.store.id),
         store_name: reconciliationTarget.store.name ?? reconciliationTarget.store.title ?? item.store_name ?? "",
@@ -3527,10 +3714,16 @@ export function createPublishRunner({
           rejected: false,
         },
         reconciled_at: now().toISOString(),
+        reconciliation_started_at: reconciliationStartIso(item),
+        reconcile_attempts: reconcileAttempts,
+        retry_at: null,
         next_reconcile_at: online
           ? null
-          : new Date(now().getTime() + reconciliationBackoffMs(Number(item.reconcile_attempts) + 1)).toISOString(),
+          : new Date(now().getTime() + reconciliationBackoffMs(reconcileAttempts)).toISOString(),
       });
+      if (recorded === false) {
+        return { status: "ignored", sku, reason: "background-final-already-recorded" };
+      }
       recordMetric("background_status.jsonl", {
         sku,
         stage: online ? "online" : "imported",
@@ -3737,6 +3930,19 @@ export function createPublishRunner({
           && nextReconcileAt > now().getTime()) {
           return { status: "ignored", sku, reason: "reconciliation-backoff" };
         }
+        if (activeDirectMode) {
+          const expiryReason = reconciliationExpiryReason(item, {
+            attempts: Math.max(0, Number(item.reconcile_attempts) || 0),
+            nowMs: now().getTime(),
+            maxAttempts: configuredReconciliationMaxAttempts,
+            maxAgeMs: configuredReconciliationMaxAgeMs,
+          });
+          if (expiryReason) {
+            return terminalizeDirectReconciliation(item, reconciliationTarget, {
+              reason: expiryReason,
+            });
+          }
+        }
         try {
           const importLog = await client.findImportLog({
             shopId: reconciliationTarget.store.id,
@@ -3748,6 +3954,19 @@ export function createPublishRunner({
             const reason = importFailureReason(importLog);
             if (reason === "import-transient-error") {
               const reconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0) + 1;
+              const expiryReason = activeDirectMode ? reconciliationExpiryReason(item, {
+                attempts: reconcileAttempts,
+                nowMs: now().getTime(),
+                maxAttempts: configuredReconciliationMaxAttempts,
+                maxAgeMs: configuredReconciliationMaxAgeMs,
+              }) : null;
+              if (expiryReason) {
+                return terminalizeDirectReconciliation(item, reconciliationTarget, {
+                  reason: expiryReason,
+                  attempts: reconcileAttempts,
+                  importLog,
+                });
+              }
               await state.transition(sku, "processing", {
                 ...item,
                 store_id: reconciliationTarget.store.id,
@@ -3758,6 +3977,7 @@ export function createPublishRunner({
                 submission_pending: true,
                 reconcile_only: true,
                 reconcile_attempts: reconcileAttempts,
+                reconciliation_started_at: reconciliationStartIso(item),
                 next_reconcile_at: new Date(now().getTime() + reconciliationBackoffMs(reconcileAttempts)).toISOString(),
               });
               return { status: "ignored", sku, source_url: item.source_url ?? null, reason };
@@ -3790,6 +4010,13 @@ export function createPublishRunner({
               reason,
               import_log: importLog,
               outcome_status: activeDirectMode ? "rejected" : undefined,
+              ...(activeDirectMode ? {
+                reconcile_only: false,
+                next_reconcile_at: null,
+                retry_at: null,
+                terminal: true,
+                failure_class: "deterministic",
+              } : {}),
               background_status: activeDirectMode ? {
                 imported: false,
                 online: false,
@@ -3820,7 +4047,7 @@ export function createPublishRunner({
           if (["all_imported", "imported"].includes(importStatus)) {
             const confirmed = await confirmPublication(sku, {
               rows: [{ offer_id: importLog.offer_id || item.offer_id }],
-            }, reconciliationTarget, { attempts: 1 });
+            }, reconciliationTarget, { attempts: 1, initialImportLog: importLog });
             const existing = confirmed.online_product;
             if (!confirmed.ok || !existing) {
               const reason = confirmed.reason || "reconciliation-online-product-missing";
@@ -3833,6 +4060,22 @@ export function createPublishRunner({
                 "stock-activation-rejected",
               ].includes(reason);
               const reconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0) + 1;
+              const expiryReason = activeDirectMode && retryablePending
+                ? reconciliationExpiryReason(item, {
+                    attempts: reconcileAttempts,
+                    nowMs: now().getTime(),
+                    maxAttempts: configuredReconciliationMaxAttempts,
+                    maxAgeMs: configuredReconciliationMaxAgeMs,
+                  })
+                : null;
+              if (expiryReason) {
+                return terminalizeDirectReconciliation(item, reconciliationTarget, {
+                  reason: expiryReason,
+                  attempts: reconcileAttempts,
+                  importLog,
+                  finalResult: confirmed,
+                });
+              }
               await state.transition(sku, retryablePending ? "processing" : "failed", {
                 ...item,
                 reason,
@@ -3850,7 +4093,14 @@ export function createPublishRunner({
                 } : item.background_status,
                 ...(retryablePending ? {
                   reconcile_attempts: reconcileAttempts,
+                  reconciliation_started_at: reconciliationStartIso(item),
                   next_reconcile_at: new Date(now().getTime() + reconciliationBackoffMs(reconcileAttempts)).toISOString(),
+                } : activeDirectMode ? {
+                  reconcile_only: false,
+                  next_reconcile_at: null,
+                  retry_at: null,
+                  terminal: true,
+                  failure_class: "deterministic",
                 } : {}),
               });
               return { status: retryablePending ? "ignored" : "failed", sku, reason };
@@ -3990,6 +4240,33 @@ export function createPublishRunner({
             return { status: "ignored", sku, reason: "reconciliation-import-pending" };
           }
           if (item.reconcile_only || item.submitted || item.submission_pending) {
+            if (activeDirectMode) {
+              const reconcileAttempts = Math.max(0, Number(item.reconcile_attempts) || 0) + 1;
+              const expiryReason = reconciliationExpiryReason(item, {
+                attempts: reconcileAttempts,
+                nowMs: now().getTime(),
+                maxAttempts: configuredReconciliationMaxAttempts,
+                maxAgeMs: configuredReconciliationMaxAgeMs,
+              });
+              if (expiryReason) {
+                return terminalizeDirectReconciliation(item, reconciliationTarget, {
+                  reason: expiryReason,
+                  attempts: reconcileAttempts,
+                });
+              }
+              const reason = item.submission_intent === true
+                ? "submission-api-status-unknown"
+                : "reconciliation-import-not-visible";
+              await state.transition(sku, "processing", {
+                ...item,
+                reason,
+                reconcile_only: true,
+                reconcile_attempts: reconcileAttempts,
+                reconciliation_started_at: reconciliationStartIso(item),
+                next_reconcile_at: new Date(now().getTime() + reconciliationBackoffMs(reconcileAttempts)).toISOString(),
+              });
+              return { status: "ignored", sku, reason };
+            }
             return { status: "ignored", sku, reason: "reconciliation-import-not-visible" };
           }
         } catch (error) {
