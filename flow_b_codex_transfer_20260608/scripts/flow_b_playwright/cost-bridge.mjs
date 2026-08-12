@@ -258,6 +258,12 @@ function downloadErrorChain(error) {
 }
 
 function isTransientDownloadError(error) {
+  const isBareFetchFailure = error instanceof TypeError
+    && error.message === "fetch failed"
+    && (error.cause === null || error.cause === undefined)
+    && (!Array.isArray(error.errors) || error.errors.length === 0);
+  if (isBareFetchFailure) return true;
+
   const chain = downloadErrorChain(error);
   for (const current of chain) {
     const message = String(current?.message || current || "");

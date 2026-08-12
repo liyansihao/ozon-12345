@@ -1442,24 +1442,88 @@ test("generic fetch failures with non-transient causes do not retry", async () =
   });
 });
 
-test("bare generic fetch failures without a cause fail fast", async () => {
+test("bare TypeError fetch failures retry once and can recover", async () => {
+  await withTempDir(async (runDir) => {
+    let downloads = 0;
+    let runs = 0;
+    const delays = [];
+    const bridge = createCostBridge({
+      download: async (_url, destinationPath) => {
+        downloads += 1;
+        if (downloads === 1) throw new TypeError("fetch failed");
+        await fs.writeFile(destinationPath, "image");
+      },
+      sleep: async (ms) => { delays.push(ms); },
+      runProcess: async () => {
+        runs += 1;
+        return {
+          code: 0,
+          stdout: [
+            "COST_SOURCE search_first_page_p70_similarity_filtered",
+            "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+            "P70_COST 11",
+          ].join("\n"),
+          stderr: "",
+        };
+      },
+    });
+    const result = await bridge.estimate({
+      sku: "bare-fetch-recovery",
+      cover_image: "https://img.example/bare-fetch-recovery.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, true);
+    assert.equal(downloads, 2);
+    assert.equal(runs, 1);
+    assert.deepEqual(delays, [500]);
+    await bridge.close();
+  });
+});
+
+test("persistent bare TypeError fetch failures stop after two attempts", async () => {
+  await withTempDir(async (runDir) => {
+    let downloads = 0;
+    const delays = [];
+    const bridge = createCostBridge({
+      downloadAttempts: 99,
+      download: async () => {
+        downloads += 1;
+        throw new TypeError("fetch failed");
+      },
+      sleep: async (ms) => { delays.push(ms); },
+      runProcess: async () => { throw new Error("1688 must not run without a valid image"); },
+    });
+    const result = await bridge.estimate({
+      sku: "persistent-bare-fetch-failure",
+      cover_image: "https://img.example/persistent-bare-fetch-failure.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.message, "fetch failed");
+    assert.equal(downloads, 2);
+    assert.deepEqual(delays, [500]);
+    await bridge.close();
+  });
+});
+
+test("arbitrary TypeError image failures do not retry", async () => {
   await withTempDir(async (runDir) => {
     let downloads = 0;
     const bridge = createCostBridge({
       download: async () => {
         downloads += 1;
-        throw new TypeError("fetch failed");
+        throw new TypeError("invalid image transform input");
       },
-      sleep: async () => { throw new Error("unknown fetch failures must not back off"); },
+      sleep: async () => { throw new Error("arbitrary TypeErrors must not back off"); },
       runProcess: async () => { throw new Error("1688 must not run without a valid image"); },
     });
     const result = await bridge.estimate({
-      sku: "unknown-fetch-failure",
-      cover_image: "https://img.example/unknown-fetch-failure.jpg",
+      sku: "arbitrary-type-error",
+      cover_image: "https://img.example/arbitrary-type-error.jpg",
       sell_price: 100,
     }, runDir);
     assert.equal(result.ok, false);
-    assert.equal(result.error?.message, "fetch failed");
+    assert.equal(result.error?.message, "invalid image transform input");
     assert.equal(downloads, 1);
     await bridge.close();
   });
@@ -1472,7 +1536,7 @@ test("transient image retry does not extend the end-to-end budget", async () => 
       totalBudgetMs: 400,
       download: async () => {
         downloads += 1;
-        throw genericFetchFailure("ECONNRESET", "connection reset by peer");
+        throw new TypeError("fetch failed");
       },
       sleep: async () => { throw new Error("retry delay must not start beyond the budget"); },
       runProcess: async () => { throw new Error("1688 must not run without an image"); },
