@@ -7,6 +7,7 @@ import {
   acceptanceRoundPlan,
   allDirectStoresRejected,
   isRecoverableForegroundFavoritesTimeout,
+  ozonDetailQueueSlotCount,
   parseCli,
   parseDailyStoreUsageSeed,
   parseProfitSafetyActionPolicy,
@@ -19,6 +20,15 @@ import {
   sourceScanOutputFile,
   unlimitedPublishTarget,
 } from "../scripts/flow_b_playwright.mjs";
+
+test("Ozon detail queue capacity follows publish callers instead of the page pool", () => {
+  assert.equal(ozonDetailQueueSlotCount({
+    FLOW_B_PUBLISH_WORKERS: "8",
+    FLOW_B_OZON_DETAIL_WORKERS: "1",
+    FLOW_B_MAX_OZON_DETAIL_WORKERS: "1",
+  }), 8);
+  assert.equal(ozonDetailQueueSlotCount({}), 8);
+});
 
 function maoziTimeout(overrides = {}) {
   return Object.assign(new Error("Maozi GET favorites timed out"), {

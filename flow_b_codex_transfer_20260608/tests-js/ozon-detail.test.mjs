@@ -524,6 +524,7 @@ test("access-controller queue wait does not consume each detail execution budget
     operationBudgetMs: 15,
     initialConcurrency: 1,
     maxConcurrency: 1,
+    queueSlotCount: 8,
   });
 
   const details = await Promise.all(Array.from({ length: 8 }, (_, index) => (
@@ -535,6 +536,40 @@ test("access-controller queue wait does not consume each detail execution budget
   assert.equal(evaluateCalls, 8);
   await provider.close();
   assert.equal(closeCalls, 1);
+});
+
+test("single-page detail pool budgets access queue wait for all eight publish callers", async () => {
+  const queueBudgets = [];
+  const page = {
+    isClosed: () => false,
+    goto: async () => ({ status: () => 200 }),
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/product/queue-capacity/",
+      title: "Ozon item",
+      text: "发货模式： FBS",
+    }),
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    accessController: {
+      run: async (_metadata, operation, options) => {
+        queueBudgets.push(options.deadlineAt - Date.now());
+        return operation();
+      },
+    },
+    timeout: 1,
+    operationBudgetMs: 15,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+    queueSlotCount: 8,
+  });
+
+  await provider.getProductDetail("queue-capacity", { sell_price: 90 });
+  assert.equal(queueBudgets.length, 1);
+  assert.ok(queueBudgets[0] >= 8 * 55_000 - 10);
+  assert.ok(queueBudgets[0] <= 8 * 55_000);
+  await provider.close();
 });
 
 test("an expired access-controller detail never opens a page and later detail work proceeds", async () => {
@@ -573,6 +608,7 @@ test("an expired access-controller detail never opens a page and later detail wo
     timeout: 1,
     initialConcurrency: 1,
     maxConcurrency: 1,
+    queueSlotCount: 8,
   });
 
   const expired = provider.getProductDetail("expired-before-access", { sell_price: 90 });

@@ -91,6 +91,10 @@ export function unlimitedPublishTarget(target) {
   return Number(target) === 0;
 }
 
+export function ozonDetailQueueSlotCount(env = process.env) {
+  return Math.max(1, Number(env.FLOW_B_PUBLISH_WORKERS) || 8);
+}
+
 export function parseProfitSafetyActionPolicy(env = {}) {
   const policy = String(env.FLOW_B_PROFIT_SAFETY_ACTION_POLICY ?? "shadow")
     .trim()
@@ -432,6 +436,10 @@ async function createPublishingSession(context, options, env, shared) {
           || Number(env.FLOW_B_MAX_PUBLISH_WORKERS)
           || 12,
       ),
+      // Ozon access is globally serialized, so the queue can contain the
+      // complete publish worker tranche even when the page pool is deliberately
+      // held at one page. Queue TTL must describe callers, not page capacity.
+      queueSlotCount: ozonDetailQueueSlotCount(env),
     });
     const runner = createPublishRunner({
       client,

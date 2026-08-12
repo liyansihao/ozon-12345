@@ -231,6 +231,7 @@ export function createOzonDetailProvider({
   captchaConfirmationDelayMs = 750,
   initialConcurrency = 8,
   maxConcurrency = 12,
+  queueSlotCount = null,
   retryNavigationTimeoutMs = RETRY_NAVIGATION_TIMEOUT_MS,
   operationGraceMs = RETRY_OPERATION_GRACE_MS,
   pageCleanupTimeoutMs = PAGE_CLEANUP_TIMEOUT_MS,
@@ -466,8 +467,13 @@ export function createOzonDetailProvider({
       // detail worker. Give each slot one hard operation budget plus pacing
       // headroom, while still bounding abandoned work and keeping execution's
       // independent 45 second ceiling.
+      const configuredQueueSlotCount = Number(queueSlotCount);
+      const activeQueueSlotCount = Number.isFinite(configuredQueueSlotCount)
+        && configuredQueueSlotCount > 0
+        ? Math.max(1, Math.ceil(configuredQueueSlotCount))
+        : Math.max(1, Math.ceil(Number(maxConcurrency) || 1));
       const defaultQueueWaitBudgetMs = DEFAULT_DETAIL_QUEUE_SLOT_BUDGET_MS
-        * Math.max(1, Math.ceil(Number(maxConcurrency) || 1));
+        * activeQueueSlotCount;
       const activeQueueWaitBudgetMs = Number.isFinite(configuredQueueWaitBudgetMs)
         && configuredQueueWaitBudgetMs > 0
         ? Math.max(1, Math.floor(configuredQueueWaitBudgetMs))
