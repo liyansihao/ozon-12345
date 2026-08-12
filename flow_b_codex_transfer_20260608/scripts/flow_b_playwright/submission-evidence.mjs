@@ -18,7 +18,7 @@ export function importFailureReason(log) {
   return "import-failed";
 }
 
-function hasTerminalModerationDecline(product) {
+export function hasTerminalModerationDecline(product) {
   return Array.isArray(product?.errors) && product.errors.some((error) => {
     const level = String(error?.level || "").toUpperCase();
     const state = String(error?.state || "").toLowerCase();
@@ -27,7 +27,7 @@ function hasTerminalModerationDecline(product) {
   });
 }
 
-function hasTerminalStockActivationRejection(stockUpdate) {
+export function hasTerminalStockActivationRejection(stockUpdate) {
   return (stockUpdate?.result || []).some((row) => (row?.errors || []).some((error) => (
     String(error?.code || "").toUpperCase() === "CB_DELIVERY_ONLY_FBP"
   )));

@@ -31,7 +31,12 @@ import {
 import { createProfitFilesReader, prioritizeProfitRows } from "./profit-priority.mjs";
 import { assessProfitSafety, assessProfitSafetyGate } from "./profit-safety.mjs";
 import { dailyWindowState } from "../daily-window.mjs";
-import { importFailureReason, isTerminalSubmittedFailure } from "./submission-evidence.mjs";
+import {
+  hasTerminalModerationDecline,
+  hasTerminalStockActivationRejection,
+  importFailureReason,
+  isTerminalSubmittedFailure,
+} from "./submission-evidence.mjs";
 
 const ECONOMY_SENTINEL = Object.freeze({
   title: "CEL Economy",
