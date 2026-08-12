@@ -486,7 +486,20 @@ export function createOzonDetailProvider({
           page = await acquirePage(operationDeadline);
           if (!page) throw new Error("Ozon detail page pool could not allocate a page");
           let navigationAttempt = 0;
-          while (true) {
+          const retryOnFreshPage = async () => {
+            const poisonedPage = page;
+            page = null;
+            reusable = false;
+            await discardPage(poisonedPage, operationDeadline);
+            if (remainingDeadlineMs(operationDeadline) <= 0) {
+              throw detailDeadlineError("retry-page-create");
+            }
+            page = await createPage(operationDeadline);
+            reusable = true;
+            navigationFailed = false;
+            navigationAttempt += 1;
+          };
+          detailAttempt: while (true) {
             const configuredNavigationTimeoutMs = navigationAttempt === 0
               ? primaryNavigationTimeoutMs
               : activeRetryNavigationTimeoutMs;
@@ -518,102 +531,92 @@ export function createOzonDetailProvider({
                 throw error;
               }
               navigationFailed = false;
-              break;
             } catch (error) {
               navigationFailed = true;
               if (navigationAttempt !== 0 || !isRetryablePageGotoFailure(error)) throw error;
-
-              const poisonedPage = page;
-              page = null;
-              reusable = false;
-              await discardPage(poisonedPage, operationDeadline);
-              if (remainingDeadlineMs(operationDeadline) <= 0) {
-                throw detailDeadlineError("retry-page-create");
-              }
-              page = await createPage(operationDeadline);
-              reusable = true;
-              navigationFailed = false;
-              navigationAttempt += 1;
+              await retryOnFreshPage();
+              continue;
             }
-          }
-          const deadline = Math.min(
-            Date.now() + Math.max(0, timeout),
-            operationDeadline,
-          );
-          const requiredCaptchaConfirmations = Math.max(
-            1,
-            Math.floor(Number(captchaConfirmations) || 2),
-          );
-          let consecutiveCaptchaObservations = 0;
-          let payload = null;
-          do {
-            payload = await withinDeadline(() => page.evaluate(() => ({
-              url: location.href,
-              title: document.title,
-              text: document.body?.innerText || "",
-              webPriceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
-              sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
-                || document.querySelector('a[href*="/seller/"]')?.href || "",
-            })), operationDeadline, "page-inspection").catch((error) => {
-              if (error?.code === "OZON_DETAIL_DEADLINE" || isUnusablePageFailure(error)) {
+            const deadline = Math.min(
+              Date.now() + Math.max(0, timeout),
+              operationDeadline,
+            );
+            const requiredCaptchaConfirmations = Math.max(
+              1,
+              Math.floor(Number(captchaConfirmations) || 2),
+            );
+            let consecutiveCaptchaObservations = 0;
+            let payload = null;
+            do {
+              payload = await withinDeadline(() => page.evaluate(() => ({
+                url: location.href,
+                title: document.title,
+                text: document.body?.innerText || "",
+                webPriceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
+                sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
+                  || document.querySelector('a[href*="/seller/"]')?.href || "",
+              })), operationDeadline, "page-inspection").catch((error) => {
+                if (error?.code === "OZON_DETAIL_DEADLINE" || isUnusablePageFailure(error)) {
+                  navigationFailed = true;
+                  throw error;
+                }
+                // A committed document can replace its execution context while
+                // redirects or client hydration settle. Poll the new context;
+                // other access and readiness checks still fail closed below.
+                return null;
+              });
+              const access = classifyOzonDetailAccessPayload(payload);
+              if (access.captcha) {
+                consecutiveCaptchaObservations += 1;
+                if (consecutiveCaptchaObservations < requiredCaptchaConfirmations) {
+                  await delayBeforeDeadline(
+                    Math.max(1, Number(captchaConfirmationDelayMs) || 750),
+                    operationDeadline,
+                    "captcha-confirmation",
+                  );
+                  continue;
+                }
                 navigationFailed = true;
+                throw new Error(
+                  `Ozon CAPTCHA required for SKU ${sku} after ${consecutiveCaptchaObservations} confirmations`,
+                );
+              }
+              consecutiveCaptchaObservations = 0;
+              if (access.authentication) {
+                navigationFailed = true;
+                throw new Error(`Ozon authentication or MFA required for SKU ${sku}`);
+              }
+              if (payload && !isExpectedOzonProductLocation(payload.url, sku)) {
+                navigationFailed = true;
+                const error = new Error(
+                  `Ozon detail unexpected product location for SKU ${sku}: ${String(payload?.url || "missing URL")}`,
+                );
+                error.code = "OZON_DETAIL_UNEXPECTED_LOCATION";
                 throw error;
               }
-              // A committed document can replace its execution context while
-              // redirects or client hydration settle. Poll the new context;
-              // other access and readiness checks still fail closed below.
-              return null;
-            });
-            const access = classifyOzonDetailAccessPayload(payload);
-            if (access.captcha) {
-              consecutiveCaptchaObservations += 1;
-              if (consecutiveCaptchaObservations < requiredCaptchaConfirmations) {
-                await delayBeforeDeadline(
-                  Math.max(1, Number(captchaConfirmationDelayMs) || 750),
-                  operationDeadline,
-                  "captcha-confirmation",
-                );
-                continue;
+              const diagnostic = [
+                payload?.url,
+                payload?.title,
+                payload?.text?.slice(0, 1000),
+              ].filter(Boolean).join(" ");
+              if (/доступ ограничен|access denied|похоже, нет(?:\s|\u00a0)+соединения/i.test(diagnostic)) {
+                navigationFailed = true;
+                throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
               }
-              navigationFailed = true;
-              throw new Error(
-                `Ozon CAPTCHA required for SKU ${sku} after ${consecutiveCaptchaObservations} confirmations`,
+              if (payload?.text && /发货模式：/.test(payload.text)) return payload;
+              if (Date.now() >= deadline) {
+                navigationFailed = true;
+                if (navigationAttempt !== 0) throw detailDeadlineError("product-ready", timeout);
+                await retryOnFreshPage();
+                continue detailAttempt;
+              }
+              await delayBeforeDeadline(
+                Math.max(1, pollInterval),
+                operationDeadline,
+                "detail-poll",
               );
-            }
-            consecutiveCaptchaObservations = 0;
-            if (access.authentication) {
-              navigationFailed = true;
-              throw new Error(`Ozon authentication or MFA required for SKU ${sku}`);
-            }
-            if (payload && !isExpectedOzonProductLocation(payload.url, sku)) {
-              navigationFailed = true;
-              const error = new Error(
-                `Ozon detail unexpected product location for SKU ${sku}: ${String(payload?.url || "missing URL")}`,
-              );
-              error.code = "OZON_DETAIL_UNEXPECTED_LOCATION";
-              throw error;
-            }
-            const diagnostic = [
-              payload?.url,
-              payload?.title,
-              payload?.text?.slice(0, 1000),
-            ].filter(Boolean).join(" ");
-            if (/доступ ограничен|access denied|похоже, нет(?:\s|\u00a0)+соединения/i.test(diagnostic)) {
-              navigationFailed = true;
-              throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
-            }
-            if (payload?.text && /发货模式：/.test(payload.text)) break;
-            if (Date.now() >= deadline) {
-              navigationFailed = true;
-              throw detailDeadlineError("product-ready", timeout);
-            }
-            await delayBeforeDeadline(
-              Math.max(1, pollInterval),
-              operationDeadline,
-              "detail-poll",
-            );
-          } while (true);
-          return payload;
+            } while (true);
+          }
         };
         let payload;
         let accessQueueCancellation = null;
@@ -659,7 +662,7 @@ export function createOzonDetailProvider({
         adaptive.recordFailure(error);
         if (error?.code === "OZON_DETAIL_DEADLINE") navigationFailed = true;
         reusable = !navigationFailed
-          && !/target page|context or browser has been closed|frame was detached/i.test(String(error?.message || error));
+          && !isUnusablePageFailure(error);
         throw error;
       } finally {
         if (page) {
