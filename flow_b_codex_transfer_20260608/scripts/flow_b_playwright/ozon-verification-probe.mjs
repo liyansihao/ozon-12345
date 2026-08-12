@@ -57,6 +57,22 @@ async function closeOwnPageWithin(page, timeoutMs) {
   }
 }
 
+async function awaitLateOwnedPage(pageCreation, deadlineAt) {
+  const remainingMs = Math.max(0, Math.floor(deadlineAt - Date.now()));
+  if (remainingMs <= 0) return null;
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(pageCreation).catch(() => null),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function ozonHost(value) {
   try {
     const hostname = new URL(String(value || "")).hostname.toLowerCase();
@@ -148,7 +164,19 @@ export async function probeOzonVerification({
     ));
     const context = browser.contexts()[0];
     if (!context) throw new Error("CDP browser has no default context");
-    page = await runWithinDeadline("page creation", operationDeadlineAt, () => context.newPage());
+    const pageCreation = Promise.resolve().then(() => context.newPage());
+    try {
+      page = await runWithinDeadline("page creation", operationDeadlineAt, () => pageCreation);
+    } catch (error) {
+      if (error?.code === "OZON_VERIFICATION_PROBE_TIMEOUT"
+        && error?.operation === "page creation") {
+        // Target.createTarget can complete after our operation deadline. Keep
+        // ownership of that in-flight result for the reserved cleanup window
+        // so the dedicated CLI does not leave an orphan tab in shared Chrome.
+        page = await awaitLateOwnedPage(pageCreation, deadlineAt);
+      }
+      throw error;
+    }
     const response = await runWithinDeadline("page navigation", operationDeadlineAt, (remainingMs) => (
       page.goto(String(url), {
         waitUntil: "domcontentloaded",

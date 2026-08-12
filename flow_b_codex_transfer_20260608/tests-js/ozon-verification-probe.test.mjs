@@ -196,3 +196,58 @@ test("a hanging own-page close cannot suppress a conclusive probe result", async
   assert.ok(elapsedMs < 1_000, `cleanup suppressed the result: ${elapsedMs}ms`);
   assert.equal(pageCloseCalls, 1);
 });
+
+test("a page created just after the operation deadline is reclaimed before the probe exits", async () => {
+  let pageCloseCalls = 0;
+  let browserCloseCalls = 0;
+  const page = {
+    url: () => "https://www.ozon.ru/product/example-123/",
+    close: async () => { pageCloseCalls += 1; },
+  };
+  const startedAt = Date.now();
+  const result = await probeOzonVerification({
+    cdpEndpoint: "http://127.0.0.1:9223",
+    url: "https://www.ozon.ru/product/example-123/",
+    timeoutMs: 100,
+    settleMs: 10,
+    browserType: {
+      connectOverCDP: async () => ({
+        contexts: () => [{
+          newPage: () => new Promise((resolve) => setTimeout(() => resolve(page), 70)),
+        }],
+        close: async () => { browserCloseCalls += 1; },
+      }),
+    },
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(result.classification, "INDETERMINATE");
+  assert.match(result.error, /page creation timed out/iu);
+  assert.ok(elapsedMs >= 60, `probe did not wait for its late owned page: ${elapsedMs}ms`);
+  assert.ok(elapsedMs < 500, `late-page cleanup exceeded the total deadline: ${elapsedMs}ms`);
+  assert.equal(pageCloseCalls, 1);
+  assert.equal(browserCloseCalls, 0);
+});
+
+test("a page creation that never settles remains bounded by the probe deadline", async () => {
+  let browserCloseCalls = 0;
+  const startedAt = Date.now();
+  const result = await probeOzonVerification({
+    cdpEndpoint: "http://127.0.0.1:9223",
+    url: "https://www.ozon.ru/product/example-123/",
+    timeoutMs: 100,
+    settleMs: 10,
+    browserType: {
+      connectOverCDP: async () => ({
+        contexts: () => [{ newPage: async () => new Promise(() => {}) }],
+        close: async () => { browserCloseCalls += 1; },
+      }),
+    },
+  });
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(result.classification, "INDETERMINATE");
+  assert.match(result.error, /page creation timed out/iu);
+  assert.ok(elapsedMs < 500, `hanging page creation exceeded the deadline: ${elapsedMs}ms`);
+  assert.equal(browserCloseCalls, 0);
+});
