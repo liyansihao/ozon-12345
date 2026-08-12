@@ -43,6 +43,8 @@ import {
   closeReusablePages,
   closeRuntimeReusablePagePools,
   ensureReusablePageSlots,
+  isPoisonedFavoriteWorkerPageError,
+  quarantineReusablePage,
   runtimeReusablePagePools,
   classifyFreshSourceUrls,
   expandFreshSellerSourceUrls,
@@ -1388,6 +1390,461 @@ test("zero reusable pages after creation timeout is transient but browser closur
     source_url: "https://www.ozon.ru/seller/closed/",
     stop_reason: `error: ${closedError.message}`,
   }]).message, /context or browser has been closed/i);
+});
+
+test("favorite detail navigation timeouts quarantine only the poisoned shared page", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-favorite-quarantine-"));
+  let firstClosed = 0;
+  let secondClosed = 0;
+  const first = {
+    isClosed: () => firstClosed > 0,
+    goto: async () => { throw new Error("page.goto: Timeout 30000ms exceeded."); },
+    close: async () => { firstClosed += 1; },
+  };
+  const second = {
+    isClosed: () => secondClosed > 0,
+    goto: async () => {},
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/product/healthy-1002/",
+      title: "Healthy",
+      ogTitle: "Healthy",
+      ogImage: "https://ir.ozone.ru/healthy.jpg",
+      priceText: "100 ₽",
+      sellerUrl: "https://www.ozon.ru/seller/healthy/",
+      mode: "FBS",
+      pageText: "发货模式：FBS",
+    }),
+    close: async () => { secondClosed += 1; },
+  };
+  const pagePool = [first, second];
+  const outcomes = [];
+  try {
+    const total = await collectFavorites({
+      context: { newPage: async () => { throw new Error("unexpected page creation"); } },
+      maozi: {
+        evaluate: async (_operation, payload) => payload ? { code: 1 } : [],
+      },
+      links: [
+        { href: "https://www.ozon.ru/product/timeout-1001/", text: "Timeout", card_text: "100 ₽\n发货模式：FBS" },
+        { href: "https://www.ozon.ru/product/healthy-1002/", text: "Healthy", card_text: "100 ₽\n发货模式：FBS" },
+      ],
+      target: 2,
+      currentTotal: 0,
+      env: {
+        FLOW_B_DIRECT_PUBLISH: "1",
+        FLOW_B_VERIFY_LISTING_FBS_DETAIL: "1",
+        FLOW_B_FAVORITE_WORKERS: "2",
+        FLOW_B_FAVORITE_DETAIL_TIMEOUT: "10",
+        FLOW_B_FAVORITE_API_INTERVAL_MS: "0",
+        FLOW_B_FBS_SOURCE_HISTORY: path.join(directory, "history.jsonl"),
+      },
+      attempted: new Set(),
+      logFile: path.join(directory, "run", "favorite_collection.jsonl"),
+      log: () => {},
+      workerPagePool: pagePool,
+      onResult: (row) => outcomes.push(row),
+    });
+    assert.equal(total, 1);
+    assert.equal(firstClosed, 1);
+    assert.equal(secondClosed, 0);
+    assert.deepEqual(pagePool, [second]);
+    assert.equal(outcomes.some((row) => row.status === "failed" && row.sku === "1001"), true);
+    assert.equal(outcomes.some((row) => row.status === "favorited" && row.sku === "1002"), true);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("favorite page quarantine is precise and never closes a healthy page for an API timeout", async () => {
+  assert.equal(isPoisonedFavoriteWorkerPageError(new Error("page.goto: Timeout 30000ms exceeded.")), true);
+  assert.equal(isPoisonedFavoriteWorkerPageError(Object.assign(
+    new Error("Ozon detail navigation-primary timed out after 30000ms"),
+    { code: "OZON_DETAIL_DEADLINE", phase: "navigation-primary" },
+  )), true);
+  assert.equal(isPoisonedFavoriteWorkerPageError(new Error("Maozi POST timed out after 10000ms")), false);
+  assert.equal(isPoisonedFavoriteWorkerPageError(new Error("Ozon detail soft blocked: access denied")), false);
+  assert.equal(isPoisonedFavoriteWorkerPageError(new Error("Ozon authentication required: login")), false);
+  let closed = 0;
+  const healthy = { isClosed: () => false, close: async () => { closed += 1; } };
+  const poisoned = { isClosed: () => false, close: async () => { closed += 1; } };
+  const pages = [healthy, poisoned];
+  await quarantineReusablePage(pages, poisoned, 10);
+  assert.deepEqual(pages, [healthy]);
+  assert.equal(closed, 1);
+});
+
+test("a Maozi POST navigation-context failure never quarantines a healthy Ozon detail page", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-favorite-post-page-scope-"));
+  let detailClosed = 0;
+  const detailPage = {
+    isClosed: () => detailClosed > 0,
+    goto: async () => {},
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/product/healthy-1101/",
+      title: "Healthy",
+      ogTitle: "Healthy",
+      ogImage: "https://ir.ozone.ru/healthy.jpg",
+      priceText: "100 ₽",
+      sellerUrl: "https://www.ozon.ru/seller/healthy/",
+      mode: "FBS",
+      pageText: "发货模式：FBS",
+    }),
+    close: async () => { detailClosed += 1; },
+  };
+  const pagePool = [detailPage];
+  try {
+    const total = await collectFavorites({
+      context: { newPage: async () => { throw new Error("unexpected page creation"); } },
+      maozi: {
+        evaluate: async (_operation, payload) => {
+          if (!payload) return [];
+          throw new Error("page.evaluate: Execution context was destroyed, most likely because of a navigation.");
+        },
+      },
+      links: [{
+        href: "https://www.ozon.ru/product/healthy-1101/",
+        text: "Healthy",
+        card_text: "100 ₽\n发货模式：FBS",
+      }],
+      target: 1,
+      currentTotal: 0,
+      env: {
+        FLOW_B_DIRECT_PUBLISH: "1",
+        FLOW_B_VERIFY_LISTING_FBS_DETAIL: "1",
+        FLOW_B_FAVORITE_WORKERS: "1",
+        FLOW_B_FAVORITE_API_RETRIES: "0",
+        FLOW_B_FAVORITE_API_INTERVAL_MS: "0",
+        FLOW_B_FBS_SOURCE_HISTORY: path.join(directory, "history.jsonl"),
+      },
+      attempted: new Set(),
+      logFile: path.join(directory, "run", "favorite_collection.jsonl"),
+      log: () => {},
+      workerPagePool: pagePool,
+    });
+    assert.equal(total, 0);
+    assert.equal(detailClosed, 0);
+    assert.deepEqual(pagePool, [detailPage]);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent quarantine removes both poisoned shared pages and leaves unclaimed SKUs for a replenished round", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-favorite-concurrent-quarantine-"));
+  const attempted = new Set();
+  const pagePool = [];
+  const closed = [];
+  const poison = (id) => ({
+    isClosed: () => closed.includes(id),
+    goto: async () => { throw new Error("page.goto: Timeout 30000ms exceeded."); },
+    close: async () => { closed.push(id); },
+  });
+  pagePool.push(poison("first"), poison("second"));
+  const links = [1201, 1202, 1203, 1204].map((sku) => ({
+    href: `https://www.ozon.ru/product/item-${sku}/`,
+    text: `Item ${sku}`,
+    card_text: "100 ₽\n发货模式：FBS",
+  }));
+  const maozi = {
+    evaluate: async (_operation, payload) => payload ? { code: 1 } : [],
+  };
+  const env = {
+    FLOW_B_DIRECT_PUBLISH: "1",
+    FLOW_B_VERIFY_LISTING_FBS_DETAIL: "1",
+    FLOW_B_FAVORITE_WORKERS: "2",
+    FLOW_B_FAVORITE_DETAIL_INTERVAL_MS: "0",
+    FLOW_B_FAVORITE_API_INTERVAL_MS: "0",
+    FLOW_B_FBS_SOURCE_HISTORY: path.join(directory, "history.jsonl"),
+  };
+  const logFile = path.join(directory, "run", "favorite_collection.jsonl");
+  try {
+    const firstTotal = await collectFavorites({
+      context: { newPage: async () => { throw new Error("unexpected page creation"); } },
+      maozi,
+      links,
+      target: 2,
+      currentTotal: 0,
+      env,
+      attempted,
+      logFile,
+      log: () => {},
+      workerPagePool: pagePool,
+    });
+    assert.equal(firstTotal, 0);
+    assert.deepEqual(closed.sort(), ["first", "second"]);
+    assert.deepEqual(pagePool, []);
+    assert.deepEqual([...attempted].sort(), ["1201", "1202"]);
+
+    let created = 0;
+    const replacement = () => {
+      const id = `replacement-${++created}`;
+      let currentUrl = "";
+      let isClosed = false;
+      return {
+        id,
+        isClosed: () => isClosed,
+        goto: async (url) => { currentUrl = url; },
+        evaluate: async () => ({
+          url: currentUrl,
+          title: id,
+          ogTitle: id,
+          ogImage: `https://ir.ozone.ru/${id}.jpg`,
+          priceText: "100 ₽",
+          sellerUrl: "https://www.ozon.ru/seller/healthy/",
+          mode: "FBS",
+          pageText: "发货模式：FBS",
+        }),
+        close: async () => { isClosed = true; },
+      };
+    };
+    const secondTotal = await collectFavorites({
+      context: { newPage: async () => replacement() },
+      maozi,
+      links,
+      target: 2,
+      currentTotal: 0,
+      env,
+      attempted,
+      logFile,
+      log: () => {},
+      workerPagePool: pagePool,
+    });
+    assert.equal(secondTotal, 2);
+    assert.equal(created, 2);
+    assert.equal(pagePool.length, 2);
+    assert.deepEqual([...attempted].sort(), ["1201", "1202", "1203", "1204"]);
+  } finally {
+    await closeReusablePages(pagePool, 50);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("detail soft blocks and fatal authentication stops preserve the shared worker page", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-favorite-preserve-access-page-"));
+  let closed = 0;
+  let diagnostic = "Ozon detail soft blocked access denied";
+  const page = {
+    isClosed: () => closed > 0,
+    goto: async () => {},
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/product/access-1301/",
+      title: diagnostic,
+      ogTitle: "",
+      ogImage: "",
+      priceText: "",
+      sellerUrl: "",
+      mode: "",
+      pageText: diagnostic,
+    }),
+    close: async () => { closed += 1; },
+  };
+  const pagePool = [page];
+  const base = {
+    context: { newPage: async () => { throw new Error("unexpected page creation"); } },
+    maozi: { evaluate: async (_operation, payload) => payload ? { code: 1 } : [] },
+    links: [{
+      href: "https://www.ozon.ru/product/access-1301/",
+      text: "Access",
+      card_text: "100 ₽\n发货模式：FBS",
+    }],
+    target: 1,
+    currentTotal: 0,
+    env: {
+      FLOW_B_DIRECT_PUBLISH: "1",
+      FLOW_B_VERIFY_LISTING_FBS_DETAIL: "1",
+      FLOW_B_FAVORITE_WORKERS: "1",
+      FLOW_B_FAVORITE_DETAIL_RETRIES: "0",
+      FLOW_B_FAVORITE_API_INTERVAL_MS: "0",
+      FLOW_B_FBS_SOURCE_HISTORY: path.join(directory, "history.jsonl"),
+    },
+    attempted: new Set(),
+    logFile: path.join(directory, "soft-block", "favorite_collection.jsonl"),
+    log: () => {},
+    workerPagePool: pagePool,
+  };
+  try {
+    assert.equal(await collectFavorites(base), 0);
+    assert.equal(closed, 0);
+    assert.deepEqual(pagePool, [page]);
+
+    const mixedSoftBlock = new Error("Ozon detail soft blocked: navigation timed out");
+    await collectFavorites({
+      ...base,
+      attempted: new Set(),
+      logFile: path.join(directory, "mixed-soft-block", "favorite_collection.jsonl"),
+      accessController: { run: async () => { throw mixedSoftBlock; } },
+    });
+    assert.equal(closed, 0);
+    assert.deepEqual(pagePool, [page]);
+
+    diagnostic = "Ozon authentication required login";
+    const stopped = Object.assign(new Error("Ozon access stopped; manual clearance required: authentication required"), {
+      code: "FLOW_B_OZON_ACCESS_STOPPED",
+    });
+    const accessController = {
+      async run(_metadata, operation) {
+        try { return await operation(); }
+        catch { throw stopped; }
+      },
+    };
+    await assert.rejects(
+      collectFavorites({
+        ...base,
+        attempted: new Set(),
+        logFile: path.join(directory, "auth", "favorite_collection.jsonl"),
+        accessController,
+      }),
+      (error) => error === stopped,
+    );
+    assert.equal(closed, 0);
+    assert.deepEqual(pagePool, [page]);
+  } finally {
+    await closeReusablePages(pagePool, 50);
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a timed-out access-controller operation cannot return its late page to the shared pool", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-favorite-controller-timeout-"));
+  let closed = 0;
+  let lateEvaluateAfterClose = 0;
+  let settleLateOperation;
+  const lateOperationSettled = new Promise((resolve) => { settleLateOperation = resolve; });
+  const page = {
+    isClosed: () => closed > 0,
+    goto: async () => new Promise((resolve) => setTimeout(resolve, 20)),
+    evaluate: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      if (closed > 0) lateEvaluateAfterClose += 1;
+      throw new Error("page.evaluate: Target page has been closed");
+    },
+    close: async () => { closed += 1; },
+  };
+  const pagePool = [page];
+  const accessController = {
+    run(_metadata, operation) {
+      const lateOperation = Promise.resolve().then(operation);
+      lateOperation.then(settleLateOperation, settleLateOperation);
+      return Promise.race([
+        lateOperation,
+        new Promise((_, reject) => setTimeout(() => {
+          reject(new Error("Ozon detail access-controller timed out after 5ms"));
+        }, 5)),
+      ]);
+    },
+  };
+  try {
+    assert.equal(await collectFavorites({
+      context: { newPage: async () => { throw new Error("unexpected page creation"); } },
+      maozi: { evaluate: async (_operation, payload) => payload ? { code: 1 } : [] },
+      links: [{
+        href: "https://www.ozon.ru/product/controller-1401/",
+        text: "Controller",
+        card_text: "100 ₽\n发货模式：FBS",
+      }],
+      target: 1,
+      currentTotal: 0,
+      env: {
+        FLOW_B_DIRECT_PUBLISH: "1",
+        FLOW_B_VERIFY_LISTING_FBS_DETAIL: "1",
+        FLOW_B_FAVORITE_WORKERS: "1",
+        FLOW_B_FAVORITE_DETAIL_TIMEOUT: "1",
+        FLOW_B_FAVORITE_API_INTERVAL_MS: "0",
+        FLOW_B_FBS_SOURCE_HISTORY: path.join(directory, "history.jsonl"),
+      },
+      attempted: new Set(),
+      logFile: path.join(directory, "run", "favorite_collection.jsonl"),
+      log: () => {},
+      workerPagePool: pagePool,
+      accessController,
+    }), 0);
+    assert.equal(closed, 1);
+    assert.deepEqual(pagePool, []);
+    await Promise.race([
+      lateOperationSettled,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("late detail operation did not settle")), 250)),
+    ]);
+    assert.equal(lateEvaluateAfterClose, 1);
+    assert.deepEqual(pagePool, []);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("collection-owned favorite worker pages still close after a healthy round", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-favorite-owned-page-close-"));
+  let closed = 0;
+  let currentUrl = "";
+  const page = {
+    isClosed: () => closed > 0,
+    goto: async (url) => { currentUrl = url; },
+    evaluate: async () => ({
+      url: currentUrl,
+      title: "Owned",
+      ogTitle: "Owned",
+      ogImage: "https://ir.ozone.ru/owned.jpg",
+      priceText: "100 ₽",
+      sellerUrl: "https://www.ozon.ru/seller/owned/",
+      mode: "FBS",
+      pageText: "发货模式：FBS",
+    }),
+    close: async () => { closed += 1; },
+  };
+  try {
+    assert.equal(await collectFavorites({
+      context: { newPage: async () => page },
+      maozi: { evaluate: async (_operation, payload) => payload ? { code: 1 } : [] },
+      links: [{
+        href: "https://www.ozon.ru/product/owned-1501/",
+        text: "Owned",
+        card_text: "100 ₽\n发货模式：FBS",
+      }],
+      target: 1,
+      currentTotal: 0,
+      env: {
+        FLOW_B_DIRECT_PUBLISH: "1",
+        FLOW_B_VERIFY_LISTING_FBS_DETAIL: "1",
+        FLOW_B_FAVORITE_WORKERS: "1",
+        FLOW_B_FAVORITE_API_INTERVAL_MS: "0",
+        FLOW_B_FBS_SOURCE_HISTORY: path.join(directory, "history.jsonl"),
+      },
+      attempted: new Set(),
+      logFile: path.join(directory, "run", "favorite_collection.jsonl"),
+      log: () => {},
+    }), 1);
+    assert.equal(closed, 1);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a quarantined favorite slot is replenished serially on the next collection round", async () => {
+  let created = 0;
+  const healthy = { id: "healthy", isClosed: () => false, close: async () => {} };
+  const replacement = { id: "replacement", isClosed: () => false, close: async () => {} };
+  const pages = [healthy];
+  const context = {
+    newPage: async () => {
+      created += 1;
+      return replacement;
+    },
+  };
+  const usable = await ensureReusablePageSlots(context, pages, 2, 100);
+  assert.deepEqual(usable, [healthy, replacement]);
+  assert.deepEqual(pages, [healthy, replacement]);
+  assert.equal(created, 1);
+});
+
+test("quarantining a poisoned page remains bounded when close never settles", async () => {
+  const poisoned = {
+    isClosed: () => false,
+    close: () => new Promise(() => {}),
+  };
+  const pages = [poisoned];
+  const started = Date.now();
+  assert.equal(await quarantineReusablePage(pages, poisoned, 5), true);
+  assert.deepEqual(pages, []);
+  assert.ok(Date.now() - started < 250);
 });
 
 test("non-timeout page creation errors are never degraded and a late page closes exactly once", async () => {

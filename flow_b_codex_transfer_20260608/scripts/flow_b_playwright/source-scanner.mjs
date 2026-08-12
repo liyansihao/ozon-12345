@@ -643,6 +643,49 @@ export async function closeReusablePages(pages, timeoutMs = 5_000) {
     : Promise.resolve()));
 }
 
+export function isPoisonedFavoriteWorkerPageError(error) {
+  if (error?.code === "OZON_DETAIL_DEADLINE"
+    && ["navigation", "navigation-primary", "navigation-retry", "access-controller"].includes(error?.phase)) {
+    return true;
+  }
+  const message = String(error?.message || error || "");
+  return /page\.goto:\s*Timeout\b|navigation(?:-(?:primary|retry))? timed out\b|Ozon detail access-controller timed out\b|execution context was destroyed.*navigation/i
+    .test(message);
+}
+
+function markPoisonedFavoriteWorkerPageError(error) {
+  if (!isPoisonedFavoriteWorkerPageError(error)) return error;
+  const failure = error instanceof Error ? error : new Error(String(error || "Ozon detail page failed"));
+  try {
+    failure.flow_b_favorite_worker_page_action = "quarantine";
+    return failure;
+  } catch {
+    const marked = new Error(failure.message);
+    marked.cause = error;
+    if (failure.code !== undefined) marked.code = failure.code;
+    if (failure.phase !== undefined) marked.phase = failure.phase;
+    marked.flow_b_favorite_worker_page_action = "quarantine";
+    return marked;
+  }
+}
+
+function shouldQuarantineFavoriteWorkerPage(error) {
+  return error?.flow_b_favorite_worker_page_action === "quarantine";
+}
+
+export async function quarantineReusablePage(pages, page, timeoutMs = 2_000) {
+  for (let index = pages.length - 1; index >= 0; index -= 1) {
+    if (pages[index] === page) pages.splice(index, 1);
+  }
+  if (!isReusablePageOpen(page)) return false;
+  await withTimeout(
+    Promise.resolve().then(() => page.close()),
+    timeoutMs,
+    "poisoned reusable page close",
+  ).catch(() => {});
+  return true;
+}
+
 export async function closeRuntimeReusablePagePools(runtime, timeoutMs = 5_000) {
   await Promise.all([
     closeReusablePages(runtime.sourcePagePool || [], timeoutMs),
@@ -3096,9 +3139,15 @@ export async function collectFavorites({ context, maozi, links, target, currentT
       } catch (error) {
         if (isOzonAccessStoppedError(error)) throw error;
         const policy = ozonDetailFailurePolicy(error, attempt, detailRetries);
+        // A soft-block/auth policy owns the live page state. Only a genuine
+        // navigation/controller failure receives the structured quarantine
+        // disposition consumed by the outer worker loop.
+        const detailPageError = policy.softBlocked
+          ? error
+          : markPoisonedFavoriteWorkerPageError(error);
         if (!policy.softBlocked) {
-          updateDetailPacing(/^non-pure-fbs:/i.test(String(error?.message || error)) ? "success" : "failure");
-          throw error;
+          updateDetailPacing(/^non-pure-fbs:/i.test(String(detailPageError?.message || detailPageError)) ? "success" : "failure");
+          throw detailPageError;
         }
         updateDetailPacing("soft-block");
         if (sourceBlockKey) softBlockedSources.add(sourceBlockKey);
@@ -3116,9 +3165,9 @@ export async function collectFavorites({ context, maozi, links, target, currentT
         await queueCollectionRuntimeStatePersist(collectionPacingFile, runtime);
         if (controllerOwnsDirectPacing) {
           log(`Ozon detail soft block deferred source=${sourceBlockKey || "unknown"}`);
-          throw error;
+          throw detailPageError;
         }
-        if (!policy.retry) throw error;
+        if (!policy.retry) throw detailPageError;
         log(`Ozon detail retry SKU ${item.sku} attempt=${attempt + 1} wait=${cooldown}ms`);
       }
     }
@@ -3157,13 +3206,16 @@ export async function collectFavorites({ context, maozi, links, target, currentT
   };
   const desiredWorkers = Math.min(workerCount, queue.length);
   const ownsWorkerPages = !Array.isArray(workerPagePool);
+  const activeWorkerPagePool = ownsWorkerPages ? [] : workerPagePool;
   const workerPages = await ensureReusablePageSlots(
     context,
-    ownsWorkerPages ? [] : workerPagePool,
+    activeWorkerPagePool,
     desiredWorkers,
     envNumber(env, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS", 10_000),
   );
-  const workers = workerPages.map(async (page) => {
+  let reusablePoolDegraded = false;
+  const workers = workerPages.map(async (initialPage) => {
+    let page = initialPage;
     try {
       while (canClaimFavorite({ total, inFlight, target }) && !isCollectionDeadlineReached(env)) {
         const item = queue[cursor++];
@@ -3229,6 +3281,16 @@ export async function collectFavorites({ context, maozi, links, target, currentT
           log(`favorite SKU ${productInfo.sku} total=${observedTotal}/${target}`);
         } catch (error) {
           if (isOzonAccessStoppedError(error)) throw error;
+          const poisonedPage = shouldQuarantineFavoriteWorkerPage(error);
+          if (poisonedPage) {
+            reusablePoolDegraded = true;
+            await quarantineReusablePage(
+              activeWorkerPagePool,
+              page,
+              envNumber(env, "FLOW_B_FAVORITE_PAGE_CLOSE_TIMEOUT_MS", 2_000),
+            );
+            page = null;
+          }
           if (error?.code === "FLOW_B_DEADLINE_REACHED") {
             break;
           } else if (["FLOW_B_SOURCE_SOFT_BLOCKED", "FLOW_B_SOURCE_LOW_FBS_YIELD"].includes(error?.code)) {
@@ -3269,12 +3331,16 @@ export async function collectFavorites({ context, maozi, links, target, currentT
         } finally {
           inFlight -= 1;
         }
+        if (!page) break;
       }
     } finally {
-      if (ownsWorkerPages) await page.close().catch(() => {});
+      if (ownsWorkerPages && page) await quarantineReusablePage(activeWorkerPagePool, page).catch(() => {});
     }
   });
   await Promise.all(workers);
+  if (reusablePoolDegraded && total < target) {
+    for (; cursor < queue.length; cursor += 1) attempted.delete(queue[cursor].sku);
+  }
   await writeChain;
   if (Object.values(collection).some((value) => value > 0)) {
     log(`favorite collection summary attempted=${collection.attempted} favorited=${collection.favorited} rejected=${collection.rejected} failed=${collection.failed}`);
