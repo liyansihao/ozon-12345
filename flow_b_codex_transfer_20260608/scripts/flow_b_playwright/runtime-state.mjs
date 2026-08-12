@@ -19,6 +19,7 @@ const LEGACY_STATUSES = new Set([
 ]);
 const CANONICAL_LINK_HEADERS = new Set(["product_link", "canonical_product_link"]);
 const PRODUCT_URL_PATTERN = /https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s]+)/iu;
+const OPERATIONAL_METADATA_INDEX = "sku_state_operational_metadata";
 const OPERATIONAL_TERMINAL_DATA_INDEX = "sku_state_operational_terminal_data";
 const OPERATIONAL_TERMINAL_DATA_PREDICATE = `
   terminal = 1 AND (
@@ -961,6 +962,11 @@ export function createRuntimeState({
         PRIMARY KEY (sku, shanghai_day)
       ) STRICT, WITHOUT ROWID;
 
+      CREATE INDEX IF NOT EXISTS ${OPERATIONAL_METADATA_INDEX}
+      ON sku_state(
+        sku, stage, reason, failure_class, terminal, strict, next_eligible_at, updated_at
+      );
+
       CREATE INDEX IF NOT EXISTS ${OPERATIONAL_TERMINAL_DATA_INDEX}
       ON sku_state(sku)
       WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE};
@@ -1146,29 +1152,28 @@ export function createRuntimeState({
 
   const selectState = database.prepare("SELECT * FROM sku_state WHERE sku = ?");
   const selectAllStates = database.prepare("SELECT * FROM sku_state ORDER BY sku");
-  const selectOperationalStates = database.prepare(`
+  const selectOperationalMetadata = database.prepare(`
     SELECT
-      s.sku,
-      s.stage,
-      s.reason,
-      s.failure_class,
-      s.terminal,
-      s.strict,
-      s.next_eligible_at,
-      CASE
-        WHEN s.terminal = 0
-          OR s.stage = 'published'
-          OR s.strict = 1
-          OR s.sku IN (
-            SELECT sku
-            FROM sku_state INDEXED BY ${OPERATIONAL_TERMINAL_DATA_INDEX}
-            WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE}
-          )
-        THEN s.data_json
-        ELSE '{}'
-      END AS data_json,
-      s.updated_at
-    FROM sku_state AS s
+      sku, stage, reason, failure_class, terminal, strict, next_eligible_at,
+      '{}' AS data_json,
+      updated_at
+    FROM sku_state INDEXED BY ${OPERATIONAL_METADATA_INDEX}
+    ORDER BY sku
+  `);
+  const selectOperationalPayloads = database.prepare(`
+    WITH hydration_skus AS (
+      SELECT sku
+      FROM sku_state INDEXED BY ${OPERATIONAL_METADATA_INDEX}
+      WHERE terminal = 0 OR stage = 'published' OR strict = 1
+      UNION
+      SELECT sku
+      FROM sku_state INDEXED BY ${OPERATIONAL_TERMINAL_DATA_INDEX}
+      WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE}
+    )
+    SELECT s.sku, s.data_json
+    FROM hydration_skus AS h
+    CROSS JOIN sku_state AS s INDEXED BY sqlite_autoindex_sku_state_1
+      ON s.sku = h.sku
     ORDER BY s.sku
   `);
   const selectNativeRuntimeEvent = database.prepare(`
@@ -1373,7 +1378,28 @@ export function createRuntimeState({
 
   function operationalStateEntries() {
     assertOpen();
-    return selectOperationalStates.all().map(rowToState);
+    let readTransactionOpen = false;
+    try {
+      database.exec("BEGIN DEFERRED");
+      readTransactionOpen = true;
+      const metadataRows = selectOperationalMetadata.all();
+      const payloadBySku = new Map(
+        selectOperationalPayloads.all().map((row) => [row.sku, row.data_json]),
+      );
+      database.exec("COMMIT");
+      readTransactionOpen = false;
+      return metadataRows.map((row) => rowToState({
+        ...row,
+        data_json: payloadBySku.get(row.sku) ?? row.data_json,
+      }));
+    } catch (error) {
+      if (readTransactionOpen) {
+        try {
+          database.exec("ROLLBACK");
+        } catch {}
+      }
+      throw error;
+    }
   }
 
   function hasNativeRuntimeEvents() {

@@ -1076,7 +1076,8 @@ test("strict publication rows expose authoritative data for compatibility audit 
 
 test("operational state entries compact ordinary terminal evidence without weakening runtime semantics", async () => {
   await withTempDir(async (dir) => {
-    const state = createRuntimeState({ dbPath: path.join(dir, "state.sqlite") });
+    const dbPath = path.join(dir, "state.sqlite");
+    const state = createRuntimeState({ dbPath });
     const terminalPayload = "x".repeat(32 * 1024);
     for (let index = 0; index < 128; index += 1) {
       state.recordSkip(`terminal-skip-${index}`, {
@@ -1195,5 +1196,60 @@ test("operational state entries compact ordinary terminal evidence without weake
     assert.equal(allEntries.find((entry) => entry.sku === "terminal-skip-127").data.terminal_payload, terminalPayload);
     assert.equal(allEntries.find((entry) => entry.sku === "terminal-failure").data.terminal_payload, terminalPayload);
     state.close();
+
+    const database = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const metadataPlan = database.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT
+          sku, stage, reason, failure_class, terminal, strict, next_eligible_at,
+          '{}' AS data_json,
+          updated_at
+        FROM sku_state INDEXED BY sku_state_operational_metadata
+        ORDER BY sku
+      `).all().map((row) => String(row.detail)).join("\n");
+      assert.match(
+        metadataPlan,
+        /SCAN sku_state USING COVERING INDEX sku_state_operational_metadata/u,
+      );
+
+      const payloadPlan = database.prepare(`
+        EXPLAIN QUERY PLAN
+        WITH hydration_skus AS (
+          SELECT sku
+          FROM sku_state INDEXED BY sku_state_operational_metadata
+          WHERE terminal = 0 OR stage = 'published' OR strict = 1
+          UNION
+          SELECT sku
+          FROM sku_state INDEXED BY sku_state_operational_terminal_data
+          WHERE terminal = 1 AND (
+            coalesce(CAST(json_extract(data_json, '$.submitted') AS INTEGER), 0) = 1 OR
+            coalesce(CAST(json_extract(data_json, '$.submission_pending') AS INTEGER), 0) = 1 OR
+            coalesce(CAST(json_extract(data_json, '$.submission_intent') AS INTEGER), 0) = 1 OR
+            coalesce(length(trim(CAST(json_extract(data_json, '$.selected_at') AS TEXT))), 0) > 0 OR
+            coalesce(length(trim(CAST(json_extract(data_json, '$.prepared_at') AS TEXT))), 0) > 0
+          )
+        )
+        SELECT s.sku, s.data_json
+        FROM hydration_skus AS h
+        CROSS JOIN sku_state AS s INDEXED BY sqlite_autoindex_sku_state_1
+          ON s.sku = h.sku
+        ORDER BY s.sku
+      `).all().map((row) => String(row.detail)).join("\n");
+      assert.match(
+        payloadPlan,
+        /SCAN sku_state USING COVERING INDEX sku_state_operational_metadata/u,
+      );
+      assert.match(
+        payloadPlan,
+        /SCAN sku_state USING INDEX sku_state_operational_terminal_data/u,
+      );
+      assert.match(
+        payloadPlan,
+        /SEARCH s USING INDEX sqlite_autoindex_sku_state_1 \(sku=\?\)/u,
+      );
+    } finally {
+      database.close();
+    }
   });
 });
