@@ -6,6 +6,7 @@ import {
   createOzonDetailProvider,
   parseOzonDetailText,
 } from "../scripts/flow_b_playwright/ozon-detail.mjs";
+import { createOzonAccessController } from "../scripts/flow_b_playwright/ozon-access-controller.mjs";
 
 test("detail parser extracts plugin mode, current price, and lowest follow price", () => {
   const detail = parseOzonDetailText([
@@ -205,6 +206,103 @@ test("detail provider retries an exact navigation timeout once on a fresh page",
   assert.equal(pages[1].isClosed(), false);
   await provider.close();
   assert.equal(pages[1].isClosed(), true);
+});
+
+test("access-controller queue wait does not consume each detail execution budget", async () => {
+  let gotoCalls = 0;
+  let evaluateCalls = 0;
+  let closeCalls = 0;
+  const page = {
+    isClosed: () => false,
+    goto: async () => { gotoCalls += 1; },
+    evaluate: async () => {
+      evaluateCalls += 1;
+      return {
+        url: `https://www.ozon.ru/product/queued-${evaluateCalls}/`,
+        title: "Ozon item",
+        text: "发货模式： FBS",
+      };
+    },
+    close: async () => { closeCalls += 1; },
+  };
+  const accessController = createOzonAccessController({ minIntervalMs: 10 });
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    accessController,
+    timeout: 1,
+    retryNavigationTimeoutMs: 5,
+    operationGraceMs: 2,
+    operationBudgetMs: 15,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  const details = await Promise.all(Array.from({ length: 8 }, (_, index) => (
+    provider.getProductDetail(`queued-${index + 1}`, { sell_price: 90 })
+  )));
+
+  assert.deepEqual(details.map((detail) => detail.mode), Array(8).fill("FBS"));
+  assert.equal(gotoCalls, 8);
+  assert.equal(evaluateCalls, 8);
+  await provider.close();
+  assert.equal(closeCalls, 1);
+});
+
+test("a running detail hang remains bounded and releases the access-controller queue without ghost work", async () => {
+  let newPageCalls = 0;
+  let firstCloseCalls = 0;
+  let firstEvaluateCalls = 0;
+  let secondEvaluateCalls = 0;
+  const accessController = createOzonAccessController({ minIntervalMs: 0 });
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        newPageCalls += 1;
+        const index = newPageCalls;
+        return {
+          isClosed: () => false,
+          goto: async () => {},
+          evaluate: async () => {
+            if (index === 1) {
+              firstEvaluateCalls += 1;
+              return new Promise(() => {});
+            }
+            secondEvaluateCalls += 1;
+            return {
+              url: "https://www.ozon.ru/product/after-hang/",
+              title: "Ozon item",
+              text: "发货模式： FBS",
+            };
+          },
+          close: async () => { if (index === 1) firstCloseCalls += 1; },
+        };
+      },
+    },
+    accessController,
+    timeout: 1,
+    retryNavigationTimeoutMs: 5,
+    operationGraceMs: 2,
+    operationBudgetMs: 15,
+    pageCleanupTimeoutMs: 2,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+  const startedAt = Date.now();
+  const hung = provider.getProductDetail("hung-controller-detail", { sell_price: 90 });
+  const after = provider.getProductDetail("after-hang", { sell_price: 90 });
+
+  await assert.rejects(
+    hung,
+    (error) => error?.code === "OZON_DETAIL_DEADLINE" && error?.phase === "page-inspection",
+  );
+  assert.ok(Date.now() - startedAt < 250);
+  assert.equal((await after).mode, "FBS");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(firstEvaluateCalls, 1);
+  assert.equal(secondEvaluateCalls, 1);
+  assert.equal(firstCloseCalls, 1);
+  assert.equal(newPageCalls, 2);
+  await provider.close();
 });
 
 test("detail provider retries a transient Ozon product navigation failure once on a fresh page", async () => {

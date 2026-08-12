@@ -414,18 +414,23 @@ export function createOzonDetailProvider({
         ? operationBudgetMs(sku, item)
         : operationBudgetMs;
       const configuredOperationBudgetMs = Number(configuredOperationBudgetValue);
-      const operationDeadline = Date.now() + Math.min(
+      const activeOperationBudgetMs = Math.min(
         MAX_DETAIL_OPERATION_TIMEOUT_MS,
         Number.isFinite(configuredOperationBudgetMs) && configuredOperationBudgetMs > 0
           ? Math.max(1, Math.floor(configuredOperationBudgetMs))
           : primaryNavigationTimeoutMs + activeRetryNavigationTimeoutMs + activeOperationGraceMs,
       );
+      let operationDeadline = Number.POSITIVE_INFINITY;
       let page = null;
       let reusable = true;
       let navigationFailed = false;
       try {
         const url = item.link || item.detail_url || canonicalProductUrl(sku);
         const readDetail = async () => {
+          // The access controller may intentionally serialize this operation
+          // behind other Ozon traffic. Queue time is pacing, not execution
+          // time, so establish the hard deadline only when work really starts.
+          operationDeadline = Date.now() + activeOperationBudgetMs;
           page = await acquirePage(operationDeadline);
           if (!page) throw new Error("Ozon detail page pool could not allocate a page");
           let navigationAttempt = 0;
@@ -530,11 +535,7 @@ export function createOzonDetailProvider({
           return payload;
         };
         const payload = accessController
-          ? await withinDeadline(
-            () => accessController.run({ kind: "publish-detail", url }, readDetail),
-            operationDeadline,
-            "access-controller",
-          )
+          ? await accessController.run({ kind: "publish-detail", url }, readDetail)
           : await readDetail();
         if (!payload?.text) throw new Error(`Ozon detail text unavailable for SKU ${sku}`);
         const fallback = String(item.source_currency || "").toUpperCase() === "CNY"
