@@ -666,6 +666,10 @@ test("transient failures are capped at two attempts per SKU per Shanghai day", a
       { recorded: true, attempts: 1, dailyLimitReached: false },
     );
     assert.equal(state.canAttempt("retry", { at: "2026-07-29T01:04:59.000Z" }).allowed, false);
+    assert.deepEqual(
+      state.canAttemptFromState(state.get("retry"), { at: "2026-07-29T01:04:59.000Z" }),
+      state.canAttempt("retry", { at: "2026-07-29T01:04:59.000Z" }),
+    );
     assert.equal(state.recordSubmission("retry", {
       reason: "must-wait-until-next-eligible",
     }).recorded, false);
@@ -684,6 +688,10 @@ test("transient failures are capped at two attempts per SKU per Shanghai day", a
       { recorded: true, attempts: 2, dailyLimitReached: true },
     );
     assert.equal(state.canAttempt("retry", { at: "2026-07-29T15:59:00.000Z" }).allowed, false);
+    assert.deepEqual(
+      state.canAttemptFromState(state.get("retry"), { at: "2026-07-29T15:59:00.000Z" }),
+      state.canAttempt("retry", { at: "2026-07-29T15:59:00.000Z" }),
+    );
     assert.equal(state.recordSubmission("retry", {
       reason: "must-not-submit-third-attempt",
     }).recorded, false);
@@ -702,6 +710,14 @@ test("transient failures are capped at two attempts per SKU per Shanghai day", a
     // 16:01Z is 00:01 on the next Shanghai natural day.
     now = new Date("2026-07-29T16:01:00.000Z");
     assert.equal(state.canAttempt("retry").allowed, true);
+    assert.deepEqual(
+      state.canAttemptFromState(state.get("retry")),
+      state.canAttempt("retry"),
+    );
+    assert.throws(
+      () => state.canAttemptFromState(null),
+      /state must be a runtime state entry/u,
+    );
     const nextDay = state.recordFailure("retry", {
       reason: "next-day-timeout",
       kind: "transient",

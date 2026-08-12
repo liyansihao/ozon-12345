@@ -463,7 +463,7 @@ export function createPublishState({
       data.next_eligible_at = runtimeValue.nextEligibleAt;
     }
     if (!runtimeValue.terminal) {
-      const eligibility = runtimeState.canAttempt(runtimeValue.sku);
+      const eligibility = runtimeState.canAttemptFromState(runtimeValue);
       if (Number.isFinite(Number(eligibility.attempts))) {
         data.transient_attempts = Number(eligibility.attempts);
       }

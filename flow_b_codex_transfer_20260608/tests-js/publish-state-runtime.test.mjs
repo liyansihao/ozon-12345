@@ -245,6 +245,18 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
         store_id: 106637,
       },
     });
+    runtime.recordFailure("daily-retry-exhausted", {
+      reason: "temporary-timeout",
+      kind: "transient",
+      nextEligibleAt: "2026-08-12T00:00:00.000Z",
+      data: { runtime_run_dir: previousRunDir },
+    });
+    runtime.recordFailure("daily-retry-exhausted", {
+      reason: "temporary-timeout",
+      kind: "transient",
+      nextEligibleAt: "2026-08-12T00:00:00.000Z",
+      data: { runtime_run_dir: previousRunDir },
+    });
     runtime.recordStrictPublication("published-current-run", {
       reason: "strict-confirmed",
       data: {
@@ -265,7 +277,7 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
     });
     await restored.load();
     const startupEntries = restored.entries();
-    assert.equal(startupEntries.length, 70);
+    assert.equal(startupEntries.length, 71);
     const startupBySku = new Map(startupEntries.map((entry) => [entry.sku, entry]));
     assert.deepEqual(startupBySku.get("terminal-history-63").data, {
       reason: "historical-policy-rejection",
@@ -278,6 +290,9 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
     assert.equal(startupBySku.get("legacy-terminal-submitted").data.submitted, true);
     assert.equal(startupBySku.get("legacy-terminal-submitted").data.store_id, 106637);
     assert.equal(startupBySku.get("terminal-selected-only").data.selected_at, "2026-08-12T04:02:00.000Z");
+    assert.equal(startupBySku.get("daily-retry-exhausted").data.transient_attempts, 2);
+    assert.equal(startupBySku.get("daily-retry-exhausted").data.terminal, true);
+    assert.equal(startupBySku.get("daily-retry-exhausted").data.retry_limit_scope, "shanghai-day");
     assert.equal(
       restoredDailyStoreUsage(startupEntries, 106637, new Date("2026-08-12T06:00:00.000Z")),
       3,
@@ -285,7 +300,7 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
     assert.equal(restored.runPublishedCount(), 1);
     assert.deepEqual(restored.summary(100), {
       published: 1,
-      failed: 2,
+      failed: 3,
       skipped: 65,
       remaining: 99,
     });

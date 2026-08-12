@@ -2068,11 +2068,8 @@ export function createRuntimeState({
     });
   }
 
-  function canAttempt(rawSku, { at } = {}) {
-    assertOpen();
-    const sku = normalizeSku(rawSku);
+  function attemptDecision(sku, state, { at } = {}) {
     const checkAt = at === undefined ? currentTimestamp() : timestamp(at, "at");
-    const state = getState(sku);
     if (state?.terminal) {
       return { allowed: false, reason: "terminal-state", state };
     }
@@ -2089,6 +2086,20 @@ export function createRuntimeState({
       return { allowed: false, reason: "daily-transient-limit", attempts, state };
     }
     return { allowed: true, reason: "eligible", attempts, state };
+  }
+
+  function canAttemptFromState(state, options = {}) {
+    assertOpen();
+    if (!state || typeof state !== "object" || Array.isArray(state)) {
+      throw new TypeError("state must be a runtime state entry");
+    }
+    return attemptDecision(normalizeSku(state.sku), state, options);
+  }
+
+  function canAttempt(rawSku, options = {}) {
+    assertOpen();
+    const sku = normalizeSku(rawSku);
+    return attemptDecision(sku, getState(sku), options);
   }
 
   function reopenDirectCandidate(rawSku) {
@@ -2405,6 +2416,7 @@ export function createRuntimeState({
     recordDelay,
     recordStrictPublication,
     canAttempt,
+    canAttemptFromState,
     reopenDirectCandidate,
     get,
     stateEntries,
