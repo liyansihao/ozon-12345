@@ -6352,6 +6352,60 @@ test("reconciliation-only keeps a pre-call submission intent read-only and never
   }
 });
 
+test("reconciliation-only is read-only for a pre-call intent outside direct mode", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-readonly-intent-nondirect-"));
+  try {
+    const sku = "readonly-intent-nondirect";
+    const offerId = "mz-readonly-intent-nondirect";
+    const state = fakeState({
+      [sku]: {
+        status: "processing",
+        data: {
+          sku,
+          submission_intent: true,
+          submitted: false,
+          submission_pending: false,
+          reconcile_only: true,
+          api_call_attempts_total: 0,
+          offer_id: offerId,
+          store_id: 7,
+          submission_payload: { rows: [{ sku, offer_id: offerId }] },
+        },
+      },
+    });
+    let publishCalls = 0;
+    let importLogCalls = 0;
+    await createPublishRunner({
+      client: clientFor([], {
+        findImportLog: async () => { importLogCalls += 1; return null; },
+        findOnlineProduct: async () => null,
+        publish: async () => { publishCalls += 1; return { ok: true }; },
+      }),
+      costBridge: { estimate: async () => { throw new Error("intent recovery must not source"); } },
+      state,
+      target: 1,
+      runDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+      directMode: false,
+      reconciliationOnly: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(importLogCalls, 1);
+    assert.equal(publishCalls, 0);
+    const pending = state.entryOf(sku);
+    assert.equal(pending.status, "processing");
+    assert.equal(pending.data.submission_intent, true);
+    assert.equal(pending.data.reconcile_only, true);
+    assert.equal(pending.data.api_call_attempts_total, 0);
+    assert.equal(pending.data.reconcile_attempts, 1);
+    assert.ok(Date.parse(pending.data.next_reconcile_at) > Date.parse("2026-08-12T12:00:00.000Z"));
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("direct mode turns an unconfirmed ERP response into reconciliation-only state", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-new-unknown-"));
   try {
@@ -7124,6 +7178,124 @@ test("SQLite persists a direct online reconciliation outcome as an idempotent te
   }
 });
 
+test("SQLite reconciliation delays keep publish transient attempts untouched", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-reconcile-delay-sqlite-"));
+  const runDir = path.join(root, "run");
+  const dbPath = path.join(root, "runtime", "state.sqlite");
+  const state = createPublishState({
+    runDir,
+    publishedCsv: path.join(root, "published.csv"),
+    runtimeStateDbPath: dbPath,
+  });
+  try {
+    const sku = "reconcile-delay-sqlite";
+    const common = {
+      sku,
+      reason: "reconciliation-import-not-visible",
+      submitted: true,
+      submission_intent: false,
+      submission_pending: false,
+      reconcile_only: true,
+      api_call_attempts_total: 1,
+      store_id: 7,
+      offer_id: `mz-${sku}`,
+    };
+    assert.equal(await state.transition(sku, "processing", {
+      ...common,
+      reconcile_attempts: 1,
+      next_reconcile_at: "2026-08-12T12:01:00.000Z",
+    }), true);
+    assert.equal(await state.transition(sku, "processing", {
+      ...common,
+      reconcile_attempts: 2,
+      next_reconcile_at: "2026-08-12T12:02:00.000Z",
+    }), true);
+
+    const pending = state.entryOf(sku);
+    assert.equal(pending.status, "processing");
+    assert.equal(pending.data.reconcile_attempts, 2);
+    assert.equal(pending.data.api_call_attempts_total, 1);
+    assert.equal(pending.data.transient_attempts, 0);
+    const eligibility = state.canAttempt(sku, { at: "2026-08-12T12:03:00.000Z" });
+    assert.equal(eligibility.allowed, true);
+    assert.equal(eligibility.reason, "eligible");
+    assert.equal(eligibility.attempts, 0);
+  } finally {
+    await state.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy publish retry exhaustion cannot hide accepted reconciliation work", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-reconcile-legacy-ledger-"));
+  const runDir = path.join(root, "run");
+  const state = createPublishState({
+    runDir,
+    publishedCsv: path.join(root, "published.csv"),
+    runtimeStateDbPath: path.join(root, "runtime", "state.sqlite"),
+  });
+  try {
+    const sku = "legacy-ledger-reconcile";
+    const testNow = new Date();
+    const accepted = {
+      sku,
+      reason: "reconciliation-check-failed",
+      submitted: true,
+      submission_intent: false,
+      submission_pending: false,
+      reconcile_only: true,
+      api_call_attempts_total: 1,
+      store_id: 7,
+      offer_id: `mz-${sku}`,
+      mode: "FBS",
+      shipping_mode: "FBS",
+      preflight_mode: "FBS",
+      fbs_evidence: {
+        ...VALID_FBS_EVIDENCE,
+        observations: VALID_FBS_EVIDENCE.observations.map((row) => ({ ...row })),
+      },
+      purchase_price: 20,
+      cost_verified: true,
+      cost: { ok: true, cost: 20, source: "test-reliable-1688-source" },
+      retry_at: new Date(testNow.getTime() - 60_000).toISOString(),
+    };
+    assert.equal(await state.transition(sku, "failed", accepted), true);
+    assert.equal(await state.transition(sku, "failed", accepted), true);
+    assert.equal(state.canAttempt(sku, { at: testNow.toISOString() }).allowed, false);
+
+    let publishCalls = 0;
+    let importLogCalls = 0;
+    await createPublishRunner({
+      client: clientFor([], {
+        publish: async () => { publishCalls += 1; return { ok: true }; },
+        findImportLog: async () => { importLogCalls += 1; return null; },
+        findOnlineProduct: async () => null,
+      }),
+      costBridge: { estimate: async () => { throw new Error("reconciliation must not source"); } },
+      state,
+      target: 500,
+      runDir,
+      now: () => new Date(testNow),
+      directMode: true,
+      reconciliationOnly: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.equal(importLogCalls, 1);
+    assert.equal(publishCalls, 0);
+    const pending = state.entryOf(sku);
+    assert.equal(pending.status, "processing");
+    assert.equal(pending.data.terminal, false);
+    assert.equal(pending.data.reconcile_attempts, 1);
+    assert.equal(pending.data.api_call_attempts_total, 1);
+    assert.ok(Date.parse(pending.data.next_reconcile_at) > testNow.getTime());
+  } finally {
+    await state.close();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("background reconciliation excludes durable rejected outcomes before querying ERP", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-rejected-"));
   try {
@@ -7257,6 +7429,183 @@ test("background reconciliation bounds each due batch to the configured attempt 
     queried.length = 0;
     await runner.run({ attemptLimit: 1 });
     assert.deepEqual(queried, ["direct-due-2"]);
+
+    queried.length = 0;
+    await runner.run({ attemptLimit: 6 });
+    assert.deepEqual(queried, ["direct-due-3", "direct-due-4"]);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("background reconciliation orders due work by oldest schedule instead of product priority", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-oldest-"));
+  try {
+    const state = fakeState({
+      "newer-high-value": {
+        status: "processing",
+        data: {
+          sku: "newer-high-value",
+          submitted: true,
+          reconcile_only: true,
+          store_id: 7,
+          offer_id: "mz-newer-high-value",
+          sell_price: 10_000,
+          next_reconcile_at: "2026-08-12T11:59:59.000Z",
+        },
+      },
+      "oldest-low-value": {
+        status: "processing",
+        data: {
+          sku: "oldest-low-value",
+          submitted: true,
+          reconcile_only: true,
+          store_id: 7,
+          offer_id: "mz-oldest-low-value",
+          sell_price: 1,
+          next_reconcile_at: "2026-08-12T11:00:00.000Z",
+        },
+      },
+    });
+    const queried = [];
+    await createPublishRunner({
+      client: clientFor([], {
+        findImportLog: async ({ sku }) => { queried.push(sku); return null; },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+      directMode: true,
+      reconciliationOnly: true,
+      concurrency: 1,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
+
+    assert.deepEqual(queried, ["oldest-low-value"]);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("background reconciliation cursor drains an exact due-time tie despite contested state writes", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-fair-"));
+  try {
+    const initial = Object.fromEntries(Array.from({ length: 5 }, (_, index) => {
+      const sku = `direct-fair-${index}`;
+      return [sku, {
+        status: "processing",
+        data: {
+          sku,
+          submitted: true,
+          reconcile_only: true,
+          store_id: 7,
+          offer_id: `mz-${sku}`,
+          sell_price: 1_000 - index,
+          reconciliation_started_at: "2026-08-12T10:00:00.000Z",
+          next_reconcile_at: "2026-08-12T11:59:00.000Z",
+        },
+      }];
+    }));
+    const state = fakeState(initial);
+    state.transition = async () => false;
+    const queried = [];
+    let clockMs = Date.parse("2026-08-12T12:00:00.000Z");
+    const runner = createPublishRunner({
+      client: clientFor([], {
+        findImportLog: async ({ sku }) => {
+          queried.push(sku);
+          return null;
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      now: () => new Date(clockMs),
+      directMode: true,
+      reconciliationOnly: true,
+      concurrency: 2,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    });
+
+    for (let round = 0; round < 3; round += 1) {
+      await runner.run();
+      clockMs += 1_000;
+    }
+
+    assert.deepEqual(queried.slice(0, 5), [
+      "direct-fair-0",
+      "direct-fair-1",
+      "direct-fair-2",
+      "direct-fair-3",
+      "direct-fair-4",
+    ]);
+    assert.equal(new Set(queried.slice(0, 5)).size, 5);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
+test("background reconciliation errors advance only the reconciliation ledger", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-background-error-delay-"));
+  try {
+    const sku = "direct-background-error-delay";
+    const state = fakeState({
+      [sku]: {
+        status: "processing",
+        data: {
+          sku,
+          submitted: true,
+          reconcile_only: true,
+          api_call_attempts_total: 1,
+          transient_attempts: 2,
+          store_id: 7,
+          offer_id: `mz-${sku}`,
+          next_reconcile_at: "2026-08-12T11:59:00.000Z",
+        },
+      },
+    });
+    state.canAttempt = async () => ({
+      allowed: false,
+      reason: "daily-transient-limit",
+      attempts: 2,
+    });
+    let publishCalls = 0;
+    let importLogCalls = 0;
+    const runner = createPublishRunner({
+      client: clientFor([], {
+        publish: async () => { publishCalls += 1; return { ok: true }; },
+        findImportLog: async () => {
+          importLogCalls += 1;
+          throw new Error("temporary ERP read failure");
+        },
+      }),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 500,
+      runDir,
+      now: () => new Date("2026-08-12T12:00:00.000Z"),
+      directMode: true,
+      reconciliationOnly: true,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    });
+    await runner.run();
+    await runner.run();
+
+    assert.equal(importLogCalls, 1);
+    assert.equal(publishCalls, 0);
+    const pending = state.entryOf(sku);
+    assert.equal(pending.status, "processing");
+    assert.equal(pending.data.reason, "reconciliation-check-failed");
+    assert.equal(pending.data.reconcile_attempts, 1);
+    assert.equal(pending.data.transient_attempts, 2);
+    assert.equal(pending.data.api_call_attempts_total, 1);
+    assert.ok(Date.parse(pending.data.next_reconcile_at) > Date.parse("2026-08-12T12:00:00.000Z"));
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }
@@ -7273,6 +7622,7 @@ test("background reconciliation terminalizes imported not-selling work at its at
           sku,
           submitted: true,
           reconcile_only: true,
+          api_call_attempts_total: 1,
           store_id: 7,
           offer_id: `mz-${sku}`,
           outcome_status: "imported",
@@ -7285,7 +7635,7 @@ test("background reconciliation terminalizes imported not-selling work at its at
     });
     let publishCalls = 0;
     let importLogCalls = 0;
-    await createPublishRunner({
+    const runner = createPublishRunner({
       client: clientFor([], {
         publish: async () => { publishCalls += 1; },
         findImportLog: async () => {
@@ -7310,7 +7660,9 @@ test("background reconciliation terminalizes imported not-selling work at its at
       reconciliationMaxAgeMs: 24 * 60 * 60_000,
       confirmationAttempts: 1,
       confirmationIntervalMs: 0,
-    }).run();
+    });
+    await runner.run();
+    await runner.run();
 
     assert.equal(publishCalls, 0);
     assert.equal(importLogCalls, 1);
@@ -7322,6 +7674,7 @@ test("background reconciliation terminalizes imported not-selling work at its at
     assert.equal(expired.data.terminal, true);
     assert.equal(expired.data.outcome_status, "indeterminate");
     assert.equal(expired.data.next_reconcile_at, null);
+    assert.equal(expired.data.api_call_attempts_total, 1);
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }

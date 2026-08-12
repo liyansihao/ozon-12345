@@ -518,7 +518,13 @@ export function createPublishState({
       if (Number.isFinite(Number(eligibility.attempts))) {
         data.transient_attempts = Number(eligibility.attempts);
       }
-      if (eligibility.reason === "daily-transient-limit") {
+      const reconciliationPending = (
+        data.reconcile_only === true
+        || data.submitted === true
+        || data.submission_pending === true
+        || data.submission_intent === true
+      );
+      if (eligibility.reason === "daily-transient-limit" && !reconciliationPending) {
         // This closure is valid for the current Shanghai day. SQLite retains the
         // attempt ledger, so the SKU becomes eligible naturally on the next day.
         data.terminal = true;
@@ -677,6 +683,7 @@ export function createPublishState({
       reason,
       runtime_run_dir: resolvedRunDir,
     };
+    const delayedAt = Date.parse(String(runtimeData.next_reconcile_at || ""));
     if (status === "published") {
       const qualityError = strictQualityError(sku, runtimeData);
       if (qualityError) throw new TypeError(qualityError);
@@ -687,6 +694,20 @@ export function createPublishState({
     }
     if (status === "skipped") {
       return runtimeState.recordSkip(sku, { reason, data: runtimeData });
+    }
+    if (
+      status === "processing"
+      && runtimeData.reconciliation_terminal !== true
+      && runtimeData.submission_intent === true
+      && runtimeData.submitted !== true
+      && runtimeData.reconcile_only === true
+      && Number.isFinite(delayedAt)
+    ) {
+      return runtimeState.recordDelay(sku, {
+        reason,
+        nextEligibleAt: new Date(delayedAt).toISOString(),
+        data: runtimeData,
+      });
     }
     if (
       status === "processing" &&
@@ -746,11 +767,18 @@ export function createPublishState({
         },
       });
     }
-    const delayedAt = Date.parse(String(runtimeData.next_reconcile_at || ""));
-    if (runtimeData.submitted === true && Number.isFinite(delayedAt)) {
-      return runtimeState.recordFailure(sku, {
+    if (
+      status === "processing"
+      && Number.isFinite(delayedAt)
+      && (
+        runtimeData.reconcile_only === true
+        || runtimeData.submitted === true
+        || runtimeData.submission_pending === true
+        || runtimeData.submission_intent === true
+      )
+    ) {
+      return runtimeState.recordDelay(sku, {
         reason,
-        kind: durableFailureKind(reason, runtimeData),
         nextEligibleAt: new Date(delayedAt).toISOString(),
         data: runtimeData,
       });

@@ -607,6 +607,51 @@ function reconciliationExpiryReason(item, {
   return null;
 }
 
+function reconciliationDueAtMs(item) {
+  const scheduledAt = Date.parse(String(item?.next_reconcile_at || ""));
+  if (Number.isFinite(scheduledAt)) return scheduledAt;
+  return reconciliationStartedAtMs(item) ?? Number.NEGATIVE_INFINITY;
+}
+
+function prioritizeDueReconciliations(items, cursorSku = null) {
+  const ranked = [...items]
+    .map((item, index) => ({
+      item,
+      index,
+      sku: asSku(item),
+      dueAt: reconciliationDueAtMs(item),
+      startedAt: reconciliationStartedAtMs(item) ?? Number.NEGATIVE_INFINITY,
+    }))
+    .sort((left, right) => left.dueAt - right.dueAt
+      || left.startedAt - right.startedAt
+      || left.sku.localeCompare(right.sku)
+      || left.index - right.index);
+  const cursorIndex = ranked.findIndex((row) => row.sku === String(cursorSku || ""));
+  if (cursorIndex < 0) return ranked.map(({ item }) => item);
+
+  // Oldest-due order is authoritative. The cursor rotates only an exact-time
+  // tie, so a repeatedly failing head row cannot starve its peers without
+  // allowing newer work to jump ahead of genuinely older work.
+  const cursor = ranked[cursorIndex];
+  let groupStart = cursorIndex;
+  let groupEnd = cursorIndex + 1;
+  while (groupStart > 0
+    && ranked[groupStart - 1].dueAt === cursor.dueAt
+    && ranked[groupStart - 1].startedAt === cursor.startedAt) groupStart -= 1;
+  while (groupEnd < ranked.length
+    && ranked[groupEnd].dueAt === cursor.dueAt
+    && ranked[groupEnd].startedAt === cursor.startedAt) groupEnd += 1;
+  const group = ranked.slice(groupStart, groupEnd);
+  const groupCursor = group.findIndex((row) => row.sku === cursor.sku);
+  ranked.splice(
+    groupStart,
+    group.length,
+    ...group.slice(groupCursor + 1),
+    ...group.slice(0, groupCursor + 1),
+  );
+  return ranked.map(({ item }) => item);
+}
+
 export function prioritizePublishCandidates(items, preflightPureSkus = new Set(), familyScores = {}, sourceScores = new Map()) {
   return [...items]
     .map((item, index) => ({
@@ -969,6 +1014,7 @@ export function createPublishRunner({
   const lastStoreTargetMetrics = new Map();
   const selectedTitleOwners = new Map();
   let lastAllStoresStalledAt = 0;
+  let reconciliationFairnessCursor = null;
   const adaptive = new AdaptiveConcurrency({
     initial: workerCount,
     max: activeDirectMode
@@ -2553,6 +2599,55 @@ export function createPublishRunner({
     return { status: "ignored", sku, reason };
   }
 
+  async function scheduleReconciliationRetry(item, reconciliationTarget, {
+    reason,
+    error = null,
+    attempts = Math.max(0, Number(item?.reconcile_attempts) || 0) + 1,
+    importLog = item?.import_log || null,
+    finalResult = item?.final_result || null,
+  }) {
+    const sku = asSku(item);
+    const normalizedAttempts = Math.max(0, Number(attempts) || 0);
+    const expiryReason = reconciliationExpiryReason(item, {
+      attempts: normalizedAttempts,
+      nowMs: now().getTime(),
+      maxAttempts: configuredReconciliationMaxAttempts,
+      maxAgeMs: configuredReconciliationMaxAgeMs,
+    });
+    if (expiryReason) {
+      return terminalizeDirectReconciliation(item, reconciliationTarget, {
+        reason: expiryReason,
+        attempts: normalizedAttempts,
+        importLog,
+        finalResult,
+      });
+    }
+    const nextReconcileAt = new Date(
+      now().getTime() + reconciliationBackoffMs(normalizedAttempts),
+    ).toISOString();
+    const recorded = await state.transition(sku, "processing", {
+      ...item,
+      reason,
+      ...(error ? {
+        reconciliation_error: String(error?.message || error),
+        reconciliation_error_at: now().toISOString(),
+      } : {}),
+      import_log: importLog,
+      final_result: finalResult,
+      reconcile_only: true,
+      reconcile_attempts: normalizedAttempts,
+      reconciliation_started_at: reconciliationStartIso(item),
+      next_reconcile_at: nextReconcileAt,
+    });
+    return {
+      status: "ignored",
+      sku,
+      source_url: item.source_url ?? null,
+      reason: recorded === false ? "reconciliation-state-not-recorded" : reason,
+      retry_at: nextReconcileAt,
+    };
+  }
+
   async function recoverSubmissionIntent(item, targetConfig, batchControl = null) {
     const sku = asSku(item);
     const payload = item?.submission_payload;
@@ -2570,22 +2665,24 @@ export function createPublishRunner({
         attempts: currentReconcileAttempts,
       });
     }
-    const lease = await state.transition(sku, "processing", {
-      ...item,
-      reason: "submission-intent-recovery",
-      submission_intent: true,
-      submitted: false,
-      submission_pending: false,
-      reconcile_only: true,
-      reconciliation_started_at: reconciliationStartIso(item),
-    });
-    if (lease === false) {
-      return {
-        status: "ignored",
-        sku,
-        source_url: item.source_url ?? null,
-        reason: "submission-recovery-reservation-not-acquired",
-      };
+    if (!reconciliationOnly) {
+      const lease = await state.transition(sku, "processing", {
+        ...item,
+        reason: "submission-intent-recovery",
+        submission_intent: true,
+        submitted: false,
+        submission_pending: false,
+        reconcile_only: true,
+        reconciliation_started_at: reconciliationStartIso(item),
+      });
+      if (lease === false) {
+        return {
+          status: "ignored",
+          sku,
+          source_url: item.source_url ?? null,
+          reason: "submission-recovery-reservation-not-acquired",
+        };
+      }
     }
     if (batchControl?.cancelled) {
       return { status: "ignored", sku, source_url: item.source_url ?? null, reason: "batch-fatal-cancelled" };
@@ -2618,22 +2715,10 @@ export function createPublishRunner({
       }
     } catch (error) {
       if (isFatalRunnerError(error)) throw error;
-      await state.transition(sku, "processing", {
-        ...item,
+      return scheduleReconciliationRetry(item, targetConfig, {
         reason: "submission-intent-verification-failed",
-        submission_intent: true,
-        submitted: false,
-        submission_pending: false,
-        reconcile_only: true,
-        verification_error: String(error?.message || error),
-        next_reconcile_at: new Date(now().getTime() + 30_000).toISOString(),
-      }).catch(() => {});
-      return {
-        status: "ignored",
-        sku,
-        source_url: item.source_url ?? null,
-        reason: "submission-intent-verification-failed",
-      };
+        error,
+      });
     }
 
     const usablePayload = payload?.rows?.[0]
@@ -2685,42 +2770,17 @@ export function createPublishRunner({
       });
     }
 
-    if (activeDirectMode && (reconciliationOnly || item?.api_call_started_at)) {
-      const reconcileAttempts = currentReconcileAttempts + 1;
-      const expiryReason = reconciliationExpiryReason(item, {
-        attempts: reconcileAttempts,
-        nowMs: now().getTime(),
-        maxAttempts: configuredReconciliationMaxAttempts,
-        maxAgeMs: configuredReconciliationMaxAgeMs,
-      });
-      if (expiryReason) {
-        return terminalizeDirectReconciliation(item, targetConfig, {
-          reason: expiryReason,
-          attempts: reconcileAttempts,
-        });
-      }
-      const nextReconcileAt = new Date(
-        now().getTime() + reconciliationBackoffMs(reconcileAttempts),
-      ).toISOString();
-      await state.transition(sku, "processing", {
+    if (reconciliationOnly || (activeDirectMode && item?.api_call_started_at)) {
+      return scheduleReconciliationRetry({
         ...item,
-        reason: "submission-api-status-unknown",
         submission_intent: true,
         submitted: false,
         submission_pending: false,
-        reconcile_only: true,
-        reconcile_attempts: reconcileAttempts,
-        reconciliation_started_at: reconciliationStartIso(item),
         verification_completed_at: now().toISOString(),
-        next_reconcile_at: nextReconcileAt,
-      });
-      return {
-        status: "ignored",
-        sku,
-        source_url: item.source_url ?? null,
+      }, targetConfig, {
         reason: "submission-api-status-unknown",
-        retry_at: nextReconcileAt,
-      };
+        attempts: currentReconcileAttempts + 1,
+      });
     }
 
     const callDay = localDateKey(now(), dailyStoreTimeZone);
@@ -3519,21 +3579,22 @@ export function createPublishRunner({
       familyScores,
       sourceScores,
     ), profitSnapshot, targetConfig.store.id);
-    const rankedDueReconciliations = prioritizePublishCandidates(
+    const rankedDueReconciliations = prioritizeDueReconciliations(
       (activeValidationOnly || (activeDirectMode && !reconciliationOnly)
         ? []
         : [...delayedSubmissions, ...actionableFavorites.filter(isReconciliationCandidate)]).filter((item) => {
         const nextReconcileAt = Date.parse(item?.next_reconcile_at || "");
         return !Number.isFinite(nextReconcileAt) || nextReconcileAt <= now().getTime();
       }),
-      preflightPureSkus,
-      familyScores,
-      sourceScores,
+      reconciliationFairnessCursor,
     );
     const dueReconciliationLimit = reconciliationOnly
-      ? (activeAttemptLimit > 0 ? activeAttemptLimit : workerCount)
+      ? (activeAttemptLimit > 0 ? Math.min(workerCount, activeAttemptLimit) : workerCount)
       : rankedDueReconciliations.length;
     const dueReconciliations = rankedDueReconciliations.slice(0, dueReconciliationLimit);
+    if (dueReconciliations.length > 0) {
+      reconciliationFairnessCursor = asSku(dueReconciliations.at(-1));
+    }
     if (dueReconciliations.length > 0) {
       const delayedCountByStore = new Map();
       for (const item of dueReconciliations) {
@@ -3848,8 +3909,10 @@ export function createPublishRunner({
         }
         return { status: "ignored", sku };
       }
-      const blocked = await attemptBlock(sku);
-      if (blocked) return { ...blocked, source_url: inputItem.source_url ?? null };
+      if (!isReconciliationCandidate(item)) {
+        const blocked = await attemptBlock(sku);
+        if (blocked) return { ...blocked, source_url: inputItem.source_url ?? null };
+      }
       if (!activeDirectMode && !isReconciliationCandidate(item)) {
         const duplicateOwner = crossStoreDuplicateOwner(item?.title, sku, targetConfig.store.id);
         if (duplicateOwner) {
@@ -4224,12 +4287,19 @@ export function createPublishRunner({
           }
         } catch (error) {
           if (isFatalRunnerError(error)) throw error;
-          await state.transition(sku, "failed", {
-            ...item,
+          const deferred = await scheduleReconciliationRetry(item, reconciliationTarget, {
             reason: "reconciliation-check-failed",
-            error: String(error?.message || error),
-          }).catch(() => {});
-          return { status: "failed", sku, reason: "reconciliation-check-failed", error };
+            error,
+          }).catch(() => ({
+            status: "ignored",
+            sku,
+            reason: "reconciliation-state-not-recorded",
+          }));
+          return DIRECT_RECONCILIATION_FINAL_OUTCOMES.has(
+            String(state.entryOf?.(sku)?.data?.outcome_status || ""),
+          )
+            ? deferred
+            : { ...deferred, status: "failed", error };
         }
       }
 

@@ -349,7 +349,7 @@ test("direct production can disable growing legacy state and close-time audit ex
   });
 });
 
-test("SQLite-backed publish state terminalizes deterministic failures and enforces two transient failures per Shanghai day", async () => {
+test("SQLite-backed publish state caps fresh transient failures without charging reconciliation delays", async () => {
   await withTempDir(async (dir) => {
     const runDir = path.join(dir, "run");
     const dbPath = path.join(dir, "external-state", "runtime.sqlite");
@@ -398,9 +398,10 @@ test("SQLite-backed publish state terminalizes deterministic failures and enforc
       reason: "reconciliation-import-pending",
       submitted: true,
       next_reconcile_at: pendingAt,
-    }), false);
-    assert.equal(state.entryOf("pending").data.terminal, true);
-    assert.equal(state.entryOf("pending").data.transient_attempts, 2);
+    }), true);
+    assert.equal(state.entryOf("pending").data.terminal, false);
+    assert.equal(state.entryOf("pending").data.transient_attempts, 0);
+    assert.equal(state.canAttempt("pending").allowed, true);
     await state.close();
 
     const auditRows = (await fs.readFile(path.join(runDir, "sku_states.jsonl"), "utf8"))
