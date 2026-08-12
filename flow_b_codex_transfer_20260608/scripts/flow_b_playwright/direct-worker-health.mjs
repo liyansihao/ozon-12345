@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 export const DIRECT_WORKER_HEALTH_SCHEMA_VERSION = 1;
+export const DIRECT_RUNTIME_LANE_SCHEMA_VERSION = 2;
 
 function finiteTimestamp(value) {
   const timestamp = Date.parse(String(value || ""));
@@ -51,7 +52,7 @@ export function createDirectWorkerHealthTracker({
     worker_pid: Number(workerPid),
     worker_started_at: startedAt,
     heartbeat_at: startedAt,
-    runtime_lane_schema_version: 1,
+    runtime_lane_schema_version: DIRECT_RUNTIME_LANE_SCHEMA_VERSION,
     producer: {
       phase: "starting",
       heartbeat_at: startedAt,
@@ -79,6 +80,13 @@ export function createDirectWorkerHealthTracker({
       last_progress_kind: null,
       last_accepted_at: null,
       activity_count: null,
+      productive_watch: {
+        eligible: false,
+        eligible_since: null,
+        last_checked_at: null,
+        eligible_backlog_count: 0,
+        blocked_reason: "starting",
+      },
     },
     reconciliation: {
       phase: "starting",
@@ -196,8 +204,15 @@ export function createDirectWorkerHealthTracker({
       attempt_seq: Number(state.consumer.attempt_seq || 0) + 1,
       attempt_started_at: timestamp(),
     } }),
-    consumerProgress: ({ kind = "consumer-activity" } = {}) => {
+    consumerProgress: ({
+      kind = "consumer-activity",
+      eligibleBacklogCount = null,
+      productiveWatchEligible = null,
+    } = {}) => {
       const progressAt = timestamp();
+      const priorProductiveWatch = state.consumer.productive_watch || {};
+      const startsProductiveWatch = productiveWatchEligible === true
+        && Number(eligibleBacklogCount) > 0;
       return persist({ consumer: {
         phase: "running",
         last_progress_at: progressAt,
@@ -205,16 +220,53 @@ export function createDirectWorkerHealthTracker({
         ...(["published", "submitted", "erp-accepted"].includes(String(kind || ""))
           ? { last_accepted_at: progressAt }
           : {}),
+        ...(startsProductiveWatch ? {
+          productive_watch: {
+            ...priorProductiveWatch,
+            eligible: true,
+            eligible_since: priorProductiveWatch.eligible === true
+              ? priorProductiveWatch.eligible_since || progressAt
+              : progressAt,
+            eligible_backlog_count: Math.max(
+              1,
+              Math.floor(Number(eligibleBacklogCount) || 0),
+            ),
+            blocked_reason: null,
+          },
+        } : {}),
       } });
     },
     consumerRoundCompleted: (result = {}) => {
       const completedAt = timestamp();
+      const eligibleBacklogCount = Math.max(
+        0,
+        Math.floor(Number(result?.eligible_backlog_count) || 0),
+      );
+      const productiveEligible = result?.productive_watch_eligible === true
+        && eligibleBacklogCount > 0;
+      const priorProductiveWatch = state.consumer.productive_watch || {};
       return persist({ consumer: {
         phase: "healthy",
         last_completed_at: completedAt,
         last_progress_at: completedAt,
         last_progress_kind: String(result?.kind || "consumer-round-completed").slice(0, 100),
         activity_count: Number(result?.attempted ?? result?.activity_count ?? 0) || 0,
+        productive_watch: {
+          eligible: productiveEligible,
+          eligible_since: productiveEligible
+            ? (priorProductiveWatch.eligible === true
+              ? priorProductiveWatch.eligible_since || completedAt
+              : completedAt)
+            : null,
+          last_checked_at: completedAt,
+          eligible_backlog_count: eligibleBacklogCount,
+          blocked_reason: productiveEligible
+            ? null
+            : String(
+              result?.productive_block_reason
+                || (eligibleBacklogCount <= 0 ? "eligible-queue-empty" : "productive-watch-paused"),
+            ).slice(0, 100),
+        },
       } });
     },
     reconciliationRoundStarted: () => persist({ reconciliation: {
@@ -278,6 +330,8 @@ export function directWorkerHealthDecision({
   staleMs = 1_200_000,
   consumerStaleMs = staleMs,
   reconciliationStaleMs = staleMs,
+  productiveStaleMs = consumerStaleMs,
+  productiveEligible = true,
   errorThreshold = 3,
   lastRecoveryAt = null,
   recoveryHistory = [],
@@ -293,6 +347,7 @@ export function directWorkerHealthDecision({
   const stale = Math.max(1, Number(staleMs) || 1_200_000);
   const consumerStale = Math.max(1, Number(consumerStaleMs) || stale);
   const reconciliationStale = Math.max(1, Number(reconciliationStaleMs) || stale);
+  const productiveStale = Math.max(1, Number(productiveStaleMs) || consumerStale);
   const threshold = Math.max(1, Math.floor(Number(errorThreshold) || 3));
   const cooldown = Math.max(0, Number(recoveryCooldownMs) || 0);
   const recoveryWindow = Math.max(1, Number(recoveryWindowMs) || 7_200_000);
@@ -361,13 +416,12 @@ export function directWorkerHealthDecision({
   }
 
   const laneRecovery = (laneName, lane, laneStaleMs) => {
-    // Schema-v1 workers deployed before lane heartbeats remain compatible
-    // during a rolling supervisor handoff. Every new worker writes both lanes
-    // from process start, so their absence is not silently accepted afterward.
+    // A current worker writes both lanes before doing browser or queue work.
+    // Missing lanes therefore get only the ordinary startup grace; accepting
+    // them forever would make a rolling upgrade silently disable coverage.
     if (!lane || typeof lane !== "object") {
-      if (Number(health?.runtime_lane_schema_version) !== 1) return null;
       const elapsed = Math.max(0, nowMs - workerStartedAtMs);
-      if (elapsed < laneStaleMs) return null;
+      if (elapsed < grace) return null;
       return {
         ...base,
         action: "restart-worker",
@@ -395,6 +449,48 @@ export function directWorkerHealthDecision({
     };
   };
   if (!recovery) recovery = laneRecovery("consumer", health?.consumer, consumerStale);
+  if (!recovery && productiveEligible) {
+    const productiveWatch = health?.consumer?.productive_watch;
+    if (!productiveWatch || typeof productiveWatch !== "object") {
+      const elapsed = Math.max(0, nowMs - workerStartedAtMs);
+      if (elapsed >= grace) {
+        recovery = {
+          ...base,
+          action: "restart-worker",
+          reason: "direct-consumer-productive-watch-missing",
+          stale_ms: elapsed,
+        };
+      }
+    } else if (productiveWatch.eligible === true
+      && Number(productiveWatch.eligible_backlog_count || 0) > 0) {
+      const eligibleSinceMs = finiteTimestamp(productiveWatch.eligible_since);
+      const lastCheckedAtMs = finiteTimestamp(productiveWatch.last_checked_at);
+      const lastAcceptedAtMs = finiteTimestamp(health?.consumer?.last_accepted_at);
+      if (eligibleSinceMs !== null && lastCheckedAtMs !== null) {
+        const productiveBaselineMs = Math.max(
+          eligibleSinceMs,
+          lastAcceptedAtMs === null ? eligibleSinceMs : lastAcceptedAtMs,
+        );
+        // Use completed-round evidence rather than wall-clock time. A bounded
+        // in-flight stage can keep its liveness heartbeat without being mistaken
+        // for a proven no-production interval. Repeated completed zero-accept
+        // rounds advance last_checked_at and eventually prove the stall.
+        const productiveStaleEvidenceMs = Math.max(0, lastCheckedAtMs - productiveBaselineMs);
+        if (productiveStaleEvidenceMs >= productiveStale) {
+          recovery = {
+            ...base,
+            action: "restart-worker",
+            reason: "direct-consumer-productive-progress-stale",
+            stale_ms: productiveStaleEvidenceMs,
+            productive_eligible_since: productiveWatch.eligible_since,
+            productive_last_checked_at: productiveWatch.last_checked_at,
+            last_accepted_at: health?.consumer?.last_accepted_at || null,
+            eligible_backlog_count: Number(productiveWatch.eligible_backlog_count || 0),
+          };
+        }
+      }
+    }
+  }
   if (!recovery) {
     recovery = laneRecovery(
       "reconciliation",

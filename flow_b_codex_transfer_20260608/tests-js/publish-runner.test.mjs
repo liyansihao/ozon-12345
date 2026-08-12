@@ -453,6 +453,9 @@ test("publisher reports consumer and reconciliation progress without changing ou
     onProgress: (event) => consumerProgress.push(event),
   }).run();
   assert.equal(consumer.attempted, 0);
+  assert.equal(consumer.eligible_backlog_count, 0);
+  assert.equal(consumer.productive_watch_eligible, false);
+  assert.equal(consumer.productive_block_reason, "not-direct-mode");
   assert.deepEqual(consumerProgress.map((event) => event.kind), [
     "runner-started",
     "runner-completed",
@@ -471,6 +474,82 @@ test("publisher reports consumer and reconciliation progress without changing ou
   }).run();
   assert.ok(reconciliationProgress.length >= 2);
   assert.ok(reconciliationProgress.every((event) => event.lane === "reconciliation"));
+});
+
+test("productive queue evidence is paused after the direct submission cutoff", async () => {
+  let costCalls = 0;
+  let publishCalls = 0;
+  const result = await createPublishRunner({
+    client: clientFor([{
+      sku: "after-cutoff",
+      title: "Безопасный товар после закрытия окна",
+      cover_image: "https://img.example/after-cutoff.jpg",
+      sell_price: 100,
+    }], {
+      publish: async () => {
+        publishCalls += 1;
+        return { ok: true, response: { code: 1 } };
+      },
+    }),
+    costBridge: { estimate: async () => {
+      costCalls += 1;
+      return { ...RELIABLE_COST_RESULT };
+    } },
+    state: fakeState(),
+    target: 1,
+    runDir: "/tmp/run",
+    directMode: true,
+    now: () => new Date("2026-08-10T15:01:00.000Z"),
+    dailyStoreTimeZone: "Asia/Shanghai",
+    dailySubmissionCutoff: "23:00",
+  }).run();
+  assert.equal(costCalls, 0);
+  assert.equal(publishCalls, 0);
+  assert.equal(result.eligible_backlog_count, 0);
+  assert.equal(result.productive_watch_eligible, false);
+  assert.equal(result.productive_block_reason, "submission-window-closed");
+});
+
+test("productive work is reported while the selected direct batch is still in flight", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-productive-inflight-"));
+  let releaseCost;
+  const costGate = new Promise((resolve) => { releaseCost = resolve; });
+  let signalCostStarted;
+  const costStarted = new Promise((resolve) => { signalCostStarted = resolve; });
+  const progress = [];
+  try {
+    const running = createPublishRunner({
+      client: clientFor(Array.from({ length: 8 }, (_, index) => ({
+        sku: `productive-inflight-${index}`,
+        title: `Безопасный товар productive inflight ${index}`,
+        cover_image: `https://img.example/productive-inflight-${index}.jpg`,
+        sell_price: 100,
+      }))),
+      costBridge: { estimate: async () => {
+        signalCostStarted();
+        await costGate;
+        return { ok: false, reason: "no reliable same-item match" };
+      } },
+      state: fakeState(),
+      target: 8,
+      runDir,
+      directMode: true,
+      concurrency: 8,
+      onProgress: async (event) => { progress.push(event); },
+    }).run();
+    await costStarted;
+    const expected = progress.find((event) => event.kind === "productive-work-expected");
+    assert.ok(expected);
+    assert.equal(expected.eligible_backlog_count, 8);
+    assert.equal(expected.productive_watch_eligible, true);
+    assert.equal(progress.some((event) => event.kind === "runner-completed"), false);
+    releaseCost();
+    const result = await running;
+    assert.equal(result.eligible_backlog_count, 8);
+  } finally {
+    releaseCost?.();
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
 });
 
 test("production cost contract rejects a positive number without reliable same-item evidence", async () => {
@@ -5201,6 +5280,7 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
     const state = fakeState();
     let confirmationChecks = 0;
     let publishCalls = 0;
+    const progressKinds = [];
     const client = clientFor([
       {
         sku: "direct-fbo-safe-item",
@@ -5247,12 +5327,24 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
       directMode: true,
       minimumSameItemMatches: 1,
       requireReliableCostContract: true,
+      onProgress: async (event) => {
+        progressKinds.push(event.kind);
+        if (event.kind === "erp-accepted") {
+          await Promise.resolve();
+          throw new Error("health projection unavailable");
+        }
+      },
     }).run();
 
     assert.equal(publishCalls, 1);
     assert.equal(confirmationChecks, 0);
     assert.equal(result.accepted, 1);
     assert.equal(result.remaining, 0);
+    assert.equal(result.eligible_backlog_count, 1);
+    assert.equal(result.queue_candidate_count, 1);
+    assert.equal(result.productive_watch_eligible, true);
+    assert.equal(result.productive_block_reason, null);
+    assert.ok(progressKinds.indexOf("erp-accepted") < progressKinds.lastIndexOf("runner-completed"));
     assert.equal(state.entryOf("direct-fbo-safe-item").data.submitted, true);
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
@@ -5613,6 +5705,8 @@ test("direct cost rejection skips live Ozon detail, profit, and ERP submission",
     }).run();
 
     assert.equal(result.accepted, 0);
+    assert.equal(result.eligible_backlog_count, 1);
+    assert.equal(result.productive_watch_eligible, true);
     assert.equal(detailCalls, 0);
     assert.equal(profitCalls, 0);
     assert.equal(publishCalls, 0);
@@ -7046,6 +7140,8 @@ test("direct mode stops after every configured store returns a real publish reje
       rejected_store_ids: storeTargets.map((row) => row.id),
       all: true,
     });
+    assert.equal(result.productive_watch_eligible, false);
+    assert.equal(result.productive_block_reason, "all-stores-exhausted");
   } finally {
     await fs.rm(runDir, { recursive: true, force: true });
   }

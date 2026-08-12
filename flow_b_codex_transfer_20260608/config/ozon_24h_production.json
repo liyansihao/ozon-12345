@@ -54,6 +54,7 @@
     "source_error_threshold": 3,
     "producer_stale_ms": 1200000,
     "consumer_stale_ms": 1200000,
+    "productive_stale_ms": 1200000,
     "reconciliation_stale_ms": 1200000,
     "startup_grace_ms": 180000,
     "recovery_cooldown_ms": 1800000,

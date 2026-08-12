@@ -986,13 +986,20 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         const lane = String(progress?.lane || "consumer");
         const now = Date.now();
         const last = Number(laneProgressAt.get(lane) || 0);
-        const urgent = progress?.kind === "erp-accepted";
-        if (!urgent && now - last < 30_000) return;
+        const urgent = ["erp-accepted", "productive-work-expected"].includes(progress?.kind);
+        if (!urgent && now - last < 30_000) return null;
         laneProgressAt.set(lane, now);
         const operation = lane === "reconciliation"
           ? () => directWorkerHealth.reconciliationProgress({ kind: progress?.kind })
-          : () => directWorkerHealth.consumerProgress({ kind: progress?.kind });
-        void recordProducerHealth(operation);
+          : () => directWorkerHealth.consumerProgress({
+              kind: progress?.kind,
+              eligibleBacklogCount: progress?.eligible_backlog_count,
+              productiveWatchEligible: progress?.productive_watch_eligible,
+            });
+        const recorded = recordProducerHealth(operation);
+        if (urgent) return recorded;
+        void recorded;
+        return null;
       };
       await recordProducerHealth(() => directWorkerHealth.start());
       const pageCleanup = directEnv.FLOW_B_PRUNE_ORPHAN_PAGES_ON_START === "1"

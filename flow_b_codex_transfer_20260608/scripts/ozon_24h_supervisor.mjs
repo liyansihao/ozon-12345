@@ -3061,6 +3061,10 @@ async function superviseDirectPublishing({
       60_000,
       Number(config.direct_worker_watchdog?.consumer_stale_ms) || 1_200_000,
     ),
+    productiveStaleMs: Math.max(
+      60_000,
+      Number(config.direct_worker_watchdog?.productive_stale_ms) || 1_200_000,
+    ),
     reconciliationStaleMs: Math.max(
       60_000,
       Number(config.direct_worker_watchdog?.reconciliation_stale_ms) || 1_200_000,
@@ -3355,6 +3359,15 @@ async function superviseDirectPublishing({
             cutoff: config.flow_env?.FLOW_B_DAILY_SUBMISSION_CUTOFF || "23:00",
             reportAfter: config.flow_env?.FLOW_B_DAILY_REPORT_AFTER || "23:30",
           });
+          let productiveAccessEligible = false;
+          try {
+            const currentAccessState = await readOzonAccessState(accessStateFile, { strict: true });
+            productiveAccessEligible = currentAccessState?.requires_manual_clear !== true;
+          } catch {
+            // Unreadable verification state is fail-closed for productive-stall
+            // recovery. The worker/browser security path remains authoritative.
+            productiveAccessEligible = false;
+          }
           const healthDecision = directWorkerHealthDecision({
             health,
             expectedRunId: currentRun.run_id,
@@ -3368,6 +3381,8 @@ async function superviseDirectPublishing({
             startupGraceMs: watchdogConfig.startupGraceMs,
             staleMs: watchdogConfig.staleMs,
             consumerStaleMs: watchdogConfig.consumerStaleMs,
+            productiveStaleMs: watchdogConfig.productiveStaleMs,
+            productiveEligible: productiveAccessEligible,
             reconciliationStaleMs: watchdogConfig.reconciliationStaleMs,
             errorThreshold: watchdogConfig.errorThreshold,
             lastRecoveryAt: watchdogState.last_recovery_at,

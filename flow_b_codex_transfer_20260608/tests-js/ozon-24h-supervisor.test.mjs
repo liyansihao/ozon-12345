@@ -1464,6 +1464,199 @@ test("direct worker health records independent consumer and reconciliation progr
   assert.equal(health.producer.phase, "starting");
 });
 
+test("consumer productive evidence is durable, ordered, and pauses when the eligible queue drains", async () => {
+  let nowMs = Date.parse("2026-08-10T10:00:00.000Z");
+  const writes = [];
+  const tracker = createDirectWorkerHealthTracker({
+    filename: "/tmp/direct-worker-health-productive.json",
+    runId: "run-productive",
+    generation: "generation-productive",
+    workerPid: 4323,
+    now: () => new Date(nowMs),
+    write: async (_filename, snapshot) => {
+      await Promise.resolve();
+      writes.push(snapshot);
+    },
+  });
+  await tracker.start();
+  nowMs = Date.parse("2026-08-10T10:00:30.000Z");
+  await tracker.consumerProgress({
+    kind: "productive-work-expected",
+    eligibleBacklogCount: 8,
+    productiveWatchEligible: true,
+  });
+  nowMs = Date.parse("2026-08-10T10:01:00.000Z");
+  await tracker.consumerRoundCompleted({
+    attempted: 8,
+    eligible_backlog_count: 8,
+    productive_watch_eligible: true,
+  });
+  assert.equal(tracker.snapshot().consumer.productive_watch.eligible, true);
+  assert.equal(
+    tracker.snapshot().consumer.productive_watch.eligible_since,
+    "2026-08-10T10:00:30.000Z",
+  );
+
+  nowMs = Date.parse("2026-08-10T10:02:00.000Z");
+  const acceptedWrite = tracker.consumerProgress({ kind: "erp-accepted" });
+  nowMs = Date.parse("2026-08-10T10:02:01.000Z");
+  const completedWrite = tracker.consumerRoundCompleted({
+    attempted: 8,
+    eligible_backlog_count: 7,
+    productive_watch_eligible: true,
+  });
+  await Promise.all([acceptedWrite, completedWrite]);
+  assert.equal(writes.at(-1).consumer.last_accepted_at, "2026-08-10T10:02:00.000Z");
+  assert.equal(writes.at(-1).consumer.productive_watch.eligible_backlog_count, 7);
+
+  nowMs = Date.parse("2026-08-10T10:03:00.000Z");
+  await tracker.consumerRoundCompleted({
+    attempted: 0,
+    eligible_backlog_count: 0,
+    productive_watch_eligible: false,
+    productive_block_reason: "eligible-queue-empty",
+  });
+  const drained = tracker.snapshot().consumer.productive_watch;
+  assert.equal(drained.eligible, false);
+  assert.equal(drained.eligible_since, null);
+  assert.equal(drained.blocked_reason, "eligible-queue-empty");
+});
+
+test("productive watchdog detects completed zero-accept rounds but not idle, blocked, or bounded in-flight work", () => {
+  const workerStartedAt = Date.parse("2026-08-10T10:00:00.000Z");
+  const now = Date.parse("2026-08-10T10:30:00.000Z");
+  const base = {
+    schema_version: 1,
+    runtime_lane_schema_version: 2,
+    run_id: "run-productive",
+    worker_generation: "generation-productive",
+    worker_pid: 4324,
+    heartbeat_at: "2026-08-10T10:30:00.000Z",
+    producer: {
+      phase: "healthy",
+      heartbeat_at: "2026-08-10T10:30:00.000Z",
+      consecutive_errors: 0,
+    },
+    consumer: {
+      phase: "healthy",
+      heartbeat_at: "2026-08-10T10:30:00.000Z",
+      last_progress_at: "2026-08-10T10:30:00.000Z",
+      last_progress_kind: "candidate-result",
+      last_accepted_at: null,
+      productive_watch: {
+        eligible: true,
+        eligible_since: "2026-08-10T10:00:00.000Z",
+        last_checked_at: "2026-08-10T10:20:00.000Z",
+        eligible_backlog_count: 8,
+        blocked_reason: null,
+      },
+    },
+    reconciliation: {
+      phase: "healthy",
+      heartbeat_at: "2026-08-10T10:30:00.000Z",
+      consecutive_errors: 0,
+    },
+  };
+  const decide = (health = base, extra = {}) => directWorkerHealthDecision({
+    health,
+    expectedRunId: "run-productive",
+    expectedGeneration: "generation-productive",
+    expectedWorkerPid: 4324,
+    workerStartedAt,
+    now,
+    staleMs: 1_200_000,
+    consumerStaleMs: 1_200_000,
+    productiveStaleMs: 1_200_000,
+    reconciliationStaleMs: 1_200_000,
+    ...extra,
+  });
+
+  const stalled = decide();
+  assert.equal(stalled.action, "restart-worker");
+  assert.equal(stalled.reason, "direct-consumer-productive-progress-stale");
+  assert.equal(stalled.eligible_backlog_count, 8);
+
+  const accepted = decide({
+    ...base,
+    consumer: {
+      ...base.consumer,
+      last_accepted_at: "2026-08-10T10:15:00.001Z",
+      productive_watch: {
+        ...base.consumer.productive_watch,
+        last_checked_at: "2026-08-10T10:30:00.000Z",
+      },
+    },
+  });
+  assert.equal(accepted.action, "continue");
+
+  const drained = decide({
+    ...base,
+    consumer: {
+      ...base.consumer,
+      productive_watch: {
+        ...base.consumer.productive_watch,
+        eligible: false,
+        eligible_since: null,
+        eligible_backlog_count: 0,
+        blocked_reason: "eligible-queue-empty",
+      },
+    },
+  });
+  assert.equal(drained.action, "continue");
+
+  assert.equal(decide(base, { productiveEligible: false }).action, "continue");
+  assert.equal(decide(base, { eligible: false }).action, "continue");
+
+  const boundedInFlight = decide({
+    ...base,
+    consumer: {
+      ...base.consumer,
+      phase: "running",
+      last_progress_kind: "stage-started",
+      productive_watch: {
+        ...base.consumer.productive_watch,
+        last_checked_at: "2026-08-10T10:19:59.999Z",
+      },
+    },
+  });
+  assert.equal(boundedInFlight.action, "continue");
+
+  const boundedRecovery = decide(base, {
+    lastRecoveryAt: "2026-08-10T10:29:00.000Z",
+    recoveryCooldownMs: 1_800_000,
+  });
+  assert.equal(boundedRecovery.action, "defer-recovery");
+  assert.equal(boundedRecovery.trigger_reason, "direct-consumer-productive-progress-stale");
+});
+
+test("legacy current workers missing runtime lanes recover after startup grace", () => {
+  const base = {
+    schema_version: 1,
+    run_id: "run-legacy",
+    worker_generation: "generation-legacy",
+    worker_pid: 4325,
+    heartbeat_at: "2026-08-10T10:04:00.000Z",
+    producer: {
+      phase: "healthy",
+      heartbeat_at: "2026-08-10T10:04:00.000Z",
+      consecutive_errors: 0,
+    },
+  };
+  const decide = (now) => directWorkerHealthDecision({
+    health: base,
+    expectedRunId: "run-legacy",
+    expectedGeneration: "generation-legacy",
+    expectedWorkerPid: 4325,
+    workerStartedAt: Date.parse("2026-08-10T10:00:00.000Z"),
+    now,
+    startupGraceMs: 180_000,
+  });
+  assert.equal(decide(Date.parse("2026-08-10T10:02:59.999Z")).action, "continue");
+  const afterGrace = decide(Date.parse("2026-08-10T10:03:00.000Z"));
+  assert.equal(afterGrace.action, "restart-worker");
+  assert.equal(afterGrace.reason, "direct-consumer-heartbeat-missing");
+});
+
 test("direct worker watchdog detects a stalled consumer or reconciliation lane", () => {
   const base = {
     schema_version: 1,
@@ -1477,7 +1670,11 @@ test("direct worker watchdog detects a stalled consumer or reconciliation lane",
       heartbeat_at: "2026-08-10T10:30:00.000Z",
       consecutive_errors: 0,
     },
-    consumer: { phase: "running", heartbeat_at: "2026-08-10T10:09:59.999Z" },
+    consumer: {
+      phase: "running",
+      heartbeat_at: "2026-08-10T10:09:59.999Z",
+      productive_watch: { eligible: false, eligible_backlog_count: 0 },
+    },
     reconciliation: { phase: "healthy", heartbeat_at: "2026-08-10T10:30:00.000Z" },
   };
   const decide = (health) => directWorkerHealthDecision({
@@ -1502,7 +1699,8 @@ test("direct worker watchdog detects a stalled consumer or reconciliation lane",
   assert.equal(reconciliation.action, "restart-worker");
   assert.equal(reconciliation.reason, "direct-reconciliation-progress-stale");
   const legacy = { ...base, runtime_lane_schema_version: undefined, consumer: undefined, reconciliation: undefined };
-  assert.equal(decide(legacy).action, "continue");
+  assert.equal(decide(legacy).action, "restart-worker");
+  assert.equal(decide(legacy).reason, "direct-consumer-heartbeat-missing");
   const missing = decide({ ...base, consumer: undefined });
   assert.equal(missing.action, "restart-worker");
   assert.equal(missing.reason, "direct-consumer-heartbeat-missing");
@@ -1537,7 +1735,19 @@ test("direct worker watchdog restarts after three consecutive failures or twenty
     },
   };
   const decide = (health, now, extra = {}) => directWorkerHealthDecision({
-    health,
+    health: {
+      ...health,
+      consumer: health.consumer || {
+        phase: "healthy",
+        heartbeat_at: new Date(now).toISOString(),
+        productive_watch: { eligible: false, eligible_backlog_count: 0 },
+      },
+      reconciliation: health.reconciliation || {
+        phase: "healthy",
+        heartbeat_at: new Date(now).toISOString(),
+        consecutive_errors: 0,
+      },
+    },
     expectedRunId: "run-1",
     expectedGeneration: "generation-1",
     expectedWorkerPid: 4321,
@@ -1633,7 +1843,19 @@ test("direct worker recovery budget delays only unhealthy workers and retries au
     producer: { phase: "healthy", consecutive_errors: 0 },
   };
   const decide = (candidateHealth, now) => directWorkerHealthDecision({
-    health: candidateHealth,
+    health: {
+      ...candidateHealth,
+      consumer: candidateHealth.consumer || {
+        phase: "healthy",
+        heartbeat_at: new Date(now).toISOString(),
+        productive_watch: { eligible: false, eligible_backlog_count: 0 },
+      },
+      reconciliation: candidateHealth.reconciliation || {
+        phase: "healthy",
+        heartbeat_at: new Date(now).toISOString(),
+        consecutive_errors: 0,
+      },
+    },
     expectedRunId: "run-1",
     expectedGeneration: "generation-1",
     expectedWorkerPid: 4321,

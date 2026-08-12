@@ -895,11 +895,13 @@ export function createPublishRunner({
   });
   function reportProgress(progress = {}) {
     try {
-      Promise.resolve(onProgress({
+      return Promise.resolve(onProgress({
         lane: reconciliationOnly ? "reconciliation" : "consumer",
         ...progress,
       })).catch(() => {});
-    } catch {}
+    } catch {
+      return Promise.resolve();
+    }
   }
   dailyWindowState({
     now: now(),
@@ -1182,6 +1184,7 @@ export function createPublishRunner({
 
   async function timed(sku, stage, operation) {
     const started = Date.now();
+    void reportProgress({ kind: "stage-started", sku, stage });
     try {
       const value = await operation();
       recordMetric("stage_timings.jsonl", { sku, stage, duration_ms: Date.now() - started, ok: true });
@@ -2867,7 +2870,7 @@ export function createPublishRunner({
     validationTarget: runValidationTarget = validationTargetCount,
     attemptLimit = 0,
   } = {}) {
-    reportProgress({ kind: "runner-started" });
+    void reportProgress({ kind: "runner-started" });
     activeValidationOnly = Boolean(validationMode);
     const activeValidationTarget = Number(runValidationTarget);
     if (!Number.isInteger(activeValidationTarget) || activeValidationTarget <= 0) {
@@ -3628,6 +3631,21 @@ export function createPublishRunner({
       ...interleaveCandidateBatches(freshCandidates, dueReconciliations, workerCount),
     ];
     const terminalCleanupSet = new Set(terminalCleanupCandidates);
+    const freshCandidateSet = new Set(freshCandidates);
+    const initialProductiveWorkExpected = activeDirectMode
+      && !reconciliationOnly
+      && !activeValidationOnly
+      && dailyWindow.open
+      && !freshSubmissionsPaused
+      && !targetPlan.every((entry) => directRejectedStoreIds.has(Number(entry.id)))
+      && freshCandidates.length > 0;
+    if (initialProductiveWorkExpected) {
+      await reportProgress({
+        kind: "productive-work-expected",
+        eligible_backlog_count: freshCandidates.length,
+        productive_watch_eligible: true,
+      });
+    }
     const reorderRemainingFreshForStore = (fromIndex, storeId) => {
       const positions = [];
       const pendingFresh = [];
@@ -3662,6 +3680,7 @@ export function createPublishRunner({
     let failed = 0;
     let skipped = 0;
     let attempted = 0;
+    let eligibleFreshAttemptCount = 0;
     let submittedPending = activeDirectMode
       ? [...acceptedSkus].filter((sku) => restoredBySku.get(sku)?.status !== "published").length
       : 0;
@@ -4320,15 +4339,22 @@ export function createPublishRunner({
       };
     }
 
-    function recordCandidateResult(item, result) {
-      reportProgress({
-        kind: ["published", "submitted"].includes(String(result?.status || ""))
-          ? "erp-accepted"
-          : "candidate-result",
+    async function recordCandidateResult(item, result) {
+      const progressKind = ["published", "submitted"].includes(String(result?.status || ""))
+        ? "erp-accepted"
+        : "candidate-result";
+      // ERP acceptance has already been persisted before handleCandidate returns.
+      // Await its health projection so the productive watchdog cannot lose an
+      // accepted reset behind a later round-completed snapshot.
+      await reportProgress({
+        kind: progressKind,
         sku: result?.sku ?? item?.sku ?? null,
         status: result?.status ?? null,
         attempted: result?.attempted === true,
       });
+      if (freshCandidateSet.has(item) && result?.attempted === true) {
+        eligibleFreshAttemptCount += 1;
+      }
       if (activeValidationOnly
         && result.attempted
         && ["deferred", "failed"].includes(result.status)) {
@@ -4408,7 +4434,7 @@ export function createPublishRunner({
       task = (async () => {
         try {
           const result = await handleCandidate(item, schedulerControl);
-          recordCandidateResult(item, result);
+          await recordCandidateResult(item, result);
         } catch (error) {
           cancelDirectRun(error, schedulerControl);
         } finally {
@@ -4584,10 +4610,38 @@ export function createPublishRunner({
 
     if (!haltReason && freshSubmissionsPaused && initialPauseReason) haltReason = initialPauseReason;
 
-    reportProgress({
+    const finalDailyWindow = dailyWindowState({
+      now: now(),
+      timeZone: dailyStoreTimeZone,
+      cutoff: dailySubmissionCutoff,
+      reportAfter: dailyReportAfter,
+    });
+    const allStoresExhausted = activeDirectMode
+      && targetPlan.every((entry) => directRejectedStoreIds.has(Number(entry.id)));
+    const productiveBlockReason = !activeDirectMode
+      ? "not-direct-mode"
+      : reconciliationOnly
+        ? "reconciliation-only"
+        : activeValidationOnly
+          ? "validation-only"
+          : !finalDailyWindow.open || dailyWindowClosed
+            ? "submission-window-closed"
+            : allStoresExhausted
+              ? "all-stores-exhausted"
+              : freshSubmissionsPaused
+                ? String(haltReason || initialPauseReason || "fresh-submissions-paused")
+                : eligibleFreshAttemptCount <= 0
+                  ? "eligible-queue-empty"
+                  : null;
+    const productiveWatchEligible = productiveBlockReason === null;
+
+    await reportProgress({
       kind: "runner-completed",
       attempted,
       accepted: acceptedCount(),
+      eligible_backlog_count: eligibleFreshAttemptCount,
+      productive_watch_eligible: productiveWatchEligible,
+      productive_block_reason: productiveBlockReason,
     });
 
     return {
@@ -4598,6 +4652,10 @@ export function createPublishRunner({
       failed,
       skipped,
       attempted,
+      eligible_backlog_count: eligibleFreshAttemptCount,
+      queue_candidate_count: freshCandidates.length,
+      productive_watch_eligible: productiveWatchEligible,
+      productive_block_reason: productiveBlockReason,
       submitted_pending: submittedPending,
       dry_candidates: dryCandidates,
       final_concurrency: adaptive.current,
@@ -4612,12 +4670,7 @@ export function createPublishRunner({
       } : null,
       fresh_submissions_paused: freshSubmissionsPaused,
       daily_window_closed: dailyWindowClosed,
-      daily_submission_window: dailyWindowState({
-        now: now(),
-        timeZone: dailyStoreTimeZone,
-        cutoff: dailySubmissionCutoff,
-        reportAfter: dailyReportAfter,
-      }),
+      daily_submission_window: finalDailyWindow,
       active_store_id: Number(targetConfig?.store?.id || 0),
       store_switches: storeSwitches,
       store_submitted_usage: Object.fromEntries([...storeDailyUsage].map(([id, usage]) => [String(id), usage])),
