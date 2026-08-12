@@ -545,6 +545,75 @@ test("load idempotently projects missing submitted reservations to ERP accepted 
   });
 });
 
+test("load repairs a missing ERP accepted projection after reconciliation closes the submitted reservation", async () => {
+  await withTempDir(async (dir) => {
+    const runDir = path.join(dir, "run");
+    const dbPath = path.join(dir, "external-state", "runtime.sqlite");
+    const publishedCsv = path.join(dir, "published.csv");
+    const runtime = createRuntimeState({
+      dbPath,
+      ownerId: "closed-projection-publisher",
+      generationId: "closed-projection-generation",
+    });
+    assert.equal(runtime.reserveSubmission("closed-projection", {
+      reason: "submission-intent",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        offer_id: "mz-closed-projection",
+        api_call_attempts_total: 1,
+      },
+    }).recorded, true);
+    assert.equal(runtime.confirmSubmission("closed-projection", {
+      reason: "erp-submission-accepted",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        offer_id: "mz-closed-projection",
+        submitted: true,
+        api_call_completed_at: "2026-08-12T03:07:00.000Z",
+        api_call_attempts_total: 1,
+      },
+    }).recorded, true);
+    assert.equal(runtime.recordTerminalOutcome("closed-projection", {
+      reason: "background-online",
+      stage: "online",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        offer_id: "mz-closed-projection",
+        submitted: true,
+        api_call_completed_at: "2026-08-12T03:07:00.000Z",
+        api_call_attempts_total: 1,
+        outcome_status: "online",
+      },
+    }).recorded, true);
+    assert.equal(runtime.submissionReservation("closed-projection").status, "closed");
+    runtime.close();
+
+    const first = createPublishState({ runDir, publishedCsv, runtimeStateDbPath: dbPath });
+    await first.load();
+    assert.deepEqual(first.erpAcceptedAuditReconciliation(), { submitted: 1, added: 1 });
+    await first.close();
+    const second = createPublishState({ runDir, publishedCsv, runtimeStateDbPath: dbPath });
+    await second.load();
+    assert.deepEqual(second.erpAcceptedAuditReconciliation(), { submitted: 1, added: 0 });
+    await second.close();
+
+    const acceptedRows = (await fs.readFile(path.join(runDir, "erp_accepted.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.deepEqual(acceptedRows, [{
+      at: "2026-08-12T03:07:00.000Z",
+      sku: "closed-projection",
+      store_id: 106637,
+      accepted_at: "2026-08-12T03:07:00.000Z",
+      offer_id: "mz-closed-projection",
+    }]);
+  });
+});
+
 test("SQLite-backed strict publication rejects weakened quality evidence before writing compatibility files", async () => {
   await withTempDir(async (dir) => {
     const runDir = path.join(dir, "run");

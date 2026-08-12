@@ -1461,7 +1461,14 @@ export function createRuntimeState({
   const selectSubmittedReservationsForRun = database.prepare(`
     SELECT *
     FROM submission_reservations
-    WHERE status = 'submitted'
+    WHERE status IN ('submitted', 'closed')
+      AND json_type(data_json, '$.submitted') = 'true'
+      AND (
+        NULLIF(CAST(json_extract(data_json, '$.accepted_at') AS TEXT), '') IS NOT NULL
+        OR NULLIF(CAST(json_extract(data_json, '$.api_call_completed_at') AS TEXT), '') IS NOT NULL
+        OR NULLIF(CAST(json_extract(data_json, '$.api_call_accepted_at') AS TEXT), '') IS NOT NULL
+        OR NULLIF(CAST(json_extract(data_json, '$.submitted_at') AS TEXT), '') IS NOT NULL
+      )
       AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
     ORDER BY updated_at, sku
   `);
