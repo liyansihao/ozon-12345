@@ -12,6 +12,10 @@ import {
   isOzonCaptchaText,
   ozonAccessControllerFor,
 } from "./ozon-access-controller.mjs";
+import {
+  createStrictSourceFeedbackWatcher,
+  loadRuntimeSourceYieldIndex,
+} from "./source-yield-index.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const DEFAULT_SOURCE_YIELD_HISTORY = path.resolve(import.meta.dirname, "../../data/flow_b/source_yield_history.jsonl");
@@ -804,7 +808,10 @@ export function sourceSampleStatsFromEvents(events = []) {
       stats.set(key, { attempted: 0, nonPureFbs: 0, favorited: 0 });
       continue;
     }
-    stats.set(key, nextSourceSampleStats(stats.get(key), event));
+    const repeats = Math.max(1, Math.floor(Number(event?.__runtime_repeat_count) || 1));
+    let value = stats.get(key);
+    for (let count = 0; count < repeats; count += 1) value = nextSourceSampleStats(value, event);
+    stats.set(key, value);
   }
   return stats;
 }
@@ -1184,12 +1191,7 @@ export function normalizeRuntimeSourceYieldRows(rows = []) {
 }
 
 export async function loadRuntimeSourceYieldRows(filenames = []) {
-  const rows = [];
-  for (const filename of filenames || []) {
-    const normalized = normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(filename));
-    for (const row of normalized) rows.push(row);
-  }
-  return rows;
+  return (await loadRuntimeSourceYieldIndex(filenames)).rows;
 }
 
 export function sourceCollectionBlockKey(value) {
@@ -3472,11 +3474,15 @@ export async function scanSources({
     ...String(env.FLOW_B_SOURCE_YIELD_SEED_FILES || "").split(path.delimiter).filter(Boolean),
     ...String(env.FLOW_B_FAVORITE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
   ].map((value) => path.resolve(value)))];
-  const yieldRows = await loadRuntimeSourceYieldRows(yieldFiles);
+  const yieldIndex = await loadRuntimeSourceYieldIndex(yieldFiles, {
+    indexFile: path.join(path.dirname(outputPath), ".source-yield-runtime-index-v1.json"),
+  });
+  const yieldRows = yieldIndex.rows;
   const liveYieldFile = path.join(path.dirname(outputPath), "source_yield.jsonl");
-  const strictFeedbackBaseline = strictSourceFeedbackKeys(normalizeRuntimeSourceYieldRows(
-    await readJsonLinesIncremental(liveYieldFile),
-  ));
+  const strictFeedbackWatcher = createStrictSourceFeedbackWatcher(
+    liveYieldFile,
+    yieldIndex.files.get(path.resolve(liveYieldFile)),
+  );
   const productiveSourceSampleKeys = new Set(yieldRows
     .filter((row) => ["favorited", "submitted", "published"].includes(String(row?.status || "")))
     .map((row) => sourceNonFbsSampleKey(row?.source_url))
@@ -4074,10 +4080,7 @@ export async function scanSources({
           adaptiveWorkers.recordSuccess();
         }
       }
-      const strictFeedbackChangedBeforeCollection = hasNewStrictSourceFeedback(
-        strictFeedbackBaseline,
-        normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(liveYieldFile)),
-      );
+      const strictFeedbackChangedBeforeCollection = await strictFeedbackWatcher.hasChanged();
       if (sourceBatchPrefetchAllowed({
         sourceBlocked: sourceGloballyBlocked,
         deadlineReached: isCollectionDeadlineReached(env),
@@ -4193,10 +4196,7 @@ export async function scanSources({
       if (favoriteAfter !== null && favoriteAfter >= targetFavorites) break;
       if (lowDeltaBatchLimit > 0 && lowDeltaBatches >= lowDeltaBatchLimit) break;
       const strictFeedbackChanged = strictFeedbackChangedBeforeCollection
-        || hasNewStrictSourceFeedback(
-          strictFeedbackBaseline,
-          normalizeRuntimeSourceYieldRows(await readJsonLinesIncremental(liveYieldFile)),
-        );
+        || await strictFeedbackWatcher.hasChanged();
       const sourceInputChanged = await fs.stat(inputPath).then((stat) => (
         `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}` !== inputRevision
       ));

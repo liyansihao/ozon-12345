@@ -199,3 +199,67 @@ test("discover enriches an existing pending SKU without clearing its retry windo
     reason: "ozon-soft-block",
   });
 });
+
+test("candidate queue sidecar preserves pending order and terminal dedup across warm starts", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-index-"));
+  const filename = path.join(dir, "candidate_queue.jsonl");
+  const indexFile = path.join(dir, "candidate-index.json");
+  const seeded = createCandidateQueue(filename, { indexFile });
+  await seeded.load();
+  await seeded.discover([card("100"), card("200"), card("300")]);
+  await seeded.transition("100", "favorited", { oversized_debug_payload: "x".repeat(100_000) });
+  await seeded.transition("200", "rejected", { reason: "non-pure-fbs" });
+  await seeded.transition("300", "deferred", { retry_at: "2026-07-17T12:10:00.000Z" });
+
+  const rebuilt = createCandidateQueue(filename, { indexFile });
+  await rebuilt.load();
+  assert.equal(rebuilt.indexStats().rebuilt, true);
+  assert.deepEqual(rebuilt.pending({ nowMs: Date.parse("2026-07-17T12:10:00.000Z") }).map((row) => row.sku), ["300"]);
+  assert.equal(await rebuilt.discover([card("100"), card("200")]), 0, "terminal SKUs remain final");
+  const sidecar = JSON.parse(await fs.readFile(indexFile, "utf8"));
+  assert.equal(sidecar.version, "candidate-queue-index-v1");
+  assert.deepEqual(sidecar.entries.map((entry) => entry.row.sku), ["100", "200", "300"]);
+  assert.equal(sidecar.entries.find((entry) => entry.row.sku === "100").row.oversized_debug_payload, undefined);
+
+  const warm = createCandidateQueue(filename, { indexFile });
+  await warm.load();
+  assert.deepEqual(warm.indexStats(), { rebuilt: false, appended_bytes: 0 });
+  assert.deepEqual(warm.stats(), rebuilt.stats());
+});
+
+test("candidate queue sidecar replays append bytes and safely rebuilds after a half-line or truncate", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-candidate-queue-index-recovery-"));
+  const filename = path.join(dir, "candidate_queue.jsonl");
+  const indexFile = path.join(dir, "candidate-index.json");
+  const queue = createCandidateQueue(filename, { indexFile });
+  await queue.load();
+  await queue.discover([card("100")]);
+
+  const first = createCandidateQueue(filename, { indexFile });
+  await first.load();
+  assert.equal(first.indexStats().rebuilt, true);
+  const appendedRow = { ...card("200"), at: "2026-07-17T12:00:00.000Z", status: "discovered", sku: "200" };
+  const payload = `${JSON.stringify(appendedRow)}\n`;
+  await fs.appendFile(filename, payload);
+  const appended = createCandidateQueue(filename, { indexFile });
+  await appended.load();
+  assert.deepEqual(appended.indexStats(), { rebuilt: false, appended_bytes: Buffer.byteLength(payload) });
+  assert.deepEqual(appended.pending().map((row) => row.sku), ["100", "200"]);
+
+  await fs.appendFile(filename, '{"sku":"300"');
+  const halfLine = createCandidateQueue(filename, { indexFile });
+  await halfLine.load();
+  assert.equal(halfLine.indexStats().rebuilt, false);
+  assert.deepEqual(halfLine.pending().map((row) => row.sku), ["100", "200"]);
+  await fs.appendFile(filename, ',"status":"discovered","href":"https://www.ozon.ru/product/sample-300/"}\n');
+  const completed = createCandidateQueue(filename, { indexFile });
+  await completed.load();
+  assert.equal(completed.indexStats().rebuilt, true);
+  assert.deepEqual(completed.pending().map((row) => row.sku), ["100", "200", "300"]);
+
+  await fs.writeFile(filename, `${JSON.stringify(appendedRow)}\n`);
+  const truncated = createCandidateQueue(filename, { indexFile });
+  await truncated.load();
+  assert.equal(truncated.indexStats().rebuilt, true);
+  assert.deepEqual(truncated.pending().map((row) => row.sku), ["200"]);
+});
