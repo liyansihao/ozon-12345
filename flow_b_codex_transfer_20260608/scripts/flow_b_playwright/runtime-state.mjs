@@ -26,7 +26,8 @@ const OPERATIONAL_TERMINAL_DATA_INDEX = "sku_state_operational_terminal_data";
 const OPERATIONAL_PAYLOAD_TABLE = "sku_state_operational_payloads";
 const OPERATIONAL_PAYLOAD_FORMAT_METADATA_KEY = "operational_payload_format_version";
 const OPERATIONAL_PAYLOAD_FORMAT_VERSION = "2";
-const ACCEPTED_AUDIT_RESERVATION_INDEX = "submission_reservations_accepted_audit_by_run";
+const LEGACY_ACCEPTED_AUDIT_RESERVATION_INDEX = "submission_reservations_accepted_audit_by_run";
+const ACCEPTED_AUDIT_RESERVATION_INDEX = "submission_reservations_accepted_audit_by_run_v2";
 const ACCEPTED_AUDIT_RUN_DIR_SQL = "CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT)";
 const ACCEPTED_AUDIT_TIMESTAMP_SQL = `
   COALESCE(
@@ -1255,13 +1256,14 @@ export function createRuntimeState({
         )
       ) STRICT;
 
+      DROP INDEX IF EXISTS ${LEGACY_ACCEPTED_AUDIT_RESERVATION_INDEX};
+
       CREATE INDEX IF NOT EXISTS ${ACCEPTED_AUDIT_RESERVATION_INDEX}
       ON submission_reservations (
         ${ACCEPTED_AUDIT_RUN_DIR_SQL},
-        updated_at,
+        (${ACCEPTED_AUDIT_TIMESTAMP_SQL}),
         sku,
         CAST(json_extract(data_json, '$.store_id') AS INTEGER),
-        (${ACCEPTED_AUDIT_TIMESTAMP_SQL}),
         json_extract(data_json, '$.offer_id'),
         json_extract(data_json, '$.at')
       )
@@ -1495,14 +1497,14 @@ export function createRuntimeState({
     FROM submission_reservations INDEXED BY ${ACCEPTED_AUDIT_RESERVATION_INDEX}
     WHERE ${ACCEPTED_AUDIT_PREDICATE_SQL}
       AND ${ACCEPTED_AUDIT_RUN_DIR_SQL} = ?
-    ORDER BY updated_at, sku
+    ORDER BY (${ACCEPTED_AUDIT_TIMESTAMP_SQL}), sku
   `);
   const selectSubmittedReservationsForRun = database.prepare(`
     SELECT *
     FROM submission_reservations INDEXED BY ${ACCEPTED_AUDIT_RESERVATION_INDEX}
     WHERE ${ACCEPTED_AUDIT_PREDICATE_SQL}
       AND ${ACCEPTED_AUDIT_RUN_DIR_SQL} = ?
-    ORDER BY updated_at, sku
+    ORDER BY (${ACCEPTED_AUDIT_TIMESTAMP_SQL}), sku
   `);
   const selectActiveTitleReservation = database.prepare(`
     SELECT sku, owner_id, generation_id, status

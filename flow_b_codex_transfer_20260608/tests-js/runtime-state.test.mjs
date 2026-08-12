@@ -333,6 +333,9 @@ test("accepted audit repair uses a compact indexed projection and excludes uncer
       dbPath,
       ownerId: "accepted-audit-owner",
       generationId: "accepted-audit-generation",
+      // Force every mutable updated_at value to collide. Accepted audit order
+      // must follow the durable acceptance timestamp, with SKU as its tie-break.
+      now: () => new Date("2026-08-12T03:10:00.000Z"),
     });
 
     const accept = (sku, targetRunDir, acceptedAt) => {
@@ -367,6 +370,8 @@ test("accepted audit repair uses a compact indexed projection and excludes uncer
       data: { outcome_status: "online" },
     }).recorded, true);
     accept("accepted-other-run", otherRunDir, "2026-08-12T03:02:00.000Z");
+    accept("accepted-same-b", runDir, "2026-08-12T03:03:00.000Z");
+    accept("accepted-same-a", runDir, "2026-08-12T03:03:00.000Z");
 
     assert.equal(state.reserveSubmission("uncertain-closed", {
       reason: "submission-intent",
@@ -399,11 +404,25 @@ test("accepted audit repair uses a compact indexed projection and excludes uncer
           offer_id: "mz-accepted-closed",
           at: "2026-08-12T03:01:00.000Z",
         },
+        {
+          sku: "accepted-same-a",
+          store_id: 106637,
+          accepted_at: "2026-08-12T03:03:00.000Z",
+          offer_id: "mz-accepted-same-a",
+          at: "2026-08-12T03:03:00.000Z",
+        },
+        {
+          sku: "accepted-same-b",
+          store_id: 106637,
+          accepted_at: "2026-08-12T03:03:00.000Z",
+          offer_id: "mz-accepted-same-b",
+          at: "2026-08-12T03:03:00.000Z",
+        },
       ],
     );
     assert.deepEqual(
       state.submittedReservations(runDir).map((row) => row.sku),
-      ["accepted-open", "accepted-closed"],
+      ["accepted-open", "accepted-closed", "accepted-same-a", "accepted-same-b"],
     );
     assert.equal(state.submissionReservation("uncertain-closed").data.submitted, false);
     state.close();
@@ -423,7 +442,7 @@ test("accepted audit repair uses a compact indexed projection and excludes uncer
           ) AS accepted_at,
           json_extract(data_json, '$.offer_id') AS offer_id,
           json_extract(data_json, '$.at') AS at
-        FROM submission_reservations INDEXED BY submission_reservations_accepted_audit_by_run
+        FROM submission_reservations INDEXED BY submission_reservations_accepted_audit_by_run_v2
         WHERE status IN ('submitted', 'closed')
           AND json_type(data_json, '$.submitted') = 'true'
           AND COALESCE(
@@ -433,11 +452,16 @@ test("accepted audit repair uses a compact indexed projection and excludes uncer
             NULLIF(CAST(json_extract(data_json, '$.submitted_at') AS TEXT), '')
           ) IS NOT NULL
           AND CAST(json_extract(data_json, '$.runtime_run_dir') AS TEXT) = ?
-        ORDER BY updated_at, sku
+        ORDER BY COALESCE(
+          NULLIF(CAST(json_extract(data_json, '$.accepted_at') AS TEXT), ''),
+          NULLIF(CAST(json_extract(data_json, '$.api_call_completed_at') AS TEXT), ''),
+          NULLIF(CAST(json_extract(data_json, '$.api_call_accepted_at') AS TEXT), ''),
+          NULLIF(CAST(json_extract(data_json, '$.submitted_at') AS TEXT), '')
+        ), sku
       `).all(runDir).map((row) => String(row.detail)).join("\n");
       assert.match(
         plan,
-        /SEARCH submission_reservations USING INDEX submission_reservations_accepted_audit_by_run/u,
+        /SEARCH submission_reservations USING INDEX submission_reservations_accepted_audit_by_run_v2/u,
       );
       assert.doesNotMatch(plan, /SCAN submission_reservations/u);
       assert.doesNotMatch(plan, /USE TEMP B-TREE/u);
