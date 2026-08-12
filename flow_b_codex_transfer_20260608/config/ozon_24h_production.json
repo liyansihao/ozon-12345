@@ -83,7 +83,7 @@
     "start_timeout_ms": 60000,
     "cdp_health_interval_ms": 15000,
     "cdp_health_timeout_ms": 3000,
-    "cdp_health_failure_threshold": 2,
+    "cdp_health_failure_threshold": 6,
     "disk_cache_size_bytes": 104857600,
     "media_cache_size_bytes": 52428800,
     "no_proxy_server": false
