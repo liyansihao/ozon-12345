@@ -4979,6 +4979,43 @@ test("direct mode counts ERP acceptance and does not wait for import or online c
   }
 });
 
+test("direct startup counts restored pending acceptances without per-SKU state reads", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-direct-restored-snapshot-"));
+  try {
+    const state = fakeState({
+      "restored-published": {
+        status: "published",
+        data: { runtime_run_dir: runDir },
+      },
+      "restored-pending": {
+        status: "processing",
+        data: {
+          runtime_run_dir: runDir,
+          submitted: true,
+          submission_pending: false,
+        },
+      },
+    });
+    state.entryOf = () => {
+      throw new Error("startup restored acceptance counting must use its snapshot");
+    };
+
+    const result = await createPublishRunner({
+      client: clientFor([]),
+      costBridge: { estimate: async () => ({ ...RELIABLE_COST_RESULT }) },
+      state,
+      target: 2,
+      runDir,
+      directMode: true,
+    }).run();
+
+    assert.equal(result.accepted, 2);
+    assert.equal(result.submitted_pending, 1);
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
+});
+
 test("profit safety zero gate records a shadow REJECT without changing direct publication", async () => {
   const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-profit-gate-shadow-"));
   try {

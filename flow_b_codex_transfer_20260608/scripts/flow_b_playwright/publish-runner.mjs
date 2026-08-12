@@ -2703,6 +2703,7 @@ export function createPublishRunner({
     const gate = await activeSubmissionGate();
     const allowedSkus = activeValidationOnly ? null : gate.allowed_skus;
     const restoredEntries = typeof state.entries === "function" ? state.entries() : [];
+    const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
     const restoredValidatedSkus = new Set();
     const rejectedValidationSkus = new Set();
     const validationTransientAttempts = new Map();
@@ -3328,7 +3329,6 @@ export function createPublishRunner({
       storeSwitches.at(-1)?.reason || initialPauseReason || "active",
     );
     const facts = await loadCandidateFacts(runDir, candidateFactSeedFiles);
-    const restoredBySku = new Map(restoredEntries.map((entry) => [String(entry.sku), entry]));
     const listedFavorites = await client.listFavorites();
     for (const item of listedFavorites.filter((row) => !String(row?.sku ?? row?.id ?? "").trim())) {
       recordMetric("source_yield.jsonl", {
@@ -3468,7 +3468,7 @@ export function createPublishRunner({
     let skipped = 0;
     let attempted = 0;
     let submittedPending = activeDirectMode
-      ? [...acceptedSkus].filter((sku) => state.entryOf?.(sku)?.status !== "published").length
+      ? [...acceptedSkus].filter((sku) => restoredBySku.get(sku)?.status !== "published").length
       : 0;
     let dryCandidates = 0;
     let validated = 0;
