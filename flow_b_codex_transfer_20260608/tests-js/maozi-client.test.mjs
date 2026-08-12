@@ -430,12 +430,57 @@ test("client deletes a favorite through the plugin toggle contract", async () =>
           },
           status: false,
         },
+        transportMode: "context",
+        timeoutMs: 10_000,
       });
       return { status: 200, json: { code: 1, msg: "取消收藏成功", data: [] } };
     },
   });
   const client = createMaoziClient({ transport });
   assert.equal(await client.deleteFavorite({ sku: 123, cover_image: "cover.jpg", sell_price: 19.9, title: "sample" }), true);
+});
+
+test("favorite deletion uses one bounded context POST without page-fetch fallback", async () => {
+  let identityCalls = 0;
+  let contextCalls = 0;
+  const page = {
+    evaluate: async (_fn, request) => {
+      assert.equal(request, undefined, "favorite deletion must not execute fetch inside the page");
+      identityCalls += 1;
+      return { token: "favorite-token", userAgent: "Chrome Favorite Agent" };
+    },
+  };
+  const context = {
+    request: {
+      fetch: async (url, options) => {
+        contextCalls += 1;
+        assert.equal(url, "https://api.maozierp.com/api.product.favorite/toggle");
+        assert.equal(options.method, "POST");
+        assert.equal(options.timeout, 10_000);
+        assert.equal(options.headers.Authorization, "Bearer favorite-token");
+        assert.deepEqual(options.data, {
+          productInfo: {
+            sku: "456",
+            coverImage: null,
+            price_info: { sell_price: 9.9, currency: "CNY" },
+            title: "bounded cleanup",
+          },
+          status: false,
+        });
+        return {
+          status: () => 200,
+          text: async () => JSON.stringify({ code: 1, msg: "ok", data: [] }),
+        };
+      },
+    },
+  };
+  const client = createMaoziClient({
+    transport: createMaoziPageTransport({ page, context }),
+  });
+
+  assert.equal(await client.deleteFavorite({ sku: 456, sell_price: 9.9, title: "bounded cleanup" }), true);
+  assert.equal(identityCalls, 1);
+  assert.equal(contextCalls, 1);
 });
 
 test("client finds published SKUs through the favorites endpoint", async () => {

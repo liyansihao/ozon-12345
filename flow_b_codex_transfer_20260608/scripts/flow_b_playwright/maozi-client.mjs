@@ -356,6 +356,8 @@ export function createMaoziClient({ transport }) {
       requireSuccess(await transport(ENDPOINTS.favoriteToggle, {
         method: "POST",
         body: { productInfo, status: false },
+        transportMode: "context",
+        timeoutMs: 10_000,
       }), "favorite deletion");
       return true;
     },
@@ -510,7 +512,20 @@ export function createMaoziPageTransport({
       httpZeroRecovery = null;
     }
   };
-  return async (endpoint, { method = "GET", query, body } = {}) => {
+  return async (endpoint, {
+    method = "GET",
+    query,
+    body,
+    transportMode = "page",
+    timeoutMs = configuredRequestTimeoutMs,
+  } = {}) => {
+    if (!["page", "context"].includes(String(transportMode))) {
+      throw new TypeError("transportMode must be page or context");
+    }
+    const activeRequestTimeoutMs = Math.min(
+      configuredRequestTimeoutMs,
+      positiveMilliseconds(timeoutMs, configuredRequestTimeoutMs),
+    );
     const request = {
       baseUrl,
       endpoint,
@@ -533,7 +548,7 @@ export function createMaoziPageTransport({
       totalBudgetMs: configuredGetTotalBudgetMs,
     });
     const timeoutForPhase = (phase) => {
-      if (!isGet) return configuredRequestTimeoutMs;
+      if (!isGet) return activeRequestTimeoutMs;
       const remaining = remainingGetBudgetMs();
       if (!(remaining > 0)) throw getBudgetTimeout(phase);
       return Math.max(1, Math.min(configuredRequestTimeoutMs, remaining));
@@ -649,6 +664,13 @@ export function createMaoziPageTransport({
         json,
       };
     };
+    if (transportMode === "context") {
+      const result = await contextRequest(page);
+      if (!result) {
+        throw new Error(`authenticated context transport unavailable for ${request.method} ${request.endpoint}`);
+      }
+      return result;
+    }
     let lastError;
     let unauthorizedRetried = false;
     const attempts = isGet ? Math.max(1, Math.floor(Number(maxGetAttempts) || 1)) : 1;
