@@ -535,9 +535,11 @@ export function createMaoziPageTransport({
       headers: {},
     };
     const isGet = request.method === "GET";
-    const getDeadlineAt = isGet ? currentTimeMs() + configuredGetTotalBudgetMs : null;
+    const requestDeadlineAt = currentTimeMs() + (
+      isGet ? configuredGetTotalBudgetMs : activeRequestTimeoutMs
+    );
     const remainingGetBudgetMs = () => (
-      isGet ? Math.max(0, Math.ceil(getDeadlineAt - currentTimeMs())) : null
+      isGet ? Math.max(0, Math.ceil(requestDeadlineAt - currentTimeMs())) : null
     );
     const getBudgetTimeout = (phase) => maoziRequestTimeoutError({
       endpoint: request.endpoint,
@@ -548,8 +550,20 @@ export function createMaoziPageTransport({
       totalBudgetMs: configuredGetTotalBudgetMs,
     });
     const timeoutForPhase = (phase) => {
-      if (!isGet) return activeRequestTimeoutMs;
-      const remaining = remainingGetBudgetMs();
+      const remaining = Math.max(0, Math.ceil(requestDeadlineAt - currentTimeMs()));
+      if (!isGet) {
+        if (!(remaining > 0)) {
+          throw maoziRequestTimeoutError({
+            endpoint: request.endpoint,
+            method: request.method,
+            phase,
+            timeoutMs: activeRequestTimeoutMs,
+            scope: "request-total-budget",
+            totalBudgetMs: activeRequestTimeoutMs,
+          });
+        }
+        return Math.max(1, Math.min(activeRequestTimeoutMs, remaining));
+      }
       if (!(remaining > 0)) throw getBudgetTimeout(phase);
       return Math.max(1, Math.min(configuredRequestTimeoutMs, remaining));
     };
@@ -602,6 +616,9 @@ export function createMaoziPageTransport({
           return { token: "", userAgent: "" };
         }
       }), identityTimeoutMs, "context-identity");
+      if (!identity?.token && !isGet) {
+        throw new Error(`authenticated context token unavailable for ${request.method} ${request.endpoint}`);
+      }
       const url = new URL(request.endpoint, request.baseUrl);
       for (const [key, value] of Object.entries(request.query || {})) {
         for (const entry of Array.isArray(value) ? value : [value]) {

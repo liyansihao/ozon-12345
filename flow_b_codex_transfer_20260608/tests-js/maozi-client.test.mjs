@@ -483,6 +483,77 @@ test("favorite deletion uses one bounded context POST without page-fetch fallbac
   assert.equal(contextCalls, 1);
 });
 
+test("favorite deletion shares one ten-second budget across identity, POST, and response body", async () => {
+  const clock = createControlledClock();
+  let contextCalls = 0;
+  const delayed = (delayMs, value) => new Promise((resolve) => {
+    clock.scheduleTimeout(() => resolve(value), delayMs);
+  });
+  const page = {
+    evaluate: async () => delayed(3_000, {
+      token: "favorite-token",
+      userAgent: "Chrome Favorite Agent",
+    }),
+  };
+  const context = {
+    request: {
+      fetch: async (_url, options) => {
+        contextCalls += 1;
+        assert.equal(options.timeout, 7_000);
+        return delayed(4_000, {
+          status: () => 200,
+          text: async () => new Promise(() => {}),
+        });
+      },
+    },
+  };
+  const client = createMaoziClient({
+    transport: createMaoziPageTransport({
+      page,
+      context,
+      scheduleTimeout: clock.scheduleTimeout,
+      cancelTimeout: clock.cancelTimeout,
+      now: clock.now,
+    }),
+  });
+
+  await assert.rejects(
+    settleWithControlledClock(
+      client.deleteFavorite({ sku: 789, sell_price: 9.9, title: "one budget" }),
+      clock,
+    ),
+    (error) => error?.code === "MAOZI_REQUEST_TIMEOUT"
+      && error?.method === "POST"
+      && error?.phase === "context-response-body",
+  );
+  assert.equal(clock.now(), 10_000);
+  assert.equal(contextCalls, 1);
+});
+
+test("favorite deletion fails closed before POST when the authenticated token is absent", async () => {
+  let contextCalls = 0;
+  const page = {
+    evaluate: async () => ({ token: "", userAgent: "Chrome Favorite Agent" }),
+  };
+  const context = {
+    request: {
+      fetch: async () => {
+        contextCalls += 1;
+        throw new Error("unauthenticated favorite POST must not run");
+      },
+    },
+  };
+  const client = createMaoziClient({
+    transport: createMaoziPageTransport({ page, context }),
+  });
+
+  await assert.rejects(
+    client.deleteFavorite({ sku: 790, sell_price: 9.9, title: "no token" }),
+    /authenticated context token unavailable/,
+  );
+  assert.equal(contextCalls, 0);
+});
+
 test("client finds published SKUs through the favorites endpoint", async () => {
   const transport = makeTransport({
     "/api.product.favorite/lists": (path, request) => {
