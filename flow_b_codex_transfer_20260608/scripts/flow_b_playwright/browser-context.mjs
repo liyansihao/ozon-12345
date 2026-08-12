@@ -102,9 +102,13 @@ async function wakeRegisteredExtension(context, profileDir, extensionDir, extens
   const page = await context.newPage();
   try {
     await page.goto(`${extensionPrefix}${extensionPopup.replace(/^\/+/, "")}`, {
-      waitUntil: "domcontentloaded",
+      waitUntil: "commit",
       timeout: 10000,
     });
+    const committedUrl = targetUrl(page);
+    if (!committedUrl.startsWith(extensionPrefix)) {
+      throw new Error(`Maozi extension popup committed to an unexpected URL: ${committedUrl || "unknown"}`);
+    }
     return page;
   } catch (error) {
     await page.close().catch(() => {});
@@ -236,7 +240,15 @@ export async function pruneOrphanedFlowPages(context, {
   };
 }
 
-export async function assertPluginLoaded(context, { timeout = 15000, interval = 100 } = {}) {
+export async function assertPluginLoaded(context, {
+  timeout = 15000,
+  interval = 100,
+  extensionId = null,
+} = {}) {
+  const normalizedExtensionId = String(extensionId || "").trim();
+  const extensionPrefix = normalizedExtensionId
+    ? `chrome-extension://${normalizedExtensionId}/`
+    : "chrome-extension://";
   const deadline = Date.now() + Math.max(0, timeout);
   do {
     const targets = [
@@ -244,7 +256,7 @@ export async function assertPluginLoaded(context, { timeout = 15000, interval = 
       ...(typeof context.backgroundPages === "function" ? context.backgroundPages() : []),
       ...(typeof context.pages === "function" ? context.pages() : []),
     ];
-    const extensionTarget = targets.find((target) => targetUrl(target).startsWith("chrome-extension://"));
+    const extensionTarget = targets.find((target) => targetUrl(target).startsWith(extensionPrefix));
     if (extensionTarget) return extensionTarget;
     if (Date.now() >= deadline) break;
     await delay(Math.max(1, interval));
@@ -276,11 +288,18 @@ export async function launchFlowContext(options, browserType = chromium) {
     } else {
       context = await browserType.launchPersistentContext(profileDir, launchOptions);
     }
+    const extensionId = registeredExtensionId(profileDir, extensionDir);
+    if (cdpEndpoint && !extensionId) {
+      throw new Error("Maozi extension did not load in Chrome for Testing: registered extension ID was not found in the CDP profile");
+    }
     try {
-      await assertPluginLoaded(context, { timeout: cdpEndpoint ? Math.min(pluginTimeout, 1000) : pluginTimeout });
+      await assertPluginLoaded(context, {
+        timeout: cdpEndpoint ? Math.min(pluginTimeout, 1000) : pluginTimeout,
+        extensionId,
+      });
     } catch (error) {
       if (!cdpEndpoint || !await wakeRegisteredExtension(context, profileDir, extensionDir, extensionPopup)) throw error;
-      await assertPluginLoaded(context, { timeout: pluginTimeout });
+      await assertPluginLoaded(context, { timeout: pluginTimeout, extensionId });
     }
     return context;
   } catch (error) {

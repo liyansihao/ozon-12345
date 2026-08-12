@@ -1041,6 +1041,62 @@ test("browser and CDP failures recover the same run with bounded backoff", () =>
   );
 });
 
+test("Maozi extension startup failures recycle the browser without broad timeout matching", () => {
+  for (const message of [
+    "Maozi extension did not load in Chrome for Testing",
+    "Maozi extension popup committed to an unexpected URL: about:blank",
+    [
+      "page.goto: Timeout 10000ms exceeded.",
+      "Call log:",
+      "  - navigating to \"chrome-extension://kifocjelffhjimimdnjohjldolickjaa/popup.html\", waiting until \"domcontentloaded\"",
+    ].join("\n"),
+    [
+      "page.goto: Timeout 10000ms exceeded.",
+      "Call log:",
+      "  - navigating to \"chrome-extension://kifocjelffhjimimdnjohjldolickjaa/popup.html\", waiting until \"commit\"",
+    ].join("\n"),
+  ]) {
+    assert.deepEqual(classifyWorkerFailure({ message, profileOwnerCount: 1 }), {
+      action: "restart-browser-and-worker",
+      reason: "browser-or-network-recoverable",
+    });
+  }
+
+  for (const message of [
+    "page.goto: Timeout 10000ms exceeded while opening https://ozon.maozierp.com/",
+    [
+      "page.goto: Timeout 10000ms exceeded.",
+      "Call log:",
+      "  - navigating to \"chrome-extension://abcdefghijklmnop/popup.html\", waiting until \"commit\"",
+    ].join("\n"),
+    "an unrelated extension failed to load",
+  ]) {
+    assert.deepEqual(classifyWorkerFailure({ message, profileOwnerCount: 1 }), {
+      action: "restart-worker",
+      reason: "ordinary-worker-recoverable",
+    });
+  }
+});
+
+test("owner and security risks take priority over Maozi extension recovery", () => {
+  const popupTimeout = [
+    "page.goto: Timeout 10000ms exceeded.",
+    "Ozon CAPTCHA verification required",
+    "  - navigating to \"chrome-extension://kifocjelffhjimimdnjohjldolickjaa/popup.html\", waiting until \"commit\"",
+  ].join("\n");
+  assert.deepEqual(classifyWorkerFailure({ message: popupTimeout, profileOwnerCount: 1 }), {
+    action: "wait-for-verification",
+    reason: "security-verification-required",
+  });
+  assert.deepEqual(classifyWorkerFailure({
+    message: "Maozi extension did not load in Chrome for Testing",
+    profileOwnerCount: 2,
+  }), {
+    action: "fatal-stop",
+    reason: "duplicate-profile-owner-risk",
+  });
+});
+
 test("worker recovery ignores browser errors left by an earlier worker generation", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-worker-evidence-"));
   const errors = path.join(root, "runtime_errors.jsonl");

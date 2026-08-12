@@ -159,6 +159,11 @@ test("orphan pruning reads the page body before preserving an Ozon verification 
 
 test("browser context can attach to a normally launched CDP browser and owns its shutdown", async () => {
   const extensionDir = await extensionFixture();
+  const profileDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-attached-profile-"));
+  await fsp.mkdir(path.join(profileDir, "Default"), { recursive: true });
+  await fsp.writeFile(path.join(profileDir, "Default", "Preferences"), JSON.stringify({
+    extensions: { settings: { fixture: { path: extensionDir } } },
+  }));
   let endpoint = null;
   let persistentLaunches = 0;
   let browserCloses = 0;
@@ -180,7 +185,7 @@ test("browser context can attach to a normally launched CDP browser and owns its
     launchPersistentContext: async () => { persistentLaunches += 1; },
   };
   const options = resolveBrowserOptions({
-    FLOW_B_PW_PROFILE: "/tmp/profile",
+    FLOW_B_PW_PROFILE: profileDir,
     FLOW_B_EXTENSION_DIR: extensionDir,
     FLOW_B_CDP_ENDPOINT: "http://127.0.0.1:9223",
   }, "/tmp/cft");
@@ -194,6 +199,34 @@ test("browser context can attach to a normally launched CDP browser and owns its
   assert.equal(contextCloses, 0);
 });
 
+test("CDP attachment fails closed when the Maozi registration ID is unavailable", async () => {
+  const extensionDir = await extensionFixture();
+  const profileDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-unregistered-profile-"));
+  let browserCloses = 0;
+  const context = {
+    serviceWorkers: () => [{ url: () => "chrome-extension://unrelated/background.js" }],
+    backgroundPages: () => [],
+    pages: () => [],
+  };
+  const browserType = {
+    connectOverCDP: async () => ({
+      contexts: () => [context],
+      close: async () => { browserCloses += 1; },
+    }),
+  };
+  const options = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: profileDir,
+    FLOW_B_EXTENSION_DIR: extensionDir,
+    FLOW_B_CDP_ENDPOINT: "http://127.0.0.1:9223",
+  }, "/tmp/cft");
+
+  await assert.rejects(
+    launchFlowContext(options, browserType),
+    /registered extension ID was not found/i,
+  );
+  assert.equal(browserCloses, 1);
+});
+
 test("CDP attachment wakes an idle registered extension through its popup", async () => {
   const extensionDir = await extensionFixture();
   const profileDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-profile-"));
@@ -202,14 +235,15 @@ test("CDP attachment wakes an idle registered extension through its popup", asyn
     extensions: { settings: { abcdefghijklmnop: { path: extensionDir } } },
   }));
   let currentUrl = "about:blank";
+  let gotoOptions = null;
   const popup = {
     url: () => currentUrl,
-    goto: async (url) => { currentUrl = url; },
+    goto: async (url, options) => { currentUrl = url; gotoOptions = options; },
     close: async () => {},
   };
   const pages = [];
   const context = {
-    serviceWorkers: () => [],
+    serviceWorkers: () => [{ url: () => "chrome-extension://unrelated/background.js" }],
     backgroundPages: () => [],
     pages: () => pages,
     newPage: async () => {
@@ -232,6 +266,78 @@ test("CDP attachment wakes an idle registered extension through its popup", asyn
 
   assert.equal(await launchFlowContext(options, browserType), context);
   assert.equal(currentUrl, "chrome-extension://abcdefghijklmnop/popup.html");
+  assert.deepEqual(gotoOptions, { waitUntil: "commit", timeout: 10000 });
+});
+
+test("CDP extension wake rejects a popup that commits outside the registered extension", async () => {
+  const extensionDir = await extensionFixture();
+  const profileDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-wrong-popup-profile-"));
+  await fsp.mkdir(path.join(profileDir, "Default"), { recursive: true });
+  await fsp.writeFile(path.join(profileDir, "Default", "Preferences"), JSON.stringify({
+    extensions: { settings: { abcdefghijklmnop: { path: extensionDir } } },
+  }));
+  let closed = 0;
+  const popup = {
+    url: () => "https://example.com/not-the-extension",
+    goto: async () => {},
+    close: async () => { closed += 1; },
+  };
+  const context = {
+    serviceWorkers: () => [],
+    backgroundPages: () => [],
+    pages: () => [],
+    newPage: async () => popup,
+  };
+  const browserType = {
+    connectOverCDP: async () => ({ contexts: () => [context], close: async () => {} }),
+  };
+  const options = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: profileDir,
+    FLOW_B_EXTENSION_DIR: extensionDir,
+    FLOW_B_CDP_ENDPOINT: "http://127.0.0.1:9223",
+    FLOW_B_PLUGIN_TIMEOUT_MS: "5",
+  }, "/tmp/cft");
+
+  await assert.rejects(
+    launchFlowContext(options, browserType),
+    /Maozi extension popup committed to an unexpected URL: https:\/\/example\.com\/not-the-extension/,
+  );
+  assert.equal(closed, 1);
+});
+
+test("CDP extension wake still fails when no extension target becomes observable", async () => {
+  const extensionDir = await extensionFixture();
+  const profileDir = await fsp.mkdtemp(path.join(os.tmpdir(), "flow-b-missing-target-profile-"));
+  await fsp.mkdir(path.join(profileDir, "Default"), { recursive: true });
+  await fsp.writeFile(path.join(profileDir, "Default", "Preferences"), JSON.stringify({
+    extensions: { settings: { abcdefghijklmnop: { path: extensionDir } } },
+  }));
+  let currentUrl = "about:blank";
+  const popup = {
+    url: () => currentUrl,
+    goto: async (url) => { currentUrl = url; },
+    close: async () => {},
+  };
+  const context = {
+    serviceWorkers: () => [],
+    backgroundPages: () => [],
+    pages: () => [],
+    newPage: async () => popup,
+  };
+  const browserType = {
+    connectOverCDP: async () => ({ contexts: () => [context], close: async () => {} }),
+  };
+  const options = resolveBrowserOptions({
+    FLOW_B_PW_PROFILE: profileDir,
+    FLOW_B_EXTENSION_DIR: extensionDir,
+    FLOW_B_CDP_ENDPOINT: "http://127.0.0.1:9223",
+    FLOW_B_PLUGIN_TIMEOUT_MS: "5",
+  }, "/tmp/cft");
+
+  await assert.rejects(
+    launchFlowContext(options, browserType),
+    /Maozi extension did not load in Chrome for Testing/,
+  );
 });
 
 test("CDP attachment reads unpacked extension registration from Secure Preferences", async () => {
@@ -441,9 +547,16 @@ test("Maozi login requires a non-empty access token", async () => {
 
 test("plugin assertion accepts service workers and rejects a missing target", async () => {
   const worker = { url: () => "chrome-extension://abc/background.js" };
-  assert.equal(await assertPluginLoaded({ serviceWorkers: () => [worker], pages: () => [] }, { timeout: 20, interval: 1 }), worker);
+  const unrelated = { url: () => "chrome-extension://other/background.js" };
+  assert.equal(await assertPluginLoaded(
+    { serviceWorkers: () => [unrelated, worker], pages: () => [] },
+    { timeout: 20, interval: 1, extensionId: "abc" },
+  ), worker);
   await assert.rejects(
-    () => assertPluginLoaded({ serviceWorkers: () => [], pages: () => [] }, { timeout: 5, interval: 1 }),
+    () => assertPluginLoaded(
+      { serviceWorkers: () => [unrelated], pages: () => [] },
+      { timeout: 5, interval: 1, extensionId: "abc" },
+    ),
     /Maozi extension/i,
   );
 });

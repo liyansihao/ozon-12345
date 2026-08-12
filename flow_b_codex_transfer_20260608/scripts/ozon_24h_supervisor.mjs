@@ -43,6 +43,8 @@ const DEFAULT_INSTALL_ROOT = path.join(process.env.HOME || "/Users/mac", ".ozon-
 const PRODUCTION_STORE_IDS = [106637, 106640, 106644, 106646, 104965];
 const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|login required|sign[- ]?in required|安全检查|验证码|登录失效|需要登录|请登录/i;
 const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|connectOverCDP:\s*Timeout|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
+const MAOZI_EXTENSION_RECOVERY_RE = /Maozi extension (?:did not load in Chrome for Testing|popup committed to an unexpected URL)/i;
+const MAOZI_POPUP_GOTO_TIMEOUT_RE = /page\.goto:\s*Timeout 10000ms exceeded\.[\s\S]*navigating to ["']chrome-extension:\/\/kifocjelffhjimimdnjohjldolickjaa\/popup\.html["'][\s\S]*waiting until ["'](?:commit|domcontentloaded)["']/i;
 
 export { directWorkerHealthDecision };
 
@@ -188,7 +190,12 @@ export function classifyWorkerFailure({ message = "", profileOwnerCount = 0 } = 
   if (SECURITY_RE.test(text)) {
     return { action: "wait-for-verification", reason: "security-verification-required" };
   }
-  if (BROWSER_RECOVERY_RE.test(text) || Number(profileOwnerCount) === 0) {
+  if (
+    BROWSER_RECOVERY_RE.test(text)
+    || MAOZI_EXTENSION_RECOVERY_RE.test(text)
+    || MAOZI_POPUP_GOTO_TIMEOUT_RE.test(text)
+    || Number(profileOwnerCount) === 0
+  ) {
     return { action: "restart-browser-and-worker", reason: "browser-or-network-recoverable" };
   }
   return { action: "restart-worker", reason: "ordinary-worker-recoverable" };
