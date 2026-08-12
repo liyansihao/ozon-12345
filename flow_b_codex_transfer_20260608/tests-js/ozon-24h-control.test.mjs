@@ -297,6 +297,10 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.browser.existing_owner_grace_ms, 30_000);
   assert.equal(config.browser.cdp_health_timeout_ms, 10_000);
   assert.equal(config.browser.cdp_health_failure_threshold, 6);
+  assert.equal(config.flow_env.NODE_USE_ENV_PROXY, "1");
+  assert.equal(config.flow_env.HTTP_PROXY, "http://127.0.0.1:7897");
+  assert.equal(config.flow_env.HTTPS_PROXY, "http://127.0.0.1:7897");
+  assert.equal(config.flow_env.NO_PROXY, "127.0.0.1,localhost,::1");
   assert.equal(config.flow_env.FLOW_B_NO_PROXY_SERVER, "0");
   assert.deepEqual(config.direct_worker_watchdog, {
     enabled: true,

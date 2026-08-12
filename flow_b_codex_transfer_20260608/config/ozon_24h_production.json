@@ -169,6 +169,10 @@
     "fbs_history": "${STATE_ROOT}/history/fbs_source_history.jsonl"
   },
   "flow_env": {
+    "NODE_USE_ENV_PROXY": "1",
+    "HTTP_PROXY": "http://127.0.0.1:7897",
+    "HTTPS_PROXY": "http://127.0.0.1:7897",
+    "NO_PROXY": "127.0.0.1,localhost,::1",
     "FLOW_B_NO_PROXY_SERVER": "0",
     "FLOW_B_MAOZI_CONTINUE_LOGIN": "1",
     "FLOW_B_PUBLISHED_CSV": "${STATE_ROOT}/dedupe/published_links.csv",
