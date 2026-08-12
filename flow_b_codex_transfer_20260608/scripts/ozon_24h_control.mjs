@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 import { loadControlStatusIndex } from "./control-status-index.mjs";
 import { dailyWindowState } from "./daily-window.mjs";
+import { diskHealthSnapshot } from "./ozon-storage-maintenance.mjs";
 
 const execFileAsync = promisify(execFile);
 let supervisorModulePromise;
@@ -1891,6 +1892,20 @@ async function status(config) {
   const current = await readJson(path.join(paths.stateRoot, "current_run.json"), {});
   const operational = await readJson(path.join(paths.stateRoot, "operational_status.json"), {});
   const owners = await readJson(path.join(paths.stateRoot, "process_owners.json"), {});
+  const storageConfig = config?.storage_maintenance || {};
+  const storage = await diskHealthSnapshot({
+    stateRoot: paths.stateRoot,
+    warningFreeBytes: Number(storageConfig.warning_free_disk_kb || 10 * 1024 * 1024) * 1024,
+    criticalFreeBytes: Number(storageConfig.critical_free_disk_kb || 5 * 1024 * 1024) * 1024,
+    warningUsedPercent: Number(storageConfig.warning_used_percent || 95),
+    criticalUsedPercent: Number(storageConfig.critical_used_percent || 98),
+  }).catch((error) => ({
+    observed_at: new Date().toISOString(),
+    severity: "unknown",
+    alert: true,
+    reasons: ["storage-health-unavailable"],
+    error: shortText(error?.message || error, 160),
+  }));
   const actualOwners = await actualRuntimeOwnerCounts(config, current).catch(() => null);
   const effectiveOwners = effectiveRuntimeOwners(owners, actualOwners);
   const checkpoint = current?.run_dir
@@ -1997,6 +2012,7 @@ async function status(config) {
       by_store_run: byStoreRun,
       daily_submission_window: submissionWindow,
       daily_pricing_report: reportStatus,
+      storage,
       profit_learning: profitLearning,
       match_policy: {
         configured: matchPolicyState.configured_policy || config?.flow_env?.FLOW_B_1688_MATCH_POLICY || "shadow",
@@ -2052,6 +2068,7 @@ async function status(config) {
       },
       checkpoint,
     }),
+    storage,
     profit_learning: profitLearning,
   };
 }

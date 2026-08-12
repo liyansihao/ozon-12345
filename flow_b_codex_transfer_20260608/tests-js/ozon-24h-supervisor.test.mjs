@@ -34,6 +34,7 @@ import {
   processOwnershipDecision,
   processOwnershipSnapshot,
   productionRunContractDecision,
+  refreshStorageMaintenance,
   readAppendedTail,
   readWorkerGenerationEvidence,
   resolveProductionLayout,
@@ -57,6 +58,59 @@ import {
   waitForWorkerOrBrowserFailure,
   workerEnvironment,
 } from "../scripts/ozon_24h_supervisor.mjs";
+
+test("storage maintenance records threshold transitions and only cleans when explicitly due", async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-storage-supervisor-"));
+  const runDir = path.join(stateRoot, "runs", "run-1");
+  await fs.mkdir(runDir, { recursive: true });
+  let cleanupCalls = 0;
+  const snapshot = async () => ({
+    observed_at: "2026-08-13T00:00:00.000Z",
+    severity: "warning",
+    alert: true,
+    reasons: ["free-bytes-below-warning"],
+    available_bytes: 7 * 1024 ** 3,
+    used_percent: 97,
+  });
+  const cleanup = async ({ execute, minimumAgeMs }) => {
+    cleanupCalls += 1;
+    assert.equal(execute, true);
+    assert.equal(minimumAgeMs, 24 * 60 * 60 * 1000);
+    return { removed: [{ path: "old.tmp", size_bytes: 4096 }], removed_bytes: 4096 };
+  };
+  try {
+    const first = await refreshStorageMaintenance({
+      stateRoot,
+      runDir,
+      config: { storage_maintenance: { temporary_minimum_age_hours: 24 } },
+      allowCleanup: false,
+      cleanup,
+      snapshot,
+    });
+    assert.equal(first.severity, "warning");
+    assert.equal(cleanupCalls, 0);
+    const second = await refreshStorageMaintenance({
+      stateRoot,
+      runDir,
+      config: { storage_maintenance: { temporary_minimum_age_hours: 24 } },
+      allowCleanup: true,
+      cleanup,
+      snapshot,
+    });
+    assert.equal(cleanupCalls, 1);
+    assert.equal(second.automatic_cleanup.removed_bytes, 4096);
+    const status = JSON.parse(await fs.readFile(path.join(stateRoot, "storage_status.json"), "utf8"));
+    assert.equal(status.severity, "warning");
+    assert.equal(status.automatic_cleanup.removed_count, 1);
+    const alerts = (await fs.readFile(path.join(stateRoot, "storage_alerts.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.equal(alerts.length, 2);
+    assert.equal(alerts[0].previous_severity, null);
+    assert.equal(alerts[1].cleanup_removed_bytes, 4096);
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true });
+  }
+});
 
 const RELIABLE_COST = Object.freeze({
   cost_verified: true,

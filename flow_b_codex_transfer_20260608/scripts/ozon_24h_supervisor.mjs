@@ -35,6 +35,10 @@ import {
   reportOutputPath,
   writeReportState,
 } from "./daily-pricing-report.mjs";
+import {
+  cleanupStaleTemporaries,
+  diskHealthSnapshot,
+} from "./ozon-storage-maintenance.mjs";
 
 const execFileAsync = promisify(execFile);
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -1685,6 +1689,87 @@ async function updateOperationalState(stateRoot, currentRun, patch) {
   await appendJsonLine(path.join(stateRoot, "operational_history.jsonl"), event);
 }
 
+export async function refreshStorageMaintenance({
+  stateRoot,
+  runDir,
+  config = {},
+  allowCleanup = false,
+  cleanup = cleanupStaleTemporaries,
+  snapshot = diskHealthSnapshot,
+} = {}) {
+  if (!stateRoot) throw new TypeError("stateRoot is required");
+  const settings = config?.storage_maintenance || {};
+  const statusPath = path.join(stateRoot, "storage_status.json");
+  const previous = await readJson(statusPath, {});
+  let health = await snapshot({
+    stateRoot,
+    warningFreeBytes: Number(settings.warning_free_disk_kb || 10 * 1024 * 1024) * 1024,
+    criticalFreeBytes: Number(settings.critical_free_disk_kb || 5 * 1024 * 1024) * 1024,
+    warningUsedPercent: Number(settings.warning_used_percent || 95),
+    criticalUsedPercent: Number(settings.critical_used_percent || 98),
+  });
+  let cleanupResult = null;
+  if (
+    allowCleanup
+    && health.alert
+    && settings.automatic_temporary_cleanup_enabled !== false
+  ) {
+    try {
+      cleanupResult = await cleanup({
+        stateRoot,
+        runDir,
+        execute: true,
+        minimumAgeMs: Math.max(
+          60 * 60 * 1000,
+          Number(settings.temporary_minimum_age_hours || 24) * 60 * 60 * 1000,
+        ),
+      });
+      if (Number(cleanupResult?.removed_bytes || 0) > 0) {
+        health = await snapshot({
+          stateRoot,
+          warningFreeBytes: Number(settings.warning_free_disk_kb || 10 * 1024 * 1024) * 1024,
+          criticalFreeBytes: Number(settings.critical_free_disk_kb || 5 * 1024 * 1024) * 1024,
+          warningUsedPercent: Number(settings.warning_used_percent || 95),
+          criticalUsedPercent: Number(settings.critical_used_percent || 98),
+        });
+      }
+    } catch (error) {
+      cleanupResult = {
+        error: String(error?.message || error),
+        removed_bytes: 0,
+      };
+    }
+  }
+  const value = {
+    ...health,
+    automatic_cleanup: cleanupResult
+      ? {
+          attempted_at: new Date().toISOString(),
+          removed_count: Number(cleanupResult?.removed?.length || 0),
+          removed_bytes: Number(cleanupResult?.removed_bytes || 0),
+          error: cleanupResult?.error || null,
+        }
+      : (previous?.automatic_cleanup || null),
+  };
+  await writeJsonAtomic(statusPath, value);
+  if (
+    String(previous?.severity || "unknown") !== String(value.severity)
+    || (cleanupResult && Number(cleanupResult?.removed_bytes || 0) > 0)
+  ) {
+    await appendJsonLine(path.join(stateRoot, "storage_alerts.jsonl"), {
+      at: value.observed_at,
+      action: "storage-health-transition",
+      previous_severity: previous?.severity || null,
+      severity: value.severity,
+      reasons: value.reasons,
+      available_bytes: value.available_bytes,
+      used_percent: value.used_percent,
+      cleanup_removed_bytes: Number(cleanupResult?.removed_bytes || 0),
+    });
+  }
+  return value;
+}
+
 async function acceptanceEnded(runDir) {
   const window = await readJson(path.join(runDir, "acceptance_window.json"), {});
   const endedAt = Date.parse(window?.ended_at || "");
@@ -2930,7 +3015,10 @@ async function superviseDirectPublishing({
   let restartAttempt = 0;
   let reportTimer = null;
   let sourceRefreshTimer = null;
+  let storageTimer = null;
   let sourceRefreshRunning = false;
+  let storageRefreshRunning = false;
+  let lastStorageCleanupAttemptAt = 0;
   const watchdogConfig = {
     enabled: config.direct_worker_watchdog?.enabled !== false,
     errorThreshold: Math.max(
@@ -3013,6 +3101,27 @@ async function superviseDirectPublishing({
       }).catch(() => {});
     }
   };
+  const storagePoll = async ({ allowCleanup = false } = {}) => {
+    if (storageRefreshRunning || shuttingDown) return null;
+    storageRefreshRunning = true;
+    try {
+      return await refreshStorageMaintenance({
+        stateRoot,
+        runDir,
+        config,
+        allowCleanup,
+      });
+    } catch (error) {
+      await appendJsonLine(path.join(stateRoot, "storage_alerts.jsonl"), {
+        at: new Date().toISOString(),
+        action: "storage-health-check-failed",
+        error: String(error?.message || error),
+      }).catch(() => {});
+      return null;
+    } finally {
+      storageRefreshRunning = false;
+    }
+  };
   const stopWorker = async () => {
     await stopOwnedWorker(worker);
     worker = null;
@@ -3026,6 +3135,23 @@ async function superviseDirectPublishing({
   process.on("SIGHUP", onSignal);
   try {
     await fsp.mkdir(runDir, { recursive: true });
+    const startupStorage = await storagePoll();
+    const storageScanIntervalMs = Math.max(
+      60_000,
+      Number(config.storage_maintenance?.scan_interval_seconds || 300) * 1000,
+    );
+    const storageCleanupIntervalMs = Math.max(
+      60 * 60_000,
+      Number(config.storage_maintenance?.cleanup_interval_seconds || 21_600) * 1000,
+    );
+    const persistedCleanupAt = Date.parse(startupStorage?.automatic_cleanup?.attempted_at || "");
+    if (Number.isFinite(persistedCleanupAt)) lastStorageCleanupAttemptAt = persistedCleanupAt;
+    storageTimer = setInterval(() => {
+      const allowCleanup = Date.now() - lastStorageCleanupAttemptAt >= storageCleanupIntervalMs;
+      if (allowCleanup) lastStorageCleanupAttemptAt = Date.now();
+      void storagePoll({ allowCleanup });
+    }, storageScanIntervalMs);
+    storageTimer.unref();
     await refreshSources();
     const sourceRefreshIntervalMs = Math.max(
       60_000,
@@ -3384,6 +3510,7 @@ async function superviseDirectPublishing({
   } finally {
     if (reportTimer) clearInterval(reportTimer);
     if (sourceRefreshTimer) clearInterval(sourceRefreshTimer);
+    if (storageTimer) clearInterval(storageTimer);
     process.off("SIGTERM", onSignal);
     process.off("SIGINT", onSignal);
     process.off("SIGHUP", onSignal);

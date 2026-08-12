@@ -75,6 +75,17 @@
     "warmup_interval_ms": 8000
   },
   "minimum_free_disk_kb": 5242880,
+  "storage_maintenance": {
+    "warning_free_disk_kb": 10485760,
+    "critical_free_disk_kb": 5242880,
+    "warning_used_percent": 95,
+    "critical_used_percent": 98,
+    "scan_interval_seconds": 300,
+    "cleanup_interval_seconds": 21600,
+    "temporary_minimum_age_hours": 24,
+    "automatic_temporary_cleanup_enabled": true,
+    "database_event_pruning_enabled": false
+  },
   "browser": {
     "cdp_endpoint": "http://127.0.0.1:9223",
     "executable": "${HOME}/.ozon-24h-production/browser/playwright-1.62.0/chromium-1234/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",

@@ -1,5 +1,7 @@
 # Ozon 十店直接上架生产手册
 
+磁盘阈值、校验归档、临时文件治理、恢复演练与数据库禁止在线裁剪的契约见 [OZON_STORAGE_RETENTION_RUNBOOK.md](./OZON_STORAGE_RETENTION_RUNBOOK.md)。
+
 ## 桌面控制面板（推荐）
 
 桌面上的 `Ozon上品控制.app` 是现有生产控制脚本的原生 macOS 中文面板。双击即可查看和控制，不需要打开 Codex 或终端。它不会修改选品、1688 同款判断、利润率、店铺轮换、SKU 去重或生产状态数据库。
