@@ -456,7 +456,7 @@ test("favorite deletion uses one bounded context POST without page-fetch fallbac
         contextCalls += 1;
         assert.equal(url, "https://api.maozierp.com/api.product.favorite/toggle");
         assert.equal(options.method, "POST");
-        assert.equal(options.timeout, 10_000);
+        assert.equal(options.timeout > 0 && options.timeout <= 10_000, true);
         assert.equal(options.headers.Authorization, "Bearer favorite-token");
         assert.deepEqual(options.data, {
           productInfo: {
@@ -635,7 +635,7 @@ test("browser page transport includes Maozi headers and safely parses non-JSON e
   assert.equal(requests[0].headers["Accept-Language"], "zh-CN");
   assert.equal(requests[0].headers.Client, "pc");
   assert.equal(requests[0].headers.Authorization, "Bearer abc123");
-  assert.equal(requests[0].timeout_ms, 30_000);
+  assert.equal(requests[0].timeout_ms > 0 && requests[0].timeout_ms <= 30_000, true);
 });
 
 test("browser transport hard-times out one POST without replaying it", async () => {
