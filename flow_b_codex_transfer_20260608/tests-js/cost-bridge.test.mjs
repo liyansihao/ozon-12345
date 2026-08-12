@@ -144,6 +144,12 @@ function adaptiveV5({
   };
 }
 
+function genericFetchFailure(code, causeMessage = code) {
+  const error = new TypeError("fetch failed");
+  error.cause = Object.assign(new Error(causeMessage), { code });
+  return error;
+}
+
 test("manual feedback can stop a blocked source before image download or 1688", async () => {
   await withTempDir(async (runDir) => {
     const feedbackFile = path.join(runDir, "错误货源.json");
@@ -1338,25 +1344,176 @@ test("transient image downloads retry at most once before running 1688", async (
   });
 });
 
-test("deterministic image HTTP errors do not retry", async () => {
+test("generic fetch failures retry audited UND_ERR, ECONN, timeout, and DNS causes", async () => {
+  await withTempDir(async (runDir) => {
+    const causes = [
+      ["UND_ERR_SOCKET", "other side closed"],
+      ["ECONNRESET", "connection reset by peer"],
+      ["ETIMEDOUT", "connect timed out"],
+      ["EAI_AGAIN", "temporary DNS lookup failure"],
+    ];
+    const attempts = new Map();
+    const delays = [];
+    const bridge = createCostBridge({
+      download: async (url, destinationPath) => {
+        const code = String(url).split("/").at(-1).replace(/\.jpg$/, "");
+        const count = (attempts.get(code) || 0) + 1;
+        attempts.set(code, count);
+        if (count === 1) {
+          const cause = causes.find(([candidate]) => candidate === code)?.[1];
+          throw genericFetchFailure(code, cause);
+        }
+        await fs.writeFile(destinationPath, "image");
+      },
+      sleep: async (ms) => { delays.push(ms); },
+      runProcess: async () => ({
+        code: 0,
+        stdout: [
+          "COST_SOURCE search_first_page_p70_similarity_filtered",
+          "FILTERED_FIRST_PAGE_PRICES [10, 11, 12]",
+          "P70_COST 11",
+        ].join("\n"),
+        stderr: "",
+      }),
+    });
+
+    for (const [code] of causes) {
+      const result = await bridge.estimate({
+        sku: `retry-${code.toLowerCase().replaceAll("_", "-")}`,
+        cover_image: `https://img.example/${code}.jpg`,
+        sell_price: 100,
+      }, runDir);
+      assert.equal(result.ok, true, `${code}: ${JSON.stringify(result)}`);
+      assert.equal(attempts.get(code), 2);
+    }
+    assert.deepEqual(delays, [500, 500, 500, 500]);
+    await bridge.close();
+  });
+});
+
+test("persistent generic fetch failures stop at the two-attempt ceiling", async () => {
+  await withTempDir(async (runDir) => {
+    let downloads = 0;
+    let runs = 0;
+    const delays = [];
+    const bridge = createCostBridge({
+      downloadAttempts: 99,
+      download: async () => {
+        downloads += 1;
+        throw genericFetchFailure("UND_ERR_CONNECT_TIMEOUT", "connection timed out");
+      },
+      sleep: async (ms) => { delays.push(ms); },
+      runProcess: async () => { runs += 1; return { code: 0, stdout: "", stderr: "" }; },
+    });
+    const result = await bridge.estimate({
+      sku: "persistent-fetch-failure",
+      cover_image: "https://img.example/persistent.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.message, "fetch failed");
+    assert.equal(downloads, 2);
+    assert.equal(runs, 0);
+    assert.deepEqual(delays, [500]);
+    await bridge.close();
+  });
+});
+
+test("generic fetch failures with non-transient causes do not retry", async () => {
   await withTempDir(async (runDir) => {
     let downloads = 0;
     const bridge = createCostBridge({
       download: async () => {
         downloads += 1;
-        throw new Error("image download HTTP 404");
+        throw genericFetchFailure("UND_ERR_REQ_CONTENT_LENGTH_MISMATCH", "response body is invalid");
       },
-      sleep: async () => { throw new Error("404 must not back off"); },
-      runProcess: async () => { throw new Error("1688 must not run without an image"); },
+      sleep: async () => { throw new Error("non-transient errors must not back off"); },
+      runProcess: async () => { throw new Error("1688 must not run without a valid image"); },
     });
     const result = await bridge.estimate({
-      sku: "missing-image",
-      cover_image: "https://img.example/missing.jpg",
+      sku: "invalid-fetch-content",
+      cover_image: "https://img.example/invalid-content.jpg",
       sell_price: 100,
     }, runDir);
     assert.equal(result.ok, false);
     assert.equal(downloads, 1);
-    assert.match(result.error.message, /HTTP 404/);
+    assert.equal(result.error?.message, "fetch failed");
+    await bridge.close();
+  });
+});
+
+test("bare generic fetch failures without a cause fail fast", async () => {
+  await withTempDir(async (runDir) => {
+    let downloads = 0;
+    const bridge = createCostBridge({
+      download: async () => {
+        downloads += 1;
+        throw new TypeError("fetch failed");
+      },
+      sleep: async () => { throw new Error("unknown fetch failures must not back off"); },
+      runProcess: async () => { throw new Error("1688 must not run without a valid image"); },
+    });
+    const result = await bridge.estimate({
+      sku: "unknown-fetch-failure",
+      cover_image: "https://img.example/unknown-fetch-failure.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.message, "fetch failed");
+    assert.equal(downloads, 1);
+    await bridge.close();
+  });
+});
+
+test("transient image retry does not extend the end-to-end budget", async () => {
+  await withTempDir(async (runDir) => {
+    let downloads = 0;
+    const bridge = createCostBridge({
+      totalBudgetMs: 400,
+      download: async () => {
+        downloads += 1;
+        throw genericFetchFailure("ECONNRESET", "connection reset by peer");
+      },
+      sleep: async () => { throw new Error("retry delay must not start beyond the budget"); },
+      runProcess: async () => { throw new Error("1688 must not run without an image"); },
+    });
+    const result = await bridge.estimate({
+      sku: "retry-budget-bound",
+      cover_image: "https://img.example/retry-budget-bound.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "1688-total-timeout");
+    assert.equal(downloads, 1);
+    await bridge.close();
+  });
+});
+
+test("HTTP 4xx and invalid image content do not retry", async () => {
+  await withTempDir(async (runDir) => {
+    const cases = ["400", "404", "408", "425", "429", "empty"];
+    const downloads = new Map();
+    const bridge = createCostBridge({
+      download: async (url) => {
+        const kind = String(url).split("/").at(-1).replace(/\.jpg$/, "");
+        downloads.set(kind, (downloads.get(kind) || 0) + 1);
+        if (kind === "empty") throw new Error("downloaded image is empty");
+        throw new Error(`image download HTTP ${kind}`);
+      },
+      sleep: async () => { throw new Error("deterministic image failures must not back off"); },
+      runProcess: async () => { throw new Error("1688 must not run without an image"); },
+    });
+    for (const kind of cases) {
+      const result = await bridge.estimate({
+        sku: `invalid-image-${kind}`,
+        cover_image: `https://img.example/${kind}.jpg`,
+        sell_price: 100,
+      }, runDir);
+      assert.equal(result.ok, false);
+      assert.equal(downloads.get(kind), 1);
+      assert.match(result.error.message, kind === "empty" ? /empty/ : new RegExp(`HTTP ${kind}`));
+    }
+    await bridge.close();
   });
 });
 

@@ -221,12 +221,56 @@ async function defaultDownload(url, destinationPath, { timeout = 15_000 } = {}) 
   }
 }
 
+const TRANSIENT_DOWNLOAD_ERROR_CODES = new Set([
+  "ABORT_ERR",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "UND_ERR_ABORTED",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CLOSED",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function downloadErrorChain(error) {
+  const chain = [];
+  const pending = [error];
+  const seen = new Set();
+  while (pending.length > 0 && chain.length < 12) {
+    const current = pending.shift();
+    if (current === null || current === undefined || seen.has(current)) continue;
+    seen.add(current);
+    chain.push(current);
+    if (typeof current === "object") {
+      if (current.cause !== null && current.cause !== undefined) pending.push(current.cause);
+      if (Array.isArray(current.errors)) pending.push(...current.errors.slice(0, 4));
+    }
+  }
+  return chain;
+}
+
 function isTransientDownloadError(error) {
-  const message = String(error?.message || error || "");
-  const status = Number(message.match(/HTTP\s+(\d{3})/i)?.[1]);
-  if (status > 0) return [408, 425, 429].includes(status) || status >= 500;
-  return /aborted|aborterror|timed?\s*out|timeout|econnreset|econnrefused|enotfound|eai_again|network|socket/i.test(message)
-    || ["ABORT_ERR", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"].includes(String(error?.code || "").toUpperCase());
+  const chain = downloadErrorChain(error);
+  for (const current of chain) {
+    const message = String(current?.message || current || "");
+    const status = Number(message.match(/HTTP\s+(\d{3})/i)?.[1]);
+    if (status > 0) return status >= 500 && status <= 599;
+  }
+  return chain.some((current) => {
+    const code = String(current?.code || "").trim().toUpperCase();
+    if (TRANSIENT_DOWNLOAD_ERROR_CODES.has(code)) return true;
+    if (String(current?.name || "").trim() === "AbortError") return true;
+    const message = String(current?.message || current || "");
+    return /\b(?:ABORT_ERR|ECONNABORTED|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EPIPE|ETIMEDOUT|EAI_AGAIN|UND_ERR_(?:ABORTED|BODY_TIMEOUT|CLOSED|CONNECT_TIMEOUT|HEADERS_TIMEOUT|SOCKET))\b/i.test(message);
+  });
 }
 
 function isTransient1688TransportFailure(result, combinedOutput) {
@@ -732,7 +776,7 @@ export function createCostBridge({
   }
 
   async function downloadImage(url, destinationPath, { deadlineAt, budget } = {}) {
-    const attempts = Math.max(1, Number(downloadAttempts) || 1);
+    const attempts = Math.max(1, Math.min(2, Math.floor(Number(downloadAttempts) || 1)));
     let lastError;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const remaining = Number.isFinite(deadlineAt) ? deadlineAt - Date.now() : Number(downloadTimeoutMs);
