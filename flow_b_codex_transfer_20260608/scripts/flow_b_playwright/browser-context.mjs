@@ -58,6 +58,10 @@ async function navigateMaoziFavorite(page, timeoutMs) {
   }
 }
 
+export function isMaoziPageNavigationTimeout(error) {
+  return error?.code === "MAOZI_PAGE_NAVIGATION_TIMEOUT";
+}
+
 export function resolveBrowserOptions(env = process.env, defaultExecutable = chromium.executablePath()) {
   const profileDir = requiredPath(env.FLOW_B_PW_PROFILE, "FLOW_B_PW_PROFILE");
   const extensionDir = requiredPath(env.FLOW_B_EXTENSION_DIR, "FLOW_B_EXTENSION_DIR");
@@ -341,6 +345,8 @@ export async function openMaoziPage(context, {
   recoveryPollMs = 100,
   navigationTimeoutMs = 15_000,
   navigationCleanupTimeoutMs = 2_000,
+  navigationRetryDelayMs = 2_000,
+  navigationRetryTimeoutMs = 30_000,
 } = {}) {
   const available = () => context.pages().filter((page) => (
     !failedMaoziNavigationPages.has(page)
@@ -349,13 +355,24 @@ export async function openMaoziPage(context, {
   const pagesBeforeOpen = new Set(available());
   let page = forceNew ? null : available().find((candidate) => targetUrl(candidate).startsWith("https://ozon.maozierp.com/"));
   if (!page) {
-    page = await context.newPage();
+    const openOwnedPage = async (timeoutMs) => {
+      const ownedPage = await context.newPage();
+      try {
+        await navigateMaoziFavorite(ownedPage, timeoutMs);
+        return ownedPage;
+      } catch (error) {
+        failedMaoziNavigationPages.add(ownedPage);
+        await closePageWithin(ownedPage, positiveInteger(navigationCleanupTimeoutMs, 2_000));
+        throw error;
+      }
+    };
     try {
-      await navigateMaoziFavorite(page, navigationTimeoutMs);
+      page = await openOwnedPage(navigationTimeoutMs);
     } catch (error) {
-      failedMaoziNavigationPages.add(page);
-      await closePageWithin(page, positiveInteger(navigationCleanupTimeoutMs, 2_000));
-      throw error;
+      if (!isMaoziPageNavigationTimeout(error)) throw error;
+      const retryDelay = Math.max(0, Number(navigationRetryDelayMs) || 0);
+      if (retryDelay > 0) await delay(retryDelay);
+      page = await openOwnedPage(positiveInteger(navigationRetryTimeoutMs, 30_000));
     }
   }
   if (settleMs > 0) await delay(settleMs);

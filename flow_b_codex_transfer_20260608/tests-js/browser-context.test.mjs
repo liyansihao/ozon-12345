@@ -11,6 +11,7 @@ import {
   ensureMaoziLogin,
   ensureMaoziPluginLogin,
   launchFlowContext,
+  isMaoziPageNavigationTimeout,
   openMaoziPage,
   pruneOrphanedFlowPages,
   resolveBrowserOptions,
@@ -459,6 +460,7 @@ test("Maozi navigation reuses an existing authenticated page", async () => {
 
 test("Maozi navigation owns and closes its new page when goto fails", async () => {
   let closed = 0;
+  let newPageCalls = 0;
   let unrelatedGotoCalls = 0;
   const unrelated = {
     url: () => "https://www.ozon.ru/product/example",
@@ -473,7 +475,7 @@ test("Maozi navigation owns and closes its new page when goto fails", async () =
   };
   const context = {
     pages: () => [unrelated],
-    newPage: async () => opened,
+    newPage: async () => { newPageCalls += 1; return opened; },
   };
 
   await assert.rejects(
@@ -482,6 +484,7 @@ test("Maozi navigation owns and closes its new page when goto fails", async () =
   );
   assert.equal(unrelatedGotoCalls, 0);
   assert.equal(closed, 1);
+  assert.equal(newPageCalls, 1);
 });
 
 test("Maozi navigation uses commit and keeps token validation fail-closed", async () => {
@@ -511,6 +514,7 @@ test("Maozi navigation hard-deadlines and quarantines a failed page", async () =
   let firstCloseCalls = 0;
   let firstGotoCalls = 0;
   let replacementGotoCalls = 0;
+  let replacementGotoOptions = null;
   let newPageCalls = 0;
   const first = {
     url: () => firstUrl,
@@ -526,8 +530,9 @@ test("Maozi navigation hard-deadlines and quarantines a failed page", async () =
   const replacement = {
     url: () => replacementUrl,
     isClosed: () => false,
-    goto: async () => {
+    goto: async (_url, options) => {
       replacementGotoCalls += 1;
+      replacementGotoOptions = options;
       replacementUrl = "https://ozon.maozierp.com/#/product/favorite";
     },
     close: async () => {},
@@ -540,27 +545,81 @@ test("Maozi navigation hard-deadlines and quarantines a failed page", async () =
     },
   };
 
-  await assert.rejects(
-    Promise.race([
-      openMaoziPage(context, {
-        settleMs: 0,
-        navigationTimeoutMs: 5,
-        navigationCleanupTimeoutMs: 5,
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("test guard expired")), 100)),
-    ]),
-    /Maozi page navigation timed out after 5ms/,
-  );
+  assert.equal(await Promise.race([
+    openMaoziPage(context, {
+      settleMs: 0,
+      navigationTimeoutMs: 5,
+      navigationCleanupTimeoutMs: 5,
+      navigationRetryDelayMs: 0,
+      navigationRetryTimeoutMs: 50,
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("test guard expired")), 100)),
+  ]), replacement);
   assert.equal(firstGotoCalls, 1);
   assert.equal(firstCloseCalls, 1);
-
-  assert.equal(await openMaoziPage(context, {
-    settleMs: 0,
-    navigationTimeoutMs: 50,
-  }), replacement);
   assert.equal(newPageCalls, 2);
-  assert.equal(firstGotoCalls, 1);
   assert.equal(replacementGotoCalls, 1);
+  assert.deepEqual(replacementGotoOptions, { waitUntil: "commit", timeout: 50 });
+});
+
+test("Maozi navigation retries only one structured timeout and keeps the total bounded", async () => {
+  let newPageCalls = 0;
+  let closeCalls = 0;
+  const context = {
+    pages: () => [],
+    newPage: async () => {
+      newPageCalls += 1;
+      return {
+        url: () => "about:blank",
+        isClosed: () => false,
+        goto: async () => new Promise(() => {}),
+        close: async () => { closeCalls += 1; },
+      };
+    },
+  };
+
+  const error = await Promise.race([
+    openMaoziPage(context, {
+      settleMs: 0,
+      navigationTimeoutMs: 5,
+      navigationCleanupTimeoutMs: 5,
+      navigationRetryDelayMs: 0,
+      navigationRetryTimeoutMs: 7,
+    }).catch((caught) => caught),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("test guard expired")), 100)),
+  ]);
+  assert.match(error.message, /Maozi page navigation timed out after 7ms/);
+  assert.equal(isMaoziPageNavigationTimeout(error), true);
+  assert.equal(newPageCalls, 2);
+  assert.equal(closeCalls, 2);
+});
+
+test("Maozi navigation never retries a closed browser or an unstructured lookalike", async () => {
+  assert.equal(isMaoziPageNavigationTimeout(
+    new Error("Maozi page navigation timed out after 15000ms"),
+  ), false);
+
+  let newPageCalls = 0;
+  let closeCalls = 0;
+  const closed = new Error("page.goto: Target page, context or browser has been closed");
+  const context = {
+    pages: () => [],
+    newPage: async () => {
+      newPageCalls += 1;
+      return {
+        url: () => "about:blank",
+        isClosed: () => false,
+        goto: async () => { throw closed; },
+        close: async () => { closeCalls += 1; },
+      };
+    },
+  };
+  await assert.rejects(openMaoziPage(context, {
+    settleMs: 0,
+    navigationRetryDelayMs: 0,
+  }), (error) => error === closed);
+  assert.equal(newPageCalls, 1);
+  assert.equal(closeCalls, 1);
 });
 
 test("force-new Maozi navigation waits for a delayed authenticated replacement after SSO closes", async () => {
