@@ -6,6 +6,14 @@ import {
 } from "./ozon-access-controller.mjs";
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const RETRY_NAVIGATION_TIMEOUT_MS = 30_000;
+const RETRY_OPERATION_GRACE_MS = 3_000;
+
+function isExactPageGotoTimeout(error) {
+  const message = String(error?.message || error || "");
+  if (/target page|context or browser has been closed|frame was detached/i.test(message)) return false;
+  return /^page\.goto: Timeout [0-9]+ms exceeded\.?(?:\r?\n|$)/.test(message);
+}
 
 function money(value) {
   const normalized = String(value || "")
@@ -236,23 +244,48 @@ export function createOzonDetailProvider({
     async getProductDetail(skuValue, item = {}) {
       const sku = String(skuValue || "").trim();
       if (!sku) throw new Error("Ozon detail SKU is required");
-      const page = await acquirePage();
+      let page = await acquirePage();
       if (!page) throw new Error("Ozon detail page pool could not allocate a page");
       let reusable = true;
       let navigationFailed = false;
       try {
         const url = item.link || item.detail_url || canonicalProductUrl(sku);
+        const primaryNavigationTimeoutMs = Math.max(1_000, Number(timeout) || 20_000);
         const readDetail = async () => {
-          try {
-            await page.goto(url, {
-              waitUntil: "domcontentloaded",
-              timeout: Math.max(1_000, Number(timeout) || 20_000),
-            });
-          } catch (error) {
-            navigationFailed = true;
-            throw error;
+          const operationDeadline = Date.now()
+            + primaryNavigationTimeoutMs
+            + RETRY_NAVIGATION_TIMEOUT_MS
+            + RETRY_OPERATION_GRACE_MS;
+          let navigationAttempt = 0;
+          while (true) {
+            const navigationTimeoutMs = navigationAttempt === 0
+              ? primaryNavigationTimeoutMs
+              : RETRY_NAVIGATION_TIMEOUT_MS;
+            try {
+              await page.goto(url, {
+                waitUntil: "domcontentloaded",
+                timeout: navigationTimeoutMs,
+              });
+              navigationFailed = false;
+              break;
+            } catch (error) {
+              navigationFailed = true;
+              if (navigationAttempt !== 0 || !isExactPageGotoTimeout(error)) throw error;
+
+              const poisonedPage = page;
+              page = null;
+              reusable = false;
+              await discardPage(poisonedPage);
+              page = await createPage();
+              reusable = true;
+              navigationFailed = false;
+              navigationAttempt += 1;
+            }
           }
-          const deadline = Date.now() + Math.max(0, timeout);
+          const deadline = Math.min(
+            Date.now() + Math.max(0, timeout),
+            operationDeadline,
+          );
           const requiredCaptchaConfirmations = Math.max(
             1,
             Math.floor(Number(captchaConfirmations) || 2),
@@ -318,7 +351,7 @@ export function createOzonDetailProvider({
           && !/target page|context or browser has been closed|frame was detached/i.test(String(error?.message || error));
         throw error;
       } finally {
-        await releasePage(page, reusable);
+        if (page) await releasePage(page, reusable);
       }
     },
     async close() {

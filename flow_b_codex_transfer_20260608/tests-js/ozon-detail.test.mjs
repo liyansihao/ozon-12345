@@ -154,10 +154,11 @@ test("detail provider applies the configured timeout to product navigation", asy
   await provider.close();
 });
 
-test("detail provider discards a page after a navigation timeout", async () => {
+test("detail provider retries an exact navigation timeout once on a fresh page", async () => {
   const pages = [];
   const navigationTimeouts = [];
   let newPageCalls = 0;
+  let accessControllerCalls = 0;
   const context = {
     newPage: async () => {
       newPageCalls += 1;
@@ -182,26 +183,136 @@ test("detail provider discards a page after a navigation timeout", async () => {
   };
   const provider = createOzonDetailProvider({
     context,
+    accessController: {
+      run: async (_request, operation) => {
+        accessControllerCalls += 1;
+        return operation();
+      },
+    },
     timeout: 1_500,
     pollInterval: 1,
     initialConcurrency: 1,
     maxConcurrency: 1,
   });
 
-  await assert.rejects(
-    provider.getProductDetail("poisoned-page", { sell_price: 90 }),
-    /Timeout 1500ms exceeded/,
-  );
-  assert.equal(pages[0].isClosed(), true);
-
-  const detail = await provider.getProductDetail("fresh-page", { sell_price: 90 });
+  const detail = await provider.getProductDetail("poisoned-page", { sell_price: 90 });
 
   assert.equal(detail.mode, "FBS");
+  assert.equal(pages[0].isClosed(), true);
   assert.equal(newPageCalls, 2);
-  assert.deepEqual(navigationTimeouts, [1_500, 1_500]);
+  assert.equal(accessControllerCalls, 1);
+  assert.deepEqual(navigationTimeouts, [1_500, 30_000]);
   assert.equal(pages[1].isClosed(), false);
   await provider.close();
   assert.equal(pages[1].isClosed(), true);
+});
+
+test("detail provider bounds a double navigation timeout to two fresh-page attempts", async () => {
+  const pages = [];
+  const navigationTimeouts = [];
+  const context = {
+    newPage: async () => {
+      let closed = false;
+      const page = {
+        isClosed: () => closed,
+        goto: async (_url, options) => {
+          navigationTimeouts.push(options.timeout);
+          throw new Error(`page.goto: Timeout ${options.timeout}ms exceeded.`);
+        },
+        evaluate: async () => assert.fail("a timed-out navigation must not be evaluated"),
+        close: async () => { closed = true; },
+      };
+      pages.push(page);
+      return page;
+    },
+  };
+  const provider = createOzonDetailProvider({
+    context,
+    timeout: 12_000,
+    pollInterval: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  await assert.rejects(
+    provider.getProductDetail("double-timeout", { sell_price: 90 }),
+    /page\.goto: Timeout 30000ms exceeded/,
+  );
+
+  assert.equal(pages.length, 2);
+  assert.deepEqual(navigationTimeouts, [12_000, 30_000]);
+  assert.deepEqual(pages.map((page) => page.isClosed()), [true, true]);
+  await provider.close();
+});
+
+test("detail provider does not retry a closed browser navigation failure", async () => {
+  const pages = [];
+  let newPageCalls = 0;
+  const context = {
+    newPage: async () => {
+      newPageCalls += 1;
+      let closed = false;
+      const page = {
+        isClosed: () => closed,
+        goto: async () => {
+          throw new Error("page.goto: Target page, context or browser has been closed");
+        },
+        evaluate: async () => assert.fail("a closed browser must not be evaluated"),
+        close: async () => { closed = true; },
+      };
+      pages.push(page);
+      return page;
+    },
+  };
+  const provider = createOzonDetailProvider({
+    context,
+    timeout: 12_000,
+    pollInterval: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  await assert.rejects(
+    provider.getProductDetail("closed-browser", { sell_price: 90 }),
+    /browser has been closed/i,
+  );
+
+  assert.equal(newPageCalls, 1);
+  assert.equal(pages[0].isClosed(), true);
+  await provider.close();
+});
+
+test("detail provider does not retry an unstructured timeout lookalike", async () => {
+  let newPageCalls = 0;
+  let closed = false;
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        newPageCalls += 1;
+        return {
+          isClosed: () => closed,
+          goto: async () => {
+            throw new Error("Ozon request Timeout 12000ms exceeded");
+          },
+          evaluate: async () => assert.fail("a failed navigation must not be evaluated"),
+          close: async () => { closed = true; },
+        };
+      },
+    },
+    timeout: 12_000,
+    pollInterval: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  await assert.rejects(
+    provider.getProductDetail("timeout-lookalike", { sell_price: 90 }),
+    /Ozon request Timeout 12000ms exceeded/,
+  );
+
+  assert.equal(newPageCalls, 1);
+  assert.equal(closed, true);
+  await provider.close();
 });
 
 test("detail provider close reclaims a leased page and rejects queued waiters", async () => {
