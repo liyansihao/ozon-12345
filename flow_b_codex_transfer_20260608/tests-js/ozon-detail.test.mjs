@@ -457,7 +457,12 @@ test("detail provider waits for Maozi mode instead of accepting a long bare Ozon
     },
     close: async () => {},
   };
-  const provider = createOzonDetailProvider({ context: { newPage: async () => page }, timeout: 50, pollInterval: 1 });
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    timeout: 50,
+    pollInterval: 1,
+    operationBudgetMs: 200,
+  });
   const detail = await provider.getProductDetail("321", { sell_price: 7283 });
   assert.equal(calls, 2);
   assert.equal(detail.mode, "FBS");
@@ -547,6 +552,7 @@ test("detail provider requires persistent CAPTCHA evidence before stopping", asy
     timeout: 10,
     pollInterval: 1,
     captchaConfirmationDelayMs: 1,
+    operationBudgetMs: 200,
   });
   const detail = await provider.getProductDetail("transient-123", { sell_price: 90 });
   assert.equal(detail.mode, "FBS");
@@ -574,11 +580,193 @@ test("detail provider still stops on two consecutive blocking CAPTCHA pages", as
     timeout: 10,
     pollInterval: 1,
     captchaConfirmationDelayMs: 1,
+    operationBudgetMs: 200,
   });
   await assert.rejects(
     provider.getProductDetail("blocked-123", { sell_price: 90 }),
     /after 2 confirmations/i,
   );
   assert.equal(calls, 2);
+  await provider.close();
+});
+
+test("detail provider bounds an initial page creation that never settles and close stays bounded", async () => {
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => new Promise(() => {}) },
+    timeout: 1,
+    retryNavigationTimeoutMs: 5,
+    operationGraceMs: 2,
+    operationBudgetMs: 8,
+    pageCleanupTimeoutMs: 2,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+  const startedAt = Date.now();
+  await assert.rejects(
+    provider.getProductDetail("hung-create", { sell_price: 90 }),
+    (error) => error?.code === "OZON_DETAIL_DEADLINE" && error?.phase === "page-create",
+  );
+  assert.ok(Date.now() - startedAt < 250);
+  const closeStartedAt = Date.now();
+  await provider.close();
+  assert.ok(Date.now() - closeStartedAt < 250);
+});
+
+test("a timed-out queued detail waiter cannot steal the released page", async () => {
+  let releaseFirst;
+  let firstNavigationStarted;
+  const firstStarted = new Promise((resolve) => { firstNavigationStarted = resolve; });
+  let firstEvaluation = true;
+  let newPageCalls = 0;
+  let evaluateCalls = 0;
+  const page = {
+    isClosed: () => false,
+    goto: async () => {},
+    evaluate: async () => {
+      if (firstEvaluation) {
+        firstEvaluation = false;
+        firstNavigationStarted();
+        await new Promise((resolve) => { releaseFirst = resolve; });
+      }
+      evaluateCalls += 1;
+      return {
+        url: "https://www.ozon.ru/product/queue/",
+        title: "Ozon item",
+        text: "发货模式： FBS",
+      };
+    },
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => { newPageCalls += 1; return page; } },
+    timeout: 1,
+    retryNavigationTimeoutMs: 15,
+    operationGraceMs: 2,
+    operationBudgetMs: (sku) => sku === "queue-timeout" ? 10 : 50,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+  const first = provider.getProductDetail("queue-first", { sell_price: 90 });
+  first.catch(() => {});
+  await firstStarted;
+  const queued = provider.getProductDetail("queue-timeout", { sell_price: 90 });
+  queued.catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  await assert.rejects(
+    queued,
+    (error) => error?.code === "OZON_DETAIL_DEADLINE",
+  );
+  releaseFirst();
+  await first;
+  await provider.getProductDetail("queue-third", { sell_price: 90 });
+  assert.equal(newPageCalls, 1);
+  assert.equal(evaluateCalls, 2);
+  await provider.close();
+});
+
+test("retry cleanup is bounded when the poisoned page close hangs", async () => {
+  let calls = 0;
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        calls += 1;
+        const index = calls;
+        return {
+          isClosed: () => false,
+          goto: async (_url, options) => {
+            if (index === 1) throw new Error(`page.goto: Timeout ${options.timeout}ms exceeded.`);
+          },
+          evaluate: async () => ({
+            url: "https://www.ozon.ru/product/retry-close/",
+            title: "Ozon item",
+            text: "发货模式： FBS",
+          }),
+          close: async () => index === 1 ? new Promise(() => {}) : undefined,
+        };
+      },
+    },
+    timeout: 1,
+    retryNavigationTimeoutMs: 20,
+    operationGraceMs: 5,
+    pageCleanupTimeoutMs: 2,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+  assert.equal((await provider.getProductDetail("retry-close", { sell_price: 90 })).mode, "FBS");
+  assert.equal(calls, 2);
+  await provider.close();
+});
+
+test("a late retry page is closed once after its creation deadline", async () => {
+  let newPageCalls = 0;
+  let lateCloseCalls = 0;
+  const latePage = {
+    isClosed: () => false,
+    goto: async () => {},
+    evaluate: async () => assert.fail("an abandoned late page must not be evaluated"),
+    close: async () => { lateCloseCalls += 1; },
+  };
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        newPageCalls += 1;
+        if (newPageCalls === 2) {
+          return new Promise((resolve) => setTimeout(() => resolve(latePage), 15));
+        }
+        return {
+          isClosed: () => false,
+          goto: async (_url, options) => { throw new Error(`page.goto: Timeout ${options.timeout}ms exceeded.`); },
+          evaluate: async () => null,
+          close: async () => {},
+        };
+      },
+    },
+    timeout: 1,
+    retryNavigationTimeoutMs: 5,
+    operationGraceMs: 2,
+    operationBudgetMs: 8,
+    pageCleanupTimeoutMs: 2,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+  await assert.rejects(
+    provider.getProductDetail("late-retry", { sell_price: 90 }),
+    (error) => error?.code === "OZON_DETAIL_DEADLINE",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(lateCloseCalls, 1);
+  await provider.close();
+  assert.equal(lateCloseCalls, 1);
+});
+
+test("a timed-out page inspection poisons and closes the page", async () => {
+  let newPageCalls = 0;
+  let closeCalls = 0;
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        newPageCalls += 1;
+        return {
+          isClosed: () => false,
+          goto: async () => {},
+          evaluate: async () => new Promise(() => {}),
+          close: async () => { closeCalls += 1; },
+        };
+      },
+    },
+    timeout: 1,
+    retryNavigationTimeoutMs: 5,
+    operationGraceMs: 2,
+    operationBudgetMs: 8,
+    pageCleanupTimeoutMs: 2,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+  await assert.rejects(
+    provider.getProductDetail("hung-inspection", { sell_price: 90 }),
+    (error) => error?.code === "OZON_DETAIL_DEADLINE" && error?.phase === "page-inspection",
+  );
+  assert.equal(newPageCalls, 1);
+  assert.equal(closeCalls, 1);
   await provider.close();
 });

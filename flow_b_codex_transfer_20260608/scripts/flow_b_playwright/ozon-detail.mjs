@@ -8,8 +8,50 @@ import {
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const RETRY_NAVIGATION_TIMEOUT_MS = 30_000;
 const RETRY_OPERATION_GRACE_MS = 3_000;
+const PAGE_CLEANUP_TIMEOUT_MS = 2_000;
+const MAX_DETAIL_OPERATION_TIMEOUT_MS = 45_000;
+
+function detailDeadlineError(phase, timeoutMs = null) {
+  const hasTimeout = timeoutMs !== null && timeoutMs !== undefined
+    && Number.isFinite(Number(timeoutMs));
+  const suffix = hasTimeout ? ` after ${Math.max(1, Math.floor(Number(timeoutMs)))}ms` : "";
+  const error = new Error(`Ozon detail ${phase} timed out${suffix}`);
+  error.code = "OZON_DETAIL_DEADLINE";
+  error.phase = phase;
+  return error;
+}
+
+function remainingDeadlineMs(deadlineAt) {
+  return Math.max(0, Math.floor(deadlineAt - Date.now()));
+}
+
+async function withinDeadline(operation, deadlineAt, phase, timeoutMs = null) {
+  const remainingMs = remainingDeadlineMs(deadlineAt);
+  const boundedMs = timeoutMs !== null && timeoutMs !== undefined && Number.isFinite(Number(timeoutMs))
+    ? Math.min(remainingMs, Math.max(1, Math.floor(Number(timeoutMs))))
+    : remainingMs;
+  if (boundedMs <= 0) throw detailDeadlineError(phase, timeoutMs);
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(detailDeadlineError(phase, boundedMs)), boundedMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function delayBeforeDeadline(delayMs, deadlineAt, phase) {
+  const requestedMs = Math.max(0, Math.floor(Number(delayMs) || 0));
+  if (remainingDeadlineMs(deadlineAt) <= requestedMs) throw detailDeadlineError(phase);
+  await delay(requestedMs);
+}
 
 function isRetryablePageGotoFailure(error) {
+  if (error?.code === "OZON_DETAIL_DEADLINE" && error?.phase === "navigation-primary") return true;
   const message = String(error?.message || error || "");
   if (/target page|context or browser has been closed|frame was detached/i.test(message)) return false;
   return /^page\.goto: (?:Timeout [0-9]+ms exceeded\.?|net::ERR_(?:FAILED|CONNECTION_(?:CLOSED|RESET)) at https:\/\/www\.ozon\.ru\/product\/[^\s]+)(?:\r?\n|$)/.test(message);
@@ -154,6 +196,10 @@ export function createOzonDetailProvider({
   captchaConfirmationDelayMs = 750,
   initialConcurrency = 8,
   maxConcurrency = 12,
+  retryNavigationTimeoutMs = RETRY_NAVIGATION_TIMEOUT_MS,
+  operationGraceMs = RETRY_OPERATION_GRACE_MS,
+  pageCleanupTimeoutMs = PAGE_CLEANUP_TIMEOUT_MS,
+  operationBudgetMs = null,
 } = {}) {
   if (!context || typeof context.newPage !== "function") throw new TypeError("Playwright context is required for Ozon detail extraction");
   const adaptive = new AdaptiveConcurrency({ initial: initialConcurrency, max: maxConcurrency, min: 1 });
@@ -161,6 +207,25 @@ export function createOzonDetailProvider({
   const waiters = [];
   const allPages = new Set();
   const pageCreations = new Set();
+  const pageCloseOperations = new WeakMap();
+  const activeRetryNavigationTimeoutMs = Math.max(
+    1,
+    Math.floor(Number.isFinite(Number(retryNavigationTimeoutMs))
+      ? Number(retryNavigationTimeoutMs)
+      : RETRY_NAVIGATION_TIMEOUT_MS),
+  );
+  const activeOperationGraceMs = Math.max(
+    1,
+    Math.floor(Number.isFinite(Number(operationGraceMs))
+      ? Number(operationGraceMs)
+      : RETRY_OPERATION_GRACE_MS),
+  );
+  const activePageCleanupTimeoutMs = Math.max(
+    1,
+    Math.floor(Number.isFinite(Number(pageCleanupTimeoutMs))
+      ? Number(pageCleanupTimeoutMs)
+      : PAGE_CLEANUP_TIMEOUT_MS),
+  );
   let created = 0;
   let closing = false;
   let closePromise = null;
@@ -171,41 +236,107 @@ export function createOzonDetailProvider({
     return error;
   }
 
-  async function createPage() {
-    if (closing) throw providerClosedError();
-    created += 1;
-    let retained = false;
-    const creation = (async () => {
-      const page = await context.newPage();
-      if (closing) {
-        await page.close().catch(() => {});
-        return null;
-      }
-      allPages.add(page);
-      retained = true;
-      return page;
-    })();
-    pageCreations.add(creation);
+  async function closeOwnedPageWithin(page, timeoutMs) {
+    if (!page?.close) return;
+    let closeOperation = pageCloseOperations.get(page);
+    if (!closeOperation) {
+      closeOperation = Promise.resolve()
+        .then(() => page.close({ runBeforeUnload: false }))
+        .catch(() => {});
+      pageCloseOperations.set(page, closeOperation);
+    }
+    let timer;
     try {
-      const page = await creation;
-      if (!page) throw providerClosedError();
-      return page;
+      await Promise.race([
+        closeOperation,
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, Math.max(1, Math.floor(Number(timeoutMs) || 1)));
+        }),
+      ]);
     } finally {
-      pageCreations.delete(creation);
-      if (!retained) created = Math.max(0, created - 1);
+      if (timer) clearTimeout(timer);
     }
   }
 
-  async function discardPage(page) {
+  async function createPage(deadlineAt = Number.POSITIVE_INFINITY) {
+    if (closing) throw providerClosedError();
+    if (Number.isFinite(deadlineAt) && remainingDeadlineMs(deadlineAt) <= 0) {
+      throw detailDeadlineError("page-create");
+    }
+    created += 1;
+    const reservation = { abandoned: false, retained: false, counted: true };
+    const releaseReservation = () => {
+      if (!reservation.counted) return;
+      reservation.counted = false;
+      created = Math.max(0, created - 1);
+      if (!closing) {
+        const next = nextWaiter();
+        if (next) createPage(next.deadlineAt).then(next.resolve, next.reject);
+      }
+    };
+    const creation = Promise.resolve().then(async () => {
+      const page = await context.newPage();
+      if (closing || reservation.abandoned) {
+        await closeOwnedPageWithin(page, Math.min(
+          activePageCleanupTimeoutMs,
+          Math.max(1, remainingDeadlineMs(deadlineAt)),
+        ));
+        return null;
+      }
+      allPages.add(page);
+      reservation.retained = true;
+      return page;
+    });
+    pageCreations.add(creation);
+    creation.finally(() => {
+      pageCreations.delete(creation);
+      if (!reservation.retained) releaseReservation();
+    }).catch(() => {});
+    let timer;
+    try {
+      let page;
+      if (Number.isFinite(deadlineAt)) {
+        const remainingMs = remainingDeadlineMs(deadlineAt);
+        if (remainingMs <= 0) {
+          reservation.abandoned = true;
+          throw detailDeadlineError("page-create");
+        }
+        page = await Promise.race([
+          creation,
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              reservation.abandoned = true;
+              pageCreations.delete(creation);
+              releaseReservation();
+              reject(detailDeadlineError("page-create"));
+            }, remainingMs);
+          }),
+        ]);
+      } else {
+        page = await creation;
+      }
+      if (!page) throw providerClosedError();
+      return page;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function discardPage(page, deadlineAt = Number.POSITIVE_INFINITY) {
     if (allPages.delete(page)) created = Math.max(0, created - 1);
-    await page?.close?.().catch(() => {});
+    const timeoutMs = Number.isFinite(deadlineAt)
+      ? Math.min(activePageCleanupTimeoutMs, Math.max(1, remainingDeadlineMs(deadlineAt)))
+      : activePageCleanupTimeoutMs;
+    await closeOwnedPageWithin(page, timeoutMs);
   }
 
   function nextWaiter() {
-    return waiters.shift() || null;
+    let waiter = waiters.shift() || null;
+    while (waiter?.cancelled) waiter = waiters.shift() || null;
+    return waiter;
   }
 
-  async function acquirePage() {
+  async function acquirePage(deadlineAt) {
     if (closing) throw providerClosedError();
     while (available.length) {
       const page = available.pop();
@@ -213,24 +344,55 @@ export function createOzonDetailProvider({
       if (allPages.delete(page)) created = Math.max(0, created - 1);
     }
     if (created < adaptive.current) {
-      return createPage();
+      return createPage(deadlineAt);
     }
     return new Promise((resolve, reject) => {
-      if (closing) reject(providerClosedError());
-      else waiters.push({ resolve, reject });
+      const remainingMs = remainingDeadlineMs(deadlineAt);
+      const waiter = {
+        cancelled: false,
+        deadlineAt,
+        timer: null,
+        resolve(page) {
+          if (waiter.cancelled) {
+            releasePage(page).catch(() => {});
+            return;
+          }
+          waiter.cancelled = true;
+          if (waiter.timer) clearTimeout(waiter.timer);
+          resolve(page);
+        },
+        reject(error) {
+          if (waiter.cancelled) return;
+          waiter.cancelled = true;
+          if (waiter.timer) clearTimeout(waiter.timer);
+          reject(error);
+        },
+      };
+      if (closing) {
+        waiter.reject(providerClosedError());
+        return;
+      }
+      if (remainingMs <= 0) {
+        waiter.reject(detailDeadlineError("page-acquire"));
+        return;
+      }
+      waiter.timer = setTimeout(() => {
+        waiter.reject(detailDeadlineError("page-acquire"));
+      }, remainingMs);
+      waiters.push(waiter);
     });
   }
 
-  async function releasePage(page, reusable = true) {
+  async function releasePage(page, reusable = true, deadlineAt = Number.POSITIVE_INFINITY) {
     if (closing) {
-      await discardPage(page);
+      await discardPage(page, deadlineAt);
       return;
     }
     if (!reusable || (typeof page?.isClosed === "function" && page.isClosed())) {
-      await discardPage(page);
+      await discardPage(page, deadlineAt);
       const next = nextWaiter();
       if (next) {
-        createPage().then(next.resolve, next.reject);
+        createPage(next.deadlineAt).then(next.resolve, next.reject);
       }
       return;
     }
@@ -244,28 +406,48 @@ export function createOzonDetailProvider({
     async getProductDetail(skuValue, item = {}) {
       const sku = String(skuValue || "").trim();
       if (!sku) throw new Error("Ozon detail SKU is required");
-      let page = await acquirePage();
-      if (!page) throw new Error("Ozon detail page pool could not allocate a page");
+      const configuredPrimaryTimeoutMs = Number.isFinite(Number(timeout))
+        ? Math.max(1, Math.floor(Number(timeout)))
+        : 20_000;
+      const primaryNavigationTimeoutMs = Math.max(1_000, configuredPrimaryTimeoutMs);
+      const configuredOperationBudgetValue = typeof operationBudgetMs === "function"
+        ? operationBudgetMs(sku, item)
+        : operationBudgetMs;
+      const configuredOperationBudgetMs = Number(configuredOperationBudgetValue);
+      const operationDeadline = Date.now() + Math.min(
+        MAX_DETAIL_OPERATION_TIMEOUT_MS,
+        Number.isFinite(configuredOperationBudgetMs) && configuredOperationBudgetMs > 0
+          ? Math.max(1, Math.floor(configuredOperationBudgetMs))
+          : primaryNavigationTimeoutMs + activeRetryNavigationTimeoutMs + activeOperationGraceMs,
+      );
+      let page = null;
       let reusable = true;
       let navigationFailed = false;
       try {
         const url = item.link || item.detail_url || canonicalProductUrl(sku);
-        const primaryNavigationTimeoutMs = Math.max(1_000, Number(timeout) || 20_000);
         const readDetail = async () => {
-          const operationDeadline = Date.now()
-            + primaryNavigationTimeoutMs
-            + RETRY_NAVIGATION_TIMEOUT_MS
-            + RETRY_OPERATION_GRACE_MS;
+          page = await acquirePage(operationDeadline);
+          if (!page) throw new Error("Ozon detail page pool could not allocate a page");
           let navigationAttempt = 0;
           while (true) {
-            const navigationTimeoutMs = navigationAttempt === 0
+            const configuredNavigationTimeoutMs = navigationAttempt === 0
               ? primaryNavigationTimeoutMs
-              : RETRY_NAVIGATION_TIMEOUT_MS;
+              : activeRetryNavigationTimeoutMs;
+            const navigationTimeoutMs = Math.min(
+              configuredNavigationTimeoutMs,
+              remainingDeadlineMs(operationDeadline),
+            );
+            if (navigationTimeoutMs <= 0) throw detailDeadlineError("navigation");
             try {
-              await page.goto(url, {
-                waitUntil: "domcontentloaded",
-                timeout: navigationTimeoutMs,
-              });
+              await withinDeadline(
+                () => page.goto(url, {
+                  waitUntil: "domcontentloaded",
+                  timeout: navigationTimeoutMs,
+                }),
+                operationDeadline,
+                navigationAttempt === 0 ? "navigation-primary" : "navigation-retry",
+                navigationTimeoutMs,
+              );
               navigationFailed = false;
               break;
             } catch (error) {
@@ -275,8 +457,11 @@ export function createOzonDetailProvider({
               const poisonedPage = page;
               page = null;
               reusable = false;
-              await discardPage(poisonedPage);
-              page = await createPage();
+              await discardPage(poisonedPage, operationDeadline);
+              if (remainingDeadlineMs(operationDeadline) <= 0) {
+                throw detailDeadlineError("retry-page-create");
+              }
+              page = await createPage(operationDeadline);
               reusable = true;
               navigationFailed = false;
               navigationAttempt += 1;
@@ -293,19 +478,29 @@ export function createOzonDetailProvider({
           let consecutiveCaptchaObservations = 0;
           let payload = null;
           do {
-            payload = await page.evaluate(() => ({
+            payload = await withinDeadline(() => page.evaluate(() => ({
               url: location.href,
               title: document.title,
               text: document.body?.innerText || "",
               webPriceText: document.querySelector('div[data-widget="webPrice"]')?.innerText || "",
               sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
                 || document.querySelector('a[href*="/seller/"]')?.href || "",
-            })).catch(() => null);
+            })), operationDeadline, "page-inspection").catch((error) => {
+              if (error?.code === "OZON_DETAIL_DEADLINE") {
+                navigationFailed = true;
+                throw error;
+              }
+              return null;
+            });
             const access = classifyOzonDetailAccessPayload(payload);
             if (access.captcha) {
               consecutiveCaptchaObservations += 1;
               if (consecutiveCaptchaObservations < requiredCaptchaConfirmations) {
-                await delay(Math.max(1, Number(captchaConfirmationDelayMs) || 750));
+                await delayBeforeDeadline(
+                  Math.max(1, Number(captchaConfirmationDelayMs) || 750),
+                  operationDeadline,
+                  "captcha-confirmation",
+                );
                 continue;
               }
               throw new Error(
@@ -326,12 +521,20 @@ export function createOzonDetailProvider({
             }
             if (payload?.text && /发货模式：/.test(payload.text)) break;
             if (Date.now() >= deadline) break;
-            await delay(Math.max(1, pollInterval));
+            await delayBeforeDeadline(
+              Math.max(1, pollInterval),
+              operationDeadline,
+              "detail-poll",
+            );
           } while (true);
           return payload;
         };
         const payload = accessController
-          ? await accessController.run({ kind: "publish-detail", url }, readDetail)
+          ? await withinDeadline(
+            () => accessController.run({ kind: "publish-detail", url }, readDetail),
+            operationDeadline,
+            "access-controller",
+          )
           : await readDetail();
         if (!payload?.text) throw new Error(`Ozon detail text unavailable for SKU ${sku}`);
         const fallback = String(item.source_currency || "").toUpperCase() === "CNY"
@@ -347,11 +550,20 @@ export function createOzonDetailProvider({
         return result;
       } catch (error) {
         adaptive.recordFailure(error);
+        if (error?.code === "OZON_DETAIL_DEADLINE") navigationFailed = true;
         reusable = !navigationFailed
           && !/target page|context or browser has been closed|frame was detached/i.test(String(error?.message || error));
         throw error;
       } finally {
-        if (page) await releasePage(page, reusable);
+        if (page) {
+          if (remainingDeadlineMs(operationDeadline) > 0) {
+            await releasePage(page, reusable, operationDeadline);
+          } else if (!reusable || navigationFailed) {
+            discardPage(page, operationDeadline).catch(() => {});
+          } else {
+            await releasePage(page, reusable, operationDeadline);
+          }
+        }
       }
     },
     async close() {
@@ -360,12 +572,12 @@ export function createOzonDetailProvider({
       const closeError = providerClosedError();
       for (const waiter of waiters.splice(0)) waiter.reject(closeError);
       available.splice(0);
+      pageCreations.clear();
       closePromise = (async () => {
-        await Promise.allSettled([...pageCreations]);
         const pages = [...allPages];
         allPages.clear();
         created = 0;
-        await Promise.all(pages.map((page) => page.close().catch(() => {})));
+        await Promise.all(pages.map((page) => closeOwnedPageWithin(page, activePageCleanupTimeoutMs)));
       })();
       return closePromise;
     },
