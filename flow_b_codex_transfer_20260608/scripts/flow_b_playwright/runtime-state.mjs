@@ -25,6 +25,84 @@ const OPERATIONAL_PAYLOAD_TABLE = "sku_state_operational_payloads";
 const OPERATIONAL_PAYLOAD_FORMAT_METADATA_KEY = "operational_payload_format_version";
 const OPERATIONAL_PAYLOAD_FORMAT_VERSION = "2";
 
+export function runtimeSourceExcludedSkus(dbPath) {
+  const configuredPath = String(dbPath ?? "").trim();
+  if (!configuredPath || configuredPath === ":memory:") return null;
+  let database = null;
+  let transactionOpen = false;
+  try {
+    database = new DatabaseSync(path.resolve(configuredPath), { readOnly: true });
+    database.exec(`
+      PRAGMA query_only = ON;
+      PRAGMA busy_timeout = 1000;
+      BEGIN DEFERRED;
+    `);
+    transactionOpen = true;
+    const schemaNames = new Set(database.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE name IN ('events', 'sku_state', '${OPERATIONAL_PAYLOAD_TABLE}')
+    `).all().map((row) => String(row.name)));
+    if (
+      !schemaNames.has("events")
+      || !schemaNames.has("sku_state")
+      || !schemaNames.has(OPERATIONAL_PAYLOAD_TABLE)
+    ) {
+      database.exec("ROLLBACK");
+      transactionOpen = false;
+      return null;
+    }
+    const native = database.prepare(`
+      SELECT 1 AS present
+      FROM events
+      WHERE source = 'runtime'
+      LIMIT 1
+    `).get();
+    if (!native?.present) {
+      database.exec("ROLLBACK");
+      transactionOpen = false;
+      return null;
+    }
+    const excluded = new Set(database.prepare(`
+      SELECT sku
+      FROM sku_state INDEXED BY ${OPERATIONAL_METADATA_INDEX}
+      WHERE stage IN ('skipped', 'published')
+    `).all().map((row) => String(row.sku)));
+    for (const row of database.prepare(`
+      SELECT sku
+      FROM ${OPERATIONAL_PAYLOAD_TABLE}
+      WHERE
+        json_type(data_json, '$.submitted') = 'true'
+        OR json_type(data_json, '$.submission_pending') = 'true'
+        OR json_type(data_json, '$.reconcile_only') = 'true'
+    `).all()) {
+      excluded.add(String(row.sku));
+    }
+    // Format-v2 compact payloads omit a terminal reconcile_only-only row.
+    // Scan that narrow legacy shape in SQLite so the source exclusion contract
+    // remains exact without materializing the compatibility JSONL in Node.
+    for (const row of database.prepare(`
+      SELECT sku
+      FROM sku_state INDEXED BY ${OPERATIONAL_METADATA_INDEX}
+      WHERE terminal = 1
+        AND stage = 'failed'
+        AND json_type(data_json, '$.reconcile_only') = 'true'
+    `).all()) {
+      excluded.add(String(row.sku));
+    }
+    database.exec("COMMIT");
+    transactionOpen = false;
+    return excluded;
+  } catch (error) {
+    if (transactionOpen) {
+      try { database?.exec("ROLLBACK"); } catch {}
+    }
+    throw new Error("failed to read native runtime source exclusions", { cause: error });
+  } finally {
+    try { database?.close(); } catch {}
+  }
+}
+
 // Terminal failed/skipped rows are only hydrated to restore publication safety
 // bookkeeping. Keep the exact fields consumed by publish-state startup:
 // selected-key dedupe, direct-run accepted/quota counts, store-limit recovery,

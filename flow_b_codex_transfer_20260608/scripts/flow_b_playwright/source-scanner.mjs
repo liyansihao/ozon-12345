@@ -5,6 +5,7 @@ import { createCandidateQueue } from "./candidate-queue.mjs";
 import { AdaptiveConcurrency, isFatalBrowserError } from "./continuous-runtime.mjs";
 import { isPureFbs, prohibitedCategorySkipReason } from "./publish-policy.mjs";
 import { createProfitFilesReader, profitPriorityScore } from "./profit-priority.mjs";
+import { runtimeSourceExcludedSkus } from "./runtime-state.mjs";
 import {
   isOzonAccessStoppedError,
   isOzonAuthenticationText,
@@ -2606,11 +2607,17 @@ export function favoritedSkusFromEvents(events = []) {
   return skus;
 }
 
-async function loadExcludedSkus(outputPath, env) {
-  const stateFiles = [
-    path.join(path.dirname(outputPath), "sku_states.jsonl"),
-    ...String(env.FLOW_B_STATE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
-  ];
+export async function loadExcludedSkus(outputPath, env) {
+  const currentStateFile = path.join(path.dirname(outputPath), "sku_states.jsonl");
+  const stateSeedFiles = String(env.FLOW_B_STATE_SEED_FILES || "")
+    .split(path.delimiter)
+    .filter(Boolean);
+  const runtimeExcluded = String(env.FLOW_B_DIRECT_PUBLISH || "") === "1"
+    ? runtimeSourceExcludedSkus(env.FLOW_B_RUNTIME_STATE_DB)
+    : null;
+  const stateFiles = runtimeExcluded === null
+    ? [currentStateFile, ...stateSeedFiles]
+    : stateSeedFiles;
   const favoriteFiles = [
     path.join(path.dirname(outputPath), "favorite_collection.jsonl"),
     ...String(env.FLOW_B_FAVORITE_SEED_FILES || "").split(path.delimiter).filter(Boolean),
@@ -2625,6 +2632,7 @@ async function loadExcludedSkus(outputPath, env) {
   const stateEventGroups = await readHistories(stateFiles);
   const favoriteEventGroups = await readHistories(favoriteFiles);
   const excluded = excludedSkusFromEventHistories({ stateEventGroups, favoriteEventGroups });
+  for (const sku of runtimeExcluded || []) excluded.add(sku);
   for (const sku of favoritedSkusFromEvents(favoriteEventGroups[0] || [])) excluded.add(sku);
   if (env.FLOW_B_EXCLUDED_SKUS) {
     for (const sku of String(env.FLOW_B_EXCLUDED_SKUS).split(/[,\s]+/).filter(Boolean)) excluded.add(sku);

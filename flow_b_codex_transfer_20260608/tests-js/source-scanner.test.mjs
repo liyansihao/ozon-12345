@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { createRuntimeState } from "../scripts/flow_b_playwright/runtime-state.mjs";
+
 import {
   canClaimFavorite,
   favoriteRetryDelay,
@@ -130,6 +132,7 @@ import {
   completedSourceUrls,
   clearJsonLinesFileCache,
   jsonLinesFileCacheStats,
+  loadExcludedSkus,
   readJsonLinesIncremental,
   clearJsonArrayFileCache,
   jsonArrayFileCacheStats,
@@ -308,6 +311,144 @@ test("parsed exclusion histories preserve latest-state and retry semantics", () 
     { sku: "one", status: "favorited" },
     { sku: "two", status: "rejected" },
   ])], ["one"]);
+});
+
+test("direct native exclusions skip the current state audit but preserve seeds and favorite semantics", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-native-exclusions-"));
+  const dbPath = path.join(dir, "runtime.sqlite");
+  const outputPath = path.join(dir, "source.json");
+  const currentStatePath = path.join(dir, "sku_states.jsonl");
+  const stateSeedPath = path.join(dir, "state-seed.jsonl");
+  const favoritePath = path.join(dir, "favorite_collection.jsonl");
+  const favoriteSeedPath = path.join(dir, "favorite-seed.jsonl");
+  try {
+    const state = createRuntimeState({ dbPath });
+    state.recordSkip("sqlite-terminal", {
+      reason: "1688-no-reliable-match",
+      data: { terminal: true },
+    });
+    state.recordProcessing("sqlite-pending", {
+      reason: "erp-submission-accepted",
+      data: { submission_pending: true, reconcile_only: true },
+    });
+    state.recordFailure("sqlite-accepted-terminal", {
+      reason: "daily-product-limit",
+      kind: "deterministic",
+      data: { submitted: true },
+    });
+    state.recordFailure("sqlite-reconcile-only-terminal", {
+      reason: "online-product-rejected",
+      kind: "deterministic",
+      data: { submitted: false, submission_pending: false, reconcile_only: true },
+    });
+    state.recordProcessing("sqlite-retryable", {
+      reason: "processing-started",
+      data: { submitted: false },
+    });
+    state.close();
+
+    await fs.writeFile(currentStatePath, `${JSON.stringify({
+      sku: "legacy-current-only",
+      status: "published",
+      data: { oversized: "x".repeat(1024 * 1024) },
+    })}\n`);
+    await fs.writeFile(stateSeedPath, `${JSON.stringify({
+      sku: "explicit-state-seed",
+      status: "published",
+    })}\n`);
+    await fs.writeFile(favoritePath, [
+      { sku: "current-rejected", status: "rejected", reason: "non-pure-fbs" },
+      { sku: "currency-recheck", status: "rejected", reason: "non-cny-sale-price" },
+      { sku: "current-favorited", status: "favorited" },
+    ].map(JSON.stringify).join("\n") + "\n");
+    await fs.writeFile(favoriteSeedPath, `${JSON.stringify({
+      sku: "seed-rejected",
+      status: "rejected",
+      reason: "prohibited-category",
+    })}\n`);
+
+    clearJsonLinesFileCache();
+    const excluded = await loadExcludedSkus(outputPath, {
+      FLOW_B_DIRECT_PUBLISH: "1",
+      FLOW_B_RUNTIME_STATE_DB: dbPath,
+      FLOW_B_STATE_SEED_FILES: stateSeedPath,
+      FLOW_B_FAVORITE_SEED_FILES: favoriteSeedPath,
+      FLOW_B_PUBLISHED_CSV: path.join(dir, "missing.csv"),
+    });
+
+    for (const sku of [
+      "sqlite-terminal",
+      "sqlite-pending",
+      "sqlite-accepted-terminal",
+      "sqlite-reconcile-only-terminal",
+      "explicit-state-seed",
+      "current-rejected",
+      "current-favorited",
+      "seed-rejected",
+    ]) assert.equal(excluded.has(sku), true, `${sku} must be excluded`);
+    for (const sku of ["sqlite-retryable", "legacy-current-only", "currency-recheck"]) {
+      assert.equal(excluded.has(sku), false, `${sku} must remain eligible`);
+    }
+    assert.equal(jsonLinesFileCacheStats(currentStatePath).full_reads, 0);
+    assert.equal(jsonLinesFileCacheStats(stateSeedPath).full_reads, 1);
+    assert.equal(jsonLinesFileCacheStats(favoritePath).full_reads, 1);
+    assert.equal(jsonLinesFileCacheStats(favoriteSeedPath).full_reads, 1);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("direct exclusions fall back to the current state audit without native runtime events", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-native-exclusions-fallback-"));
+  const dbPath = path.join(dir, "runtime.sqlite");
+  const outputPath = path.join(dir, "source.json");
+  const currentStatePath = path.join(dir, "sku_states.jsonl");
+  try {
+    createRuntimeState({ dbPath }).close();
+    await fs.writeFile(currentStatePath, [
+      { sku: "latest-retryable", status: "skipped" },
+      { sku: "latest-retryable", status: "failed", data: { submitted: false } },
+      { sku: "legacy-published", status: "published" },
+    ].map(JSON.stringify).join("\n") + "\n");
+    clearJsonLinesFileCache();
+
+    const excluded = await loadExcludedSkus(outputPath, {
+      FLOW_B_DIRECT_PUBLISH: "1",
+      FLOW_B_RUNTIME_STATE_DB: dbPath,
+      FLOW_B_PUBLISHED_CSV: path.join(dir, "missing.csv"),
+    });
+
+    assert.equal(excluded.has("legacy-published"), true);
+    assert.equal(excluded.has("latest-retryable"), false);
+    assert.equal(jsonLinesFileCacheStats(currentStatePath).full_reads, 1);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("direct native exclusion database errors fail closed without reading the current state audit", async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-native-exclusions-error-"));
+  const dbPath = path.join(dir, "corrupt.sqlite");
+  const outputPath = path.join(dir, "source.json");
+  const currentStatePath = path.join(dir, "sku_states.jsonl");
+  try {
+    await fs.writeFile(dbPath, "not a sqlite database");
+    await fs.writeFile(currentStatePath, `${JSON.stringify({
+      sku: "must-not-fallback",
+      status: "published",
+      data: { oversized: "x".repeat(1024 * 1024) },
+    })}\n`);
+    clearJsonLinesFileCache();
+
+    await assert.rejects(loadExcludedSkus(outputPath, {
+      FLOW_B_DIRECT_PUBLISH: "1",
+      FLOW_B_RUNTIME_STATE_DB: dbPath,
+      FLOW_B_PUBLISHED_CSV: path.join(dir, "missing.csv"),
+    }), /failed to read native runtime source exclusions/);
+    assert.equal(jsonLinesFileCacheStats(currentStatePath).full_reads, 0);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("source scan array checkpoints reuse memory and replace files atomically", async () => {
