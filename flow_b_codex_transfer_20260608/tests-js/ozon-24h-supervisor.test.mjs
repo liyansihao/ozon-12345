@@ -13,6 +13,7 @@ import {
 
 import {
   browserOwnerPidsForRecovery,
+  browserCdpStartupSettings,
   browserRecoverySafeStopDecision,
   buildLaunchdPlist,
   capacityPreflightDecision,
@@ -52,6 +53,7 @@ import {
   verificationLockToken,
   verificationProbeSchedule,
   waitForVerification,
+  waitForBrowserCdp,
   waitForWorkerOrBrowserFailure,
   workerEnvironment,
 } from "../scripts/ozon_24h_supervisor.mjs";
@@ -742,6 +744,61 @@ test("supervised Chrome disables GPU acceleration after repeated SkSurface resou
   assert.equal(args.includes("--disable-gpu"), true);
   assert.equal(args.includes("--disable-session-crashed-bubble"), true);
   assert.equal(args.includes("--disable-software-rasterizer"), false);
+});
+
+test("browser startup gives slow but live CDP a bounded grace window", async () => {
+  assert.deepEqual(browserCdpStartupSettings({}), {
+    probeTimeoutMs: 10_000,
+    existingOwnerGraceMs: 30_000,
+    startTimeoutMs: 180_000,
+  });
+
+  let now = 0;
+  let probes = 0;
+  const ready = await waitForBrowserCdp("http://127.0.0.1:9223", {
+    timeoutMs: 30_000,
+    probeTimeoutMs: 10_000,
+    ownerPid: 4242,
+    nowFn: () => now,
+    delayFn: async (ms) => { now += ms; },
+    pidAliveFn: () => true,
+    cdpReadyFn: async (_endpoint, timeoutMs) => {
+      probes += 1;
+      assert.equal(timeoutMs <= 10_000, true);
+      now += 3_500;
+      return probes === 2;
+    },
+  });
+
+  assert.equal(ready, true);
+  assert.equal(probes, 2);
+});
+
+test("browser startup stops waiting when the exact owner exits", async () => {
+  let now = 0;
+  let aliveChecks = 0;
+  const ready = await waitForBrowserCdp("http://127.0.0.1:9223", {
+    timeoutMs: 180_000,
+    probeTimeoutMs: 10_000,
+    ownerPid: 4242,
+    nowFn: () => now,
+    delayFn: async (ms) => { now += ms; },
+    pidAliveFn: () => ++aliveChecks === 1,
+    cdpReadyFn: async () => false,
+  });
+
+  assert.equal(ready, false);
+  assert.equal(aliveChecks, 2);
+});
+
+test("Chrome CDP startup timeout is classified as browser recovery", () => {
+  assert.deepEqual(classifyWorkerFailure({
+    message: "Chrome CDP failed to become ready at http://127.0.0.1:9223",
+    profileOwnerCount: 1,
+  }), {
+    action: "restart-browser-and-worker",
+    reason: "browser-or-network-recoverable",
+  });
 });
 
 test("launchd restarts abnormal exits without busy-looping a completed window", () => {

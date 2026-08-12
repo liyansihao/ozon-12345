@@ -42,7 +42,7 @@ const DEFAULT_LABEL = "com.codex.ozon.24h-production";
 const DEFAULT_INSTALL_ROOT = path.join(process.env.HOME || "/Users/mac", ".ozon-24h-production");
 const PRODUCTION_STORE_IDS = [106637, 106640, 106644, 106646, 104965];
 const SECURITY_RE = /captcha|滑块|slider|mfa|two[- ]factor|verification required|login required|sign[- ]?in required|安全检查|验证码|登录失效|需要登录|请登录/i;
-const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|connectOverCDP:\s*Timeout|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
+const BROWSER_RECOVERY_RE = /econnrefused|econnreset|etimedout|enotfound|eai_again|CDP health check failed|Chrome CDP failed to become ready|connectOverCDP:\s*Timeout|target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out|net::err_/i;
 const MAOZI_EXTENSION_RECOVERY_RE = /Maozi extension (?:did not load in Chrome for Testing|popup committed to an unexpected URL)/i;
 const MAOZI_POPUP_GOTO_TIMEOUT_RE = /page\.goto:\s*Timeout 10000ms exceeded\.[\s\S]*navigating to ["']chrome-extension:\/\/kifocjelffhjimimdnjohjldolickjaa\/popup\.html["'][\s\S]*waiting until ["'](?:commit|domcontentloaded)["']/i;
 
@@ -811,6 +811,46 @@ async function cdpReady(endpoint, timeoutMs = 1500) {
   }
 }
 
+export function browserCdpStartupSettings(browser = {}) {
+  const probeTimeoutMs = Math.max(
+    1_500,
+    Number(browser.start_probe_timeout_ms) || 10_000,
+  );
+  return {
+    probeTimeoutMs,
+    existingOwnerGraceMs: Math.max(
+      probeTimeoutMs,
+      Number(browser.existing_owner_grace_ms) || 30_000,
+    ),
+    startTimeoutMs: Math.max(
+      probeTimeoutMs,
+      Number(browser.start_timeout_ms) || 180_000,
+    ),
+  };
+}
+
+export async function waitForBrowserCdp(endpoint, {
+  timeoutMs,
+  probeTimeoutMs,
+  ownerPid = null,
+  cdpReadyFn = cdpReady,
+  pidAliveFn = pidAlive,
+  delayFn = delay,
+  nowFn = Date.now,
+} = {}) {
+  const startedAt = Number(nowFn());
+  const deadline = startedAt + Math.max(1_500, Number(timeoutMs) || 1_500);
+  const probeBudget = Math.max(100, Number(probeTimeoutMs) || 1_500);
+  do {
+    if (ownerPid !== null && !pidAliveFn(ownerPid)) return false;
+    const remaining = Math.max(100, deadline - Number(nowFn()));
+    if (await cdpReadyFn(endpoint, Math.min(probeBudget, remaining))) return true;
+    if (Number(nowFn()) >= deadline) return false;
+    await delayFn(Math.min(500, Math.max(1, deadline - Number(nowFn()))));
+  } while (Number(nowFn()) < deadline);
+  return false;
+}
+
 export async function waitForWorkerOrBrowserFailure(worker, {
   cdpEndpoint,
   probeIntervalMs = 15_000,
@@ -1019,13 +1059,18 @@ export function chromeArguments(browser) {
 export async function ensureBrowserOwner({ config, stateRoot, runDir }) {
   const browser = config.browser || {};
   const profileDir = absolute(browser.profile_dir);
+  const startup = browserCdpStartupSettings(browser);
   let owners = await profileOwners(profileDir);
   if (owners.length > 1) {
     const error = new Error(`duplicate browser profile owners: ${owners.map((row) => row.pid).join(",")}`);
     error.code = "OZON_DUPLICATE_PROFILE_OWNER";
     throw error;
   }
-  if (owners.length === 1 && await cdpReady(browser.cdp_endpoint)) {
+  if (owners.length === 1 && await waitForBrowserCdp(browser.cdp_endpoint, {
+    timeoutMs: startup.existingOwnerGraceMs,
+    probeTimeoutMs: startup.probeTimeoutMs,
+    ownerPid: owners[0].pid,
+  })) {
     return { pid: owners[0].pid, reused: true };
   }
   if (owners.length === 1) {
@@ -1065,21 +1110,29 @@ export async function ensureBrowserOwner({ config, stateRoot, runDir }) {
   chrome.unref();
   fs.closeSync(stdoutFd);
   fs.closeSync(stderrFd);
-  const deadline = Date.now() + Math.max(10_000, Number(browser.start_timeout_ms) || 60_000);
-  while (Date.now() < deadline) {
-    if (!pidAlive(chrome.pid)) break;
-    if (await cdpReady(browser.cdp_endpoint)) {
-      owners = await profileOwners(profileDir);
-      if (owners.length === 1) return { pid: owners[0].pid, reused: false };
-      if (owners.length > 1) {
-        const error = new Error(`duplicate browser profile owners after launch: ${owners.map((row) => row.pid).join(",")}`);
-        error.code = "OZON_DUPLICATE_PROFILE_OWNER";
-        throw error;
-      }
+  if (await waitForBrowserCdp(browser.cdp_endpoint, {
+    timeoutMs: startup.startTimeoutMs,
+    probeTimeoutMs: startup.probeTimeoutMs,
+    ownerPid: chrome.pid,
+  })) {
+    owners = await profileOwners(profileDir);
+    if (owners.length === 1) return { pid: owners[0].pid, reused: false };
+    if (owners.length > 1) {
+      const error = new Error(`duplicate browser profile owners after launch: ${owners.map((row) => row.pid).join(",")}`);
+      error.code = "OZON_DUPLICATE_PROFILE_OWNER";
+      throw error;
     }
-    await delay(500);
   }
-  throw new Error(`Chrome CDP failed to become ready at ${browser.cdp_endpoint}`);
+  await stopExactOwner(chrome.pid);
+  await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+    at: new Date().toISOString(),
+    run_dir: runDir,
+    action: "terminated-failed-browser-start",
+    pid: chrome.pid,
+  });
+  const error = new Error(`Chrome CDP failed to become ready at ${browser.cdp_endpoint}`);
+  error.code = "OZON_CDP_START_TIMEOUT";
+  throw error;
 }
 
 function expandTemplate(value, config = {}) {
