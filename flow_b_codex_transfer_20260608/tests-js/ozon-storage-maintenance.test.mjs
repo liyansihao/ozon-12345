@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   archiveStaticFile,
+  acquireMaintenanceLock,
   classifyStoragePath,
   cleanupStaleTemporaries,
   databaseMaintenancePolicy,
@@ -297,4 +298,85 @@ test("temporary name allowlist rejects SQLite and business evidence", () => {
   assert.equal(isConservativeTemporaryName("flow_b_state.sqlite"), false);
   assert.equal(isConservativeTemporaryName("flow_b_state.sqlite-wal"), false);
   assert.equal(isConservativeTemporaryName("selected.jsonl"), false);
+});
+
+test("maintenance lock recovers an old-format stale owner only when its PID is definitely absent", async () => {
+  await withTempState(async (stateRoot) => {
+    const lock = path.join(stateRoot, "storage-maintenance.lock");
+    await fs.mkdir(lock);
+    await fs.writeFile(path.join(lock, "owner.json"), JSON.stringify({
+      pid: 424242,
+      acquired_at: "2026-08-13T00:00:00.000Z",
+    }));
+    const release = await acquireMaintenanceLock(stateRoot, {
+      now: () => new Date("2026-08-13T01:00:00.000Z"),
+      staleMs: 60_000,
+      hostname: "audit-host",
+      kill: (pid) => {
+        assert.equal(pid, 424242);
+        const error = new Error("missing");
+        error.code = "ESRCH";
+        throw error;
+      },
+    });
+    const owner = JSON.parse(await fs.readFile(path.join(lock, "owner.json"), "utf8"));
+    assert.equal(owner.pid, process.pid);
+    assert.equal(owner.hostname, "audit-host");
+    await release();
+    await assert.rejects(fs.access(lock), /ENOENT/u);
+  });
+});
+
+test("maintenance lock fails closed for live, unverifiable, and foreign-host owners", async () => {
+  for (const owner of [
+    { pid: 77, hostname: "audit-host", acquired_at: "2026-08-13T00:00:00.000Z" },
+    { pid: 78, hostname: "other-host", acquired_at: "2026-08-13T00:00:00.000Z" },
+  ]) {
+    await withTempState(async (stateRoot) => {
+      const lock = path.join(stateRoot, "storage-maintenance.lock");
+      await fs.mkdir(lock);
+      await fs.writeFile(path.join(lock, "owner.json"), JSON.stringify(owner));
+      await assert.rejects(acquireMaintenanceLock(stateRoot, {
+        now: () => new Date("2026-08-13T01:00:00.000Z"),
+        staleMs: 60_000,
+        hostname: "audit-host",
+        kill: () => {
+          if (owner.pid === 77) return;
+          const error = new Error("missing");
+          error.code = "ESRCH";
+          throw error;
+        },
+      }), /already locked/u);
+      assert.deepEqual((await fs.readdir(lock)).sort(), ["owner.json"]);
+    });
+  }
+});
+
+test("maintenance lock can recover a stale dead recovery claimant without widening ownership", async () => {
+  await withTempState(async (stateRoot) => {
+    const lock = path.join(stateRoot, "storage-maintenance.lock");
+    await fs.mkdir(lock);
+    await fs.writeFile(path.join(lock, "owner.json"), JSON.stringify({
+      pid: 91,
+      acquired_at: "2026-08-13T00:00:00.000Z",
+    }));
+    await fs.writeFile(path.join(lock, "recovery-claim.json"), JSON.stringify({
+      pid: 92,
+      hostname: "audit-host",
+      acquired_at: "2026-08-13T00:00:00.000Z",
+      token: "stale-token",
+    }));
+    const release = await acquireMaintenanceLock(stateRoot, {
+      now: () => new Date("2026-08-13T01:00:00.000Z"),
+      staleMs: 60_000,
+      hostname: "audit-host",
+      kill: () => {
+        const error = new Error("missing");
+        error.code = "ESRCH";
+        throw error;
+      },
+    });
+    assert.deepEqual((await fs.readdir(lock)).sort(), ["owner.json"]);
+    await release();
+  });
 });

@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import crypto from "node:crypto";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Transform, Writable } from "node:stream";
@@ -18,6 +19,7 @@ const DEFAULT_CRITICAL_FREE_BYTES = 5 * GIB;
 const DEFAULT_WARNING_USED_PERCENT = 95;
 const DEFAULT_CRITICAL_USED_PERCENT = 98;
 const DEFAULT_TEMPORARY_MINIMUM_AGE_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_MAINTENANCE_LOCK_STALE_MS = 10 * 60 * 1000;
 const MANIFEST_VERSION = 1;
 
 function finiteNumber(value, fallback) {
@@ -376,19 +378,176 @@ async function readManifest(manifestPath) {
   }
 }
 
-async function acquireMaintenanceLock(stateRoot) {
+function processIsDefinitelyAbsent(pid, { kill = process.kill } = {}) {
+  const normalized = Number(pid);
+  if (!Number.isSafeInteger(normalized) || normalized <= 0) return false;
+  try {
+    kill(normalized, 0);
+    return false;
+  } catch (error) {
+    return error?.code === "ESRCH";
+  }
+}
+
+async function readLockRecord(filename) {
+  const [text, stat] = await Promise.all([
+    fs.readFile(filename, "utf8"),
+    fs.lstat(filename),
+  ]);
+  if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`invalid maintenance lock record: ${filename}`);
+  return { text, value: JSON.parse(text), fingerprint: statFingerprint(stat) };
+}
+
+function staleLockRecord(record, {
+  nowMs,
+  staleMs,
+  hostname,
+  kill,
+  allowLegacyHost = false,
+} = {}) {
+  const acquiredAt = Date.parse(String(record?.value?.acquired_at || ""));
+  if (!Number.isFinite(acquiredAt) || nowMs - acquiredAt < staleMs) return false;
+  const recordedHost = String(record?.value?.hostname || "").trim();
+  if (recordedHost && recordedHost !== hostname) return false;
+  if (!recordedHost && !allowLegacyHost) return false;
+  return processIsDefinitelyAbsent(record?.value?.pid, { kill });
+}
+
+async function createRecoveryClaim(claimPath, value) {
+  const handle = await fs.open(claimPath, "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(value)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function acquireRecoveryClaim(lock, {
+  now,
+  staleMs,
+  hostname,
+  kill,
+} = {}) {
+  const claimPath = path.join(lock, "recovery-claim.json");
+  const token = crypto.randomUUID();
+  const claim = {
+    pid: process.pid,
+    hostname,
+    acquired_at: now().toISOString(),
+    token,
+  };
+  try {
+    await createRecoveryClaim(claimPath, claim);
+    return { claimPath, token };
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+
+  let existing;
+  try {
+    existing = await readLockRecord(claimPath);
+  } catch (error) {
+    throw new Error(`storage maintenance recovery claim cannot be verified: ${error?.message || error}`);
+  }
+  if (!staleLockRecord(existing, {
+    nowMs: now().getTime(),
+    staleMs,
+    hostname,
+    kill,
+  })) {
+    throw new Error(`storage maintenance recovery is already claimed: ${claimPath}`);
+  }
+
+  const displaced = `${lock}.recovery-claim.${process.pid}.${crypto.randomUUID()}.stale`;
+  await fs.rename(claimPath, displaced);
+  const moved = await readLockRecord(displaced);
+  if (!sameFingerprint(existing.fingerprint, moved.fingerprint) || existing.text !== moved.text) {
+    await fs.rename(displaced, claimPath).catch(() => {});
+    throw new Error(`storage maintenance recovery claim changed during takeover: ${claimPath}`);
+  }
+  try {
+    await createRecoveryClaim(claimPath, claim);
+  } catch (error) {
+    await fs.unlink(displaced).catch(() => {});
+    throw new Error(`storage maintenance recovery was claimed concurrently: ${error?.message || error}`);
+  }
+  await fs.unlink(displaced);
+  return { claimPath, token };
+}
+
+async function assertRecoveryClaim({ claimPath, token }) {
+  const current = await readLockRecord(claimPath);
+  if (String(current?.value?.token || "") !== token) {
+    throw new Error(`storage maintenance recovery claim ownership changed: ${claimPath}`);
+  }
+}
+
+export async function acquireMaintenanceLock(stateRoot, {
+  now = () => new Date(),
+  staleMs = DEFAULT_MAINTENANCE_LOCK_STALE_MS,
+  hostname = os.hostname(),
+  kill = process.kill,
+} = {}) {
   const lock = path.join(stateRoot, "storage-maintenance.lock");
   try {
     await fs.mkdir(lock, { mode: 0o700 });
   } catch (error) {
     if (error?.code === "EEXIST") {
-      throw new Error(`storage maintenance is already locked: ${lock}`);
+      const claim = await acquireRecoveryClaim(lock, {
+        now,
+        staleMs: Math.max(60_000, Number(staleMs) || DEFAULT_MAINTENANCE_LOCK_STALE_MS),
+        hostname,
+        kill,
+      });
+      try {
+        const ownerPath = path.join(lock, "owner.json");
+        const owner = await readLockRecord(ownerPath);
+        if (!staleLockRecord(owner, {
+          nowMs: now().getTime(),
+          staleMs: Math.max(60_000, Number(staleMs) || DEFAULT_MAINTENANCE_LOCK_STALE_MS),
+          hostname,
+          kill,
+          allowLegacyHost: true,
+        })) {
+          throw new Error(`storage maintenance is already locked: ${lock}`);
+        }
+        await assertRecoveryClaim(claim);
+        const ownerAgain = await readLockRecord(ownerPath);
+        if (!sameFingerprint(owner.fingerprint, ownerAgain.fingerprint) || owner.text !== ownerAgain.text) {
+          throw new Error(`storage maintenance lock owner changed during recovery: ${lock}`);
+        }
+        const entries = (await fs.readdir(lock)).sort();
+        if (entries.length !== 2 || entries[0] !== "owner.json" || entries[1] !== "recovery-claim.json") {
+          throw new Error(`storage maintenance lock contains unexpected entries: ${lock}`);
+        }
+        const staleLock = `${lock}.${process.pid}.${crypto.randomUUID()}.stale`;
+        await fs.rename(lock, staleLock);
+        await Promise.all([
+          fs.unlink(path.join(staleLock, "owner.json")),
+          fs.unlink(path.join(staleLock, "recovery-claim.json")),
+        ]);
+        await fs.rmdir(staleLock);
+        try {
+          await fs.mkdir(lock, { mode: 0o700 });
+        } catch (mkdirError) {
+          if (mkdirError?.code === "EEXIST") {
+            throw new Error(`storage maintenance lock was acquired concurrently: ${lock}`);
+          }
+          throw mkdirError;
+        }
+      } catch (recoveryError) {
+        await fs.unlink(claim.claimPath).catch(() => {});
+        throw recoveryError;
+      }
+    } else {
+      throw error;
     }
-    throw error;
   }
   await writeJsonAtomic(path.join(lock, "owner.json"), {
     pid: process.pid,
-    acquired_at: new Date().toISOString(),
+    hostname,
+    acquired_at: now().toISOString(),
   });
   return async () => {
     await fs.unlink(path.join(lock, "owner.json")).catch((error) => {
@@ -848,6 +1007,7 @@ if (invoked) {
 export {
   DEFAULT_CRITICAL_FREE_BYTES,
   DEFAULT_CRITICAL_USED_PERCENT,
+  DEFAULT_MAINTENANCE_LOCK_STALE_MS,
   DEFAULT_TEMPORARY_MINIMUM_AGE_MS,
   DEFAULT_WARNING_FREE_BYTES,
   DEFAULT_WARNING_USED_PERCENT,

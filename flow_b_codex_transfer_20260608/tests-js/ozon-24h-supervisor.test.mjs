@@ -12,6 +12,7 @@ import {
 } from "../scripts/flow_b_playwright/direct-worker-health.mjs";
 
 import {
+  advanceStorageCleanupAttemptAt,
   browserOwnerPidsForRecovery,
   browserCdpStartupSettings,
   browserRecoverySafeStopDecision,
@@ -41,6 +42,7 @@ import {
   resolveSourceScanStateFile,
   resolveSupervisorAppRoot,
   runOzonVerificationProbe,
+  storageCleanupDue,
   runDirectSourceRefresh,
   runFormalSourceRefresh,
   runInitialSourceRefresh,
@@ -110,6 +112,87 @@ test("storage maintenance records threshold transitions and only cleans when exp
   } finally {
     await fs.rm(stateRoot, { recursive: true, force: true });
   }
+});
+
+test("critical storage transition cleans immediately and every cleanup failure is alerted", async () => {
+  const stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-storage-critical-"));
+  const runDir = path.join(stateRoot, "runs", "run-1");
+  await fs.mkdir(runDir, { recursive: true });
+  let cleanupCalls = 0;
+  try {
+    await fs.writeFile(path.join(stateRoot, "storage_status.json"), JSON.stringify({ severity: "healthy" }));
+    const options = {
+      stateRoot,
+      runDir,
+      config: { storage_maintenance: {} },
+      allowCleanup: false,
+      snapshot: async () => ({
+        observed_at: "2026-08-13T00:00:00.000Z",
+        severity: "critical",
+        alert: true,
+        reasons: ["free-bytes-below-critical"],
+      }),
+      cleanup: async () => {
+        cleanupCalls += 1;
+        throw new Error(`cleanup-failure-${cleanupCalls}`);
+      },
+    };
+    const first = await refreshStorageMaintenance(options);
+    assert.equal(cleanupCalls, 1);
+    assert.equal(first.automatic_cleanup.error, "cleanup-failure-1");
+    const second = await refreshStorageMaintenance({ ...options, allowCleanup: true });
+    assert.equal(cleanupCalls, 2);
+    assert.equal(second.automatic_cleanup.error, "cleanup-failure-2");
+    const alerts = (await fs.readFile(path.join(stateRoot, "storage_alerts.jsonl"), "utf8"))
+      .trim().split("\n").map(JSON.parse);
+    assert.equal(alerts.length, 2);
+    assert.deepEqual(alerts.map((row) => row.action), [
+      "storage-temporary-cleanup-failed",
+      "storage-temporary-cleanup-failed",
+    ]);
+    assert.deepEqual(alerts.map((row) => row.cleanup_error), [
+      "cleanup-failure-1",
+      "cleanup-failure-2",
+    ]);
+  } finally {
+    await fs.rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("storage cleanup cadence advances only from a newer persisted attempt", () => {
+  const previous = Date.parse("2026-08-13T00:00:00.000Z");
+  assert.equal(advanceStorageCleanupAttemptAt(previous, { severity: "warning" }), previous);
+  assert.equal(advanceStorageCleanupAttemptAt(previous, {
+    automatic_cleanup: { attempted_at: "2026-08-12T23:00:00.000Z" },
+  }), previous);
+  assert.equal(advanceStorageCleanupAttemptAt(previous, {
+    automatic_cleanup: { attempted_at: "2026-08-13T01:00:00.000Z" },
+  }), Date.parse("2026-08-13T01:00:00.000Z"));
+});
+
+test("critical storage retries every five minutes without cleanup storms", () => {
+  const lastAttemptAt = Date.parse("2026-08-13T00:00:00.000Z");
+  const critical = { severity: "critical", automatic_cleanup: { error: "disk-busy" } };
+  assert.equal(storageCleanupDue({
+    status: critical,
+    lastAttemptAt,
+    nowMs: Date.parse("2026-08-13T00:04:59.999Z"),
+  }), false);
+  assert.equal(storageCleanupDue({
+    status: critical,
+    lastAttemptAt,
+    nowMs: Date.parse("2026-08-13T00:05:00.000Z"),
+  }), true);
+  assert.equal(storageCleanupDue({
+    status: { severity: "warning" },
+    lastAttemptAt,
+    nowMs: Date.parse("2026-08-13T05:59:59.999Z"),
+  }), false);
+  assert.equal(storageCleanupDue({
+    status: { severity: "warning" },
+    lastAttemptAt,
+    nowMs: Date.parse("2026-08-13T06:00:00.000Z"),
+  }), true);
 });
 
 const RELIABLE_COST = Object.freeze({

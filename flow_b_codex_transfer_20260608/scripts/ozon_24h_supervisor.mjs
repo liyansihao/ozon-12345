@@ -1709,8 +1709,9 @@ export async function refreshStorageMaintenance({
     criticalUsedPercent: Number(settings.critical_used_percent || 98),
   });
   let cleanupResult = null;
+  const criticalTransition = health.severity === "critical" && previous?.severity !== "critical";
   if (
-    allowCleanup
+    (allowCleanup || criticalTransition)
     && health.alert
     && settings.automatic_temporary_cleanup_enabled !== false
   ) {
@@ -1755,19 +1756,42 @@ export async function refreshStorageMaintenance({
   if (
     String(previous?.severity || "unknown") !== String(value.severity)
     || (cleanupResult && Number(cleanupResult?.removed_bytes || 0) > 0)
+    || cleanupResult?.error
   ) {
     await appendJsonLine(path.join(stateRoot, "storage_alerts.jsonl"), {
       at: value.observed_at,
-      action: "storage-health-transition",
+      action: cleanupResult?.error ? "storage-temporary-cleanup-failed" : "storage-health-transition",
       previous_severity: previous?.severity || null,
       severity: value.severity,
       reasons: value.reasons,
       available_bytes: value.available_bytes,
       used_percent: value.used_percent,
       cleanup_removed_bytes: Number(cleanupResult?.removed_bytes || 0),
+      cleanup_error: cleanupResult?.error || null,
     });
   }
   return value;
+}
+
+export function advanceStorageCleanupAttemptAt(previousAttemptAt, result) {
+  const previous = Math.max(0, Number(previousAttemptAt) || 0);
+  const attemptedAt = Date.parse(result?.automatic_cleanup?.attempted_at || "");
+  return Number.isFinite(attemptedAt) && attemptedAt > previous ? attemptedAt : previous;
+}
+
+export function storageCleanupDue({
+  status = {},
+  nowMs = Date.now(),
+  lastAttemptAt = 0,
+  normalIntervalMs = 6 * 60 * 60_000,
+  criticalRetryIntervalMs = 5 * 60_000,
+} = {}) {
+  const observedNow = Number(nowMs);
+  const previousAttempt = Math.max(0, Number(lastAttemptAt) || 0);
+  const interval = status?.severity === "critical"
+    ? Math.max(60_000, Number(criticalRetryIntervalMs) || 5 * 60_000)
+    : Math.max(60 * 60_000, Number(normalIntervalMs) || 6 * 60 * 60_000);
+  return Number.isFinite(observedNow) && observedNow - previousAttempt >= interval;
 }
 
 async function acceptanceEnded(runDir) {
@@ -3135,7 +3159,7 @@ async function superviseDirectPublishing({
   process.on("SIGHUP", onSignal);
   try {
     await fsp.mkdir(runDir, { recursive: true });
-    const startupStorage = await storagePoll();
+    let storageStatus = await storagePoll();
     const storageScanIntervalMs = Math.max(
       60_000,
       Number(config.storage_maintenance?.scan_interval_seconds || 300) * 1000,
@@ -3144,12 +3168,19 @@ async function superviseDirectPublishing({
       60 * 60_000,
       Number(config.storage_maintenance?.cleanup_interval_seconds || 21_600) * 1000,
     );
-    const persistedCleanupAt = Date.parse(startupStorage?.automatic_cleanup?.attempted_at || "");
+    const persistedCleanupAt = Date.parse(storageStatus?.automatic_cleanup?.attempted_at || "");
     if (Number.isFinite(persistedCleanupAt)) lastStorageCleanupAttemptAt = persistedCleanupAt;
     storageTimer = setInterval(() => {
-      const allowCleanup = Date.now() - lastStorageCleanupAttemptAt >= storageCleanupIntervalMs;
-      if (allowCleanup) lastStorageCleanupAttemptAt = Date.now();
-      void storagePoll({ allowCleanup });
+      const allowCleanup = storageCleanupDue({
+        status: storageStatus,
+        nowMs: Date.now(),
+        lastAttemptAt: lastStorageCleanupAttemptAt,
+        normalIntervalMs: storageCleanupIntervalMs,
+      });
+      void storagePoll({ allowCleanup }).then((result) => {
+        if (result) storageStatus = result;
+        lastStorageCleanupAttemptAt = advanceStorageCleanupAttemptAt(lastStorageCleanupAttemptAt, result);
+      });
     }, storageScanIntervalMs);
     storageTimer.unref();
     await refreshSources();
