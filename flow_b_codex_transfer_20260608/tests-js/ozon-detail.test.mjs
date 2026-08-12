@@ -207,6 +207,85 @@ test("detail provider retries an exact navigation timeout once on a fresh page",
   assert.equal(pages[1].isClosed(), true);
 });
 
+test("detail provider retries a transient Ozon product navigation failure once on a fresh page", async () => {
+  const pages = [];
+  let newPageCalls = 0;
+  const context = {
+    newPage: async () => {
+      newPageCalls += 1;
+      const index = newPageCalls;
+      let closed = false;
+      const page = {
+        isClosed: () => closed,
+        goto: async () => {
+          if (index === 1) {
+            throw new Error([
+              "page.goto: net::ERR_FAILED at https://www.ozon.ru/product/transient-product-123/",
+              "Call log:",
+            ].join("\n"));
+          }
+        },
+        evaluate: async () => ({
+          url: "https://www.ozon.ru/product/transient-product-123/",
+          title: "Ozon item",
+          text: "title\n¥ 99\n发货模式： FBS",
+        }),
+        close: async () => { closed = true; },
+      };
+      pages.push(page);
+      return page;
+    },
+  };
+  const provider = createOzonDetailProvider({
+    context,
+    timeout: 12_000,
+    pollInterval: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  const detail = await provider.getProductDetail("transient-product-123", { sell_price: 90 });
+
+  assert.equal(detail.mode, "FBS");
+  assert.equal(newPageCalls, 2);
+  assert.equal(pages[0].isClosed(), true);
+  assert.equal(pages[1].isClosed(), false);
+  await provider.close();
+  assert.equal(pages[1].isClosed(), true);
+});
+
+test("detail provider does not retry a non-product or persistent navigation error", async () => {
+  for (const message of [
+    "page.goto: net::ERR_FAILED at https://www.ozon.ru/seller/example/",
+    "page.goto: net::ERR_NAME_NOT_RESOLVED at https://www.ozon.ru/product/example-123/",
+  ]) {
+    let newPageCalls = 0;
+    let closed = false;
+    const provider = createOzonDetailProvider({
+      context: {
+        newPage: async () => {
+          newPageCalls += 1;
+          return {
+            isClosed: () => closed,
+            goto: async () => { throw new Error(message); },
+            evaluate: async () => assert.fail("a failed navigation must not be evaluated"),
+            close: async () => { closed = true; },
+          };
+        },
+      },
+      timeout: 12_000,
+      pollInterval: 1,
+      initialConcurrency: 1,
+      maxConcurrency: 1,
+    });
+
+    await assert.rejects(provider.getProductDetail("example-123", { sell_price: 90 }), /net::ERR_/);
+    assert.equal(newPageCalls, 1);
+    assert.equal(closed, true);
+    await provider.close();
+  }
+});
+
 test("detail provider bounds a double navigation timeout to two fresh-page attempts", async () => {
   const pages = [];
   const navigationTimeouts = [];

@@ -9,10 +9,10 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const RETRY_NAVIGATION_TIMEOUT_MS = 30_000;
 const RETRY_OPERATION_GRACE_MS = 3_000;
 
-function isExactPageGotoTimeout(error) {
+function isRetryablePageGotoFailure(error) {
   const message = String(error?.message || error || "");
   if (/target page|context or browser has been closed|frame was detached/i.test(message)) return false;
-  return /^page\.goto: Timeout [0-9]+ms exceeded\.?(?:\r?\n|$)/.test(message);
+  return /^page\.goto: (?:Timeout [0-9]+ms exceeded\.?|net::ERR_(?:FAILED|CONNECTION_(?:CLOSED|RESET)) at https:\/\/www\.ozon\.ru\/product\/[^\s]+)(?:\r?\n|$)/.test(message);
 }
 
 function money(value) {
@@ -270,7 +270,7 @@ export function createOzonDetailProvider({
               break;
             } catch (error) {
               navigationFailed = true;
-              if (navigationAttempt !== 0 || !isExactPageGotoTimeout(error)) throw error;
+              if (navigationAttempt !== 0 || !isRetryablePageGotoFailure(error)) throw error;
 
               const poisonedPage = page;
               page = null;
