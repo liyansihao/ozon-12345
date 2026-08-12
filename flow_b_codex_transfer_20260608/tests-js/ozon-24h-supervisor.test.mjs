@@ -1085,13 +1085,20 @@ test("browser and CDP failures recover the same run with bounded backoff", () =>
     profileOwnerCount: 1,
   });
   assert.deepEqual(pageCreateDecision, {
-    action: "restart-browser-and-worker",
-    reason: "browser-or-network-recoverable",
+    action: "restart-worker",
+    reason: "ordinary-worker-recoverable",
   });
   assert.deepEqual(
     browserOwnerPidsForRecovery(pageCreateDecision, [{ pid: 92462 }]),
-    [92462],
+    [],
   );
+  assert.deepEqual(classifyWorkerFailure({
+    message: "favorite worker page creation timed out after 10000ms",
+    profileOwnerCount: 0,
+  }), {
+    action: "restart-browser-and-worker",
+    reason: "browser-or-network-recoverable",
+  });
   assert.deepEqual(
     browserOwnerPidsForRecovery({ action: "restart-worker" }, [{ pid: 92462 }]),
     [],

@@ -590,6 +590,6 @@ export async function withRuntimeCleanup(operation, {
 
 export function isFatalBrowserError(error) {
   if (error?.code === "FLOW_B_OZON_ACCESS_STOPPED") return true;
-  return /target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed|favorite worker page creation timed out/i
+  return /target (?:page, )?context or browser has been closed|browsercontext\.(?:newpage|close).*target page has been closed|browser has been closed/i
     .test(String(error?.message || error || ""));
 }

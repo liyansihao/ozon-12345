@@ -24,6 +24,8 @@ const collectionRuntimeStates = new Map();
 const collectionRuntimeWriteChains = new Map();
 const jsonLinesFileCache = new Map();
 const jsonArrayFileCache = new Map();
+const favoritePageCreationChains = new WeakMap();
+const reusablePagePoolFlights = new WeakMap();
 
 export function isNewFavoriteCollectionResult(result = {}) {
   return result?.existing !== true;
@@ -533,7 +535,9 @@ export async function withTimeout(operation, timeoutMs, label = "operation") {
 }
 
 export async function createFavoriteWorkerPage(context, timeoutMs = 10_000) {
+  const timeout = Math.max(1, Number(timeoutMs) || 1);
   let expired = false;
+  let timer;
   const operation = Promise.resolve().then(() => context.newPage()).then(async (page) => {
     if (expired) {
       await page.close().catch(() => {});
@@ -542,23 +546,94 @@ export async function createFavoriteWorkerPage(context, timeoutMs = 10_000) {
     return page;
   });
   try {
-    return await withTimeout(operation, timeoutMs, "favorite worker page creation");
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error(`favorite worker page creation timed out after ${timeout}ms`);
+          error.code = "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT";
+          reject(error);
+        }, timeout);
+      }),
+    ]);
   } finally {
+    clearTimeout(timer);
     expired = true;
   }
+}
+
+export function isFavoriteWorkerPageCreationTimeout(error) {
+  return error?.code === "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT";
+}
+
+function createFavoriteWorkerPageSerially(context, timeoutMs) {
+  const previous = favoritePageCreationChains.get(context) || Promise.resolve();
+  const operation = previous
+    .catch(() => {})
+    .then(() => createFavoriteWorkerPage(context, timeoutMs));
+  const settled = operation.then(() => undefined, () => undefined);
+  favoritePageCreationChains.set(context, settled);
+  settled.then(() => {
+    if (favoritePageCreationChains.get(context) === settled) {
+      favoritePageCreationChains.delete(context);
+    }
+  });
+  return operation;
 }
 
 function isReusablePageOpen(page) {
   return Boolean(page) && (typeof page.isClosed !== "function" || !page.isClosed());
 }
 
+function compactReusablePages(pages) {
+  const openPages = pages.filter(isReusablePageOpen);
+  pages.splice(0, pages.length, ...openPages);
+}
+
 export async function ensureReusablePageSlots(context, pages, count, timeoutMs = 10_000) {
   const target = Math.max(0, Number(count) || 0);
-  await Promise.all(Array.from({ length: target }, async (_, index) => {
-    if (isReusablePageOpen(pages[index])) return;
-    pages[index] = await createFavoriteWorkerPage(context, timeoutMs);
-  }));
-  return pages.slice(0, target);
+  if (target === 0) return [];
+
+  let flight = reusablePagePoolFlights.get(pages);
+  if (!flight) {
+    compactReusablePages(pages);
+    flight = {
+      context,
+      target,
+      promise: null,
+    };
+    flight.promise = (async () => {
+      let creationError = null;
+      for (let index = 0; index < flight.target; index += 1) {
+        if (isReusablePageOpen(pages[index])) continue;
+        pages[index] = null;
+        try {
+          pages[index] = await createFavoriteWorkerPageSerially(context, timeoutMs);
+        } catch (error) {
+          if (isFatalBrowserError(error)) throw error;
+          if (!isFavoriteWorkerPageCreationTimeout(error)) throw error;
+          creationError = error;
+          break;
+        }
+      }
+      if (creationError && !pages.slice(0, flight.target).some(isReusablePageOpen)) {
+        throw creationError;
+      }
+    })();
+    reusablePagePoolFlights.set(pages, flight);
+  } else {
+    flight.target = Math.max(flight.target, target);
+  }
+
+  try {
+    await flight.promise;
+  } finally {
+    compactReusablePages(pages);
+    if (reusablePagePoolFlights.get(pages) === flight) {
+      reusablePagePoolFlights.delete(pages);
+    }
+  }
+  return pages.slice(0, target).filter(isReusablePageOpen);
 }
 
 export async function closeReusablePages(pages, timeoutMs = 5_000) {
@@ -3082,17 +3157,12 @@ export async function collectFavorites({ context, maozi, links, target, currentT
   };
   const desiredWorkers = Math.min(workerCount, queue.length);
   const ownsWorkerPages = !Array.isArray(workerPagePool);
-  const workerPages = ownsWorkerPages
-    ? await Promise.all(Array.from({ length: desiredWorkers }, () => createFavoriteWorkerPage(
-      context,
-      envNumber(env, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS", 10_000),
-    )))
-    : await ensureReusablePageSlots(
-      context,
-      workerPagePool,
-      desiredWorkers,
-      envNumber(env, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS", 10_000),
-    );
+  const workerPages = await ensureReusablePageSlots(
+    context,
+    ownsWorkerPages ? [] : workerPagePool,
+    desiredWorkers,
+    envNumber(env, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT_MS", 10_000),
+  );
   const workers = workerPages.map(async (page) => {
     try {
       while (canClaimFavorite({ total, inFlight, target }) && !isCollectionDeadlineReached(env)) {

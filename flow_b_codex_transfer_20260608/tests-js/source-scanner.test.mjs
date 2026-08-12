@@ -107,6 +107,7 @@ import {
   isCollectionDeadlineReached,
   withTimeout,
   createFavoriteWorkerPage,
+  isFavoriteWorkerPageCreationTimeout,
   readFavoriteSkusWithTimeout,
   readFavoriteCountWithTimeout,
   deriveSearchSourceUrls,
@@ -1285,10 +1286,133 @@ test("runtime page pools survive producer tranches but close when the browser co
 });
 
 test("favorite worker page creation has a bounded lifecycle", async () => {
+  const error = await createFavoriteWorkerPage(
+    { newPage: () => new Promise(() => {}) },
+    5,
+  ).catch((caught) => caught);
+  assert.match(error.message, /favorite worker page creation timed out after 5ms/);
+  assert.equal(error.code, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT");
+  assert.equal(isFavoriteWorkerPageCreationTimeout(error), true);
+});
+
+test("parallel reusable page pool callers share one serial creation flight", async () => {
+  let created = 0;
+  let active = 0;
+  let peakActive = 0;
+  const gates = [];
+  const context = {
+    newPage: async () => {
+      created += 1;
+      active += 1;
+      peakActive = Math.max(peakActive, active);
+      await new Promise((resolve) => { gates.push(resolve); });
+      active -= 1;
+      return {
+        id: created,
+        isClosed: () => false,
+        close: async () => {},
+      };
+    },
+  };
+  const pages = [];
+  const first = ensureReusablePageSlots(context, pages, 3, 1_000);
+  const second = ensureReusablePageSlots(context, pages, 3, 1_000);
+
+  while (gates.length < 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(created, 1);
+  gates.shift()();
+  while (gates.length < 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(created, 2);
+  gates.shift()();
+  while (gates.length < 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(created, 3);
+  gates.shift()();
+
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(created, 3);
+  assert.equal(peakActive, 1);
+  assert.deepEqual(firstResult, pages);
+  assert.deepEqual(secondResult, pages);
+});
+
+test("reusable page pool degrades to one worker when a later slot times out", async () => {
+  let created = 0;
+  const page = { isClosed: () => false, close: async () => {} };
+  const context = {
+    newPage: async () => {
+      created += 1;
+      if (created === 1) return page;
+      return new Promise(() => {});
+    },
+  };
+  const pages = [];
+  const usable = await ensureReusablePageSlots(context, pages, 3, 5);
+  assert.deepEqual(usable, [page]);
+  assert.equal(created, 2);
+});
+
+test("reusable page pool compacts open pages without closing capacity outside the target", async () => {
+  const first = { id: 1, isClosed: () => false, close: async () => {} };
+  const third = { id: 3, isClosed: () => false, close: async () => {} };
+  const fourth = { id: 4, isClosed: () => false, close: async () => {} };
+  const closed = { id: 2, isClosed: () => true, close: async () => {} };
+  const pages = [first, closed, third, null, fourth];
+  const usable = await ensureReusablePageSlots({
+    newPage: async () => { throw new Error("unexpected page creation"); },
+  }, pages, 2, 100);
+  assert.deepEqual(usable, [first, third]);
+  assert.deepEqual(pages, [first, third, fourth]);
+});
+
+test("zero reusable pages after creation timeout is transient but browser closure remains fatal", async () => {
+  const timeoutPool = [];
+  let timeoutError;
+  try {
+    await ensureReusablePageSlots({ newPage: () => new Promise(() => {}) }, timeoutPool, 1, 5);
+  } catch (error) {
+    timeoutError = error;
+  }
+  assert.match(timeoutError?.message || "", /favorite worker page creation timed out after 5ms/);
+  assert.equal(timeoutError?.code, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT");
+  assert.equal(fatalSourceBatchError([{
+    source_url: "https://www.ozon.ru/seller/slow/",
+    stop_reason: `error: ${timeoutError.message}`,
+  }]), null);
+
+  const closedError = new Error("browserContext.newPage: Target page, context or browser has been closed");
   await assert.rejects(
-    createFavoriteWorkerPage({ newPage: () => new Promise(() => {}) }, 5),
-    /favorite worker page creation timed out after 5ms/,
+    ensureReusablePageSlots({ newPage: async () => { throw closedError; } }, [], 1, 100),
+    /context or browser has been closed/i,
   );
+  assert.match(fatalSourceBatchError([{
+    source_url: "https://www.ozon.ru/seller/closed/",
+    stop_reason: `error: ${closedError.message}`,
+  }]).message, /context or browser has been closed/i);
+});
+
+test("non-timeout page creation errors are never degraded and a late page closes exactly once", async () => {
+  const ordinaryError = new Error("browserContext.newPage: renderer allocation failed");
+  await assert.rejects(
+    ensureReusablePageSlots({ newPage: async () => { throw ordinaryError; } }, [], 1, 100),
+    (error) => error === ordinaryError,
+  );
+
+  let resolvePage;
+  let closed = 0;
+  const pages = [];
+  const latePage = {
+    isClosed: () => false,
+    close: async () => { closed += 1; },
+  };
+  const creation = ensureReusablePageSlots({
+    newPage: () => new Promise((resolve) => { resolvePage = resolve; }),
+  }, pages, 1, 5);
+  const timeoutError = await creation.catch((error) => error);
+  assert.equal(timeoutError.code, "FLOW_B_FAVORITE_PAGE_CREATE_TIMEOUT");
+  resolvePage(latePage);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(closed, 1);
+  assert.deepEqual(pages, []);
 });
 
 test("favorite SKU telemetry has a bounded lifecycle", async () => {
