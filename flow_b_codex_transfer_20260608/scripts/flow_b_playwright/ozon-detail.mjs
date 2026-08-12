@@ -2,6 +2,7 @@ import { canonicalProductUrl } from "./publish-state.mjs";
 import { AdaptiveConcurrency } from "./continuous-runtime.mjs";
 import {
   isOzonAuthenticationText,
+  isOzonAccessQueueExpiredError,
   isOzonCaptchaText,
 } from "./ozon-access-controller.mjs";
 
@@ -10,6 +11,7 @@ const RETRY_NAVIGATION_TIMEOUT_MS = 30_000;
 const RETRY_OPERATION_GRACE_MS = 3_000;
 const PAGE_CLEANUP_TIMEOUT_MS = 2_000;
 const MAX_DETAIL_OPERATION_TIMEOUT_MS = 45_000;
+const DEFAULT_DETAIL_QUEUE_SLOT_BUDGET_MS = MAX_DETAIL_OPERATION_TIMEOUT_MS + 10_000;
 
 function detailDeadlineError(phase, timeoutMs = null) {
   const hasTimeout = timeoutMs !== null && timeoutMs !== undefined
@@ -200,6 +202,7 @@ export function createOzonDetailProvider({
   operationGraceMs = RETRY_OPERATION_GRACE_MS,
   pageCleanupTimeoutMs = PAGE_CLEANUP_TIMEOUT_MS,
   operationBudgetMs = null,
+  queueWaitBudgetMs = null,
 } = {}) {
   if (!context || typeof context.newPage !== "function") throw new TypeError("Playwright context is required for Ozon detail extraction");
   const adaptive = new AdaptiveConcurrency({ initial: initialConcurrency, max: maxConcurrency, min: 1 });
@@ -208,6 +211,7 @@ export function createOzonDetailProvider({
   const allPages = new Set();
   const pageCreations = new Set();
   const pageCloseOperations = new WeakMap();
+  const accessQueueCancellations = new Set();
   const activeRetryNavigationTimeoutMs = Math.max(
     1,
     Math.floor(Number.isFinite(Number(retryNavigationTimeoutMs))
@@ -404,6 +408,7 @@ export function createOzonDetailProvider({
   return {
     adaptive,
     async getProductDetail(skuValue, item = {}) {
+      if (closing) throw providerClosedError();
       const sku = String(skuValue || "").trim();
       if (!sku) throw new Error("Ozon detail SKU is required");
       const configuredPrimaryTimeoutMs = Number.isFinite(Number(timeout))
@@ -420,6 +425,20 @@ export function createOzonDetailProvider({
           ? Math.max(1, Math.floor(configuredOperationBudgetMs))
           : primaryNavigationTimeoutMs + activeRetryNavigationTimeoutMs + activeOperationGraceMs,
       );
+      const configuredQueueWaitBudgetValue = typeof queueWaitBudgetMs === "function"
+        ? queueWaitBudgetMs(sku, item)
+        : queueWaitBudgetMs;
+      const configuredQueueWaitBudgetMs = Number(configuredQueueWaitBudgetValue);
+      // A healthy serialized queue may legitimately contain every configured
+      // detail worker. Give each slot one hard operation budget plus pacing
+      // headroom, while still bounding abandoned work and keeping execution's
+      // independent 45 second ceiling.
+      const defaultQueueWaitBudgetMs = DEFAULT_DETAIL_QUEUE_SLOT_BUDGET_MS
+        * Math.max(1, Math.ceil(Number(maxConcurrency) || 1));
+      const activeQueueWaitBudgetMs = Number.isFinite(configuredQueueWaitBudgetMs)
+        && configuredQueueWaitBudgetMs > 0
+        ? Math.max(1, Math.floor(configuredQueueWaitBudgetMs))
+        : defaultQueueWaitBudgetMs;
       let operationDeadline = Number.POSITIVE_INFINITY;
       let page = null;
       let reusable = true;
@@ -534,9 +553,31 @@ export function createOzonDetailProvider({
           } while (true);
           return payload;
         };
-        const payload = accessController
-          ? await accessController.run({ kind: "publish-detail", url }, readDetail)
-          : await readDetail();
+        let payload;
+        let accessQueueCancellation = null;
+        try {
+          if (accessController) {
+            accessQueueCancellation = new AbortController();
+            accessQueueCancellations.add(accessQueueCancellation);
+            payload = await accessController.run(
+              { kind: "publish-detail", url },
+              readDetail,
+              {
+                deadlineAt: Date.now() + activeQueueWaitBudgetMs,
+                signal: accessQueueCancellation.signal,
+              },
+            );
+          } else {
+            payload = await readDetail();
+          }
+        } catch (error) {
+          if (!isOzonAccessQueueExpiredError(error)) throw error;
+          const expired = detailDeadlineError("access-queue", activeQueueWaitBudgetMs);
+          expired.cause = error;
+          throw expired;
+        } finally {
+          if (accessQueueCancellation) accessQueueCancellations.delete(accessQueueCancellation);
+        }
         if (!payload?.text) throw new Error(`Ozon detail text unavailable for SKU ${sku}`);
         const fallback = String(item.source_currency || "").toUpperCase() === "CNY"
           ? (item.sell_price ?? item.current_price ?? item.price)
@@ -571,6 +612,8 @@ export function createOzonDetailProvider({
       if (closePromise) return closePromise;
       closing = true;
       const closeError = providerClosedError();
+      for (const cancellation of accessQueueCancellations) cancellation.abort(closeError);
+      accessQueueCancellations.clear();
       for (const waiter of waiters.splice(0)) waiter.reject(closeError);
       available.splice(0);
       pageCreations.clear();

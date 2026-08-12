@@ -57,6 +57,30 @@ export function isOzonAccessStoppedError(error) {
   return error?.code === "FLOW_B_OZON_ACCESS_STOPPED";
 }
 
+export function isOzonAccessQueueExpiredError(error) {
+  return error?.code === "FLOW_B_OZON_ACCESS_QUEUE_EXPIRED";
+}
+
+function queueExpiredError(metadata = {}, deadlineAt = null) {
+  const kind = String(metadata.kind || "operation");
+  const error = new Error(`Ozon access ${kind} expired before operation start`);
+  error.code = "FLOW_B_OZON_ACCESS_QUEUE_EXPIRED";
+  error.phase = "queue-wait";
+  error.deadline_at_ms = Number.isFinite(Number(deadlineAt)) ? Number(deadlineAt) : null;
+  return error;
+}
+
+function queueCancelledError(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const reason = signal?.reason === undefined
+    ? "caller cancelled queued Ozon work"
+    : String(signal.reason);
+  const error = new Error(reason);
+  error.code = "FLOW_B_OZON_ACCESS_QUEUE_CANCELLED";
+  error.phase = "queue-wait";
+  return error;
+}
+
 function stoppedError(reason, state = {}) {
   const error = new Error(`Ozon access stopped; manual clearance required: ${reason || state.reason || "soft block"}`);
   error.code = "FLOW_B_OZON_ACCESS_STOPPED";
@@ -220,6 +244,7 @@ export function createOzonAccessController({
     medium: [],
     low: [],
   };
+  const skippedTask = Symbol("skipped Ozon access task");
 
   const load = async () => {
     if (state) return state;
@@ -359,30 +384,43 @@ export function createOzonAccessController({
     await record("stopped", metadata, { reason: state.reason });
     return stoppedError(state.reason, state);
   };
+  const discardUnavailableHeads = (queue) => {
+    while (queue.length > 0 && !queue[0].refresh()) queue.shift();
+  };
   const dequeue = () => {
+    discardUnavailableHeads(queues.high);
+    discardUnavailableHeads(queues.medium);
+    discardUnavailableHeads(queues.low);
     if (queues.low.length > 0 && consecutiveNonSource >= MAX_NON_SOURCE_BURST) {
-      consecutiveNonSource = 0;
       return queues.low.shift();
     }
     if (queues.high.length > 0) {
-      consecutiveNonSource += 1;
       return queues.high.shift();
     }
     if (queues.medium.length > 0) {
-      consecutiveNonSource += 1;
       return queues.medium.shift();
     }
     if (queues.low.length > 0) {
-      consecutiveNonSource = 0;
       return queues.low.shift();
     }
     return null;
   };
-  const execute = async (metadata, operation) => {
+  const beginTask = (task) => {
+    if (!task.begin()) return false;
+    if (task.metadata.kind === "source") consecutiveNonSource = 0;
+    else consecutiveNonSource += 1;
+    return true;
+  };
+  const execute = async (task) => {
+    const { metadata, operation } = task;
     await load();
-    if (state.requires_manual_clear) throw stoppedError(state.reason, state);
+    if (state.requires_manual_clear) {
+      if (!beginTask(task)) return skippedTask;
+      throw stoppedError(state.reason, state);
+    }
     const waitMs = Math.max(0, Number(state.next_allowed_at_ms) - now());
     if (waitMs > 0) await sleep(waitMs);
+    if (!beginTask(task)) return skippedTask;
     if (state.requires_manual_clear) throw stoppedError(state.reason, state);
     const startedAt = now();
     state = {
@@ -456,7 +494,8 @@ export function createOzonAccessController({
         return;
       }
       try {
-        task.resolve(await execute(task.metadata, task.operation));
+        const result = await execute(task);
+        if (result !== skippedTask) task.resolve(result);
       } catch (error) {
         task.reject(error);
       }
@@ -483,15 +522,83 @@ export function createOzonAccessController({
     },
     async snapshot() { return { ...(await load()) }; },
     async stop(reason, metadata = {}) { throw await stop(reason, metadata); },
-    run(metadata = {}, operation) {
+    run(metadata = {}, operation, { deadlineAt = null, signal = null } = {}) {
       if (typeof operation !== "function") throw new TypeError("Ozon access operation is required");
       return new Promise((resolve, reject) => {
-        queues[queuePriority(metadata.kind)].push({
+        const hasDeadline = deadlineAt !== null
+          && deadlineAt !== undefined
+          && String(deadlineAt).trim() !== "";
+        const numericDeadline = Number(deadlineAt);
+        const activeDeadline = hasDeadline && Number.isFinite(numericDeadline)
+          ? numericDeadline
+          : null;
+        let status = "queued";
+        let timer = null;
+        let abortListener = null;
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          timer = null;
+          if (abortListener && typeof signal?.removeEventListener === "function") {
+            signal.removeEventListener("abort", abortListener);
+          }
+          abortListener = null;
+        };
+        const rejectOnce = (error) => {
+          if (status === "settled") return false;
+          status = "settled";
+          cleanup();
+          reject(error);
+          return true;
+        };
+        const task = {
           metadata,
           operation,
-          resolve,
-          reject,
-        });
+          resolve(value) {
+            if (status === "settled") return false;
+            status = "settled";
+            cleanup();
+            resolve(value);
+            return true;
+          },
+          reject: rejectOnce,
+          refresh() {
+            if (status !== "queued") return false;
+            if (signal?.aborted) {
+              rejectOnce(queueCancelledError(signal));
+              return false;
+            }
+            if (activeDeadline !== null && now() >= activeDeadline) {
+              rejectOnce(queueExpiredError(metadata, activeDeadline));
+              return false;
+            }
+            return true;
+          },
+          begin() {
+            if (!task.refresh()) return false;
+            status = "running";
+            cleanup();
+            return true;
+          },
+        };
+        if (signal && typeof signal.addEventListener === "function") {
+          abortListener = () => {
+            if (status === "queued") rejectOnce(queueCancelledError(signal));
+          };
+          if (signal.aborted) abortListener();
+          else signal.addEventListener("abort", abortListener, { once: true });
+        }
+        if (status === "queued" && activeDeadline !== null) {
+          const remainingMs = Math.max(0, activeDeadline - now());
+          if (remainingMs <= 0) {
+            rejectOnce(queueExpiredError(metadata, activeDeadline));
+          } else {
+            timer = setTimeout(() => {
+              if (status === "queued") rejectOnce(queueExpiredError(metadata, activeDeadline));
+            }, remainingMs);
+          }
+        }
+        if (status !== "queued") return;
+        queues[queuePriority(metadata.kind)].push(task);
         scheduleDrain();
       });
     },

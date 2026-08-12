@@ -243,6 +243,111 @@ test("queued source work runs after at most eight consecutive non-source operati
   ]);
 });
 
+test("eight expired queued operations are rejected without running and the queue continues", async () => {
+  const releaseFirst = deferred();
+  const firstStarted = deferred();
+  const order = [];
+  let expiredOperationCalls = 0;
+  const controller = createOzonAccessController({ minIntervalMs: 0 });
+  const running = controller.run({ kind: "source" }, async () => {
+    order.push("running-source");
+    firstStarted.resolve();
+    await releaseFirst.promise;
+  });
+  await firstStarted.promise;
+
+  const deadlineAt = Date.now() + 10;
+  const expired = Array.from({ length: 8 }, (_, index) => controller.run(
+    { kind: "publish-detail", url: `https://www.ozon.ru/product/expired-${index + 1}` },
+    async () => {
+      expiredOperationCalls += 1;
+      order.push(`expired-${index + 1}`);
+    },
+    { deadlineAt },
+  ));
+  const expiredAssertions = expired.map((operation) => assert.rejects(
+    operation,
+    (error) => error?.code === "FLOW_B_OZON_ACCESS_QUEUE_EXPIRED",
+  ));
+  const validPublish = controller.run({ kind: "publish-detail" }, async () => {
+    order.push("valid-publish");
+  });
+  const validSource = controller.run({ kind: "source" }, async () => {
+    order.push("valid-source");
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseFirst.resolve();
+  await Promise.all([running, ...expiredAssertions, validPublish, validSource]);
+
+  assert.equal(expiredOperationCalls, 0);
+  assert.deepEqual(order, ["running-source", "valid-publish", "valid-source"]);
+});
+
+test("queue cancellation wins exactly once without consuming priority fairness", async () => {
+  const releaseFirst = deferred();
+  const firstStarted = deferred();
+  const order = [];
+  let cancelledOperationCalls = 0;
+  const controller = createOzonAccessController({ minIntervalMs: 0 });
+  const running = controller.run({ kind: "source" }, async () => {
+    order.push("running-source");
+    firstStarted.resolve();
+    await releaseFirst.promise;
+  });
+  await firstStarted.promise;
+
+  const cancellation = new AbortController();
+  const cancelled = Array.from({ length: 8 }, () => controller.run(
+    { kind: "publish-detail" },
+    async () => { cancelledOperationCalls += 1; },
+    { signal: cancellation.signal, deadlineAt: Date.now() + 10 },
+  ));
+  const cancellationReason = new Error("caller cancelled queued Ozon work");
+  cancellation.abort(cancellationReason);
+  const cancelledAssertions = cancelled.map((operation) => assert.rejects(
+    operation,
+    (error) => error === cancellationReason,
+  ));
+  const validPublish = controller.run({ kind: "publish-detail" }, async () => {
+    order.push("valid-publish");
+  });
+  const validSource = controller.run({ kind: "source" }, async () => {
+    order.push("valid-source");
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseFirst.resolve();
+  await Promise.all([running, ...cancelledAssertions, validPublish, validSource]);
+
+  assert.equal(cancelledOperationCalls, 0);
+  assert.deepEqual(order, ["running-source", "valid-publish", "valid-source"]);
+});
+
+test("a queue deadline remains active during controller pacing before operation start", async () => {
+  const controller = createOzonAccessController({ minIntervalMs: 40 });
+  let expiredOperationCalls = 0;
+  let nextOperationCalls = 0;
+  await controller.run({ kind: "source" }, async () => {});
+
+  const expired = controller.run(
+    { kind: "publish-detail" },
+    async () => { expiredOperationCalls += 1; },
+    { deadlineAt: Date.now() + 10 },
+  );
+  const next = controller.run({ kind: "publish-detail" }, async () => {
+    nextOperationCalls += 1;
+  });
+
+  await assert.rejects(
+    expired,
+    (error) => error?.code === "FLOW_B_OZON_ACCESS_QUEUE_EXPIRED",
+  );
+  await next;
+  assert.equal(expiredOperationCalls, 0);
+  assert.equal(nextOperationCalls, 1);
+});
+
 test("an errored operation preserves the quiet interval and the priority queue continues", async () => {
   const releaseFirst = deferred();
   const firstStarted = deferred();

@@ -8,6 +8,16 @@ import {
 } from "../scripts/flow_b_playwright/ozon-detail.mjs";
 import { createOzonAccessController } from "../scripts/flow_b_playwright/ozon-access-controller.mjs";
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 test("detail parser extracts plugin mode, current price, and lowest follow price", () => {
   const detail = parseOzonDetailText([
     "商品标题",
@@ -246,6 +256,109 @@ test("access-controller queue wait does not consume each detail execution budget
   assert.equal(evaluateCalls, 8);
   await provider.close();
   assert.equal(closeCalls, 1);
+});
+
+test("an expired access-controller detail never opens a page and later detail work proceeds", async () => {
+  const releaseBlocker = deferred();
+  const blockerStarted = deferred();
+  let newPageCalls = 0;
+  let evaluateCalls = 0;
+  const accessController = createOzonAccessController({ minIntervalMs: 0 });
+  const blocker = accessController.run({ kind: "source" }, async () => {
+    blockerStarted.resolve();
+    await releaseBlocker.promise;
+  });
+  await blockerStarted.promise;
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        newPageCalls += 1;
+        return {
+          isClosed: () => false,
+          goto: async () => {},
+          evaluate: async () => {
+            evaluateCalls += 1;
+            return {
+              url: "https://www.ozon.ru/product/after-expired/",
+              title: "Ozon item",
+              text: "发货模式： FBS",
+            };
+          },
+          close: async () => {},
+        };
+      },
+    },
+    accessController,
+    queueWaitBudgetMs: 10,
+    operationBudgetMs: 50,
+    timeout: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  const expired = provider.getProductDetail("expired-before-access", { sell_price: 90 });
+  await assert.rejects(
+    expired,
+    (error) => error?.code === "OZON_DETAIL_DEADLINE" && error?.phase === "access-queue",
+  );
+  assert.equal(newPageCalls, 0);
+  assert.equal(evaluateCalls, 0);
+
+  releaseBlocker.resolve();
+  await blocker;
+  assert.equal((await provider.getProductDetail("after-expired", { sell_price: 90 })).mode, "FBS");
+  assert.equal(newPageCalls, 1);
+  assert.equal(evaluateCalls, 1);
+  await provider.close();
+});
+
+test("provider close cancels queued access exactly once without opening or stealing a page", async () => {
+  const releaseBlocker = deferred();
+  const blockerStarted = deferred();
+  let newPageCalls = 0;
+  let afterCalls = 0;
+  const accessController = createOzonAccessController({ minIntervalMs: 0 });
+  const blocker = accessController.run({ kind: "source" }, async () => {
+    blockerStarted.resolve();
+    await releaseBlocker.promise;
+  });
+  await blockerStarted.promise;
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        newPageCalls += 1;
+        return {
+          isClosed: () => false,
+          goto: async () => {},
+          evaluate: async () => ({
+            url: "https://www.ozon.ru/product/should-not-open/",
+            title: "Ozon item",
+            text: "发货模式： FBS",
+          }),
+          close: async () => {},
+        };
+      },
+    },
+    accessController,
+    queueWaitBudgetMs: 10,
+    operationBudgetMs: 50,
+    timeout: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  const queued = Array.from({ length: 12 }, (_, index) => (
+    provider.getProductDetail(`close-cancel-race-${index + 1}`, { sell_price: 90 })
+  ));
+  const queuedAssertions = queued.map((operation) => assert.rejects(operation, /provider is closed/i));
+  await provider.close();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseBlocker.resolve();
+  await Promise.all([...queuedAssertions, blocker]);
+
+  assert.equal(newPageCalls, 0);
+  await accessController.run({ kind: "publish-detail" }, async () => { afterCalls += 1; });
+  assert.equal(afterCalls, 1);
 });
 
 test("a running detail hang remains bounded and releases the access-controller queue without ghost work", async () => {
