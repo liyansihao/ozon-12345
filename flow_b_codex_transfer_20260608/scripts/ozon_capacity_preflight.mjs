@@ -36,12 +36,12 @@ async function main() {
   let page;
   try {
     page = await openMaoziPage(context, { forceNew: true, settleMs: 500 });
-    const accessToken = await ensureMaoziLogin(page, {
+    await ensureMaoziLogin(page, {
       continueDeviceLogin: process.env.FLOW_B_MAOZI_CONTINUE_LOGIN === "1",
       timeout: 60_000,
     });
     const client = createMaoziClient({
-      transport: createMaoziPageTransport({ page, context, initialAccessToken: accessToken }),
+      transport: createMaoziPageTransport({ page, context }),
     });
     const [erpStores, profileStores] = await Promise.all([
       client.listShops(),
