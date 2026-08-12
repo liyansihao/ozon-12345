@@ -483,6 +483,42 @@ async function assertRecoveryClaim({ claimPath, token }) {
   }
 }
 
+function fingerprintAgeMs(fingerprint, nowMs) {
+  return Number(nowMs) - Number(fingerprint?.mtime_ms);
+}
+
+async function removeDisplacedLock(displaced, entries) {
+  await Promise.all(entries.map((entry) => fs.unlink(path.join(displaced, entry))));
+  await fs.rmdir(displaced);
+}
+
+async function initialStaleLockCandidate(lock, {
+  nowMs,
+  staleMs,
+  hostname,
+  kill,
+} = {}) {
+  const fingerprint = statFingerprint(await fs.lstat(lock));
+  let owner = null;
+  try {
+    owner = await readLockRecord(path.join(lock, "owner.json"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  if (owner) {
+    if (!staleLockRecord(owner, {
+      nowMs,
+      staleMs,
+      hostname,
+      kill,
+      allowLegacyHost: true,
+    })) return null;
+  } else if (fingerprintAgeMs(fingerprint, nowMs) < staleMs) {
+    return null;
+  }
+  return { fingerprint, owner };
+}
+
 export async function acquireMaintenanceLock(stateRoot, {
   now = () => new Date(),
   staleMs = DEFAULT_MAINTENANCE_LOCK_STALE_MS,
@@ -490,46 +526,58 @@ export async function acquireMaintenanceLock(stateRoot, {
   kill = process.kill,
 } = {}) {
   const lock = path.join(stateRoot, "storage-maintenance.lock");
+  const normalizedStaleMs = Math.max(60_000, Number(staleMs) || DEFAULT_MAINTENANCE_LOCK_STALE_MS);
+  let createdLock = false;
   try {
     await fs.mkdir(lock, { mode: 0o700 });
+    createdLock = true;
   } catch (error) {
     if (error?.code === "EEXIST") {
+      const candidate = await initialStaleLockCandidate(lock, {
+        nowMs: now().getTime(),
+        staleMs: normalizedStaleMs,
+        hostname,
+        kill,
+      });
+      if (!candidate) throw new Error(`storage maintenance is already locked: ${lock}`);
       const claim = await acquireRecoveryClaim(lock, {
         now,
-        staleMs: Math.max(60_000, Number(staleMs) || DEFAULT_MAINTENANCE_LOCK_STALE_MS),
+        staleMs: normalizedStaleMs,
         hostname,
         kill,
       });
       try {
         const ownerPath = path.join(lock, "owner.json");
-        const owner = await readLockRecord(ownerPath);
-        if (!staleLockRecord(owner, {
-          nowMs: now().getTime(),
-          staleMs: Math.max(60_000, Number(staleMs) || DEFAULT_MAINTENANCE_LOCK_STALE_MS),
-          hostname,
-          kill,
-          allowLegacyHost: true,
-        })) {
-          throw new Error(`storage maintenance is already locked: ${lock}`);
+        const owner = candidate.owner;
+        if (owner) {
+          const ownerAgain = await readLockRecord(ownerPath);
+          if (!sameFingerprint(owner.fingerprint, ownerAgain.fingerprint)
+            || owner.text !== ownerAgain.text
+            || !staleLockRecord(ownerAgain, {
+              nowMs: now().getTime(),
+              staleMs: normalizedStaleMs,
+              hostname,
+              kill,
+              allowLegacyHost: true,
+            })) {
+            throw new Error(`storage maintenance lock owner changed during recovery: ${lock}`);
+          }
+        } else {
+          const entriesBeforeClaim = (await fs.readdir(lock)).filter((entry) => entry !== "recovery-claim.json");
+          if (entriesBeforeClaim.length !== 0) throw new Error(`storage maintenance empty lock changed during recovery: ${lock}`);
         }
         await assertRecoveryClaim(claim);
-        const ownerAgain = await readLockRecord(ownerPath);
-        if (!sameFingerprint(owner.fingerprint, ownerAgain.fingerprint) || owner.text !== ownerAgain.text) {
-          throw new Error(`storage maintenance lock owner changed during recovery: ${lock}`);
-        }
         const entries = (await fs.readdir(lock)).sort();
-        if (entries.length !== 2 || entries[0] !== "owner.json" || entries[1] !== "recovery-claim.json") {
+        const expectedEntries = owner ? ["owner.json", "recovery-claim.json"] : ["recovery-claim.json"];
+        if (entries.length !== expectedEntries.length || entries.some((entry, index) => entry !== expectedEntries[index])) {
           throw new Error(`storage maintenance lock contains unexpected entries: ${lock}`);
         }
         const staleLock = `${lock}.${process.pid}.${crypto.randomUUID()}.stale`;
         await fs.rename(lock, staleLock);
-        await Promise.all([
-          fs.unlink(path.join(staleLock, "owner.json")),
-          fs.unlink(path.join(staleLock, "recovery-claim.json")),
-        ]);
-        await fs.rmdir(staleLock);
+        await removeDisplacedLock(staleLock, entries);
         try {
           await fs.mkdir(lock, { mode: 0o700 });
+          createdLock = true;
         } catch (mkdirError) {
           if (mkdirError?.code === "EEXIST") {
             throw new Error(`storage maintenance lock was acquired concurrently: ${lock}`);
@@ -544,11 +592,19 @@ export async function acquireMaintenanceLock(stateRoot, {
       throw error;
     }
   }
-  await writeJsonAtomic(path.join(lock, "owner.json"), {
-    pid: process.pid,
-    hostname,
-    acquired_at: now().toISOString(),
-  });
+  try {
+    await writeJsonAtomic(path.join(lock, "owner.json"), {
+      pid: process.pid,
+      hostname,
+      acquired_at: now().toISOString(),
+    });
+  } catch (ownerWriteError) {
+    if (createdLock) {
+      const entries = await fs.readdir(lock).catch(() => []);
+      if (entries.length === 0) await fs.rmdir(lock).catch(() => {});
+    }
+    throw ownerWriteError;
+  }
   return async () => {
     await fs.unlink(path.join(lock, "owner.json")).catch((error) => {
       if (error?.code !== "ENOENT") throw error;

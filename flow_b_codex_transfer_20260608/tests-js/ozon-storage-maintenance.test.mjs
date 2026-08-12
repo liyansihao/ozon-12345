@@ -380,3 +380,46 @@ test("maintenance lock can recover a stale dead recovery claimant without wideni
     await release();
   });
 });
+
+test("maintenance lock recovers an empty stale directory but fails closed while it is fresh", async () => {
+  await withTempState(async (stateRoot) => {
+    const lock = path.join(stateRoot, "storage-maintenance.lock");
+    await fs.mkdir(lock);
+    const old = new Date("2026-08-13T00:00:00.000Z");
+    await fs.utimes(lock, old, old);
+    const release = await acquireMaintenanceLock(stateRoot, {
+      now: () => new Date("2026-08-13T01:00:00.000Z"),
+      staleMs: 60_000,
+      hostname: "audit-host",
+    });
+    assert.deepEqual((await fs.readdir(lock)).sort(), ["owner.json"]);
+    await release();
+  });
+  await withTempState(async (stateRoot) => {
+    const lock = path.join(stateRoot, "storage-maintenance.lock");
+    await fs.mkdir(lock);
+    await fs.utimes(lock, new Date("2026-08-13T00:59:30.000Z"), new Date("2026-08-13T00:59:30.000Z"));
+    await assert.rejects(acquireMaintenanceLock(stateRoot, {
+      now: () => new Date("2026-08-13T01:00:00.000Z"),
+      staleMs: 60_000,
+      hostname: "audit-host",
+    }), /already locked/u);
+    assert.deepEqual(await fs.readdir(lock), []);
+  });
+});
+
+test("maintenance lock does not place a recovery claim into an active holder", async () => {
+  await withTempState(async (stateRoot) => {
+    const release = await acquireMaintenanceLock(stateRoot, { hostname: "audit-host" });
+    const lock = path.join(stateRoot, "storage-maintenance.lock");
+    await assert.rejects(acquireMaintenanceLock(stateRoot, {
+      now: () => new Date("2099-08-13T01:00:00.000Z"),
+      staleMs: 60_000,
+      hostname: "audit-host",
+      kill: () => {},
+    }), /already locked/u);
+    assert.deepEqual(await fs.readdir(lock), ["owner.json"]);
+    await release();
+    await assert.rejects(fs.access(lock), /ENOENT/u);
+  });
+});
