@@ -291,6 +291,8 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
   assert.equal(config.flow_env.FLOW_B_1688_ADAPTIVE_ACTION_POLICY, "enforce");
   assert.equal(config.flow_env.FLOW_B_1688_ADAPTIVE_ACTION_SAMPLE_TARGET, "100");
   assert.equal(config.flow_env.FLOW_B_PROFIT_SAFETY_ACTION_POLICY, "shadow");
+  assert.equal(config.browser.no_proxy_server, false);
+  assert.equal(config.flow_env.FLOW_B_NO_PROXY_SERVER, "0");
   assert.deepEqual(config.direct_worker_watchdog, {
     enabled: true,
     source_error_threshold: 3,

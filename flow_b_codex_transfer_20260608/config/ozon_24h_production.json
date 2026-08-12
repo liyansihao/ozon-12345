@@ -86,7 +86,7 @@
     "cdp_health_failure_threshold": 2,
     "disk_cache_size_bytes": 104857600,
     "media_cache_size_bytes": 52428800,
-    "no_proxy_server": true
+    "no_proxy_server": false
   },
   "stores": [
     {
@@ -167,7 +167,7 @@
     "fbs_history": "${STATE_ROOT}/history/fbs_source_history.jsonl"
   },
   "flow_env": {
-    "FLOW_B_NO_PROXY_SERVER": "1",
+    "FLOW_B_NO_PROXY_SERVER": "0",
     "FLOW_B_MAOZI_CONTINUE_LOGIN": "1",
     "FLOW_B_PUBLISHED_CSV": "${STATE_ROOT}/dedupe/published_links.csv",
     "FLOW_B_STORE_TARGETS": [
