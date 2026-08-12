@@ -386,7 +386,6 @@ export function createMaoziClient({ transport }) {
 export function createMaoziPageTransport({
   page,
   context,
-  initialAccessToken = "",
   baseUrl = "https://api.maozierp.com",
   maxGetAttempts = 6,
   requestTimeoutMs = DEFAULT_MAOZI_REQUEST_TIMEOUT_MS,
@@ -401,68 +400,6 @@ export function createMaoziPageTransport({
   if (typeof scheduleTimeout !== "function") throw new TypeError("scheduleTimeout must be a function");
   if (typeof cancelTimeout !== "function") throw new TypeError("cancelTimeout must be a function");
   if (typeof now !== "function") throw new TypeError("now must be a function");
-  const invalidAccessTokens = new Set();
-  const knownAccessTokens = new Set();
-  const normalizeAccessToken = (value) => String(value || "").trim();
-  let cachedIdentity = null;
-  let identityVersion = 0;
-  const cacheIdentity = ({ token, userAgent = "" } = {}, { rejectInvalid = true } = {}) => {
-    const normalizedToken = normalizeAccessToken(token);
-    if (!normalizedToken || (rejectInvalid && invalidAccessTokens.has(normalizedToken))) return null;
-    knownAccessTokens.add(normalizedToken);
-    cachedIdentity = {
-      token: normalizedToken,
-      userAgent: String(userAgent || ""),
-    };
-    identityVersion += 1;
-    return cachedIdentity;
-  };
-  cacheIdentity({ token: initialAccessToken });
-  const redactKnownSecrets = (value) => {
-    let safe = String(value?.message || value || "");
-    for (const token of knownAccessTokens) {
-      if (token) safe = safe.split(token).join("[redacted]");
-    }
-    return safe.replace(/Bearer\s+[^\s,;]+/giu, "Bearer [redacted]");
-  };
-  const sanitizeError = (error) => {
-    const message = redactKnownSecrets(error);
-    const safe = new Error(message || "Maozi transport failed");
-    for (const field of [
-      "name",
-      "code",
-      "status",
-      "statusCode",
-      "endpoint",
-      "method",
-      "phase",
-      "timeout_ms",
-      "timeout_scope",
-      "total_budget_ms",
-    ]) {
-      if (error?.[field] !== undefined) safe[field] = error[field];
-    }
-    return safe;
-  };
-  const responseIdentities = new WeakMap();
-  const identitySnapshot = () => ({
-    token: cachedIdentity?.token || "",
-    version: identityVersion,
-  });
-  const invalidateIdentity = ({ token, version } = {}) => {
-    const normalizedToken = normalizeAccessToken(token);
-    if (normalizedToken) {
-      knownAccessTokens.add(normalizedToken);
-      invalidAccessTokens.add(normalizedToken);
-    }
-    const matchesCurrent = normalizedToken
-      ? cachedIdentity?.token === normalizedToken
-      : Number(version) === identityVersion;
-    if (matchesCurrent) {
-      cachedIdentity = null;
-      identityVersion += 1;
-    }
-  };
   const configuredRequestTimeoutMs = positiveMilliseconds(
     requestTimeoutMs,
     DEFAULT_MAOZI_REQUEST_TIMEOUT_MS,
@@ -503,22 +440,6 @@ export function createMaoziPageTransport({
           },
         );
     });
-  };
-  const readIdentityFromPage = async (activePage, timeoutMs, runWithTimeout) => {
-    try {
-      return await runWithTimeout(() => activePage.evaluate(() => {
-        try {
-          return {
-            token: JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "",
-            userAgent: navigator.userAgent || "",
-          };
-        } catch {
-          return { token: "", userAgent: "" };
-        }
-      }), timeoutMs, "context-identity");
-    } catch (error) {
-      throw sanitizeError(error);
-    }
   };
   const evaluate = async (activePage, request, timeoutMs, runWithTimeout) => {
     const result = await runWithTimeout(() => activePage.evaluate(async (input) => {
@@ -600,7 +521,6 @@ export function createMaoziPageTransport({
       httpZeroRecovery = null;
     }
   };
-  let unauthorizedRecovery = null;
   return async (endpoint, {
     method = "GET",
     query,
@@ -694,23 +614,20 @@ export function createMaoziPageTransport({
     };
     const contextRequest = async (activePage) => {
       if (!context?.request || typeof context.request.fetch !== "function") return null;
-      let identity = cachedIdentity;
-      if (!identity) {
-        const identityTimeoutMs = timeoutForPhase("context-identity");
-        identity = cacheIdentity(await readIdentityFromPage(
-          activePage,
-          identityTimeoutMs,
-          (operation, boundedTimeoutMs, phase) => runWithTimeout(
-            operation,
-            boundedTimeoutMs,
-            phase,
-          ),
-        ));
-      }
+      const identityTimeoutMs = timeoutForPhase("context-identity");
+      const identity = await runWithTimeout(() => activePage.evaluate(() => {
+        try {
+          return {
+            token: JSON.parse(localStorage.getItem("maozierp-core-access") || "{}").accessToken || "",
+            userAgent: navigator.userAgent || "",
+          };
+        } catch {
+          return { token: "", userAgent: "" };
+        }
+      }), identityTimeoutMs, "context-identity");
       if (!identity?.token && !isGet) {
         throw new Error(`authenticated context token unavailable for ${request.method} ${request.endpoint}`);
       }
-      const attemptedIdentity = identitySnapshot();
       const url = new URL(request.endpoint, request.baseUrl);
       for (const [key, value] of Object.entries(request.query || {})) {
         for (const entry of Array.isArray(value) ? value : [value]) {
@@ -744,7 +661,7 @@ export function createMaoziPageTransport({
           "context-fetch",
         );
       } catch (error) {
-        if (isMaoziRequestTimeoutError(error)) throw sanitizeError(error);
+        if (isMaoziRequestTimeoutError(error)) throw error;
         if (/timeout.*exceeded|timed?\s*out/iu.test(String(error?.message || error))) {
           throw maoziRequestTimeoutError({
             endpoint: request.endpoint,
@@ -754,124 +671,29 @@ export function createMaoziPageTransport({
             totalBudgetMs: isGet ? configuredGetTotalBudgetMs : null,
           });
         }
-        throw sanitizeError(error);
+        throw error;
       }
       const bodyTimeoutMs = timeoutForPhase("context-response-body");
-      let text;
-      try {
-        text = await runWithTimeout(
-          () => response.text(),
-          bodyTimeoutMs,
-          "context-response-body",
-        );
-      } catch (error) {
-        throw sanitizeError(error);
-      }
+      const text = await runWithTimeout(
+        () => response.text(),
+        bodyTimeoutMs,
+        "context-response-body",
+      );
       let json;
       try {
         json = text ? JSON.parse(text) : null;
       } catch {
         json = { raw: text };
       }
-      const parsed = {
+      return {
         status: typeof response.status === "function" ? response.status() : Number(response.status),
         json,
       };
-      responseIdentities.set(parsed, attemptedIdentity);
-      if (isGet && (Number(parsed.status) === 401 || Number(parsed.status) === 403)) {
-        invalidateIdentity(attemptedIdentity);
-      }
-      return parsed;
-    };
-    const recoverGetUnauthorized = async (result, requestIdentity = null) => {
-      const observedIdentity = requestIdentity || responseIdentities.get(result) || identitySnapshot();
-      invalidateIdentity(observedIdentity);
-      if (typeof recoverUnauthorized !== "function") return { recovered: false, result };
-      if (cachedIdentity && cachedIdentity.token !== observedIdentity.token) {
-        return { recovered: true };
-      }
-      if (!unauthorizedRecovery) {
-        const recoveryPage = page;
-        unauthorizedRecovery = (async () => {
-          const recoveryTimeoutMs = timeoutForPhase("unauthorized-recovery");
-          const recovered = await runWithTimeout(
-            () => recoverUnauthorized(recoveryPage, {
-              endpoint: request.endpoint,
-              method: request.method,
-              status: Number(result.status),
-            }),
-            recoveryTimeoutMs,
-            "unauthorized-recovery",
-          );
-          const recoveredPage = recovered?.page || recovered;
-          const explicitTokenResult = Boolean(
-            recovered
-              && typeof recovered === "object"
-              && Object.prototype.hasOwnProperty.call(recovered, "accessToken"),
-          );
-          let recoveredIdentity = {
-            token: normalizeAccessToken(recovered?.accessToken),
-            userAgent: "",
-          };
-          if (recoveredPage && (page === recoveryPage || !page)) page = recoveredPage;
-          if (!recoveredIdentity.token && !explicitTokenResult && recoveredPage?.evaluate) {
-            const identityTimeoutMs = timeoutForPhase("unauthorized-recovery-identity");
-            try {
-              recoveredIdentity = await readIdentityFromPage(
-                recoveredPage,
-                identityTimeoutMs,
-                (operation, boundedTimeoutMs, phase) => runWithTimeout(
-                  operation,
-                  boundedTimeoutMs,
-                  phase,
-                ),
-              );
-            } catch (error) {
-              if (isMaoziRequestTimeoutError(error)) throw error;
-              recoveredIdentity = { token: "", userAgent: "" };
-            }
-          }
-          const recoveredAccessToken = normalizeAccessToken(recoveredIdentity?.token);
-          if (!recoveredAccessToken) {
-            throw Object.assign(new Error("Maozi authentication recovery returned no access token"), {
-              status: Number(result.status),
-            });
-          }
-          if (!cacheIdentity({
-            token: recoveredAccessToken,
-            userAgent: recoveredIdentity?.userAgent,
-          })
-            || cachedIdentity?.token !== recoveredAccessToken) {
-            throw Object.assign(new Error("Maozi authentication recovery returned an invalid access token"), {
-              status: Number(result.status),
-            });
-          }
-          return true;
-        })().catch((error) => {
-          if (!cachedIdentity) invalidateIdentity(identitySnapshot());
-          throw sanitizeError(error);
-        }).finally(() => {
-          unauthorizedRecovery = null;
-        });
-      }
-      const recoveryWaitTimeoutMs = timeoutForPhase("unauthorized-recovery-wait");
-      await runWithTimeout(
-        () => unauthorizedRecovery,
-        recoveryWaitTimeoutMs,
-        "unauthorized-recovery-wait",
-      ).catch((error) => { throw sanitizeError(error); });
-      return { recovered: true };
     };
     if (transportMode === "context") {
-      let result = await contextRequest(page);
+      const result = await contextRequest(page);
       if (!result) {
         throw new Error(`authenticated context transport unavailable for ${request.method} ${request.endpoint}`);
-      }
-      if (isGet
-        && (Number(result?.status) === 401 || Number(result?.status) === 403)
-        && typeof recoverUnauthorized === "function") {
-        await recoverGetUnauthorized(result);
-        result = await contextRequest(page);
       }
       return result;
     }
@@ -880,14 +702,23 @@ export function createMaoziPageTransport({
     const attempts = isGet ? Math.max(1, Math.floor(Number(maxGetAttempts) || 1)) : 1;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const attemptedIdentity = identitySnapshot();
         let result = await evaluateRequest(page);
         if (isGet
           && !unauthorizedRetried
           && (Number(result?.status) === 401 || Number(result?.status) === 403)
           && typeof recoverUnauthorized === "function") {
           unauthorizedRetried = true;
-          await recoverGetUnauthorized(result, attemptedIdentity);
+          const recoveryTimeoutMs = timeoutForPhase("unauthorized-recovery");
+          const recoveredPage = await runWithTimeout(
+            () => recoverUnauthorized(page, {
+              endpoint: request.endpoint,
+              method: request.method,
+              status: Number(result.status),
+            }),
+            recoveryTimeoutMs,
+            "unauthorized-recovery",
+          );
+          if (recoveredPage) page = recoveredPage;
           result = await evaluateRequest(page);
         }
         const transientGet = isGet && (

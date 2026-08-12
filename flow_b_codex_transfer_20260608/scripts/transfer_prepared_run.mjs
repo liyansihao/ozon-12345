@@ -89,10 +89,8 @@ const profileDir = process.env.FLOW_B_PW_PROFILE || path.join(ROOT, "runs/flow_b
 const context = await launchFlowContext(resolveBrowserOptions({ ...process.env, FLOW_B_PW_PROFILE: profileDir }));
 try {
   const page = await openMaoziPage(context, { forceNew: true });
-  const accessToken = await ensureMaoziLogin(page, { continueDeviceLogin: true, timeout: 60000 });
-  const client = createMaoziClient({
-    transport: createMaoziPageTransport({ page, context, initialAccessToken: accessToken }),
-  });
+  await ensureMaoziLogin(page, { continueDeviceLogin: true, timeout: 60000 });
+  const client = createMaoziClient({ transport: createMaoziPageTransport({ page, context }) });
   // A transfer is de-duplicated against the destination shop's exact import/offer records.
   // Keep its CSV store-scoped so a source-shop publication cannot hide a destination success.
   const state = createPublishState({ runDir: targetRun, publishedCsv: path.join(targetRun, "published_links.csv") });
