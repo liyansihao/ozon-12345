@@ -160,8 +160,171 @@ test("detail provider applies the configured timeout to product navigation", asy
 
   assert.deepEqual(navigations, [{
     url: "https://www.ozon.ru/product/timeout-contract",
-    options: { waitUntil: "domcontentloaded", timeout: 1_234 },
+    options: { waitUntil: "commit", timeout: 1_234 },
   }]);
+  await provider.close();
+});
+
+test("detail provider reads a committed product without waiting for DOMContentLoaded", async () => {
+  const navigations = [];
+  const page = {
+    goto: async (url, options) => {
+      navigations.push({ url, options });
+      if (options.waitUntil !== "commit") return new Promise(() => {});
+      return { status: () => 200 };
+    },
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/product/commit-ready-123/",
+      title: "Ozon item",
+      text: "title\n¥ 99\n发货模式： FBS",
+    }),
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    timeout: 20,
+    pollInterval: 1,
+    operationBudgetMs: 40,
+  });
+
+  const detail = await provider.getProductDetail("commit-ready-123", { sell_price: 90 });
+
+  assert.equal(detail.mode, "FBS");
+  assert.equal(navigations.length, 1);
+  assert.equal(navigations[0].url, "https://www.ozon.ru/product/commit-ready-123");
+  assert.equal(navigations[0].options.waitUntil, "commit");
+  assert.ok(navigations[0].options.timeout > 0 && navigations[0].options.timeout <= 40);
+  await provider.close();
+});
+
+test("detail provider polls a committed empty document to its product-ready deadline and discards it", async () => {
+  let evaluations = 0;
+  let closed = false;
+  const page = {
+    isClosed: () => closed,
+    goto: async (_url, options) => {
+      assert.equal(options.waitUntil, "commit");
+      return { status: () => 200 };
+    },
+    evaluate: async () => {
+      evaluations += 1;
+      return {
+        url: "https://www.ozon.ru/product/empty-after-commit/",
+        title: "",
+        text: "",
+        webPriceText: "",
+        sellerUrl: "",
+      };
+    },
+    close: async () => { closed = true; },
+  };
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    timeout: 8,
+    pollInterval: 1,
+    operationBudgetMs: 50,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  await assert.rejects(
+    provider.getProductDetail("empty-after-commit", { sell_price: 90 }),
+    (error) => error?.code === "OZON_DETAIL_DEADLINE" && error?.phase === "product-ready",
+  );
+  assert.ok(evaluations >= 2);
+  assert.equal(closed, true);
+  await provider.close();
+});
+
+test("detail provider rejects committed wrong-origin, login, and CAPTCHA documents and discards them", async () => {
+  const cases = [
+    {
+      sku: "wrong-origin",
+      payload: {
+        url: "https://example.com/product/wrong-origin/",
+        title: "lookalike",
+        text: "发货模式： FBS",
+      },
+      message: /unexpected product location/i,
+    },
+    {
+      sku: "login-after-commit",
+      payload: {
+        url: "https://www.ozon.ru/login/",
+        title: "Ozon ID",
+        text: "Войти в аккаунт",
+      },
+      message: /authentication or MFA required/i,
+    },
+    {
+      sku: "captcha-after-commit",
+      payload: {
+        url: "https://www.ozon.ru/product/captcha-after-commit/",
+        title: "Checking",
+        text: "请完成人机验证",
+      },
+      message: /CAPTCHA required/i,
+    },
+  ];
+
+  for (const entry of cases) {
+    let closed = false;
+    const provider = createOzonDetailProvider({
+      context: {
+        newPage: async () => ({
+          isClosed: () => closed,
+          goto: async (_url, options) => {
+            assert.equal(options.waitUntil, "commit");
+            return { status: () => 200 };
+          },
+          evaluate: async () => entry.payload,
+          close: async () => { closed = true; },
+        }),
+      },
+      timeout: 10,
+      pollInterval: 1,
+      captchaConfirmations: 1,
+      operationBudgetMs: 50,
+      initialConcurrency: 1,
+      maxConcurrency: 1,
+    });
+
+    await assert.rejects(
+      provider.getProductDetail(entry.sku, { sell_price: 90 }),
+      entry.message,
+    );
+    assert.equal(closed, true, `${entry.sku} page should be discarded`);
+    await provider.close();
+  }
+});
+
+test("detail provider fails closed on a committed HTTP error before inspecting the page", async () => {
+  let evaluations = 0;
+  let closed = false;
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => ({
+        isClosed: () => closed,
+        goto: async (_url, options) => {
+          assert.equal(options.waitUntil, "commit");
+          return { status: () => 503 };
+        },
+        evaluate: async () => { evaluations += 1; },
+        close: async () => { closed = true; },
+      }),
+    },
+    timeout: 10,
+    operationBudgetMs: 50,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  await assert.rejects(
+    provider.getProductDetail("http-error", { sell_price: 90 }),
+    /HTTP 503/i,
+  );
+  assert.equal(evaluations, 0);
+  assert.equal(closed, true);
   await provider.close();
 });
 
@@ -537,6 +700,7 @@ test("detail provider bounds a double navigation timeout to two fresh-page attem
 
 test("detail provider does not retry a closed browser navigation failure", async () => {
   const pages = [];
+  const waitUntilValues = [];
   let newPageCalls = 0;
   const context = {
     newPage: async () => {
@@ -544,7 +708,8 @@ test("detail provider does not retry a closed browser navigation failure", async
       let closed = false;
       const page = {
         isClosed: () => closed,
-        goto: async () => {
+        goto: async (_url, options) => {
+          waitUntilValues.push(options.waitUntil);
           throw new Error("page.goto: Target page, context or browser has been closed");
         },
         evaluate: async () => assert.fail("a closed browser must not be evaluated"),
@@ -568,7 +733,47 @@ test("detail provider does not retry a closed browser navigation failure", async
   );
 
   assert.equal(newPageCalls, 1);
+  assert.deepEqual(waitUntilValues, ["commit"]);
   assert.equal(pages[0].isClosed(), true);
+  await provider.close();
+});
+
+test("detail provider does not retry a browser closure after document commit", async () => {
+  let newPageCalls = 0;
+  let evaluateCalls = 0;
+  let closeCalls = 0;
+  const provider = createOzonDetailProvider({
+    context: {
+      newPage: async () => {
+        newPageCalls += 1;
+        return {
+          isClosed: () => false,
+          goto: async (_url, options) => {
+            assert.equal(options.waitUntil, "commit");
+            return { status: () => 200 };
+          },
+          evaluate: async () => {
+            evaluateCalls += 1;
+            throw new Error("page.evaluate: Session closed. Most likely the page has been closed.");
+          },
+          close: async () => { closeCalls += 1; },
+        };
+      },
+    },
+    timeout: 10,
+    pollInterval: 1,
+    operationBudgetMs: 50,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  await assert.rejects(
+    provider.getProductDetail("closed-after-commit", { sell_price: 90 }),
+    /page has been closed/i,
+  );
+  assert.equal(newPageCalls, 1);
+  assert.equal(evaluateCalls, 1);
+  assert.equal(closeCalls, 1);
   await provider.close();
 });
 

@@ -55,8 +55,41 @@ async function delayBeforeDeadline(delayMs, deadlineAt, phase) {
 function isRetryablePageGotoFailure(error) {
   if (error?.code === "OZON_DETAIL_DEADLINE" && error?.phase === "navigation-primary") return true;
   const message = String(error?.message || error || "");
-  if (/target page|context or browser has been closed|frame was detached/i.test(message)) return false;
+  if (isUnusablePageFailure(error)) return false;
   return /^page\.goto: (?:Timeout [0-9]+ms exceeded\.?|net::ERR_(?:FAILED|CONNECTION_(?:CLOSED|RESET)) at https:\/\/www\.ozon\.ru\/product\/[^\s]+)(?:\r?\n|$)/.test(message);
+}
+
+function isUnusablePageFailure(error) {
+  return /target (?:page|closed)|(?:page|context|browser) (?:has been|was) closed|context or browser has been closed|frame was detached|browser has disconnected/i.test(
+    String(error?.message || error || ""),
+  );
+}
+
+function isExpectedOzonProductLocation(value, sku) {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.protocol !== "https:") return false;
+    if (!/^(?:www\.)?ozon\.ru$/i.test(url.hostname)) return false;
+    if (url.port && url.port !== "443") return false;
+    const path = decodeURIComponent(url.pathname).replace(/\/+$/, "");
+    const match = path.match(/^\/product\/([^/]+)$/i);
+    if (!match) return false;
+    const expectedSku = String(sku || "").trim();
+    if (!/^\d+$/.test(expectedSku)) return true;
+    return match[1] === expectedSku || match[1].endsWith(`-${expectedSku}`);
+  } catch {
+    return false;
+  }
+}
+
+function navigationHttpStatus(response) {
+  if (!response || typeof response.status !== "function") return null;
+  try {
+    const status = Number(response.status());
+    return Number.isInteger(status) ? status : null;
+  } catch {
+    return null;
+  }
 }
 
 function money(value) {
@@ -463,15 +496,27 @@ export function createOzonDetailProvider({
             );
             if (navigationTimeoutMs <= 0) throw detailDeadlineError("navigation");
             try {
-              await withinDeadline(
+              const response = await withinDeadline(
                 () => page.goto(url, {
-                  waitUntil: "domcontentloaded",
+                  // Ozon can paint the product and Maozi overlay while a
+                  // third-party resource keeps DOMContentLoaded pending. The
+                  // inspection loop below is the authoritative readiness and
+                  // access-control gate, so only wait for the document commit.
+                  waitUntil: "commit",
                   timeout: navigationTimeoutMs,
                 }),
                 operationDeadline,
                 navigationAttempt === 0 ? "navigation-primary" : "navigation-retry",
                 navigationTimeoutMs,
               );
+              const httpStatus = navigationHttpStatus(response);
+              if (httpStatus !== null && (httpStatus < 200 || httpStatus >= 400)) {
+                navigationFailed = true;
+                const error = new Error(`Ozon detail navigation HTTP ${httpStatus} for SKU ${sku}`);
+                error.code = "OZON_DETAIL_HTTP_ERROR";
+                error.status = httpStatus;
+                throw error;
+              }
               navigationFailed = false;
               break;
             } catch (error) {
@@ -510,10 +555,13 @@ export function createOzonDetailProvider({
               sellerUrl: document.querySelector('[data-widget="webCurrentSeller"] a[href*="/seller/"], [data-widget*="CurrentSeller"] a[href*="/seller/"], [data-widget="webSeller"] a[href*="/seller/"]')?.href
                 || document.querySelector('a[href*="/seller/"]')?.href || "",
             })), operationDeadline, "page-inspection").catch((error) => {
-              if (error?.code === "OZON_DETAIL_DEADLINE") {
+              if (error?.code === "OZON_DETAIL_DEADLINE" || isUnusablePageFailure(error)) {
                 navigationFailed = true;
                 throw error;
               }
+              // A committed document can replace its execution context while
+              // redirects or client hydration settle. Poll the new context;
+              // other access and readiness checks still fail closed below.
               return null;
             });
             const access = classifyOzonDetailAccessPayload(payload);
@@ -527,13 +575,23 @@ export function createOzonDetailProvider({
                 );
                 continue;
               }
+              navigationFailed = true;
               throw new Error(
                 `Ozon CAPTCHA required for SKU ${sku} after ${consecutiveCaptchaObservations} confirmations`,
               );
             }
             consecutiveCaptchaObservations = 0;
             if (access.authentication) {
+              navigationFailed = true;
               throw new Error(`Ozon authentication or MFA required for SKU ${sku}`);
+            }
+            if (payload && !isExpectedOzonProductLocation(payload.url, sku)) {
+              navigationFailed = true;
+              const error = new Error(
+                `Ozon detail unexpected product location for SKU ${sku}: ${String(payload?.url || "missing URL")}`,
+              );
+              error.code = "OZON_DETAIL_UNEXPECTED_LOCATION";
+              throw error;
             }
             const diagnostic = [
               payload?.url,
@@ -541,10 +599,14 @@ export function createOzonDetailProvider({
               payload?.text?.slice(0, 1000),
             ].filter(Boolean).join(" ");
             if (/доступ ограничен|access denied|похоже, нет(?:\s|\u00a0)+соединения/i.test(diagnostic)) {
+              navigationFailed = true;
               throw new Error(`Ozon detail soft blocked for SKU ${sku}`);
             }
             if (payload?.text && /发货模式：/.test(payload.text)) break;
-            if (Date.now() >= deadline) break;
+            if (Date.now() >= deadline) {
+              navigationFailed = true;
+              throw detailDeadlineError("product-ready", timeout);
+            }
             await delayBeforeDeadline(
               Math.max(1, pollInterval),
               operationDeadline,
@@ -578,7 +640,10 @@ export function createOzonDetailProvider({
         } finally {
           if (accessQueueCancellation) accessQueueCancellations.delete(accessQueueCancellation);
         }
-        if (!payload?.text) throw new Error(`Ozon detail text unavailable for SKU ${sku}`);
+        if (!payload?.text) {
+          navigationFailed = true;
+          throw detailDeadlineError("product-ready", timeout);
+        }
         const fallback = String(item.source_currency || "").toUpperCase() === "CNY"
           ? (item.sell_price ?? item.current_price ?? item.price)
           : null;
