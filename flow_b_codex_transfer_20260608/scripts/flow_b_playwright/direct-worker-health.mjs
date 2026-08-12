@@ -51,8 +51,10 @@ export function createDirectWorkerHealthTracker({
     worker_pid: Number(workerPid),
     worker_started_at: startedAt,
     heartbeat_at: startedAt,
+    runtime_lane_schema_version: 1,
     producer: {
       phase: "starting",
+      heartbeat_at: startedAt,
       attempt_seq: 0,
       attempt_started_at: null,
       last_completed_at: null,
@@ -67,6 +69,30 @@ export function createDirectWorkerHealthTracker({
       last_progress_at: null,
       last_progress_kind: null,
     },
+    consumer: {
+      phase: "starting",
+      heartbeat_at: startedAt,
+      attempt_seq: 0,
+      attempt_started_at: null,
+      last_completed_at: null,
+      last_progress_at: null,
+      last_progress_kind: null,
+      last_accepted_at: null,
+      activity_count: null,
+    },
+    reconciliation: {
+      phase: "starting",
+      heartbeat_at: startedAt,
+      attempt_seq: 0,
+      attempt_started_at: null,
+      last_completed_at: null,
+      last_progress_at: null,
+      last_progress_kind: null,
+      activity_count: null,
+      last_error: null,
+      first_consecutive_error_at: null,
+      consecutive_errors: 0,
+    },
   };
 
   const timestamp = () => {
@@ -74,15 +100,36 @@ export function createDirectWorkerHealthTracker({
     return (value instanceof Date ? value : new Date(value)).toISOString();
   };
   let writeChain = Promise.resolve();
-  const persist = (producerUpdate = {}) => {
+  const persist = ({
+    producer: producerUpdate = null,
+    consumer: consumerUpdate = null,
+    reconciliation: reconciliationUpdate = null,
+  } = {}) => {
     const heartbeatAt = timestamp();
     state = {
       ...state,
       heartbeat_at: heartbeatAt,
-      producer: {
-        ...state.producer,
-        ...producerUpdate,
-      },
+      ...(producerUpdate ? {
+        producer: {
+          ...state.producer,
+          heartbeat_at: heartbeatAt,
+          ...producerUpdate,
+        },
+      } : {}),
+      ...(consumerUpdate ? {
+        consumer: {
+          ...state.consumer,
+          heartbeat_at: heartbeatAt,
+          ...consumerUpdate,
+        },
+      } : {}),
+      ...(reconciliationUpdate ? {
+        reconciliation: {
+          ...state.reconciliation,
+          heartbeat_at: heartbeatAt,
+          ...reconciliationUpdate,
+        },
+      } : {}),
     };
     const snapshot = structuredClone(state);
     const writeTask = writeChain.then(() => write(filename, snapshot));
@@ -92,24 +139,24 @@ export function createDirectWorkerHealthTracker({
 
   return {
     snapshot: () => structuredClone(state),
-    start: () => persist({ phase: "starting" }),
-    scanStarted: () => persist({
+    start: () => persist({ producer: { phase: "starting" } }),
+    scanStarted: () => persist({ producer: {
       phase: "scanning",
       attempt_seq: Number(state.producer.attempt_seq || 0) + 1,
       attempt_started_at: timestamp(),
       next_retry_at: null,
-    }),
+    } }),
     scanProgress: ({ kind = "source-progress" } = {}) => {
       const progressAt = timestamp();
-      return persist({
+      return persist({ producer: {
         phase: "scanning",
         last_progress_at: progressAt,
         last_progress_kind: String(kind || "source-progress").slice(0, 100),
-      });
+      } });
     },
     scanSucceeded: (result = {}) => {
       const completedAt = timestamp();
-      return persist({
+      return persist({ producer: {
         phase: "healthy",
         last_completed_at: completedAt,
         last_success_at: completedAt,
@@ -122,13 +169,13 @@ export function createDirectWorkerHealthTracker({
         activity_count: Number(
           result?.candidate_activity_count ?? result?.activity_count ?? 0,
         ) || 0,
-      });
+      } });
     },
     scanFailed: (error, { retryAt = null } = {}) => {
       const failedAt = timestamp();
       const errorSignature = directWorkerErrorSignature(error);
       const hasConsecutiveError = Number(state.producer.consecutive_errors || 0) > 0;
-      return persist({
+      return persist({ producer: {
         phase: "error",
         last_completed_at: failedAt,
         last_error_at: failedAt,
@@ -142,7 +189,78 @@ export function createDirectWorkerHealthTracker({
         last_error: normalizedErrorText(error),
         next_retry_at: retryAt,
         activity_count: null,
-      });
+      } });
+    },
+    consumerRoundStarted: () => persist({ consumer: {
+      phase: "running",
+      attempt_seq: Number(state.consumer.attempt_seq || 0) + 1,
+      attempt_started_at: timestamp(),
+    } }),
+    consumerProgress: ({ kind = "consumer-activity" } = {}) => {
+      const progressAt = timestamp();
+      return persist({ consumer: {
+        phase: "running",
+        last_progress_at: progressAt,
+        last_progress_kind: String(kind || "consumer-activity").slice(0, 100),
+        ...(["published", "submitted", "erp-accepted"].includes(String(kind || ""))
+          ? { last_accepted_at: progressAt }
+          : {}),
+      } });
+    },
+    consumerRoundCompleted: (result = {}) => {
+      const completedAt = timestamp();
+      return persist({ consumer: {
+        phase: "healthy",
+        last_completed_at: completedAt,
+        last_progress_at: completedAt,
+        last_progress_kind: String(result?.kind || "consumer-round-completed").slice(0, 100),
+        activity_count: Number(result?.attempted ?? result?.activity_count ?? 0) || 0,
+      } });
+    },
+    reconciliationRoundStarted: () => persist({ reconciliation: {
+      phase: "running",
+      attempt_seq: Number(state.reconciliation.attempt_seq || 0) + 1,
+      attempt_started_at: timestamp(),
+      last_error: null,
+    } }),
+    reconciliationProgress: ({ kind = "reconciliation-activity" } = {}) => {
+      const progressAt = timestamp();
+      return persist({ reconciliation: {
+        phase: "running",
+        last_progress_at: progressAt,
+        last_progress_kind: String(kind || "reconciliation-activity").slice(0, 100),
+      } });
+    },
+    reconciliationRoundCompleted: (result = {}) => {
+      const completedAt = timestamp();
+      return persist({ reconciliation: {
+        phase: "healthy",
+        last_completed_at: completedAt,
+        last_progress_at: completedAt,
+        last_progress_kind: String(result?.kind || "reconciliation-round-completed").slice(0, 100),
+        activity_count: Number(result?.attempted ?? result?.activity_count ?? 0) || 0,
+        last_error: null,
+        first_consecutive_error_at: null,
+        consecutive_errors: 0,
+      } });
+    },
+    reconciliationRoundFailed: (error) => {
+      const completedAt = timestamp();
+      const hasConsecutiveError = Number(state.reconciliation.consecutive_errors || 0) > 0;
+      return persist({ reconciliation: {
+        phase: "error",
+        last_completed_at: completedAt,
+        last_progress_at: completedAt,
+        last_progress_kind: "reconciliation-round-failed",
+        activity_count: null,
+        last_error: normalizedErrorText(error),
+        first_consecutive_error_at: hasConsecutiveError
+          ? state.reconciliation.first_consecutive_error_at
+          : completedAt,
+        consecutive_errors: hasConsecutiveError
+          ? Number(state.reconciliation.consecutive_errors || 0) + 1
+          : 1,
+      } });
     },
   };
 }
@@ -158,6 +276,8 @@ export function directWorkerHealthDecision({
   eligible = true,
   startupGraceMs = 180_000,
   staleMs = 1_200_000,
+  consumerStaleMs = staleMs,
+  reconciliationStaleMs = staleMs,
   errorThreshold = 3,
   lastRecoveryAt = null,
   recoveryHistory = [],
@@ -171,6 +291,8 @@ export function directWorkerHealthDecision({
     : Number(workerStartedAt);
   const grace = Math.max(0, Number(startupGraceMs) || 0);
   const stale = Math.max(1, Number(staleMs) || 1_200_000);
+  const consumerStale = Math.max(1, Number(consumerStaleMs) || stale);
+  const reconciliationStale = Math.max(1, Number(reconciliationStaleMs) || stale);
   const threshold = Math.max(1, Math.floor(Number(errorThreshold) || 3));
   const cooldown = Math.max(0, Number(recoveryCooldownMs) || 0);
   const recoveryWindow = Math.max(1, Number(recoveryWindowMs) || 7_200_000);
@@ -195,7 +317,7 @@ export function directWorkerHealthDecision({
     && String(health?.run_id || "") === String(expectedRunId || "")
     && String(health?.worker_generation || "") === String(expectedGeneration || "")
     && Number(health?.worker_pid) === Number(expectedWorkerPid);
-  const heartbeatAtMs = finiteTimestamp(health?.heartbeat_at);
+  const heartbeatAtMs = finiteTimestamp(health?.producer?.heartbeat_at || health?.heartbeat_at);
   const currentHeartbeat = currentIdentity
     && heartbeatAtMs !== null
     && heartbeatAtMs >= workerStartedAtMs;
@@ -235,6 +357,61 @@ export function directWorkerHealthDecision({
       reason: "direct-producer-progress-stale",
       stale_ms: heartbeatStaleMs,
       producer_phase: health?.producer?.phase || null,
+    };
+  }
+
+  const laneRecovery = (laneName, lane, laneStaleMs) => {
+    // Schema-v1 workers deployed before lane heartbeats remain compatible
+    // during a rolling supervisor handoff. Every new worker writes both lanes
+    // from process start, so their absence is not silently accepted afterward.
+    if (!lane || typeof lane !== "object") {
+      if (Number(health?.runtime_lane_schema_version) !== 1) return null;
+      const elapsed = Math.max(0, nowMs - workerStartedAtMs);
+      if (elapsed < laneStaleMs) return null;
+      return {
+        ...base,
+        action: "restart-worker",
+        reason: `direct-${laneName}-heartbeat-missing`,
+        stale_ms: elapsed,
+        [`${laneName}_phase`]: "missing",
+        [`${laneName}_heartbeat_at`]: null,
+      };
+    }
+    const laneHeartbeatAtMs = finiteTimestamp(lane?.heartbeat_at);
+    const laneCurrent = currentIdentity
+      && laneHeartbeatAtMs !== null
+      && laneHeartbeatAtMs >= workerStartedAtMs;
+    const elapsed = laneCurrent
+      ? Math.max(0, nowMs - laneHeartbeatAtMs)
+      : Math.max(0, nowMs - workerStartedAtMs);
+    if (elapsed < laneStaleMs) return null;
+    return {
+      ...base,
+      action: "restart-worker",
+      reason: `direct-${laneName}-progress-stale`,
+      stale_ms: elapsed,
+      [`${laneName}_phase`]: lane?.phase || "missing",
+      [`${laneName}_heartbeat_at`]: lane?.heartbeat_at || null,
+    };
+  };
+  if (!recovery) recovery = laneRecovery("consumer", health?.consumer, consumerStale);
+  if (!recovery) {
+    recovery = laneRecovery(
+      "reconciliation",
+      health?.reconciliation,
+      reconciliationStale,
+    );
+  }
+  if (!recovery
+    && health?.reconciliation?.phase === "error"
+    && Number(health?.reconciliation?.consecutive_errors || 0) >= threshold) {
+    recovery = {
+      ...base,
+      action: "restart-worker",
+      reason: "direct-reconciliation-consecutive-errors",
+      consecutive_errors: Number(health.reconciliation.consecutive_errors),
+      first_error_at: health.reconciliation.first_consecutive_error_at || null,
+      last_error: health.reconciliation.last_error || null,
     };
   }
 

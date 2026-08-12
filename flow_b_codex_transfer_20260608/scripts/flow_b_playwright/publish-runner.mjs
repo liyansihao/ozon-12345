@@ -863,12 +863,14 @@ export function createPublishRunner({
   seasonPriorityFile = null,
   profitFileRefreshMs = 5_000,
   profitSafetyActionPolicy = "shadow",
+  onProgress = () => {},
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   if (!client || !costBridge || !state) throw new TypeError("client, costBridge, and state are required");
   if (!detailProvider || typeof detailProvider.getProductDetail !== "function") {
     throw new TypeError("Playwright Ozon detailProvider.getProductDetail is required");
   }
+  if (typeof onProgress !== "function") throw new TypeError("onProgress must be a function");
   const targetCount = Number(target);
   const profitThreshold = Number(threshold);
   const activeDirectMode = Boolean(directMode);
@@ -891,6 +893,14 @@ export function createPublishRunner({
     seasonFile: seasonPriorityFile,
     refreshMs: Math.max(0, Number(profitFileRefreshMs) || 0),
   });
+  function reportProgress(progress = {}) {
+    try {
+      Promise.resolve(onProgress({
+        lane: reconciliationOnly ? "reconciliation" : "consumer",
+        ...progress,
+      })).catch(() => {});
+    } catch {}
+  }
   dailyWindowState({
     now: now(),
     timeZone: dailyStoreTimeZone,
@@ -2857,6 +2867,7 @@ export function createPublishRunner({
     validationTarget: runValidationTarget = validationTargetCount,
     attemptLimit = 0,
   } = {}) {
+    reportProgress({ kind: "runner-started" });
     activeValidationOnly = Boolean(validationMode);
     const activeValidationTarget = Number(runValidationTarget);
     if (!Number.isInteger(activeValidationTarget) || activeValidationTarget <= 0) {
@@ -4310,6 +4321,14 @@ export function createPublishRunner({
     }
 
     function recordCandidateResult(item, result) {
+      reportProgress({
+        kind: ["published", "submitted"].includes(String(result?.status || ""))
+          ? "erp-accepted"
+          : "candidate-result",
+        sku: result?.sku ?? item?.sku ?? null,
+        status: result?.status ?? null,
+        attempted: result?.attempted === true,
+      });
       if (activeValidationOnly
         && result.attempted
         && ["deferred", "failed"].includes(result.status)) {
@@ -4564,6 +4583,12 @@ export function createPublishRunner({
     await metricsChain;
 
     if (!haltReason && freshSubmissionsPaused && initialPauseReason) haltReason = initialPauseReason;
+
+    reportProgress({
+      kind: "runner-completed",
+      attempted,
+      accepted: acceptedCount(),
+    });
 
     return {
       published,

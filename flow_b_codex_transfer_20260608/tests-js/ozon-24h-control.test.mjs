@@ -306,6 +306,8 @@ test("production config freezes unlimited direct runtime and external 1688 Pytho
     enabled: true,
     source_error_threshold: 3,
     producer_stale_ms: 1_200_000,
+    consumer_stale_ms: 1_200_000,
+    reconciliation_stale_ms: 1_200_000,
     startup_grace_ms: 180_000,
     recovery_cooldown_ms: 1_800_000,
     recovery_window_ms: 7_200_000,

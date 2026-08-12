@@ -442,6 +442,37 @@ test("1688 failures use bounded summary reasons while retaining raw cost evidenc
   assert.equal(normalizeCostFailureReason({ error: { code: "IMAGE_DOWNLOAD_FAILED" } }), "1688-image-fetch-failed");
 });
 
+test("publisher reports consumer and reconciliation progress without changing outcomes", async () => {
+  const consumerProgress = [];
+  const consumer = await createPublishRunner({
+    client: clientFor([]),
+    costBridge: { estimate: async () => ({ ok: false }) },
+    state: fakeState(),
+    target: 1,
+    runDir: "/tmp/run",
+    onProgress: (event) => consumerProgress.push(event),
+  }).run();
+  assert.equal(consumer.attempted, 0);
+  assert.deepEqual(consumerProgress.map((event) => event.kind), [
+    "runner-started",
+    "runner-completed",
+  ]);
+  assert.ok(consumerProgress.every((event) => event.lane === "consumer"));
+
+  const reconciliationProgress = [];
+  await createPublishRunner({
+    client: clientFor([]),
+    costBridge: { estimate: async () => ({ ok: false }) },
+    state: fakeState(),
+    target: 1,
+    runDir: "/tmp/run",
+    reconciliationOnly: true,
+    onProgress: (event) => reconciliationProgress.push(event),
+  }).run();
+  assert.ok(reconciliationProgress.length >= 2);
+  assert.ok(reconciliationProgress.every((event) => event.lane === "reconciliation"));
+});
+
 test("production cost contract rejects a positive number without reliable same-item evidence", async () => {
   const state = fakeState();
   let publishCalls = 0;

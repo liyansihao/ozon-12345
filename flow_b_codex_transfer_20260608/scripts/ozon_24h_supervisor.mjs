@@ -3057,6 +3057,14 @@ async function superviseDirectPublishing({
       60_000,
       Number(config.direct_worker_watchdog?.producer_stale_ms) || 1_200_000,
     ),
+    consumerStaleMs: Math.max(
+      60_000,
+      Number(config.direct_worker_watchdog?.consumer_stale_ms) || 1_200_000,
+    ),
+    reconciliationStaleMs: Math.max(
+      60_000,
+      Number(config.direct_worker_watchdog?.reconciliation_stale_ms) || 1_200_000,
+    ),
     recoveryCooldownMs: Math.max(
       0,
       Number(config.direct_worker_watchdog?.recovery_cooldown_ms) || 1_800_000,
@@ -3359,6 +3367,8 @@ async function superviseDirectPublishing({
               && submissionWindow.open,
             startupGraceMs: watchdogConfig.startupGraceMs,
             staleMs: watchdogConfig.staleMs,
+            consumerStaleMs: watchdogConfig.consumerStaleMs,
+            reconciliationStaleMs: watchdogConfig.reconciliationStaleMs,
             errorThreshold: watchdogConfig.errorThreshold,
             lastRecoveryAt: watchdogState.last_recovery_at,
             recoveryHistory: watchdogState.recoveries,

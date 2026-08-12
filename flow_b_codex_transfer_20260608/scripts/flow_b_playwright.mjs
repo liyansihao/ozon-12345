@@ -509,6 +509,7 @@ async function createPublishingSession(context, options, env, shared) {
       profitFeedbackFile: env.FLOW_B_PROFIT_FEEDBACK_FILE || null,
       seasonPriorityFile: env.FLOW_B_SEASON_PRIORITY_FILE || null,
       profitFileRefreshMs: Math.max(0, Number(env.FLOW_B_PROFIT_FILE_REFRESH_MS) || 5_000),
+      onProgress: shared.onProgress || (() => {}),
     });
     return { maoziPage, client, costBridge, detailProvider, runner, state };
   } catch (error) {
@@ -980,6 +981,19 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
           kind: progress.phase || "candidate-activity",
         }));
       };
+      const laneProgressAt = new Map();
+      const recordRuntimeProgress = (progress = {}) => {
+        const lane = String(progress?.lane || "consumer");
+        const now = Date.now();
+        const last = Number(laneProgressAt.get(lane) || 0);
+        const urgent = progress?.kind === "erp-accepted";
+        if (!urgent && now - last < 30_000) return;
+        laneProgressAt.set(lane, now);
+        const operation = lane === "reconciliation"
+          ? () => directWorkerHealth.reconciliationProgress({ kind: progress?.kind })
+          : () => directWorkerHealth.consumerProgress({ kind: progress?.kind });
+        void recordProducerHealth(operation);
+      };
       await recordProducerHealth(() => directWorkerHealth.start());
       const pageCleanup = directEnv.FLOW_B_PRUNE_ORPHAN_PAGES_ON_START === "1"
         ? await pruneOrphanedFlowPages(context, {
@@ -1020,6 +1034,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         persistent: true,
         session: null,
         directRunControl,
+        onProgress: recordRuntimeProgress,
       };
       const profitLearningSidecar = directEnv.FLOW_B_PROFIT_LEARNING_ENABLED === "1"
         ? createProfitLearningSidecar({
@@ -1064,6 +1079,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         while (!backgroundStop) {
           let backgroundSession = null;
           try {
+            await recordProducerHealth(() => directWorkerHealth.reconciliationRoundStarted());
             backgroundSession = await createPublishingSession(
               context,
               options,
@@ -1071,11 +1087,16 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
               {
                 targetConfigCache: {},
                 directRunControl,
+                onProgress: recordRuntimeProgress,
               },
             );
             const backgroundResult = await backgroundSession.runner.run();
+            await recordProducerHealth(() => directWorkerHealth.reconciliationRoundCompleted(
+              backgroundResult,
+            ));
             if (runtimeRoundHasActivity(backgroundResult)) runtimeWake.wake();
           } catch (error) {
+            await recordProducerHealth(() => directWorkerHealth.reconciliationRoundFailed(error));
             await fs.appendFile(path.join(options.runDir, "runtime_errors.jsonl"), `${JSON.stringify({
               at: new Date().toISOString(),
               stage: "background-reconciliation",
@@ -1154,6 +1175,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
           if (producerError) throw producerError;
           if (directRunControl.fatalError) throw directRunControl.fatalError;
           const retryDelayMs = runtimeIdleDelay(idleStreak + 1, emptyBackoffIntervals);
+          await recordProducerHealth(() => directWorkerHealth.consumerRoundStarted());
           const foregroundAttempt = await runForegroundPublishAttempt(
             () => publishWithContext(
               context,
@@ -1184,11 +1206,15 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
             },
           );
           if (foregroundAttempt.retry) {
+            await recordProducerHealth(() => directWorkerHealth.consumerProgress({
+              kind: "recoverable-timeout",
+            }));
             idleStreak += 1;
             await runtimeWake.wait(retryDelayMs);
             continue;
           }
           publish = foregroundAttempt.value;
+          await recordProducerHealth(() => directWorkerHealth.consumerRoundCompleted(publish));
           await writeDailySubmissionWindowMarker(options.runDir, publish, {
             timeZone: directEnv.FLOW_B_DAILY_STORE_TIMEZONE || "Asia/Shanghai",
           });

@@ -1435,6 +1435,93 @@ test("direct worker health tracks consecutive scan errors and resets only on emp
   assert.ok(writes.length >= 9);
 });
 
+test("direct worker health records independent consumer and reconciliation progress", async () => {
+  let tick = 0;
+  const tracker = createDirectWorkerHealthTracker({
+    filename: "/tmp/direct-worker-health-lanes.json",
+    runId: "run-lanes",
+    generation: "generation-lanes",
+    workerPid: 4322,
+    now: () => new Date(Date.UTC(2026, 7, 10, 11, 0, tick++)),
+    write: async () => {},
+  });
+  await tracker.start();
+  await tracker.consumerRoundStarted();
+  await tracker.consumerProgress({ kind: "erp-accepted" });
+  await tracker.consumerRoundCompleted({ attempted: 3 });
+  await tracker.reconciliationRoundStarted();
+  await tracker.reconciliationProgress({ kind: "candidate-result" });
+  await tracker.reconciliationRoundFailed(new Error("temporary ERP error"));
+  await tracker.reconciliationRoundStarted();
+  await tracker.reconciliationRoundCompleted({ attempted: 2 });
+  const health = tracker.snapshot();
+  assert.equal(health.consumer.phase, "healthy");
+  assert.equal(health.consumer.activity_count, 3);
+  assert.ok(health.consumer.last_accepted_at);
+  assert.equal(health.reconciliation.phase, "healthy");
+  assert.equal(health.reconciliation.activity_count, 2);
+  assert.equal(health.reconciliation.consecutive_errors, 0);
+  assert.equal(health.producer.phase, "starting");
+});
+
+test("direct worker watchdog detects a stalled consumer or reconciliation lane", () => {
+  const base = {
+    schema_version: 1,
+    runtime_lane_schema_version: 1,
+    run_id: "run-1",
+    worker_generation: "generation-1",
+    worker_pid: 4321,
+    heartbeat_at: "2026-08-10T10:30:00.000Z",
+    producer: {
+      phase: "scanning",
+      heartbeat_at: "2026-08-10T10:30:00.000Z",
+      consecutive_errors: 0,
+    },
+    consumer: { phase: "running", heartbeat_at: "2026-08-10T10:09:59.999Z" },
+    reconciliation: { phase: "healthy", heartbeat_at: "2026-08-10T10:30:00.000Z" },
+  };
+  const decide = (health) => directWorkerHealthDecision({
+    health,
+    expectedRunId: "run-1",
+    expectedGeneration: "generation-1",
+    expectedWorkerPid: 4321,
+    workerStartedAt: Date.parse("2026-08-10T10:00:00.000Z"),
+    now: Date.parse("2026-08-10T10:30:00.000Z"),
+    staleMs: 1_200_000,
+    consumerStaleMs: 1_200_000,
+    reconciliationStaleMs: 1_200_000,
+  });
+  const consumer = decide(base);
+  assert.equal(consumer.action, "restart-worker");
+  assert.equal(consumer.reason, "direct-consumer-progress-stale");
+  const reconciliation = decide({
+    ...base,
+    consumer: { ...base.consumer, heartbeat_at: "2026-08-10T10:30:00.000Z" },
+    reconciliation: { ...base.reconciliation, heartbeat_at: "2026-08-10T10:09:59.999Z" },
+  });
+  assert.equal(reconciliation.action, "restart-worker");
+  assert.equal(reconciliation.reason, "direct-reconciliation-progress-stale");
+  const legacy = { ...base, runtime_lane_schema_version: undefined, consumer: undefined, reconciliation: undefined };
+  assert.equal(decide(legacy).action, "continue");
+  const missing = decide({ ...base, consumer: undefined });
+  assert.equal(missing.action, "restart-worker");
+  assert.equal(missing.reason, "direct-consumer-heartbeat-missing");
+
+  const repeatedReconciliation = decide({
+    ...base,
+    consumer: { ...base.consumer, heartbeat_at: "2026-08-10T10:30:00.000Z" },
+    reconciliation: {
+      phase: "error",
+      heartbeat_at: "2026-08-10T10:30:00.000Z",
+      consecutive_errors: 3,
+      first_consecutive_error_at: "2026-08-10T10:29:00.000Z",
+      last_error: "temporary ERP error",
+    },
+  });
+  assert.equal(repeatedReconciliation.action, "restart-worker");
+  assert.equal(repeatedReconciliation.reason, "direct-reconciliation-consecutive-errors");
+});
+
 test("direct worker watchdog restarts after three consecutive failures or twenty minutes stale", () => {
   const workerStartedAt = Date.parse("2026-08-10T10:00:00.000Z");
   const baseHealth = {
