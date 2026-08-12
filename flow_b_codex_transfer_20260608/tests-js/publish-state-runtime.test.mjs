@@ -10,6 +10,7 @@ import {
   reconcileRuntimeAuditOutputs,
 } from "../scripts/flow_b_playwright/publish-state.mjs";
 import { createRuntimeState } from "../scripts/flow_b_playwright/runtime-state.mjs";
+import { restoredDailyStoreUsage } from "../scripts/flow_b_playwright/publish-runner.mjs";
 
 async function withTempDir(callback) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-publish-sqlite-"));
@@ -164,6 +165,116 @@ test("native SQLite restore skips oversized legacy histories and hydrates latest
     assert.equal(restored.statusOf("sqlite-only"), "processing");
     assert.equal(restored.entryOf("sqlite-only").data.submitted, true);
     assert.equal(restored.directAcceptedCount(runDir), 1);
+    await restored.close();
+  });
+});
+
+test("native SQLite restore compacts terminal evidence while preserving summary and submitted quota state", async () => {
+  await withTempDir(async (dir) => {
+    const runDir = path.join(dir, "current-run");
+    const previousRunDir = path.join(dir, "previous-run");
+    const dbPath = path.join(dir, "external-state", "runtime.sqlite");
+    const publishedCsv = path.join(dir, "published.csv");
+    const runtime = createRuntimeState({ dbPath });
+    const terminalPayload = "x".repeat(16 * 1024);
+    for (let index = 0; index < 64; index += 1) {
+      runtime.recordSkip(`terminal-history-${index}`, {
+        reason: "historical-policy-rejection",
+        data: {
+          runtime_run_dir: runDir,
+          terminal_payload: terminalPayload,
+        },
+      });
+    }
+    runtime.reserveSubmission("terminal-submitted", {
+      reason: "submission-intent",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        submitted_at: "2026-08-12T04:00:00.000Z",
+      },
+    });
+    runtime.confirmSubmission("terminal-submitted", {
+      reason: "erp-submission-accepted",
+      data: { submitted: true },
+    });
+    runtime.recordFailure("terminal-submitted", {
+      reason: "daily-product-limit",
+      kind: "deterministic",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 106637,
+        submitted: true,
+        submitted_at: "2026-08-12T04:00:00.000Z",
+        terminal_payload: terminalPayload,
+      },
+    });
+    runtime.recordProcessing("prior-run-pending", {
+      reason: "reconciliation-import-pending",
+      data: {
+        runtime_run_dir: previousRunDir,
+        submitted: true,
+        submission_pending: true,
+        store_id: 106637,
+      },
+    });
+    runtime.recordProcessing("legacy-pending", {
+      reason: "reconciliation-import-pending",
+      data: {
+        submitted: true,
+        submission_pending: true,
+        store_id: 106637,
+      },
+    });
+    runtime.recordStrictPublication("published-current-run", {
+      reason: "strict-confirmed",
+      data: {
+        ...strictPublication("published-current-run", {
+          store_id: 106637,
+          published_at: "2026-08-12T04:00:00.000Z",
+        }),
+        runtime_run_dir: path.resolve(runDir),
+      },
+    });
+    runtime.close();
+
+    const restored = createPublishState({
+      runDir,
+      publishedCsv,
+      runtimeStateDbPath: dbPath,
+      exportRuntimeAuditOnClose: false,
+    });
+    await restored.load();
+    const startupEntries = restored.entries();
+    assert.equal(startupEntries.length, 68);
+    const startupBySku = new Map(startupEntries.map((entry) => [entry.sku, entry]));
+    assert.deepEqual(startupBySku.get("terminal-history-63").data, {
+      reason: "historical-policy-rejection",
+      terminal: true,
+      strict_confirmed: false,
+      failure_class: "deterministic",
+    });
+    assert.equal(startupBySku.get("terminal-submitted").data.submitted, true);
+    assert.equal(startupBySku.get("terminal-submitted").data.store_id, 106637);
+    assert.equal(
+      restoredDailyStoreUsage(startupEntries, 106637, new Date("2026-08-12T06:00:00.000Z")),
+      2,
+    );
+    assert.equal(restored.runPublishedCount(), 1);
+    assert.deepEqual(restored.summary(100), {
+      published: 1,
+      failed: 1,
+      skipped: 64,
+      remaining: 99,
+    });
+    assert.equal(restored.entryOf("prior-run-pending").data.submission_pending, true);
+    assert.equal(restored.entryOf("legacy-pending").data.submission_pending, true);
+
+    // Startup hydration retains the compact terminal status, while the indexed
+    // per-SKU path still exposes its complete authoritative evidence.
+    assert.equal(restored.statusOf("terminal-history-63"), "skipped");
+    assert.equal(restored.entryOf("terminal-history-63").data.terminal_payload, terminalPayload);
+    assert.equal(restored.canAttempt("terminal-history-63").allowed, false);
     await restored.close();
   });
 });

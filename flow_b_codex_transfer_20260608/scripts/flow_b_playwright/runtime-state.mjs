@@ -1132,6 +1132,29 @@ export function createRuntimeState({
 
   const selectState = database.prepare("SELECT * FROM sku_state WHERE sku = ?");
   const selectAllStates = database.prepare("SELECT * FROM sku_state ORDER BY sku");
+  const selectOperationalStates = database.prepare(`
+    SELECT
+      s.sku,
+      s.stage,
+      s.reason,
+      s.failure_class,
+      s.terminal,
+      s.strict,
+      s.next_eligible_at,
+      CASE
+        WHEN s.terminal = 0
+          OR s.stage = 'published'
+          OR s.strict = 1
+          OR coalesce(CAST(json_extract(s.data_json, '$.submitted') AS INTEGER), 0) = 1
+          OR coalesce(CAST(json_extract(s.data_json, '$.submission_pending') AS INTEGER), 0) = 1
+          OR coalesce(CAST(json_extract(s.data_json, '$.submission_intent') AS INTEGER), 0) = 1
+        THEN s.data_json
+        ELSE '{}'
+      END AS data_json,
+      s.updated_at
+    FROM sku_state AS s
+    ORDER BY s.sku
+  `);
   const selectNativeRuntimeEvent = database.prepare(`
     SELECT 1 AS present
     FROM events
@@ -1330,6 +1353,11 @@ export function createRuntimeState({
   function stateEntries() {
     assertOpen();
     return selectAllStates.all().map(rowToState);
+  }
+
+  function operationalStateEntries() {
+    assertOpen();
+    return selectOperationalStates.all().map(rowToState);
   }
 
   function hasNativeRuntimeEvents() {
@@ -2277,6 +2305,7 @@ export function createRuntimeState({
     reopenDirectCandidate,
     get,
     stateEntries,
+    operationalStateEntries,
     hasNativeRuntimeEvents,
     strictCount,
     strictPublications,

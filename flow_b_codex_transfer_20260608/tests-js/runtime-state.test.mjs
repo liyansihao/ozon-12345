@@ -1073,3 +1073,98 @@ test("strict publication rows expose authoritative data for compatibility audit 
     state.close();
   });
 });
+
+test("operational state entries compact ordinary terminal evidence without weakening runtime semantics", async () => {
+  await withTempDir(async (dir) => {
+    const state = createRuntimeState({ dbPath: path.join(dir, "state.sqlite") });
+    const terminalPayload = "x".repeat(32 * 1024);
+    for (let index = 0; index < 128; index += 1) {
+      state.recordSkip(`terminal-skip-${index}`, {
+        reason: "historical-policy-rejection",
+        data: { terminal_payload: terminalPayload },
+      });
+    }
+    state.recordFailure("terminal-failure", {
+      reason: "historical-invariant-failure",
+      kind: "invariant",
+      data: { terminal_payload: terminalPayload },
+    });
+    state.reserveSubmission("terminal-submitted", {
+      reason: "submission-intent",
+      data: {
+        runtime_run_dir: path.join(dir, "submitted-run"),
+        store_id: 106637,
+        submitted_at: "2026-08-12T04:00:00.000Z",
+      },
+    });
+    state.confirmSubmission("terminal-submitted", {
+      reason: "erp-submission-accepted",
+      data: { submitted: true },
+    });
+    state.recordFailure("terminal-submitted", {
+      reason: "daily-product-limit",
+      kind: "deterministic",
+      data: {
+        runtime_run_dir: path.join(dir, "submitted-run"),
+        store_id: 106637,
+        submitted: true,
+        submitted_at: "2026-08-12T04:00:00.000Z",
+        terminal_payload: terminalPayload,
+      },
+    });
+    state.recordProcessing("previous-run-reconciliation", {
+      reason: "reconciliation-import-pending",
+      data: {
+        runtime_run_dir: path.join(dir, "previous-run"),
+        submitted: true,
+        submission_pending: true,
+      },
+    });
+    state.recordProcessing("legacy-reconciliation", {
+      reason: "reconciliation-import-pending",
+      data: {
+        submitted: true,
+        submission_pending: true,
+      },
+    });
+    state.recordFailure("transient-retry", {
+      reason: "1688-health-deferred",
+      kind: "transient",
+      nextEligibleAt: "2026-08-12T05:00:00.000Z",
+      data: { runtime_run_dir: path.join(dir, "previous-run") },
+    });
+    const legacyPublished = path.join(dir, "legacy-published.jsonl");
+    await fs.writeFile(legacyPublished, `${JSON.stringify({
+      sku: "legacy-published",
+      status: "published",
+      timestamp: "2026-08-12T04:00:00.000Z",
+      data: { runtime_run_dir: path.join(dir, "legacy-published-run") },
+    })}\n`);
+    await state.importLegacy({ published: [legacyPublished] });
+    state.recordStrictPublication("published-history", {
+      reason: "strict-confirmed",
+      data: {
+        ...strictData,
+        runtime_run_dir: path.join(dir, "published-run"),
+      },
+    });
+
+    const operationalEntries = state.operationalStateEntries();
+    assert.equal(operationalEntries.length, 135);
+    const operationalBySku = new Map(operationalEntries.map((entry) => [entry.sku, entry]));
+    assert.deepEqual(operationalBySku.get("terminal-skip-127").data, {});
+    assert.deepEqual(operationalBySku.get("terminal-failure").data, {});
+    assert.equal(operationalBySku.get("previous-run-reconciliation").data.submission_pending, true);
+    assert.equal(operationalBySku.get("legacy-reconciliation").data.submission_pending, true);
+    assert.equal(operationalBySku.get("legacy-published").data.runtime_run_dir, path.join(dir, "legacy-published-run"));
+    assert.equal(operationalBySku.get("published-history").data.runtime_run_dir, path.join(dir, "published-run"));
+    assert.equal(operationalBySku.get("terminal-submitted").data.submitted, true);
+    assert.equal(operationalBySku.get("terminal-submitted").data.store_id, 106637);
+    assert.equal(state.submissionReservation("terminal-submitted").status, "closed");
+    const allEntries = state.stateEntries();
+    assert.equal(allEntries.length, 135);
+    assert.equal(allEntries.find((entry) => entry.sku === "terminal-skip-127").data.terminal_payload, terminalPayload);
+    assert.equal(allEntries.find((entry) => entry.sku === "terminal-failure").data.terminal_payload, terminalPayload);
+    state.close();
+  });
+});

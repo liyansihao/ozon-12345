@@ -501,7 +501,7 @@ export function createPublishState({
   function hydrateFromRuntime({
     pendingSeeds = new Map(),
     localRunPublished = new Set(),
-    runtimeEntries = runtimeState?.stateEntries?.() ?? [],
+    runtimeEntries = runtimeState?.operationalStateEntries?.() ?? [],
   } = {}) {
     if (!runtimeState) return;
     states.clear();
