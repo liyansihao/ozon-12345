@@ -7,7 +7,7 @@ import path from "node:path";
 import {
   clearObservedPublishFeedbackCache,
   createConcurrencyGate,
-  createPublishRunner,
+  createPublishRunner as createProductionPublishRunner,
   duplicateTitleKey,
   freshCnySnapshotSalePrice,
   loadObservedPublishFeedback,
@@ -29,6 +29,15 @@ import {
   normalizeSeasonPriority,
 } from "../scripts/flow_b_playwright/profit-priority.mjs";
 import { runForegroundPublishAttempt } from "../scripts/flow_b_playwright.mjs";
+
+const DEFAULT_TEST_NOW = new Date("2026-08-12T12:00:00.000Z");
+
+function createPublishRunner(options = {}) {
+  return createProductionPublishRunner({
+    now: () => new Date(DEFAULT_TEST_NOW),
+    ...options,
+  });
+}
 
 test("1688 concurrency gate waits for a real worker slot before starting queued work", async () => {
   const gate = createConcurrencyGate(1);
