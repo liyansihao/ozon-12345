@@ -128,6 +128,82 @@ test("Playwright detail provider reuses its page until the pool closes", async (
   assert.equal(closed, true);
 });
 
+test("detail provider applies the configured timeout to product navigation", async () => {
+  const navigations = [];
+  const page = {
+    goto: async (url, options) => { navigations.push({ url, options }); },
+    evaluate: async () => ({
+      url: "https://www.ozon.ru/product/timeout-contract/",
+      title: "Ozon item",
+      text: "title\n¥ 99\n发货模式： FBS",
+    }),
+    close: async () => {},
+  };
+  const provider = createOzonDetailProvider({
+    context: { newPage: async () => page },
+    timeout: 1_234,
+    pollInterval: 1,
+  });
+
+  await provider.getProductDetail("timeout-contract", { sell_price: 90 });
+
+  assert.deepEqual(navigations, [{
+    url: "https://www.ozon.ru/product/timeout-contract",
+    options: { waitUntil: "domcontentloaded", timeout: 1_234 },
+  }]);
+  await provider.close();
+});
+
+test("detail provider discards a page after a navigation timeout", async () => {
+  const pages = [];
+  const navigationTimeouts = [];
+  let newPageCalls = 0;
+  const context = {
+    newPage: async () => {
+      newPageCalls += 1;
+      const index = newPageCalls;
+      let closed = false;
+      const page = {
+        isClosed: () => closed,
+        goto: async (_url, options) => {
+          navigationTimeouts.push(options.timeout);
+          if (index === 1) throw new Error("page.goto: Timeout 1500ms exceeded");
+        },
+        evaluate: async () => ({
+          url: "https://www.ozon.ru/product/fresh-page/",
+          title: "Ozon item",
+          text: "title\n¥ 99\n发货模式： FBS",
+        }),
+        close: async () => { closed = true; },
+      };
+      pages.push(page);
+      return page;
+    },
+  };
+  const provider = createOzonDetailProvider({
+    context,
+    timeout: 1_500,
+    pollInterval: 1,
+    initialConcurrency: 1,
+    maxConcurrency: 1,
+  });
+
+  await assert.rejects(
+    provider.getProductDetail("poisoned-page", { sell_price: 90 }),
+    /Timeout 1500ms exceeded/,
+  );
+  assert.equal(pages[0].isClosed(), true);
+
+  const detail = await provider.getProductDetail("fresh-page", { sell_price: 90 });
+
+  assert.equal(detail.mode, "FBS");
+  assert.equal(newPageCalls, 2);
+  assert.deepEqual(navigationTimeouts, [1_500, 1_500]);
+  assert.equal(pages[1].isClosed(), false);
+  await provider.close();
+  assert.equal(pages[1].isClosed(), true);
+});
+
 test("detail provider close reclaims a leased page and rejects queued waiters", async () => {
   let closed = false;
   let closeCalls = 0;

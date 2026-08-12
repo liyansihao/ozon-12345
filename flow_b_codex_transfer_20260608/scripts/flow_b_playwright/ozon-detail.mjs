@@ -239,10 +239,19 @@ export function createOzonDetailProvider({
       const page = await acquirePage();
       if (!page) throw new Error("Ozon detail page pool could not allocate a page");
       let reusable = true;
+      let navigationFailed = false;
       try {
         const url = item.link || item.detail_url || canonicalProductUrl(sku);
         const readDetail = async () => {
-          await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+          try {
+            await page.goto(url, {
+              waitUntil: "domcontentloaded",
+              timeout: Math.max(1_000, Number(timeout) || 20_000),
+            });
+          } catch (error) {
+            navigationFailed = true;
+            throw error;
+          }
           const deadline = Date.now() + Math.max(0, timeout);
           const requiredCaptchaConfirmations = Math.max(
             1,
@@ -305,7 +314,8 @@ export function createOzonDetailProvider({
         return result;
       } catch (error) {
         adaptive.recordFailure(error);
-        reusable = !/target page|context or browser has been closed|frame was detached/i.test(String(error?.message || error));
+        reusable = !navigationFailed
+          && !/target page|context or browser has been closed|frame was detached/i.test(String(error?.message || error));
         throw error;
       } finally {
         await releasePage(page, reusable);
