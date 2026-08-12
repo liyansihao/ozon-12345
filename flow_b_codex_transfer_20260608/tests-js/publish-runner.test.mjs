@@ -3773,31 +3773,58 @@ test("reconciliation HTTP 0 errors reduce adaptive publish concurrency", async (
   assert.equal(state.entries()[0].data.offer_id, "mz-delayed");
 });
 
-test("reconciliation-only mode never submits a fresh favorite", async () => {
-  const state = fakeState({
-    delayed: { status: "failed", data: { submitted: true, offer_id: "mz-150726-delayed", profit_rate: 45 } },
-  });
-  let publishCalls = 0;
-  const client = clientFor([{ id: "delayed", sku: "delayed" }, { id: "fresh", sku: "fresh" }], {
-    publish: async () => { publishCalls += 1; return { ok: true }; },
-    findImportLog: async ({ sku, offerId }) => String(sku) === "delayed"
-      ? { sku, offer_id: offerId, import_status: "all_imported" }
-      : null,
-  });
+test("reconciliation-only mode uses durable pending state without listing or cleaning favorites", async () => {
+  const runDir = await fs.mkdtemp(path.join(os.tmpdir(), "flow-b-reconciliation-only-"));
+  try {
+    const state = fakeState({
+      delayed: { status: "failed", data: { submitted: true, offer_id: "mz-150726-delayed", profit_rate: 45 } },
+    });
+    const calls = {
+      deleteFavorite: 0,
+      listAllFavorites: 0,
+      listFavorites: 0,
+      publish: 0,
+    };
+    const client = clientFor([], {
+      listFavorites: async () => {
+        calls.listFavorites += 1;
+        return [{ id: "delayed", sku: "delayed" }, { id: "fresh", sku: "fresh" }];
+      },
+      listAllFavorites: async () => {
+        calls.listAllFavorites += 1;
+        return [{ id: "fresh", sku: "fresh", is_imported: true }];
+      },
+      deleteFavorite: async () => { calls.deleteFavorite += 1; return true; },
+      publish: async () => { calls.publish += 1; return { ok: true }; },
+      findImportLog: async ({ sku, offerId }) => String(sku) === "delayed"
+        ? { sku, offer_id: offerId, import_status: "all_imported" }
+        : null,
+    });
 
-  const result = await createPublishRunner({
-    client,
-    costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
-    state,
-    target: 10,
-    reconciliationOnly: true,
-    confirmationAttempts: 1,
-    confirmationIntervalMs: 0,
-  }).run();
+    const result = await createPublishRunner({
+      client,
+      costBridge: { estimate: async () => ({ ok: true, cost: 20 }) },
+      state,
+      target: 10,
+      runDir,
+      reconciliationOnly: true,
+      importedFavoriteCleanupLimit: 100,
+      confirmationAttempts: 1,
+      confirmationIntervalMs: 0,
+    }).run();
 
-  assert.equal(result.published, 1);
-  assert.equal(publishCalls, 0);
-  assert.equal(state.statusOf("fresh"), null);
+    assert.equal(result.published, 1);
+    assert.equal(state.statusOf("delayed"), "published");
+    assert.equal(state.statusOf("fresh"), null);
+    assert.deepEqual(calls, {
+      deleteFavorite: 0,
+      listAllFavorites: 0,
+      listFavorites: 0,
+      publish: 0,
+    });
+  } finally {
+    await fs.rm(runDir, { recursive: true, force: true });
+  }
 });
 
 test("runner backs off a delayed reconciliation until its persisted retry time", async () => {

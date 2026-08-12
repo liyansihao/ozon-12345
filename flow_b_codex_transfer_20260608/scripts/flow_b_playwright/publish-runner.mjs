@@ -2732,7 +2732,9 @@ export function createPublishRunner({
       const retryAt = Date.parse(String(latest?.retry_at || ""));
       return !Number.isFinite(retryAt) || retryAt <= now().getTime();
     };
-    const cleanupLimit = Math.max(0, Math.floor(Number(importedFavoriteCleanupLimit) || 0));
+    const cleanupLimit = reconciliationOnly
+      ? 0
+      : Math.max(0, Math.floor(Number(importedFavoriteCleanupLimit) || 0));
     if (!activeValidationOnly && cleanupLimit > 0 && typeof client.listAllFavorites === "function") {
       let allFavorites = [];
       let cleanupFailed = 0;
@@ -3329,7 +3331,7 @@ export function createPublishRunner({
       storeSwitches.at(-1)?.reason || initialPauseReason || "active",
     );
     const facts = await loadCandidateFacts(runDir, candidateFactSeedFiles);
-    const listedFavorites = await client.listFavorites();
+    const listedFavorites = reconciliationOnly ? [] : await client.listFavorites();
     for (const item of listedFavorites.filter((row) => !String(row?.sku ?? row?.id ?? "").trim())) {
       recordMetric("source_yield.jsonl", {
         sku: null,
