@@ -1200,13 +1200,10 @@ test("operational state entries compact ordinary terminal evidence without weake
     assert.equal(state.submissionReservation("legacy-terminal-submitted"), null);
     assert.equal(operationalBySku.get("legacy-terminal-submitted").data.submitted, true);
     assert.equal(operationalBySku.get("legacy-terminal-submitted").data.store_id, 106637);
-    assert.equal(
-      operationalBySku.get("legacy-terminal-submitted").data.terminal_payload,
-      terminalPayload,
-    );
+    assert.equal(operationalBySku.get("legacy-terminal-submitted").data.terminal_payload, undefined);
     assert.equal(state.submissionReservation("terminal-selected-only"), null);
     assert.equal(operationalBySku.get("terminal-selected-only").data.selected_at, "2026-08-12T04:02:00.000Z");
-    assert.equal(operationalBySku.get("terminal-selected-only").data.terminal_payload, terminalPayload);
+    assert.equal(operationalBySku.get("terminal-selected-only").data.terminal_payload, undefined);
     const allEntries = state.stateEntries();
     assert.equal(allEntries.length, 137);
     assert.equal(allEntries.find((entry) => entry.sku === "terminal-skip-127").data.terminal_payload, terminalPayload);
@@ -1284,6 +1281,23 @@ test("operational state entries compact ordinary terminal evidence without weake
         `).get().data_json).projection_version,
         2,
       );
+      const compactTerminalPayload = database.prepare(`
+        SELECT data_json, length(data_json) AS bytes
+        FROM sku_state_operational_payloads
+        WHERE sku = 'legacy-terminal-submitted'
+      `).get();
+      assert.deepEqual(JSON.parse(compactTerminalPayload.data_json), {
+        runtime_run_dir: path.join(dir, "legacy-submitted-run"),
+        store_id: 106637,
+        submitted: true,
+        submitted_at: "2026-08-12T04:01:00.000Z",
+      });
+      assert.ok(Number(compactTerminalPayload.bytes) < 512);
+      assert.equal(database.prepare(`
+        SELECT value
+        FROM metadata
+        WHERE key = 'operational_payload_format_version'
+      `).get().value, "2");
       database.prepare("DELETE FROM sku_state WHERE sku = ?").run("projection-update-delete");
       assert.equal(database.prepare(`
         SELECT 1 AS present
@@ -1325,6 +1339,122 @@ test("operational state entries compact ordinary terminal evidence without weake
       }
     } finally {
       reopened.close();
+    }
+  });
+});
+
+test("existing full operational payloads rebuild once and install compact maintenance triggers", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "state.sqlite");
+    const terminalPayload = "z".repeat(64 * 1024);
+    const initial = createRuntimeState({ dbPath });
+    initial.recordFailure("legacy-full-payload", {
+      reason: "daily-product-limit",
+      kind: "deterministic",
+      data: {
+        runtime_run_dir: path.join(dir, "run"),
+        store_id: 106637,
+        store_name: "store-two",
+        submitted: true,
+        submission_pending: true,
+        submission_intent: true,
+        selected_at: "2026-08-12T04:00:00.000Z",
+        prepared_at: "2026-08-12T04:00:01.000Z",
+        submitted_at: "2026-08-12T04:00:02.000Z",
+        api_call_started_at: "2026-08-12T04:00:01.500Z",
+        api_call_completed_at: "2026-08-12T04:00:02.500Z",
+        store_rejection_day: "2026-08-12",
+        original_reason: "daily-product-limit",
+        import_log: { shop_name: "store-two", oversized: terminalPayload },
+        terminal_payload: terminalPayload,
+      },
+    });
+    initial.close();
+
+    const legacy = new DatabaseSync(dbPath);
+    try {
+      legacy.exec(`
+        UPDATE sku_state_operational_payloads
+        SET data_json = (
+          SELECT sku_state.data_json
+          FROM sku_state
+          WHERE sku_state.sku = sku_state_operational_payloads.sku
+        );
+        DELETE FROM metadata WHERE key = 'operational_payload_format_version';
+        DROP TRIGGER sku_state_operational_payload_insert;
+        CREATE TRIGGER sku_state_operational_payload_insert
+        AFTER INSERT ON sku_state
+        FOR EACH ROW
+        BEGIN
+          INSERT INTO sku_state_operational_payloads (sku, stage, data_json)
+          VALUES (NEW.sku, NEW.stage, NEW.data_json);
+        END;
+      `);
+      assert.ok(Number(legacy.prepare(`
+        SELECT length(data_json) AS bytes
+        FROM sku_state_operational_payloads
+        WHERE sku = 'legacy-full-payload'
+      `).get().bytes) > 64 * 1024);
+    } finally {
+      legacy.close();
+    }
+
+    const migrated = createRuntimeState({ dbPath });
+    const restored = migrated.operationalStateEntries()
+      .find((entry) => entry.sku === "legacy-full-payload");
+    assert.deepEqual(restored.data, {
+      runtime_run_dir: path.join(dir, "run"),
+      store_id: 106637,
+      store_name: "store-two",
+      submitted: true,
+      submission_pending: true,
+      submission_intent: true,
+      selected_at: "2026-08-12T04:00:00.000Z",
+      prepared_at: "2026-08-12T04:00:01.000Z",
+      submitted_at: "2026-08-12T04:00:02.000Z",
+      api_call_started_at: "2026-08-12T04:00:01.500Z",
+      api_call_completed_at: "2026-08-12T04:00:02.500Z",
+      store_rejection_day: "2026-08-12",
+      original_reason: "daily-product-limit",
+      import_log: { shop_name: "store-two" },
+    });
+    assert.equal(migrated.get("legacy-full-payload").data.terminal_payload, terminalPayload);
+
+    migrated.recordFailure("post-migration-trigger", {
+      reason: "daily-product-limit",
+      kind: "deterministic",
+      data: {
+        runtime_run_dir: path.join(dir, "run"),
+        store_id: 106637,
+        submitted: true,
+        terminal_payload: terminalPayload,
+      },
+    });
+    assert.deepEqual(
+      migrated.operationalStateEntries().find((entry) => entry.sku === "post-migration-trigger").data,
+      {
+        runtime_run_dir: path.join(dir, "run"),
+        store_id: 106637,
+        submitted: true,
+      },
+    );
+    migrated.close();
+
+    const verified = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      assert.equal(verified.prepare(`
+        SELECT value
+        FROM metadata
+        WHERE key = 'operational_payload_format_version'
+      `).get().value, "2");
+      const triggerSql = String(verified.prepare(`
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'trigger' AND name = 'sku_state_operational_payload_insert'
+      `).get().sql);
+      assert.match(triggerSql, /json_patch/u);
+    } finally {
+      verified.close();
     }
   });
 });

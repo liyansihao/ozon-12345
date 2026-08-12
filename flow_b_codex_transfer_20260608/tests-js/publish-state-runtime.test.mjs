@@ -287,9 +287,12 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
     });
     assert.equal(startupBySku.get("terminal-submitted").data.submitted, true);
     assert.equal(startupBySku.get("terminal-submitted").data.store_id, 106637);
+    assert.equal(startupBySku.get("terminal-submitted").data.terminal_payload, undefined);
     assert.equal(startupBySku.get("legacy-terminal-submitted").data.submitted, true);
     assert.equal(startupBySku.get("legacy-terminal-submitted").data.store_id, 106637);
+    assert.equal(startupBySku.get("legacy-terminal-submitted").data.terminal_payload, undefined);
     assert.equal(startupBySku.get("terminal-selected-only").data.selected_at, "2026-08-12T04:02:00.000Z");
+    assert.equal(startupBySku.get("terminal-selected-only").data.terminal_payload, undefined);
     assert.equal(startupBySku.get("daily-retry-exhausted").data.transient_attempts, 2);
     assert.equal(startupBySku.get("daily-retry-exhausted").data.terminal, true);
     assert.equal(startupBySku.get("daily-retry-exhausted").data.retry_limit_scope, "shanghai-day");
@@ -297,6 +300,8 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
       restoredDailyStoreUsage(startupEntries, 106637, new Date("2026-08-12T06:00:00.000Z")),
       3,
     );
+    assert.equal(restored.directTargetUsage(runDir), 3);
+    assert.equal(restored.directAcceptedCount(runDir), 3);
     assert.equal(restored.runPublishedCount(), 1);
     assert.deepEqual(restored.summary(100), {
       published: 1,
@@ -311,6 +316,7 @@ test("native SQLite restore compacts terminal evidence while preserving summary 
     // per-SKU path still exposes its complete authoritative evidence.
     assert.equal(restored.statusOf("terminal-history-63"), "skipped");
     assert.equal(restored.entryOf("terminal-history-63").data.terminal_payload, terminalPayload);
+    assert.equal(restored.entryOf("terminal-submitted").data.terminal_payload, terminalPayload);
     assert.equal(restored.canAttempt("terminal-history-63").allowed, false);
     assert.equal(await restored.recordSelected({
       sku: "terminal-selected-only",

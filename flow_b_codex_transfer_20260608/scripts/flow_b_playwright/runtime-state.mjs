@@ -22,6 +22,35 @@ const PRODUCT_URL_PATTERN = /https?:\/\/(?:www\.)?ozon\.ru\/product\/([^/?#,'"\s
 const OPERATIONAL_METADATA_INDEX = "sku_state_operational_metadata";
 const OPERATIONAL_TERMINAL_DATA_INDEX = "sku_state_operational_terminal_data";
 const OPERATIONAL_PAYLOAD_TABLE = "sku_state_operational_payloads";
+const OPERATIONAL_PAYLOAD_FORMAT_METADATA_KEY = "operational_payload_format_version";
+const OPERATIONAL_PAYLOAD_FORMAT_VERSION = "2";
+
+// Terminal failed/skipped rows are only hydrated to restore publication safety
+// bookkeeping. Keep the exact fields consumed by publish-state startup:
+// selected-key dedupe, direct-run accepted/quota counts, store-limit recovery,
+// and submission timestamps. Per-SKU reads continue to use authoritative
+// sku_state.data_json, so reconciliation itself never consumes this projection.
+const OPERATIONAL_TERMINAL_PAYLOAD_FIELDS = [
+  "runtime_run_dir",
+  "store_id",
+  "store_name",
+  "submitted",
+  "submission_pending",
+  "submission_intent",
+  "selected_at",
+  "prepared_at",
+  "submitted_at",
+  "reconciled_at",
+  "published_at",
+  "api_call_started_at",
+  "api_call_completed_at",
+  "erp_accepted_at",
+  "store_rejection_day",
+  "original_reason",
+  "outcome_status",
+  "next_reconcile_at",
+  "retry_at",
+];
 
 function operationalTerminalDataPredicate(row = "") {
   const column = (name) => `${row ? `${row}.` : ""}${name}`;
@@ -43,6 +72,29 @@ function operationalPayloadPredicate(row = "") {
     ${column("stage")} = 'published' OR
     ${column("strict")} = 1 OR
     (${operationalTerminalDataPredicate(row)})
+  `;
+}
+
+function operationalPayloadJson(row = "") {
+  const column = (name) => `${row ? `${row}.` : ""}${name}`;
+  const dataJson = column("data_json");
+  const compactFields = OPERATIONAL_TERMINAL_PAYLOAD_FIELDS
+    .map((field) => `'${field}', ${dataJson} -> '$.${field}'`)
+    .join(",\n      ");
+  return `
+    CASE
+      WHEN ${column("terminal")} = 1
+        AND ${column("stage")} IN ('failed', 'skipped')
+        AND ${column("strict")} = 0
+      THEN json_patch('{}', json_object(
+        ${compactFields},
+        'import_log', CASE
+          WHEN json_type(${dataJson}, '$.import_log.shop_name') IS NULL THEN NULL
+          ELSE json_object('shop_name', ${dataJson} -> '$.import_log.shop_name')
+        END
+      ))
+      ELSE ${dataJson}
+    END
   `;
 }
 
@@ -819,6 +871,10 @@ export function createRuntimeState({
     const preexistingVersion = metadataExists
       ? Number(database.prepare("SELECT value FROM metadata WHERE key = 'schema_version'").get()?.value)
       : null;
+    const preexistingOperationalPayloadFormat = metadataExists
+      ? String(database.prepare("SELECT value FROM metadata WHERE key = ?")
+        .get(OPERATIONAL_PAYLOAD_FORMAT_METADATA_KEY)?.value ?? "")
+      : "";
     if (
       preexistingVersion !== null &&
       Number.isFinite(preexistingVersion) &&
@@ -849,6 +905,10 @@ export function createRuntimeState({
       FROM sqlite_master
       WHERE type = 'table' AND name = ?
     `).get(OPERATIONAL_PAYLOAD_TABLE));
+    const operationalPayloadNeedsRebuild = (
+      !operationalPayloadTableExists
+      || preexistingOperationalPayloadFormat !== OPERATIONAL_PAYLOAD_FORMAT_VERSION
+    );
     database.exec(`
 
       CREATE TABLE IF NOT EXISTS metadata (
@@ -999,13 +1059,19 @@ export function createRuntimeState({
         data_json TEXT NOT NULL CHECK (json_valid(data_json))
       ) STRICT, WITHOUT ROWID;
 
+      ${operationalPayloadNeedsRebuild ? `
+        DROP TRIGGER IF EXISTS sku_state_operational_payload_insert;
+        DROP TRIGGER IF EXISTS sku_state_operational_payload_update;
+        DROP TRIGGER IF EXISTS sku_state_operational_payload_delete;
+      ` : ""}
+
       CREATE TRIGGER IF NOT EXISTS sku_state_operational_payload_insert
       AFTER INSERT ON sku_state
       FOR EACH ROW
       WHEN ${operationalPayloadPredicate("NEW")}
       BEGIN
         INSERT INTO ${OPERATIONAL_PAYLOAD_TABLE} (sku, stage, data_json)
-        VALUES (NEW.sku, NEW.stage, NEW.data_json);
+        VALUES (NEW.sku, NEW.stage, ${operationalPayloadJson("NEW")});
       END;
 
       CREATE TRIGGER IF NOT EXISTS sku_state_operational_payload_update
@@ -1014,7 +1080,7 @@ export function createRuntimeState({
       BEGIN
         DELETE FROM ${OPERATIONAL_PAYLOAD_TABLE} WHERE sku = OLD.sku;
         INSERT INTO ${OPERATIONAL_PAYLOAD_TABLE} (sku, stage, data_json)
-        SELECT NEW.sku, NEW.stage, NEW.data_json
+        SELECT NEW.sku, NEW.stage, ${operationalPayloadJson("NEW")}
         WHERE ${operationalPayloadPredicate("NEW")};
       END;
 
@@ -1100,8 +1166,9 @@ export function createRuntimeState({
         SELECT RAISE(ABORT, 'strict publication event mismatch');
       END;
     `);
-    if (!operationalPayloadTableExists) {
+    if (operationalPayloadNeedsRebuild) {
       database.exec(`
+        DELETE FROM ${OPERATIONAL_PAYLOAD_TABLE};
         INSERT OR REPLACE INTO ${OPERATIONAL_PAYLOAD_TABLE} (sku, stage, data_json)
         WITH hydration_skus AS (
           SELECT sku
@@ -1112,12 +1179,17 @@ export function createRuntimeState({
           FROM sku_state INDEXED BY ${OPERATIONAL_TERMINAL_DATA_INDEX}
           WHERE ${OPERATIONAL_TERMINAL_DATA_PREDICATE}
         )
-        SELECT s.sku, s.stage, s.data_json
+        SELECT s.sku, s.stage, ${operationalPayloadJson("s")}
         FROM hydration_skus AS h
         CROSS JOIN sku_state AS s INDEXED BY sqlite_autoindex_sku_state_1
           ON s.sku = h.sku;
       `);
     }
+    database.prepare(`
+      INSERT INTO metadata (key, value)
+      VALUES (?, ?)
+      ON CONFLICT (key) DO UPDATE SET value = excluded.value
+    `).run(OPERATIONAL_PAYLOAD_FORMAT_METADATA_KEY, OPERATIONAL_PAYLOAD_FORMAT_VERSION);
     ensureSubmissionGateTables(database);
     database.exec(`
       CREATE TRIGGER IF NOT EXISTS events_strict_same_item_cost_insert
