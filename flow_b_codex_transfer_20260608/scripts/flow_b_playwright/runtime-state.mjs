@@ -1558,6 +1558,14 @@ export function createRuntimeState({
       AND generation_id = ?
       AND status = 'reserved'
   `);
+  const recoverExpiredReservationSubmitted = database.prepare(`
+    UPDATE submission_reservations
+    SET owner_id = ?, generation_id = ?, status = 'submitted',
+        lease_expires_at = NULL, data_json = ?, updated_at = ?
+    WHERE sku = ?
+      AND status = 'reserved'
+      AND lease_expires_at <= ?
+  `);
   const closeReservation = database.prepare(`
     UPDATE submission_reservations
     SET status = 'closed', lease_expires_at = NULL, updated_at = ?
@@ -2052,11 +2060,18 @@ export function createRuntimeState({
           state: existing,
         };
       }
-      if (
-        reservation?.status !== "reserved" ||
-        reservation.ownerId !== normalizedOwnerId ||
-        reservation.generationId !== normalizedGenerationId
-      ) {
+      const sameGeneration = (
+        reservation?.status === "reserved"
+        && reservation.ownerId === normalizedOwnerId
+        && reservation.generationId === normalizedGenerationId
+      );
+      const expiredTakeover = (
+        options.allowExpiredTakeover === true
+        && reservation?.status === "reserved"
+        && !sameGeneration
+        && Date.parse(reservation.leaseExpiresAt) <= Date.parse(occurredAt)
+      );
+      if (!sameGeneration && !expiredTakeover) {
         return {
           recorded: false,
           reason: reservation
@@ -2075,15 +2090,29 @@ export function createRuntimeState({
         submission_pending: false,
         submission_owner_id: normalizedOwnerId,
         submission_generation_id: normalizedGenerationId,
+        ...(expiredTakeover ? {
+          cross_generation_takeover: true,
+          previous_submission_owner_id: reservation.ownerId,
+          previous_submission_generation_id: reservation.generationId,
+        } : {}),
       };
       delete mergedData.submission_lease_expires_at;
-      const changed = markReservationSubmitted.run(
-        stringifyData(mergedData),
-        occurredAt,
-        sku,
-        normalizedOwnerId,
-        normalizedGenerationId,
-      );
+      const changed = expiredTakeover
+        ? recoverExpiredReservationSubmitted.run(
+          normalizedOwnerId,
+          normalizedGenerationId,
+          stringifyData(mergedData),
+          occurredAt,
+          sku,
+          occurredAt,
+        )
+        : markReservationSubmitted.run(
+          stringifyData(mergedData),
+          occurredAt,
+          sku,
+          normalizedOwnerId,
+          normalizedGenerationId,
+        );
       if (Number(changed.changes) !== 1) {
         return {
           recorded: false,
@@ -2109,6 +2138,7 @@ export function createRuntimeState({
       return {
         recorded: true,
         eventId,
+        takeover: expiredTakeover,
         reservation: getReservation(sku),
         state: getState(sku),
       };

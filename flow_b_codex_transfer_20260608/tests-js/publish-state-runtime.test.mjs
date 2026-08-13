@@ -169,6 +169,72 @@ test("native SQLite restore skips oversized legacy histories and hydrates latest
   });
 });
 
+test("recovered ERP acceptance takes over an expired worker lease without another POST", async () => {
+  await withTempDir(async (dir) => {
+    const runDir = path.join(dir, "run");
+    const dbPath = path.join(dir, "external-state", "runtime.sqlite");
+    const publishedCsv = path.join(dir, "published.csv");
+    await fs.mkdir(runDir, { recursive: true });
+
+    const deadWorker = createRuntimeState({
+      dbPath,
+      now: () => new Date("2026-08-13T07:22:21.000Z"),
+      ownerId: "dead-worker",
+      generationId: "dead-generation",
+      submissionLeaseMs: 1_000,
+    });
+    assert.equal(deadWorker.reserveSubmission("recovered-expired-lease", {
+      reason: "submission-api-call-started",
+      data: {
+        runtime_run_dir: runDir,
+        store_id: 113154,
+        offer_id: "mz-recovered-expired-lease",
+        api_call_started_at: "2026-08-13T07:22:21.000Z",
+        api_call_attempts_total: 1,
+        submission_intent: true,
+        submitted: false,
+      },
+    }).recorded, true);
+    deadWorker.close();
+
+    const recoveredWorker = createPublishState({
+      runDir,
+      publishedCsv,
+      runtimeStateDbPath: dbPath,
+    });
+    await recoveredWorker.load();
+    const recorded = await recoveredWorker.transition("recovered-expired-lease", "processing", {
+      reason: "erp-submission-accepted",
+      runtime_run_dir: runDir,
+      store_id: 113154,
+      offer_id: "mz-recovered-expired-lease",
+      submission_intent: false,
+      submitted: true,
+      submission_pending: false,
+      accepted_at: "2026-08-13T07:24:00.000Z",
+      publish_result: { recovered: true, evidence: "import-log" },
+    });
+    assert.equal(recorded, true);
+    await recoveredWorker.close();
+
+    const reader = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const reservation = reader.prepare(`
+        SELECT status, owner_id, generation_id,
+               CAST(json_extract(data_json, '$.api_call_attempts_total') AS INTEGER) AS attempts
+        FROM submission_reservations
+        WHERE sku = 'recovered-expired-lease'
+      `).get();
+      assert.equal(reservation.status, "submitted");
+      assert.notEqual(reservation.owner_id, "dead-worker");
+      assert.notEqual(reservation.generation_id, "dead-generation");
+      assert.equal(reservation.attempts, 1);
+    } finally {
+      reader.close();
+    }
+  });
+});
+
 test("native SQLite restore compacts terminal evidence while preserving summary and submitted quota state", async () => {
   await withTempDir(async (dir) => {
     const runDir = path.join(dir, "current-run");

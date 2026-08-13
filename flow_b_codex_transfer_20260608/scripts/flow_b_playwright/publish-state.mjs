@@ -722,8 +722,11 @@ export function createPublishState({
     if (runtimeData.submitted === true) {
       const reservation = runtimeState.submissionReservation(sku);
       if (reservation?.status === "reserved") {
+        const recoveredEvidence = String(runtimeData.publish_result?.evidence || "");
         const confirmed = runtimeState.confirmSubmission(sku, {
           reason: "erp-submission-accepted",
+          allowExpiredTakeover: runtimeData.publish_result?.recovered === true
+            && ["import-log", "online-product"].includes(recoveredEvidence),
           data: runtimeData,
         });
         if (!confirmed.recorded) return confirmed;

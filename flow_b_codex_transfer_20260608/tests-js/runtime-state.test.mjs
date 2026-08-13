@@ -324,6 +324,65 @@ test("submission reservations use an owner generation lease and become permanent
   });
 });
 
+test("authoritative ERP recovery atomically confirms only an expired foreign reservation", async () => {
+  await withTempDir(async (dir) => {
+    const dbPath = path.join(dir, "runtime.sqlite");
+    const ownerA = createRuntimeState({
+      dbPath,
+      now: () => new Date("2026-08-13T07:22:21.000Z"),
+      ownerId: "dead-worker",
+      generationId: "dead-generation",
+      submissionLeaseMs: 60_000,
+    });
+    assert.equal(ownerA.reserveSubmission("accepted-after-timeout", {
+      reason: "submission-api-call-started",
+      data: {
+        api_call_started_at: "2026-08-13T07:22:21.000Z",
+        api_call_attempts_total: 1,
+        submission_intent: true,
+      },
+    }).recorded, true);
+
+    let recoveryNow = new Date("2026-08-13T07:23:20.999Z");
+    const ownerB = createRuntimeState({
+      dbPath,
+      now: () => recoveryNow,
+      ownerId: "recovery-worker",
+      generationId: "recovery-generation",
+      submissionLeaseMs: 60_000,
+    });
+    const activeLease = ownerB.confirmSubmission("accepted-after-timeout", {
+      reason: "erp-submission-accepted",
+      allowExpiredTakeover: true,
+      data: {
+        submitted: true,
+        publish_result: { recovered: true, evidence: "import-log" },
+      },
+    });
+    assert.equal(activeLease.recorded, false);
+    assert.equal(activeLease.reason, "submission-reserved-by-another-generation");
+
+    recoveryNow = new Date("2026-08-13T07:23:21.001Z");
+    const recovered = ownerB.confirmSubmission("accepted-after-timeout", {
+      reason: "erp-submission-accepted",
+      allowExpiredTakeover: true,
+      data: {
+        submitted: true,
+        publish_result: { recovered: true, evidence: "import-log" },
+      },
+    });
+    assert.equal(recovered.recorded, true);
+    assert.equal(recovered.takeover, true);
+    assert.equal(recovered.reservation.status, "submitted");
+    assert.equal(recovered.reservation.ownerId, "recovery-worker");
+    assert.equal(recovered.reservation.generationId, "recovery-generation");
+    assert.equal(recovered.reservation.data.api_call_attempts_total, 1);
+
+    ownerA.close();
+    ownerB.close();
+  });
+});
+
 test("accepted audit repair uses a compact indexed projection and excludes uncertain closures", async () => {
   await withTempDir(async (dir) => {
     const dbPath = path.join(dir, "runtime.sqlite");
