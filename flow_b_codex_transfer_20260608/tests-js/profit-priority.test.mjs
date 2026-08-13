@@ -8,6 +8,7 @@ import {
   createProfitFilesReader,
   feedbackExcludedOfferIds,
   manualFeedbackDecision,
+  normalizeProfitFeedback,
   normalizeProfitPriority,
   normalizeSeasonPriority,
   prioritizeProfitRows,
@@ -276,6 +277,74 @@ test("manual feedback blocks global offers and only the specified wrong relation
   assert.equal(manualFeedbackDecision(feedback, { offerIds: ["trusted-offer"] }).trusted, true);
   assert.deepEqual(feedbackExcludedOfferIds(feedback, "source-a"), ["bad-global", "bad-relation"]);
   assert.deepEqual(feedbackExcludedOfferIds(feedback, "source-b"), ["bad-global"]);
+});
+
+test("human review title rules block risky categories and brands before 1688", () => {
+  const feedback = {
+    blocked_title_rules: [
+      { reason: "perfume", keywords: ["парфюмерная вода", "туалетная вода"] },
+      { reason: "brand", keywords: ["avene"] },
+      { reason: "cable-spec", mode: "all", keywords: ["кабель", "метра"] },
+    ],
+  };
+
+  assert.equal(manualFeedbackDecision(feedback, { title: "Женская парфюмерная вода 100 мл" }).blocked, true);
+  assert.equal(manualFeedbackDecision(feedback, { title: "AVENE очищающая пенка" }).blocked, true);
+  assert.equal(manualFeedbackDecision(feedback, { title: "Кабель Type C 2 метра" }).blocked, true);
+  assert.equal(manualFeedbackDecision(feedback, { title: "Кабель Type C 1 м" }).blocked, false);
+});
+
+test("positive human profit feedback promotes exact and similar candidates", () => {
+  const snapshot = {
+    priority: normalizeProfitPriority({}),
+    feedback: normalizeProfitFeedback({
+      positive_sources: [{
+        store_id: 101,
+        source_sku: "positive-source",
+        title_keywords: ["кабель hoco x121"],
+        real_profit_cny: 25,
+      }],
+    }),
+    season: normalizeSeasonPriority({ events: [] }),
+  };
+
+  assert.ok(profitPriorityScore(snapshot, { sku: "positive-source", title: "anything" }, { storeId: 101 }) > 0);
+  assert.ok(profitPriorityScore(snapshot, { sku: "new", title: "Кабель HOCO X121 2 м" }, { storeId: 101 }) > 0);
+  assert.equal(profitPriorityScore(snapshot, { sku: "other", title: "garden shovel" }, { storeId: 101 }), 0);
+});
+
+test("confirmed loss feedback always outranks similar positive feedback", () => {
+  const snapshot = {
+    priority: normalizeProfitPriority({}),
+    feedback: normalizeProfitFeedback({
+      positive_sources: [{
+        store_id: 101,
+        source_sku: "profitable-cable",
+        title_keywords: ["кабель type baseus"],
+        real_profit_cny: 25,
+      }],
+      loss_sources: [{
+        store_id: 101,
+        source_sku: "loss-cable",
+        title_keywords: ["кабель type baseus"],
+        real_profit_cny: -2,
+      }],
+    }),
+    season: normalizeSeasonPriority({ events: [] }),
+  };
+
+  assert.ok(profitPriorityScore(snapshot, {
+    sku: "loss-cable",
+    title: "Кабель Type C Baseus",
+  }, { storeId: 101 }) < 0);
+  assert.ok(profitPriorityScore(snapshot, {
+    sku: "profitable-cable",
+    title: "Кабель Type C Baseus",
+  }, { storeId: 101 }) > 0);
+  assert.ok(profitPriorityScore(snapshot, {
+    sku: "unreviewed-cable",
+    title: "Кабель Type C Baseus",
+  }, { storeId: 101 }) < 0);
 });
 
 test("missing or temporarily malformed sidecar files keep the original empty model", async () => {

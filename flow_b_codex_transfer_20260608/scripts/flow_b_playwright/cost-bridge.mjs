@@ -1320,6 +1320,8 @@ export function createCostBridge({
       : item;
     const sourceDecision = manualFeedbackDecision(files.feedback, {
       sourceSku: item?.sku,
+      title: item?.title ?? item?.product_name,
+      category: item?.category ?? item?.category_name,
     });
     if (sourceDecision.blocked) {
       return {
@@ -1333,6 +1335,8 @@ export function createCostBridge({
     if (trusted) {
       const trustedDecision = manualFeedbackDecision(files.feedback, {
         sourceSku: item?.sku,
+        title: item?.title ?? item?.product_name,
+        category: item?.category ?? item?.category_name,
         matchEvidenceKey: trusted.match_evidence_key,
         offerIds: [trusted.selected_offer_id],
       });
@@ -1375,6 +1379,8 @@ export function createCostBridge({
         : []);
     const decision = manualFeedbackDecision(files.feedback, {
       sourceSku: item?.sku,
+      title: item?.title ?? item?.product_name,
+      category: item?.category ?? item?.category_name,
       matchEvidenceKey: result?.match_evidence_key,
       offerIds: selectedOfferIds,
     });

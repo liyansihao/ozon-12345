@@ -178,6 +178,35 @@ test("manual feedback can stop a blocked source before image download or 1688", 
   });
 });
 
+test("human-review title rules stop risky products before image download or 1688", async () => {
+  await withTempDir(async (runDir) => {
+    const feedbackFile = path.join(runDir, "错误货源.json");
+    await fs.writeFile(feedbackFile, JSON.stringify({
+      blocked_title_rules: [{ keywords: ["парфюмерная вода"], reason: "manual-category-filter" }],
+    }));
+    let downloads = 0;
+    let processes = 0;
+    const bridge = createCostBridge({
+      feedbackFile,
+      minimumSameItemMatches: 1,
+      download: async () => { downloads += 1; },
+      runProcess: async () => { processes += 1; return { code: 1, stdout: "", stderr: "" }; },
+    });
+    await bridge.refreshProfitFeedback();
+    const result = await bridge.estimate({
+      sku: "new-perfume",
+      title: "Женская парфюмерная вода 100 мл",
+      cover_image: "https://img.example/perfume.jpg",
+      sell_price: 100,
+    }, runDir);
+    assert.equal(result.feedback_blocked, true);
+    assert.equal(result.reason, "manual-feedback-blocked-title-rule");
+    assert.equal(downloads, 0);
+    assert.equal(processes, 0);
+    await bridge.close();
+  });
+});
+
 test("new feedback invalidates an old good match and excludes the bad offer on retry", async () => {
   await withTempDir(async (runDir) => {
     const feedbackFile = path.join(runDir, "错误货源.json");

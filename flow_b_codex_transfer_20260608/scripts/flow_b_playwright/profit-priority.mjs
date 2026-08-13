@@ -13,9 +13,11 @@ const EMPTY_FEEDBACK = Object.freeze({
   blocked_offer_ids: [],
   blocked_match_evidence_keys: [],
   blocked_matches: [],
+  blocked_title_rules: [],
   cost_overrides: [],
   trusted_matches: [],
   loss_sources: [],
+  positive_sources: [],
 });
 const MODEL_LAST_GOOD_BY_PATH = new Map();
 const SEASON_LAST_GOOD_BY_PATH = new Map();
@@ -296,12 +298,14 @@ export function normalizeProfitFeedback(value = {}) {
     blocked_match_evidence_keys: feedbackRows(value, ["blocked_match_evidence_keys"]),
     blocked_matches: feedbackRows(value, ["blocked_relations"])
       .concat(feedbackRows(value?.errors || {}, ["blocked_matches"])),
+    blocked_title_rules: feedbackRows(value, ["blocked_title_rules", "blocked_product_rules"]),
     cost_overrides: feedbackRows(value, ["cost_overrides", "purchase_cost_overrides"])
       .concat(feedbackRows(value?.trusted || {}, ["cost_corrections"])),
     trusted_matches: feedbackRows(value, ["trusted_matches", "trusted_sources"])
       .concat(feedbackRows(value?.trusted || {}, ["trusted"])),
     loss_sources: feedbackRows(value, ["loss_sources", "unprofitable_sources"])
       .concat(feedbackRows(value?.trusted || {}, ["cost_corrections"])),
+    positive_sources: feedbackRows(value, ["positive_sources", "profitable_sources"]),
   };
 }
 
@@ -453,6 +457,19 @@ function lossPenalty(feedback, row, storeId = null) {
   return penalty;
 }
 
+function positiveFeedbackScore(feedback, row, storeId = null) {
+  let score = 0;
+  for (const positive of feedback?.positive_sources || []) {
+    const positiveStore = Number(positive?.store_id ?? positive?.shop_id);
+    if (storeId !== null && positiveStore > 0 && positiveStore !== Number(storeId)) continue;
+    const mother = normalizeMother(positive, positiveStore || Number(storeId));
+    if (!mother) continue;
+    const similarity = similarityScore(row, mother);
+    if (similarity > 0) score = Math.max(score, Math.min(1_800, Math.max(350, similarity)));
+  }
+  return score;
+}
+
 function containsSeasonPhrase(source, keyword) {
   if (!source || !keyword) return false;
   return ` ${source} `.includes(` ${keyword} `);
@@ -506,9 +523,18 @@ export function profitPriorityScore(snapshot, row, { storeId = null, now = new D
   for (const store of targetStores) {
     for (const mother of store.mothers || []) score = Math.max(score, similarityScore(row, mother));
   }
-  const profitScore = score + lossPenalty(model.feedback, row, storeId);
+  const sourceSku = text(row?.sku ?? row?.source_sku ?? row?.id);
+  const exactLoss = matchingEntry(model.feedback?.loss_sources, sourceSku, ["source_sku", "sku"]);
+  const exactPositive = matchingEntry(model.feedback?.positive_sources, sourceSku, ["source_sku", "sku"]);
+  const confirmedLossPenalty = lossPenalty(model.feedback, row, storeId);
+  if (exactLoss && confirmedLossPenalty < 0) return Math.round(confirmedLossPenalty);
+  const positiveScore = positiveFeedbackScore(model.feedback, row, storeId);
+  if (exactPositive && positiveScore > 0) {
+    return Math.round(PROFIT_MOTHER_TIER + positiveScore + seasonPriorityScore(model, row, { now }));
+  }
+  if (confirmedLossPenalty < 0) return Math.round(confirmedLossPenalty);
+  const profitScore = Math.max(score, positiveScore);
   const seasonScore = seasonPriorityScore(model, row, { now });
-  if (profitScore < 0) return Math.round(profitScore);
   return Math.round((profitScore > 0 ? PROFIT_MOTHER_TIER : 0) + profitScore + seasonScore);
 }
 
@@ -533,14 +559,38 @@ function matchingEntry(rows, value, keys) {
   return (rows || []).find((row) => entryValue(row, keys) === target) || null;
 }
 
+function matchingTitleRule(rules, { title, category } = {}) {
+  const source = normalizedText([title, category].map(text).filter(Boolean).join(" "));
+  if (!source) return null;
+  const tokens = new Set(profitTokens(source));
+  for (const rule of rules || []) {
+    const keywords = asArray(rule?.keywords ?? rule?.title_keywords ?? rule?.terms)
+      .map(normalizedText)
+      .filter(Boolean);
+    if (!keywords.length) continue;
+    const hits = keywords.filter((keyword) => (
+      keyword.includes(" ") ? containsSeasonPhrase(source, keyword) : tokens.has(keyword)
+    ));
+    const mode = text(rule?.mode).toLocaleLowerCase("und");
+    const minimumHits = Math.max(1, Math.floor(Number(rule?.minimum_hits ?? rule?.min_hits) || 1));
+    const matched = mode === "all" ? hits.length === keywords.length : hits.length >= minimumHits;
+    if (matched) return rule;
+  }
+  return null;
+}
+
 export function manualFeedbackDecision(feedbackValue, {
   sourceSku,
+  title,
+  category,
   matchEvidenceKey,
   offerIds = [],
 } = {}) {
   const feedback = feedbackValue?.feedback || normalizeProfitFeedback(feedbackValue);
   const blockedSource = matchingEntry(feedback.blocked_source_skus, sourceSku, ["source_sku", "sku"]);
   if (blockedSource) return { blocked: true, reason: "manual-feedback-blocked-source", entry: blockedSource };
+  const blockedTitle = matchingTitleRule(feedback.blocked_title_rules, { title, category });
+  if (blockedTitle) return { blocked: true, reason: "manual-feedback-blocked-title-rule", entry: blockedTitle };
   const blockedEvidence = matchingEntry(
     feedback.blocked_match_evidence_keys,
     matchEvidenceKey,
