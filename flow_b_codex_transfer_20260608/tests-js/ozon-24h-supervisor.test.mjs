@@ -701,6 +701,34 @@ test("process ownership snapshot rejects a worker from any old run", () => {
   }).reason, "duplicate-worker-generation-risk");
 });
 
+test("process ownership ignores observer shells that only mention production commands", () => {
+  const monitorCommand = String.raw`/bin/zsh -c while true; do node - <<'NODE'
+const ps = "ozon_24h_supervisor.mjs supervise flow_b_playwright.mjs run --user-data-dir=/state/profile --remote-debugging-port=9223";
+NODE
+done`;
+  const rows = [
+    { pid: 10, ppid: 1, command: "/usr/bin/node /app/scripts/ozon_24h_supervisor.mjs supervise /app/config.json" },
+    { pid: 20, ppid: 10, command: "/usr/bin/node /app/scripts/flow_b_playwright.mjs run /state/runs/run-1 /state/urls.txt" },
+    { pid: 30, ppid: 1, command: "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing --remote-debugging-port=9223 --user-data-dir=/state/profile about:blank" },
+    { pid: 40, ppid: 2, command: monitorCommand },
+    { pid: 41, ppid: 2, command: `rg ${JSON.stringify(monitorCommand)}` },
+    { pid: 42, ppid: 2, command: `python3 -c ${JSON.stringify(monitorCommand)}` },
+  ];
+
+  assert.deepEqual(processOwnershipSnapshot(rows, {
+    supervisorPid: 10,
+    runDir: "/state/runs/run-1",
+    profileDir: "/state/profile",
+  }), {
+    supervisor: 1,
+    worker: 1,
+    profile_owner: 1,
+    supervisor_pids: [10],
+    worker_pids: [20],
+    profile_owner_pids: [30],
+  });
+});
+
 test("formal resume never refreshes before two hours and rejects an unauthorized source hash", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "ozon-formal-source-resume-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

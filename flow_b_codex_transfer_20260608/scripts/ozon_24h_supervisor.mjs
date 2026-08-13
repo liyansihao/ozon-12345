@@ -747,9 +747,24 @@ async function processTable() {
   }).filter(Boolean);
 }
 
+function exactNodeEntryCommand(command, scriptName, modes) {
+  const match = String(command || "").match(/^(?:\S*\/)?node\s+(\S+)\s+(\S+)(?:\s|$)/u);
+  if (!match || path.basename(match[1]) !== scriptName) return false;
+  return modes.has(match[2]);
+}
+
 function exactProfileOwner(row, profileDir) {
+  const command = String(row?.command || "");
   const marker = `--user-data-dir=${profileDir}`;
-  return row.command.includes(marker) && !row.command.includes(" --type=");
+  const flagIndex = command.indexOf(" --");
+  if (flagIndex <= 0) return false;
+  const executable = command.slice(0, flagIndex).trim();
+  const browserExecutable = /(?:^|\/)(?:Google Chrome for Testing|Google Chrome|Chromium|Chrome)$/u;
+  return (executable.startsWith("/") || !executable.includes("/"))
+    && !/\s-[^\s]/u.test(executable)
+    && browserExecutable.test(executable)
+    && command.includes(marker)
+    && !command.includes(" --type=");
 }
 
 async function profileOwners(profileDir) {
@@ -769,16 +784,18 @@ export function processOwnershipSnapshot(rows = [], {
     const pid = Number(row?.pid);
     const command = String(row?.command || "");
     if (!(pid > 0)) continue;
-    if (
-      pid === Number(supervisorPid)
-      || (command.includes("ozon_24h_supervisor.mjs") && /\bsupervise\b/u.test(command))
-    ) {
+    if (pid === Number(supervisorPid) || exactNodeEntryCommand(
+      command,
+      "ozon_24h_supervisor.mjs",
+      new Set(["supervise"]),
+    )) {
       supervisorPids.add(pid);
     }
-    if (
-      command.includes("flow_b_playwright.mjs")
-      && /\b(?:accept|run|publish)\b/u.test(command)
-    ) {
+    if (exactNodeEntryCommand(
+      command,
+      "flow_b_playwright.mjs",
+      new Set(["accept", "run", "publish"]),
+    )) {
       workerPids.add(pid);
     }
     if (exactProfileOwner(row, normalizedProfileDir)) profileOwnerPids.add(pid);
