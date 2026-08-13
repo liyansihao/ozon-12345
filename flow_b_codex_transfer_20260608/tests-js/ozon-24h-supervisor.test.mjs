@@ -21,6 +21,7 @@ import {
   checkpointEnvironment,
   chromeArguments,
   classifyWorkerFailure,
+  classifySupervisorStartupFailure,
   candidateBufferDecision,
   candidateBufferInflow,
   candidateBufferSnapshot,
@@ -932,6 +933,44 @@ test("Chrome CDP startup timeout is classified as browser recovery", () => {
   assert.deepEqual(classifyWorkerFailure({
     message: "Chrome CDP failed to become ready at http://127.0.0.1:9223",
     profileOwnerCount: 1,
+  }), {
+    action: "restart-browser-and-worker",
+    reason: "browser-or-network-recoverable",
+  });
+});
+
+test("direct supervisor startup treats ownership violations as fatal evidence", () => {
+  const error = Object.assign(new Error("duplicate-supervisor-risk"), {
+    code: "OZON_PROCESS_OWNERSHIP",
+    ownership: {
+      supervisor: 2,
+      worker: 1,
+      profile_owner: 0,
+      supervisor_pids: [10, 20],
+      worker_pids: [20],
+      profile_owner_pids: [],
+    },
+  });
+
+  assert.deepEqual(classifySupervisorStartupFailure({
+    error,
+    profileOwnerCount: 0,
+  }), {
+    action: "fatal-stop",
+    reason: "duplicate-supervisor-risk",
+    ownership: error.ownership,
+  });
+});
+
+test("direct supervisor startup keeps real missing-browser failures recoverable", () => {
+  const error = Object.assign(
+    new Error("Chrome CDP failed to become ready at http://127.0.0.1:9223"),
+    { code: "OZON_CDP_START_TIMEOUT" },
+  );
+
+  assert.deepEqual(classifySupervisorStartupFailure({
+    error,
+    profileOwnerCount: 0,
   }), {
     action: "restart-browser-and-worker",
     reason: "browser-or-network-recoverable",

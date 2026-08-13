@@ -205,6 +205,20 @@ export function classifyWorkerFailure({ message = "", profileOwnerCount = 0 } = 
   return { action: "restart-worker", reason: "ordinary-worker-recoverable" };
 }
 
+export function classifySupervisorStartupFailure({ error = null, profileOwnerCount = 0 } = {}) {
+  if (error?.code === "OZON_PROCESS_OWNERSHIP") {
+    return {
+      action: "fatal-stop",
+      reason: String(error?.message || "process-ownership-invalid"),
+      ownership: error?.ownership || null,
+    };
+  }
+  return classifyWorkerFailure({
+    message: error?.message || error,
+    profileOwnerCount,
+  });
+}
+
 export function directWatchdogRecoveryDecision({
   workerUnhealthy = false,
   workerHealth = null,
@@ -3228,8 +3242,8 @@ async function superviseDirectPublishing({
         browserOwner = await ensureBrowserOwner({ config, stateRoot, runDir });
       } catch (error) {
         const owners = await profileOwners(absolute(config.browser.profile_dir)).catch(() => []);
-        const decision = classifyWorkerFailure({
-          message: error?.message,
+        const decision = classifySupervisorStartupFailure({
+          error,
           profileOwnerCount: owners.length,
         });
         if (decision.action === "fatal-stop") {
@@ -3237,16 +3251,29 @@ async function superviseDirectPublishing({
             status: "FATAL_STOP",
             reason: decision.reason,
             error: String(error?.message || error),
+            ownership: decision.ownership || error?.ownership || null,
+            evidence_preserved: true,
           });
           return 0;
         }
         const seconds = nextRestartDelaySeconds(restartAttempt++, config.restart_delays_seconds);
+        await appendJsonLine(path.join(stateRoot, "recovery.jsonl"), {
+          at: new Date().toISOString(),
+          run_dir: runDir,
+          action: "browser-start-retry",
+          reason: decision.reason,
+          delay_seconds: seconds,
+          error: String(error?.message || error).slice(0, 1_000),
+          error_code: error?.code || null,
+        }).catch(() => {});
         await updateOperationalState(stateRoot, currentRun, {
           status: decision.action === "wait-for-verification"
             ? "WAITING_FOR_VERIFICATION"
             : "RECOVERING",
           reason: decision.reason,
           retry_in_seconds: seconds,
+          error: String(error?.message || error).slice(0, 1_000),
+          error_code: error?.code || null,
         });
         if (decision.action === "wait-for-verification") {
           await waitForVerification({
