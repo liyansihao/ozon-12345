@@ -1,0 +1,373 @@
+{
+  "version": 1,
+  "updated_at": "2026-06-18",
+  "purpose": "Long-term source pool memory for Flow B Ozon China scanning. Use this to remember proven high-yield pools, switch away from exhausted pools, and discover new categories when current pools decay.",
+  "global_rules": {
+    "keep_scroll_pacing_stable": true,
+    "do_not_change_profit_or_quality_floor": true,
+    "default_min_price": 50,
+    "batch_size": 4,
+    "low_yield_delta_threshold": 5,
+    "low_yield_consecutive_batches": 2,
+    "min_fresh_sellers_for_main_pool": 8,
+    "promote_to_main_pool_if": [
+      "Two validation batches are available and average fav_per_min >= 8",
+      "Or one small validation has favorite_delta >= 15 with clean small-goods seller segment",
+      "Seller pool is not dominated by large goods, electronics brands, furniture, or heavy instruments"
+    ],
+    "demote_or_stop_if": [
+      "Fresh seller count after dedupe is below 3",
+      "Two consecutive batches have favorite_delta < 5",
+      "Product source drifts into large goods, branded electronics, construction tools, medical items, strollers, bikes, pools, furniture, or heavy instruments",
+      "Seller extraction stalls: 10 relevant products produce 2 or fewer fresh sellers",
+      "Chrome/Maozi count is unavailable for two consecutive batches; pause and restore count before judging the pool"
+    ],
+    "source_discovery_order": [
+      "Try active main pools first",
+      "If main pool decays, try supplement pools",
+      "If supplement pools decay, explore watch pools by breadcrumb/category ids from successful products",
+      "Avoid exhausted and downweighted pools unless there is new evidence"
+    ]
+  },
+  "pools": [
+    {
+      "pool": "main",
+      "name": "kids_toys_high_price_tail",
+      "status": "active_when_fresh_cluster_exists",
+      "category_ids": [
+        7000,
+        7108
+      ],
+      "category_names": [
+        "Детские товары",
+        "Игрушки и игры"
+      ],
+      "source_url_templates": [
+        "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=7000&currency_price=500.000%3B",
+        "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=7108&currency_price=50.000%3B"
+      ],
+      "seller_segment_features": [
+        "Toy/BJD/RC/blocks stores",
+        "Children/toy China sellers in mid/tail windows, not broad front pages",
+        "Avoid outdoor large goods: electric cars, bikes, pools, strollers, furniture"
+      ],
+      "observed_performance": {
+        "best_delta": 180,
+        "best_batches": 11,
+        "best_fav_per_min": 18.76,
+        "recent_state": "fresh pool exhausted; current 7108 products clean but seller pool concentrated"
+      },
+      "use_when": [
+        "New fresh sellers can be found after path dedupe",
+        "Product mix remains toy/BJD/RC/blocks and seller extraction is not concentrated"
+      ],
+      "stop_when": [
+        "Fresh sellers < 3",
+        "Two low-yield batches below threshold",
+        "Page drifts into large children goods or generic products"
+      ]
+    },
+    {
+      "pool": "main",
+      "name": "tabletop_card_games",
+      "status": "promoted_new_main",
+      "category_ids": [
+        13506
+      ],
+      "category_names": [
+        "Настольные и карточные игры"
+      ],
+      "source_url_templates": [
+        "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=13506&currency_price=50.000%3B"
+      ],
+      "seller_segment_features": [
+        "Tabletop/card-game sellers",
+        "Small hobby goods",
+        "Search/filter product text for tabletop, card, DND, UNO, Bicycle, collectible-card terms",
+        "Prefer sellers like xiaoyu/studio101/lucky-star style tabletop stores"
+      ],
+      "observed_performance": {
+        "validation_delta": 17,
+        "validation_sellers": 3,
+        "fav_per_min": 11.3,
+        "favorite_after": 948,
+        "judgment": "strongest clean new seller segment from 2026-06-18 discovery"
+      },
+      "use_when": [
+        "Kids/toys fresh cluster is exhausted",
+        "Need clean small-goods source with high Maozi response",
+        "Product filtering can keep source in tabletop/card-game products"
+      ],
+      "stop_when": [
+        "Filtered products produce <= 2 fresh sellers after 10 products",
+        "Source drifts into apparel, instruments, tools, or unrelated broad hobby goods"
+      ]
+    },
+    {
+      "pool": "main",
+      "name": "playing_cards_collectible_cards",
+      "status": "effective_secondary_main",
+      "category_ids": [
+        13517
+      ],
+      "category_names": [
+        "Игральные карты"
+      ],
+      "source_url_templates": [
+        "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=13517&currency_price=50.000%3B"
+      ],
+      "seller_segment_features": [
+        "Playing cards, collectible cards, UNO, Bicycle, Topps/Panini, DND-adjacent cards",
+        "Seller slugs often look like Chinese trading/company names",
+        "Product exploration itself can trigger Maozi auto-favorites"
+      ],
+      "observed_performance": {
+        "seller_scan_delta": 14,
+        "validation_sellers": 9,
+        "fav_per_min": 5.6,
+        "product_exploration_lift": "889 -> 907 before seller scan completed",
+        "favorite_after": 921,
+        "judgment": "effective medium; use after tabletop or as paired source"
+      },
+      "use_when": [
+        "Need more hobby small-goods sellers after tabletop source",
+        "Can filter product text to card/game terms before seller extraction"
+      ],
+      "stop_when": [
+        "Seller growth stalls around same few card sellers",
+        "Product pool drifts into apparel or unrelated low-quality goods"
+      ]
+    },
+    {
+      "pool": "supplement",
+      "name": "default_min50_middle_window",
+      "status": "controlled_supplement_only",
+      "category_ids": [],
+      "category_names": [
+        "Default China highlight middle window"
+      ],
+      "source_url_templates": [
+        "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?currency_price=50.000%3B"
+      ],
+      "seller_segment_features": [
+        "Only middle source window; skip front and tail",
+        "Mixed small electronics/protective accessories/tech stores when source is favorable",
+        "Do not use broad front/bridge/tail as default"
+      ],
+      "observed_performance": {
+        "best_delta": 114,
+        "best_batches": 8,
+        "best_fav_per_min": 13.19,
+        "remaining_mid_delta": 6,
+        "judgment": "useful but volatile"
+      },
+      "use_when": [
+        "Main pools are exhausted and a controlled supplement is needed",
+        "Only scan known productive middle windows"
+      ],
+      "stop_when": [
+        "First batch delta is 0",
+        "Two low-yield batches occur",
+        "Source enters laptops, monitors, phones, bathroom, medical, or large goods"
+      ]
+    },
+    {
+      "pool": "supplement",
+      "name": "hobby_creativity_controlled",
+      "status": "volume_supplement_with_quality_risk",
+      "category_ids": [
+        13500
+      ],
+      "category_names": [
+        "Хобби и творчество"
+      ],
+      "source_url_templates": [
+        "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=13500&currency_price=50.000%3B"
+      ],
+      "seller_segment_features": [
+        "Broad hobby parent can produce many sellers",
+        "Handpick tabletop/hobby/creative sellers",
+        "Avoid musical-instrument, heavy gear, large tools, luggage, and unrelated tails",
+        "Can reveal phone accessories and tool-like sellers; keep quality filters strict"
+      ],
+      "observed_performance": {
+        "partial_scan_total_lift": "975 -> 999",
+        "target_completion_batch": "+1 from selected next4",
+        "fav_per_min": "unreliable due Chrome count timeout during partial scan",
+        "judgment": "good for controlled volume, not a clean default source"
+      },
+      "use_when": [
+        "Need supplement volume after clean hobby/card pools",
+        "Can manually or programmatically filter seller/product text away from large goods"
+      ],
+      "stop_when": [
+        "Seller list enters musical-instrument tail",
+        "Count unavailable for two batches",
+        "Quality risk dominates small tabletop/creative goods"
+      ]
+    },
+    {
+      "pool": "watch",
+      "name": "dnd_dice_quality_scout",
+      "status": "quality_high_low_volume",
+      "category_ids": [
+        13523
+      ],
+      "category_names": [
+        "Аксессуары для настольных игр",
+        "Игральные кости / DND dice"
+      ],
+      "source_url_templates": [
+        "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=13523&currency_price=50.000%3B"
+      ],
+      "seller_segment_features": [
+        "Very clean DND dice products",
+        "Small/light goods and good quality fit",
+        "Seller pool highly concentrated"
+      ],
+      "observed_performance": {
+        "seller_scan_delta": 0,
+        "validation_sellers": 2,
+        "product_exploration_lift": "948 -> 975",
+        "judgment": "use for product exploration or quality scouting, not seller-scan volume"
+      },
+      "use_when": [
+        "Need quality candidate products around tabletop/DND",
+        "Not when the immediate goal is fast favorite volume"
+      ],
+      "stop_when": [
+        "10 filtered products produce <= 2 fresh sellers"
+      ]
+    },
+    {
+      "pool": "watch",
+      "name": "bjd_dolls_quality_scout",
+      "status": "quality_high_low_efficiency",
+      "category_ids": [
+        31272
+      ],
+      "category_names": [
+        "Куклы и аксессуары"
+      ],
+      "source_url_templates": [
+        "https://www.ozon.ru/highlight/tovary-iz-kitaya-935133/?category=31272&currency_price=50.000%3B"
+      ],
+      "seller_segment_features": [
+        "BJD dolls, doll accessories, Shuga/JoyBJD style products",
+        "High relevance but seller pool collapses to very few stores"
+      ],
+      "observed_performance": {
+        "seller_scan_delta": 0,
+        "validation_sellers": 2,
+        "fav_per_min": 0.0,
+        "judgment": "do not use for fast favorites; only quality scouting"
+      },
+      "use_when": [
+        "Looking for high-ticket quality products, not favorite volume"
+      ],
+      "stop_when": [
+        "Fresh sellers <= 2",
+        "Scan delta remains 0"
+      ]
+    },
+    {
+      "pool": "exhausted",
+      "name": "current_toys_subcategory_pages",
+      "status": "exhausted_current_fresh_pool",
+      "category_ids": [
+        7108,
+        7174,
+        7169,
+        7175,
+        7141
+      ],
+      "category_names": [
+        "Игрушки и игры",
+        "Конструкторы",
+        "Фигурки и аксессуары",
+        "Мягкие игрушки",
+        "Игрушечное оружие"
+      ],
+      "seller_segment_features": [
+        "Relevant products but new sellers are concentrated or low-yield",
+        "Constructors/figures/plush/toy-weapons current pages did not produce high favorite response"
+      ],
+      "observed_performance": {
+        "constructors_7174_delta": 1,
+        "figures_7169_delta": 0,
+        "plush_7175_result": "0-3 products / unstable",
+        "toy_weapons_7141_delta": 0,
+        "judgment": "do not hard-scan until new evidence appears"
+      },
+      "revive_if": [
+        "A new visible seller cluster appears",
+        "A different price window produces >= 8 fresh sellers and first batch delta >= 5"
+      ]
+    },
+    {
+      "pool": "downweight",
+      "name": "broad_low_quality_or_large_goods",
+      "status": "downweighted",
+      "category_ids": [
+        15500,
+        9700,
+        13755,
+        12300,
+        30726,
+        7182,
+        13568,
+        7697
+      ],
+      "category_names": [
+        "Электроника",
+        "Строительство и ремонт",
+        "Коллекционирование current page",
+        "Pets current page",
+        "Kids outdoor",
+        "School/learning",
+        "Paint by numbers for seller scanning",
+        "Broad accessories"
+      ],
+      "seller_segment_features": [
+        "Large electronics, construction tools, medical/e-bike/razor drift, pets/category drift, large kids goods, seller extraction failure, or broad mixed accessories"
+      ],
+      "observed_performance": {
+        "judgment": "avoid as default; only revisit with specific new filtered product signal"
+      },
+      "revive_if": [
+        "A specific subcategory/product breadcrumb has proven seller delta >= 10",
+        "Broad page can be filtered to clean small-goods sellers before scanning"
+      ]
+    }
+  ],
+  "automatic_switching": {
+    "main_pool_order": [
+      "kids_toys_high_price_tail",
+      "tabletop_card_games",
+      "playing_cards_collectible_cards"
+    ],
+    "supplement_pool_order": [
+      "default_min50_middle_window",
+      "hobby_creativity_controlled"
+    ],
+    "watch_pool_order": [
+      "dnd_dice_quality_scout",
+      "bjd_dolls_quality_scout"
+    ],
+    "switch_logic": [
+      "Run the current main pool until fresh sellers < 3 or two low-yield batches occur.",
+      "If main pool decays, move to the next main pool in order.",
+      "If all main pools decay, scan supplement pools with strict filtering and early stop.",
+      "If supplement pools decay or become quality-risk heavy, use watch pools only for product/category discovery, then create a new candidate pool from breadcrumbs.",
+      "Promote a new candidate to main only after validation exceeds current supplement performance."
+    ],
+    "new_category_discovery_logic": [
+      "Open products that caused favorite growth.",
+      "Extract breadcrumb category IDs from product detail pages.",
+      "Create a China-highlight URL with that category ID.",
+      "Collect products, filter product text to the target segment, then extract sellers.",
+      "Validate 1-3 small batches and record favorite_delta and fav_per_min.",
+      "Promote, watch, downweight, or mark exhausted based on validation."
+    ]
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "ozon-flow-b-automation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "flow:b:setup": "node flow_b_codex_transfer_20260608/scripts/flow_b_playwright.mjs setup",
+    "flow:b:transfer": "node flow_b_codex_transfer_20260608/scripts/transfer_prepared_run.mjs",
+    "flow:b:run": "node flow_b_codex_transfer_20260608/scripts/flow_b_playwright.mjs run",
+    "test:flow-b": "node --test flow_b_codex_transfer_20260608/tests-js/*.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.54.0"
+  }
+}

@@ -1,0 +1,2080 @@
+{
+  "contract": "ozon-audited-validation-discovery-seeds-v1",
+  "schema_version": 1,
+  "deployment_phase": "validation_only",
+  "automatic_publish_eligible": false,
+  "price_evidence_publish_eligible": false,
+  "favorite_mutations_allowed": false,
+  "submission_allowed": false,
+  "generated_at": "2026-08-18T00:00:00.000Z",
+  "source_query_contract": {
+    "price_parameter": "currency_price",
+    "price_band_currency": "RUB",
+    "effective_cny_evidence": "live-same-page-rate-only",
+    "sorting": "rating",
+    "max_page": 2,
+    "require_card_price_within_rub_band": true,
+    "require_detail_current_rub_within_band": true,
+    "identity_checkpoint_max_age_ms": 86400000,
+    "current_price_max_age_ms": 900000,
+    "next_stage_requires_live_price_refetch": true
+  },
+  "global_guard": {
+    "live_brand_policy": "empty-or-no-name-only",
+    "deny_terms_any": [
+      "духи",
+      "парфюм",
+      "туалетная вода",
+      "космет",
+      "сыворот",
+      "крем для лица",
+      "шампун",
+      "масло",
+      "гель",
+      "спрей",
+      "жидкост",
+      "еда",
+      "напиток",
+      "футболк",
+      "плать",
+      "одежд",
+      "обув",
+      "сумк",
+      "игруш",
+      "кукл",
+      "конструкт",
+      "lego",
+      "лего",
+      "star wars",
+      "marvel",
+      "disney",
+      "minecraft",
+      "pokemon",
+      "hot wheels",
+      "barbie",
+      "hello kitty",
+      "sanrio",
+      "labubu",
+      "lps",
+      "авто",
+      "автомоб",
+      "мото",
+      "obd",
+      "elm327",
+      "совместим",
+      "набор",
+      "комплект",
+      "упаковк",
+      "лот",
+      "пара",
+      "dewalt",
+      "makita",
+      "bosch",
+      "philips",
+      "osram",
+      "ecola",
+      "navigator",
+      "tuya",
+      "aqara",
+      "yeelight",
+      "gauss",
+      "voltme",
+      "dled",
+      "ceoniya",
+      "ugreen",
+      "baseus",
+      "anker",
+      "hoco",
+      "defender",
+      "abb",
+      "iek",
+      "wago",
+      "xq"
+    ],
+    "deny_regex": [
+      "(?:^|\\s)(?:[2-9]|\\d{2,})\\s*(?:шт\\.?|штук|предмет|пар[ыа]?)",
+      "(?:две|три|четыре|пять|шесть|семь|восемь|девять|десять)\\s+(?:штуки|штук|предмета|пары)",
+      "(?:^|\\s)\\d+\\s*[- ]?[вxх]\\s*[- ]?1(?:\\s|,|$)",
+      "для\\s+(?:honda|toyota|bmw|mercedes|lexus|ford|audi|volkswagen|volvo|mazda|nissan|kia|hyundai|renault|lada|haval|chery|geely|tesla|yamaha|suzuki|ktm|iphone|ipad|samsung|xiaomi|redmi|huawei|honor|nikon|canon|epson|bambu|anycubic)"
+    ],
+    "unknown_latin_token_policy": {
+      "action": "reject",
+      "min_alpha_length": 3,
+      "allowlist": [
+        "usb",
+        "type",
+        "micro",
+        "mini",
+        "hdmi",
+        "displayport",
+        "vga",
+        "dvi",
+        "rj",
+        "ethernet",
+        "aux",
+        "jack",
+        "dc",
+        "sd",
+        "tf",
+        "otg",
+        "led",
+        "gu",
+        "gx",
+        "ip",
+        "rgb",
+        "uv",
+        "awg",
+        "pd",
+        "qc",
+        "pps",
+        "gan",
+        "hub",
+        "card",
+        "reader",
+        "fast",
+        "charge",
+        "black",
+        "white",
+        "female",
+        "male",
+        "cat"
+      ]
+    }
+  },
+  "compiler_policy": {
+    "minimum_observations_per_seller_role": 3,
+    "minimum_distinct_sellers": 20,
+    "maximum_distinct_sellers": 120
+  },
+  "assignment_policy": {
+    "global_dedup_key": "sku",
+    "rule": [
+      "highest_required_group_count",
+      "priority_order",
+      "seed_id"
+    ],
+    "priority_order": [
+      "L05",
+      "L06",
+      "L07",
+      "L08",
+      "L01",
+      "L02",
+      "L03",
+      "L04",
+      "E01",
+      "E02",
+      "E03",
+      "E04",
+      "E05",
+      "E06",
+      "E07",
+      "E08",
+      "A04",
+      "A05",
+      "A06",
+      "A07",
+      "A01",
+      "A02",
+      "A03",
+      "A08",
+      "C01",
+      "C02",
+      "T01",
+      "T02",
+      "T03",
+      "T04"
+    ]
+  },
+  "capacity_policy": {
+    "minimum_detail_strict_unique": 360,
+    "minimum_current_sellers": 20,
+    "maximum_unique_per_seller": 18,
+    "forecast_counts_for_gate": false,
+    "historical_proxy_counts_for_gate": false
+  },
+  "excluded_seller_urls": [
+    "https://www.ozon.ru/seller/wan-le-fu/",
+    "https://www.ozon.ru/seller/radjab-carpet-ofitsialnyy-magazin/",
+    "https://www.ozon.ru/seller/ganagoho-mototsikl/",
+    "https://www.ozon.ru/seller/tinyworld/",
+    "https://www.ozon.ru/seller/jicha-3396280/",
+    "https://www.ozon.ru/seller/li-01-3837508/",
+    "https://www.ozon.ru/seller/youzi-5074541/",
+    "https://www.ozon.ru/seller/han-2001709/",
+    "https://www.ozon.ru/seller/univermag-2688595/",
+    "https://www.ozon.ru/seller/upcloud-international/"
+  ],
+  "seeds": [
+    {
+      "id": "L01",
+      "selection_priority": 5,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=1&sorting=rating&text=%D0%B2%D1%81%D1%82%D1%80%D0%B0%D0%B8%D0%B2%D0%B0%D0%B5%D0%BC%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+GX53",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=2&sorting=rating&text=%D0%B2%D1%81%D1%82%D1%80%D0%B0%D0%B8%D0%B2%D0%B0%D0%B5%D0%BC%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+GX53"
+      ],
+      "query_text": "встраиваемый светильник GX53",
+      "category_key": "lighting-recessed-gx53",
+      "accessory_role": "fixture-recessed-gx53",
+      "required_role_attributes": {
+        "fixture_type": "recessed",
+        "socket": "gx53"
+      },
+      "title_prefix_terms_any": [
+        "встраиваемый",
+        "светильник"
+      ],
+      "required_term_groups_all": [
+        [
+          "светильник"
+        ],
+        [
+          "встраиваем"
+        ],
+        [
+          "gx53"
+        ]
+      ],
+      "deny_terms_any": [
+        "лампочка",
+        "лампа в комплекте",
+        "кольцев",
+        "фото",
+        "софтбокс",
+        "штатив",
+        "маникюр",
+        "ногт",
+        "для растений",
+        "фитоламп",
+        "умн",
+        "датчик",
+        "сенсор",
+        "rgb"
+      ],
+      "allowed_latin_tokens": [
+        "gx53"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      }
+    },
+    {
+      "id": "L02",
+      "selection_priority": 6,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=1&sorting=rating&text=%D0%BD%D0%B0%D0%BA%D0%BB%D0%B0%D0%B4%D0%BD%D0%BE%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+GX53",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=2&sorting=rating&text=%D0%BD%D0%B0%D0%BA%D0%BB%D0%B0%D0%B4%D0%BD%D0%BE%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+GX53"
+      ],
+      "query_text": "накладной светильник GX53",
+      "category_key": "lighting-surface-gx53",
+      "accessory_role": "fixture-surface-gx53",
+      "required_role_attributes": {
+        "fixture_type": "surface",
+        "socket": "gx53"
+      },
+      "title_prefix_terms_any": [
+        "накладной",
+        "светильник"
+      ],
+      "required_term_groups_all": [
+        [
+          "светильник"
+        ],
+        [
+          "накладн"
+        ],
+        [
+          "gx53"
+        ]
+      ],
+      "deny_terms_any": [
+        "лампочка",
+        "лампа в комплекте",
+        "кольцев",
+        "фото",
+        "софтбокс",
+        "штатив",
+        "маникюр",
+        "ногт",
+        "для растений",
+        "фитоламп",
+        "умн",
+        "датчик",
+        "сенсор",
+        "rgb"
+      ],
+      "allowed_latin_tokens": [
+        "gx53"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      }
+    },
+    {
+      "id": "L03",
+      "selection_priority": 7,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=1&sorting=rating&text=%D1%82%D1%80%D0%B5%D0%BA%D0%BE%D0%B2%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+GU10",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=2&sorting=rating&text=%D1%82%D1%80%D0%B5%D0%BA%D0%BE%D0%B2%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+GU10"
+      ],
+      "query_text": "трековый светильник GU10",
+      "category_key": "lighting-track-gu10",
+      "accessory_role": "fixture-track-gu10",
+      "required_role_attributes": {
+        "fixture_type": "track",
+        "socket": "gu10"
+      },
+      "title_prefix_terms_any": [
+        "трековый",
+        "светильник",
+        "спот"
+      ],
+      "required_term_groups_all": [
+        [
+          "светильник",
+          "спот"
+        ],
+        [
+          "треков"
+        ],
+        [
+          "gu10"
+        ]
+      ],
+      "deny_terms_any": [
+        "лампочка",
+        "лампа в комплекте",
+        "кольцев",
+        "фото",
+        "софтбокс",
+        "штатив",
+        "маникюр",
+        "ногт",
+        "для растений",
+        "фитоламп",
+        "умн",
+        "датчик",
+        "сенсор",
+        "rgb"
+      ],
+      "allowed_latin_tokens": [
+        "gu10"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      }
+    },
+    {
+      "id": "L04",
+      "selection_priority": 8,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=1&sorting=rating&text=%D0%BD%D0%B0%D1%81%D1%82%D0%B5%D0%BD%D0%BD%D0%BE+%D0%BF%D0%BE%D1%82%D0%BE%D0%BB%D0%BE%D1%87%D0%BD%D1%8B%D0%B9+%D1%81%D0%BF%D0%BE%D1%82+GU10",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=2&sorting=rating&text=%D0%BD%D0%B0%D1%81%D1%82%D0%B5%D0%BD%D0%BD%D0%BE+%D0%BF%D0%BE%D1%82%D0%BE%D0%BB%D0%BE%D1%87%D0%BD%D1%8B%D0%B9+%D1%81%D0%BF%D0%BE%D1%82+GU10"
+      ],
+      "query_text": "настенно потолочный спот GU10",
+      "category_key": "lighting-wall-ceiling-gu10",
+      "accessory_role": "fixture-wall-ceiling-gu10",
+      "required_role_attributes": {
+        "fixture_type": "wall-ceiling-adjustable",
+        "socket": "gu10"
+      },
+      "title_prefix_terms_any": [
+        "настенно",
+        "светильник",
+        "спот"
+      ],
+      "required_term_groups_all": [
+        [
+          "светильник",
+          "спот"
+        ],
+        [
+          "настенно-потолочн",
+          "настенно потолочн",
+          "поворотн"
+        ],
+        [
+          "gu10"
+        ]
+      ],
+      "deny_terms_any": [
+        "лампочка",
+        "лампа в комплекте",
+        "кольцев",
+        "фото",
+        "софтбокс",
+        "штатив",
+        "маникюр",
+        "ногт",
+        "для растений",
+        "фитоламп",
+        "умн",
+        "датчик",
+        "сенсор",
+        "rgb"
+      ],
+      "allowed_latin_tokens": [
+        "gu10"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      }
+    },
+    {
+      "id": "L05",
+      "selection_priority": 1,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=1&sorting=rating&text=%D1%83%D0%BB%D0%B8%D1%87%D0%BD%D1%8B%D0%B9+%D0%BD%D0%B0%D1%81%D1%82%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+E27+IP65",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=2&sorting=rating&text=%D1%83%D0%BB%D0%B8%D1%87%D0%BD%D1%8B%D0%B9+%D0%BD%D0%B0%D1%81%D1%82%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+E27+IP65"
+      ],
+      "query_text": "уличный настенный светильник E27 IP65",
+      "category_key": "lighting-outdoor-e27-ip65",
+      "accessory_role": "fixture-outdoor-wall-e27-ip65",
+      "required_role_attributes": {
+        "fixture_type": "outdoor-wall",
+        "ingress_rating": "ip65-or-ip66",
+        "socket": "e27"
+      },
+      "title_prefix_terms_any": [
+        "уличный",
+        "светильник"
+      ],
+      "required_term_groups_all": [
+        [
+          "светильник"
+        ],
+        [
+          "уличн",
+          "фасадн"
+        ],
+        [
+          "e27"
+        ],
+        [
+          "ip65",
+          "ip66"
+        ]
+      ],
+      "deny_terms_any": [
+        "лампочка",
+        "лампа в комплекте",
+        "кольцев",
+        "фото",
+        "софтбокс",
+        "штатив",
+        "маникюр",
+        "ногт",
+        "для растений",
+        "фитоламп",
+        "умн",
+        "датчик",
+        "сенсор",
+        "rgb"
+      ],
+      "allowed_latin_tokens": [
+        "e27",
+        "ip65",
+        "ip66"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      }
+    },
+    {
+      "id": "L06",
+      "selection_priority": 2,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=1&sorting=rating&text=%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+%D0%B4%D0%BB%D1%8F+%D0%B1%D0%B0%D0%BD%D0%B8+IP65",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=2&sorting=rating&text=%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+%D0%B4%D0%BB%D1%8F+%D0%B1%D0%B0%D0%BD%D0%B8+IP65"
+      ],
+      "query_text": "светильник для бани IP65",
+      "category_key": "lighting-sauna-ip65",
+      "accessory_role": "fixture-sauna-ip65",
+      "required_role_attributes": {
+        "environment": "sauna",
+        "fixture_type": "sealed",
+        "ingress_rating": "ip65-or-ip66"
+      },
+      "title_prefix_terms_any": [
+        "светильник"
+      ],
+      "required_term_groups_all": [
+        [
+          "светильник"
+        ],
+        [
+          "баня",
+          "бани",
+          "сауна",
+          "парная"
+        ],
+        [
+          "ip65",
+          "ip66"
+        ]
+      ],
+      "deny_terms_any": [
+        "лампочка",
+        "лампа в комплекте",
+        "кольцев",
+        "фото",
+        "софтбокс",
+        "штатив",
+        "маникюр",
+        "ногт",
+        "для растений",
+        "фитоламп",
+        "умн",
+        "датчик",
+        "сенсор",
+        "rgb"
+      ],
+      "allowed_latin_tokens": [
+        "ip65",
+        "ip66"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      }
+    },
+    {
+      "id": "L07",
+      "selection_priority": 3,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=1&sorting=rating&text=%D0%BC%D0%B5%D0%B1%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9+%D0%B2%D1%81%D1%82%D1%80%D0%B0%D0%B8%D0%B2%D0%B0%D0%B5%D0%BC%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+220V",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=2&sorting=rating&text=%D0%BC%D0%B5%D0%B1%D0%B5%D0%BB%D1%8C%D0%BD%D1%8B%D0%B9+%D0%B2%D1%81%D1%82%D1%80%D0%B0%D0%B8%D0%B2%D0%B0%D0%B5%D0%BC%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+220V"
+      ],
+      "query_text": "мебельный встраиваемый светильник 220V",
+      "category_key": "lighting-furniture-recessed",
+      "accessory_role": "fixture-furniture-recessed-220v",
+      "required_role_attributes": {
+        "fixture_type": "furniture-recessed",
+        "voltage": "220v"
+      },
+      "title_prefix_terms_any": [
+        "мебельный",
+        "светильник"
+      ],
+      "required_term_groups_all": [
+        [
+          "светильник"
+        ],
+        [
+          "мебельн"
+        ],
+        [
+          "встраиваем"
+        ],
+        [
+          "220v",
+          "220в",
+          "220 в"
+        ]
+      ],
+      "deny_terms_any": [
+        "лампочка",
+        "лампа в комплекте",
+        "кольцев",
+        "фото",
+        "софтбокс",
+        "штатив",
+        "маникюр",
+        "ногт",
+        "для растений",
+        "фитоламп",
+        "умн",
+        "датчик",
+        "сенсор",
+        "rgb"
+      ],
+      "allowed_latin_tokens": [
+        "v"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      }
+    },
+    {
+      "id": "L08",
+      "selection_priority": 4,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=1&sorting=rating&text=%D0%BB%D0%B8%D0%BD%D0%B5%D0%B9%D0%BD%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+T5+220V",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B5000.000&is_global=true&page=2&sorting=rating&text=%D0%BB%D0%B8%D0%BD%D0%B5%D0%B9%D0%BD%D1%8B%D0%B9+%D1%81%D0%B2%D0%B5%D1%82%D0%B8%D0%BB%D1%8C%D0%BD%D0%B8%D0%BA+T5+220V"
+      ],
+      "query_text": "линейный светильник T5 220V",
+      "category_key": "lighting-linear-t5",
+      "accessory_role": "fixture-linear-t5-220v",
+      "required_role_attributes": {
+        "fixture_type": "linear",
+        "form_factor": "t5",
+        "voltage": "220v"
+      },
+      "title_prefix_terms_any": [
+        "линейный",
+        "светильник"
+      ],
+      "required_term_groups_all": [
+        [
+          "светильник"
+        ],
+        [
+          "линейн"
+        ],
+        [
+          "t5"
+        ],
+        [
+          "220v",
+          "220в",
+          "220 в"
+        ]
+      ],
+      "deny_terms_any": [
+        "лампочка",
+        "лампа в комплекте",
+        "кольцев",
+        "фото",
+        "софтбокс",
+        "штатив",
+        "маникюр",
+        "ногт",
+        "для растений",
+        "фитоламп",
+        "умн",
+        "датчик",
+        "сенсор",
+        "rgb"
+      ],
+      "allowed_latin_tokens": [
+        "t5",
+        "v"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 5000
+      }
+    },
+    {
+      "id": "E01",
+      "selection_priority": 9,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D1%80%D0%BE%D0%B7%D0%B5%D1%82%D0%BA%D0%B0+%D0%BD%D0%B0%D0%BA%D0%BB%D0%B0%D0%B4%D0%BD%D0%B0%D1%8F+%D1%81+%D0%B7%D0%B0%D0%B7%D0%B5%D0%BC%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5%D0%BC+IP44",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D1%80%D0%BE%D0%B7%D0%B5%D1%82%D0%BA%D0%B0+%D0%BD%D0%B0%D0%BA%D0%BB%D0%B0%D0%B4%D0%BD%D0%B0%D1%8F+%D1%81+%D0%B7%D0%B0%D0%B7%D0%B5%D0%BC%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5%D0%BC+IP44"
+      ],
+      "query_text": "розетка накладная с заземлением IP44",
+      "category_key": "electrical-outdoor-socket",
+      "accessory_role": "socket-surface-grounded-ip44",
+      "required_role_attributes": {
+        "grounding": "yes",
+        "ingress_rating": "ip44-or-higher",
+        "mount": "surface",
+        "product_type": "socket"
+      },
+      "title_prefix_terms_any": [
+        "розетка"
+      ],
+      "required_term_groups_all": [
+        [
+          "розетка"
+        ],
+        [
+          "накладн",
+          "наружн"
+        ],
+        [
+          "заземл"
+        ],
+        [
+          "ip44",
+          "ip54",
+          "ip55",
+          "ip65",
+          "ip66"
+        ]
+      ],
+      "deny_terms_any": [
+        "умн",
+        "wifi",
+        "wi-fi",
+        "zigbee",
+        "bluetooth",
+        "сенсор",
+        "дистанцион",
+        "пульт",
+        "таймер"
+      ],
+      "allowed_latin_tokens": [
+        "ip44",
+        "ip54",
+        "ip55",
+        "ip65",
+        "ip66"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "E02",
+      "selection_priority": 10,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D1%80%D0%BE%D0%B7%D0%B5%D1%82%D0%BA%D0%B0+%D0%B4%D0%B2%D0%BE%D0%B9%D0%BD%D0%B0%D1%8F+%D1%81%D0%BA%D1%80%D1%8B%D1%82%D0%BE%D0%B9+%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B8+%D1%81+%D0%B7%D0%B0%D0%B7%D0%B5%D0%BC%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5%D0%BC",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D1%80%D0%BE%D0%B7%D0%B5%D1%82%D0%BA%D0%B0+%D0%B4%D0%B2%D0%BE%D0%B9%D0%BD%D0%B0%D1%8F+%D1%81%D0%BA%D1%80%D1%8B%D1%82%D0%BE%D0%B9+%D1%83%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BA%D0%B8+%D1%81+%D0%B7%D0%B0%D0%B7%D0%B5%D0%BC%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5%D0%BC"
+      ],
+      "query_text": "розетка двойная скрытой установки с заземлением",
+      "category_key": "electrical-flush-socket",
+      "accessory_role": "socket-double-flush-grounded",
+      "required_role_attributes": {
+        "grounding": "yes",
+        "mount": "flush",
+        "outlets": "2",
+        "product_type": "socket"
+      },
+      "title_prefix_terms_any": [
+        "розетка"
+      ],
+      "required_term_groups_all": [
+        [
+          "розетка"
+        ],
+        [
+          "двойн"
+        ],
+        [
+          "скрыт",
+          "встраиваем"
+        ],
+        [
+          "заземл"
+        ]
+      ],
+      "deny_terms_any": [
+        "умн",
+        "wifi",
+        "wi-fi",
+        "zigbee",
+        "bluetooth",
+        "сенсор",
+        "дистанцион",
+        "пульт",
+        "таймер"
+      ],
+      "allowed_latin_tokens": [],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "E03",
+      "selection_priority": 11,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%B2%D1%8B%D0%BA%D0%BB%D1%8E%D1%87%D0%B0%D1%82%D0%B5%D0%BB%D1%8C+%D0%BD%D0%B0%D0%BA%D0%BB%D0%B0%D0%B4%D0%BD%D0%BE%D0%B9+IP44",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%B2%D1%8B%D0%BA%D0%BB%D1%8E%D1%87%D0%B0%D1%82%D0%B5%D0%BB%D1%8C+%D0%BD%D0%B0%D0%BA%D0%BB%D0%B0%D0%B4%D0%BD%D0%BE%D0%B9+IP44"
+      ],
+      "query_text": "выключатель накладной IP44",
+      "category_key": "electrical-outdoor-switch",
+      "accessory_role": "switch-surface-ip44",
+      "required_role_attributes": {
+        "ingress_rating": "ip44-or-higher",
+        "mount": "surface",
+        "product_type": "switch"
+      },
+      "title_prefix_terms_any": [
+        "выключатель"
+      ],
+      "required_term_groups_all": [
+        [
+          "выключатель"
+        ],
+        [
+          "накладн",
+          "наружн"
+        ],
+        [
+          "ip44",
+          "ip54",
+          "ip55",
+          "ip65",
+          "ip66"
+        ]
+      ],
+      "deny_terms_any": [
+        "умн",
+        "wifi",
+        "wi-fi",
+        "zigbee",
+        "bluetooth",
+        "сенсор",
+        "дистанцион",
+        "пульт",
+        "таймер"
+      ],
+      "allowed_latin_tokens": [
+        "ip44",
+        "ip54",
+        "ip55",
+        "ip65",
+        "ip66"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "E04",
+      "selection_priority": 12,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D1%82%D1%80%D0%BE%D0%B9%D0%BD%D0%B8%D0%BA+%D0%B4%D0%BB%D1%8F+%D1%80%D0%BE%D0%B7%D0%B5%D1%82%D0%BA%D0%B8+16%D0%90",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D1%82%D1%80%D0%BE%D0%B9%D0%BD%D0%B8%D0%BA+%D0%B4%D0%BB%D1%8F+%D1%80%D0%BE%D0%B7%D0%B5%D1%82%D0%BA%D0%B8+16%D0%90"
+      ],
+      "query_text": "тройник для розетки 16А",
+      "category_key": "electrical-plug-splitter",
+      "accessory_role": "socket-splitter-16a",
+      "required_role_attributes": {
+        "current": "16a",
+        "product_type": "socket-splitter"
+      },
+      "title_prefix_terms_any": [
+        "тройник",
+        "разветвитель"
+      ],
+      "required_term_groups_all": [
+        [
+          "тройник",
+          "разветвитель"
+        ],
+        [
+          "розетк"
+        ],
+        [
+          "16а",
+          "16a"
+        ]
+      ],
+      "deny_terms_any": [
+        "умн",
+        "wifi",
+        "wi-fi",
+        "zigbee",
+        "bluetooth",
+        "сенсор",
+        "дистанцион",
+        "пульт",
+        "таймер",
+        "латун",
+        "резьба",
+        "водо",
+        "душ",
+        "смесител",
+        "труб"
+      ],
+      "allowed_latin_tokens": [
+        "a"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "E05",
+      "selection_priority": 13,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D1%83%D0%B4%D0%BB%D0%B8%D0%BD%D0%B8%D1%82%D0%B5%D0%BB%D1%8C+%D1%81%D0%B5%D1%82%D0%B5%D0%B2%D0%BE%D0%B9+3+%D1%80%D0%BE%D0%B7%D0%B5%D1%82%D0%BA%D0%B8+2+%D0%BC%D0%B5%D1%82%D1%80%D0%B0",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D1%83%D0%B4%D0%BB%D0%B8%D0%BD%D0%B8%D1%82%D0%B5%D0%BB%D1%8C+%D1%81%D0%B5%D1%82%D0%B5%D0%B2%D0%BE%D0%B9+3+%D1%80%D0%BE%D0%B7%D0%B5%D1%82%D0%BA%D0%B8+2+%D0%BC%D0%B5%D1%82%D1%80%D0%B0"
+      ],
+      "query_text": "удлинитель сетевой 3 розетки 2 метра",
+      "category_key": "electrical-extension",
+      "accessory_role": "extension-3socket-2m",
+      "required_role_attributes": {
+        "cable_length": "2m",
+        "outlets": "3",
+        "product_type": "extension"
+      },
+      "title_prefix_terms_any": [
+        "удлинитель"
+      ],
+      "required_term_groups_all": [
+        [
+          "удлинитель"
+        ],
+        [
+          "сетев"
+        ],
+        [
+          "3 розет"
+        ],
+        [
+          "2м",
+          "2 м",
+          "2 метр"
+        ]
+      ],
+      "deny_terms_any": [
+        "умн",
+        "wifi",
+        "wi-fi",
+        "zigbee",
+        "bluetooth",
+        "сенсор",
+        "дистанцион",
+        "пульт",
+        "таймер"
+      ],
+      "allowed_latin_tokens": [
+        "m"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      }
+    },
+    {
+      "id": "E06",
+      "selection_priority": 14,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%B1%D0%BB%D0%BE%D0%BA+%D0%BF%D0%B8%D1%82%D0%B0%D0%BD%D0%B8%D1%8F+12V+2A+5.5x2.1",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%B1%D0%BB%D0%BE%D0%BA+%D0%BF%D0%B8%D1%82%D0%B0%D0%BD%D0%B8%D1%8F+12V+2A+5.5x2.1"
+      ],
+      "query_text": "блок питания 12V 2A 5.5x2.1",
+      "category_key": "low-voltage-power-12v2a",
+      "accessory_role": "power-supply-12v2a-dc5521",
+      "required_role_attributes": {
+        "connector": "dc-5.5x2.1",
+        "current": "2a",
+        "output_voltage": "12v",
+        "product_type": "fixed-power-supply"
+      },
+      "title_prefix_terms_any": [
+        "блок питания",
+        "адаптер питания"
+      ],
+      "required_term_groups_all": [
+        [
+          "блок питания",
+          "адаптер питания"
+        ],
+        [
+          "12v",
+          "12в",
+          "12 в"
+        ],
+        [
+          "2a",
+          "2а",
+          "2 а"
+        ],
+        [
+          "5.5x2.1",
+          "5,5x2,1",
+          "5.5х2.1",
+          "5,5х2,1"
+        ]
+      ],
+      "deny_terms_any": [
+        "умн",
+        "wifi",
+        "wi-fi",
+        "zigbee",
+        "bluetooth",
+        "сенсор",
+        "дистанцион",
+        "пульт",
+        "таймер",
+        "универсальн",
+        "регулируем",
+        "для роутер",
+        "для камеры",
+        "для ноутбук"
+      ],
+      "allowed_latin_tokens": [
+        "v",
+        "a",
+        "dc",
+        "x2.1"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      }
+    },
+    {
+      "id": "E07",
+      "selection_priority": 15,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B1500.000&is_global=true&page=1&sorting=rating&text=%D0%BF%D0%B0%D1%82%D1%80%D0%BE%D0%BD+%D0%BA%D0%B5%D1%80%D0%B0%D0%BC%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B9+E27",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B1500.000&is_global=true&page=2&sorting=rating&text=%D0%BF%D0%B0%D1%82%D1%80%D0%BE%D0%BD+%D0%BA%D0%B5%D1%80%D0%B0%D0%BC%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B9+E27"
+      ],
+      "query_text": "патрон керамический E27",
+      "category_key": "electrical-lamp-holder",
+      "accessory_role": "lamp-holder-ceramic-e27",
+      "required_role_attributes": {
+        "material": "ceramic",
+        "product_type": "lamp-holder",
+        "socket": "e27"
+      },
+      "title_prefix_terms_any": [
+        "патрон"
+      ],
+      "required_term_groups_all": [
+        [
+          "патрон"
+        ],
+        [
+          "керамич"
+        ],
+        [
+          "e27"
+        ]
+      ],
+      "deny_terms_any": [
+        "умн",
+        "wifi",
+        "wi-fi",
+        "zigbee",
+        "bluetooth",
+        "сенсор",
+        "дистанцион",
+        "пульт",
+        "таймер",
+        "дрель",
+        "шуруповерт",
+        "перфоратор"
+      ],
+      "allowed_latin_tokens": [
+        "e27"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 1500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 1500
+      }
+    },
+    {
+      "id": "E08",
+      "selection_priority": 16,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B1500.000&is_global=true&page=1&sorting=rating&text=%D0%B2%D0%B8%D0%BB%D0%BA%D0%B0+%D1%8D%D0%BB%D0%B5%D0%BA%D1%82%D1%80%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B0%D1%8F+%D1%83%D0%B3%D0%BB%D0%BE%D0%B2%D0%B0%D1%8F+16%D0%90+%D1%81+%D0%B7%D0%B0%D0%B7%D0%B5%D0%BC%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5%D0%BC",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B1500.000&is_global=true&page=2&sorting=rating&text=%D0%B2%D0%B8%D0%BB%D0%BA%D0%B0+%D1%8D%D0%BB%D0%B5%D0%BA%D1%82%D1%80%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B0%D1%8F+%D1%83%D0%B3%D0%BB%D0%BE%D0%B2%D0%B0%D1%8F+16%D0%90+%D1%81+%D0%B7%D0%B0%D0%B7%D0%B5%D0%BC%D0%BB%D0%B5%D0%BD%D0%B8%D0%B5%D0%BC"
+      ],
+      "query_text": "вилка электрическая угловая 16А с заземлением",
+      "category_key": "electrical-angle-plug",
+      "accessory_role": "plug-angle-grounded-16a",
+      "required_role_attributes": {
+        "current": "16a",
+        "grounding": "yes",
+        "orientation": "angle",
+        "product_type": "electrical-plug"
+      },
+      "title_prefix_terms_any": [
+        "вилка"
+      ],
+      "required_term_groups_all": [
+        [
+          "вилка"
+        ],
+        [
+          "электрическ"
+        ],
+        [
+          "углов"
+        ],
+        [
+          "16а",
+          "16a"
+        ],
+        [
+          "заземл"
+        ]
+      ],
+      "deny_terms_any": [
+        "умн",
+        "wifi",
+        "wi-fi",
+        "zigbee",
+        "bluetooth",
+        "сенсор",
+        "дистанцион",
+        "пульт",
+        "таймер",
+        "столов",
+        "салат",
+        "барбекю"
+      ],
+      "allowed_latin_tokens": [
+        "a"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 1500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 1500
+      }
+    },
+    {
+      "id": "A01",
+      "selection_priority": 21,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+USB+3.0+Type-C+OTG",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+USB+3.0+Type-C+OTG"
+      ],
+      "query_text": "переходник USB 3.0 Type-C OTG",
+      "category_key": "adapter-usb-typec",
+      "accessory_role": "adapter-usb3-typec-otg",
+      "required_role_attributes": {
+        "connector_a": "usb-c-male",
+        "connector_b": "usb-a-female",
+        "direction": "usb-c-host-to-usb-a-device",
+        "protocol": "otg"
+      },
+      "title_prefix_terms_any": [
+        "переходник",
+        "адаптер"
+      ],
+      "required_term_groups_all": [
+        [
+          "переходник",
+          "адаптер"
+        ],
+        [
+          "usb 3.0",
+          "usb3"
+        ],
+        [
+          "type-c",
+          "type c"
+        ],
+        [
+          "otg"
+        ]
+      ],
+      "deny_terms_any": [
+        "зарядное устройство",
+        "блок питания",
+        "sim",
+        "антенн",
+        "объектив",
+        "байонет",
+        "пылесос",
+        "аккумулятор",
+        "для iphone",
+        "для samsung",
+        "для xiaomi"
+      ],
+      "allowed_latin_tokens": [
+        "usb",
+        "usb3",
+        "type-c",
+        "type",
+        "otg"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "A02",
+      "selection_priority": 22,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+Type-C+Micro+USB",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+Type-C+Micro+USB"
+      ],
+      "query_text": "переходник Type-C Micro USB",
+      "category_key": "adapter-typec-microusb",
+      "accessory_role": "adapter-typec-microusb",
+      "required_role_attributes": {
+        "connector_a": "usb-c-female",
+        "connector_b": "micro-usb-male",
+        "direction": "usb-c-cable-to-micro-usb-device"
+      },
+      "title_prefix_terms_any": [
+        "переходник",
+        "адаптер"
+      ],
+      "required_term_groups_all": [
+        [
+          "переходник",
+          "адаптер"
+        ],
+        [
+          "type-c",
+          "type c"
+        ],
+        [
+          "micro usb",
+          "microusb"
+        ]
+      ],
+      "deny_terms_any": [
+        "зарядное устройство",
+        "блок питания",
+        "sim",
+        "антенн",
+        "объектив",
+        "байонет",
+        "пылесос",
+        "аккумулятор",
+        "для iphone",
+        "для samsung",
+        "для xiaomi"
+      ],
+      "allowed_latin_tokens": [
+        "usb",
+        "type-c",
+        "type",
+        "micro",
+        "microusb"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "A03",
+      "selection_priority": 23,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B1500.000&is_global=true&page=1&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+HDMI+%D0%BC%D0%B0%D0%BC%D0%B0-%D0%BC%D0%B0%D0%BC%D0%B0",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B1500.000&is_global=true&page=2&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+HDMI+%D0%BC%D0%B0%D0%BC%D0%B0-%D0%BC%D0%B0%D0%BC%D0%B0"
+      ],
+      "query_text": "переходник HDMI мама-мама",
+      "category_key": "adapter-hdmi-coupler",
+      "accessory_role": "adapter-hdmi-female-female",
+      "required_role_attributes": {
+        "connector_a": "hdmi-female",
+        "connector_b": "hdmi-female",
+        "direction": "bidirectional"
+      },
+      "title_prefix_terms_any": [
+        "переходник",
+        "адаптер"
+      ],
+      "required_term_groups_all": [
+        [
+          "переходник",
+          "адаптер"
+        ],
+        [
+          "hdmi"
+        ],
+        [
+          "мама-мама",
+          "мама мама",
+          "female female"
+        ]
+      ],
+      "deny_terms_any": [
+        "зарядное устройство",
+        "блок питания",
+        "sim",
+        "антенн",
+        "объектив",
+        "байонет",
+        "пылесос",
+        "аккумулятор",
+        "для iphone",
+        "для samsung",
+        "для xiaomi"
+      ],
+      "allowed_latin_tokens": [
+        "hdmi",
+        "female"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 1500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 1500
+      }
+    },
+    {
+      "id": "A04",
+      "selection_priority": 17,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+HDMI+Mini+HDMI+%D1%83%D0%B3%D0%BB%D0%BE%D0%B2%D0%BE%D0%B9",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+HDMI+Mini+HDMI+%D1%83%D0%B3%D0%BB%D0%BE%D0%B2%D0%BE%D0%B9"
+      ],
+      "query_text": "переходник HDMI Mini HDMI угловой",
+      "category_key": "adapter-hdmi-mini",
+      "accessory_role": "adapter-hdmi-mini-angle",
+      "required_role_attributes": {
+        "connector_a": "hdmi-female",
+        "connector_b": "mini-hdmi-male",
+        "direction": "bidirectional",
+        "orientation": "angle-90"
+      },
+      "title_prefix_terms_any": [
+        "переходник",
+        "адаптер"
+      ],
+      "required_term_groups_all": [
+        [
+          "переходник",
+          "адаптер"
+        ],
+        [
+          "hdmi"
+        ],
+        [
+          "mini hdmi"
+        ],
+        [
+          "углов",
+          "90"
+        ]
+      ],
+      "deny_terms_any": [
+        "зарядное устройство",
+        "блок питания",
+        "sim",
+        "антенн",
+        "объектив",
+        "байонет",
+        "пылесос",
+        "аккумулятор",
+        "для iphone",
+        "для samsung",
+        "для xiaomi",
+        "кабель"
+      ],
+      "allowed_latin_tokens": [
+        "hdmi",
+        "mini"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "A05",
+      "selection_priority": 18,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+HDMI+VGA+%D0%B1%D0%B5%D0%B7+%D0%BA%D0%B0%D0%B1%D0%B5%D0%BB%D1%8F",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+HDMI+VGA+%D0%B1%D0%B5%D0%B7+%D0%BA%D0%B0%D0%B1%D0%B5%D0%BB%D1%8F"
+      ],
+      "query_text": "переходник HDMI VGA без кабеля",
+      "category_key": "adapter-hdmi-vga",
+      "accessory_role": "adapter-hdmi-vga-no-cable",
+      "required_role_attributes": {
+        "cable": "none",
+        "connector_a": "hdmi-male",
+        "connector_b": "vga-female",
+        "direction": "hdmi-source-to-vga-display"
+      },
+      "title_prefix_terms_any": [
+        "переходник",
+        "адаптер"
+      ],
+      "required_term_groups_all": [
+        [
+          "переходник",
+          "адаптер"
+        ],
+        [
+          "hdmi"
+        ],
+        [
+          "vga"
+        ],
+        [
+          "без кабел"
+        ]
+      ],
+      "deny_terms_any": [
+        "зарядное устройство",
+        "блок питания",
+        "sim",
+        "антенн",
+        "объектив",
+        "байонет",
+        "пылесос",
+        "аккумулятор",
+        "для iphone",
+        "для samsung",
+        "для xiaomi",
+        "кабель в комплекте"
+      ],
+      "allowed_latin_tokens": [
+        "hdmi",
+        "vga"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "A06",
+      "selection_priority": 19,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+DisplayPort+HDMI",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%BF%D0%B5%D1%80%D0%B5%D1%85%D0%BE%D0%B4%D0%BD%D0%B8%D0%BA+DisplayPort+HDMI"
+      ],
+      "query_text": "переходник DisplayPort HDMI",
+      "category_key": "adapter-displayport-hdmi",
+      "accessory_role": "adapter-displayport-hdmi",
+      "required_role_attributes": {
+        "connector_a": "displayport-male",
+        "connector_b": "hdmi-female",
+        "direction": "displayport-source-to-hdmi-display"
+      },
+      "title_prefix_terms_any": [
+        "переходник",
+        "адаптер"
+      ],
+      "required_term_groups_all": [
+        [
+          "переходник",
+          "адаптер"
+        ],
+        [
+          "displayport",
+          "display port",
+          "dp"
+        ],
+        [
+          "hdmi"
+        ]
+      ],
+      "deny_terms_any": [
+        "зарядное устройство",
+        "блок питания",
+        "sim",
+        "антенн",
+        "объектив",
+        "байонет",
+        "пылесос",
+        "аккумулятор",
+        "для iphone",
+        "для samsung",
+        "для xiaomi",
+        "кабель"
+      ],
+      "allowed_latin_tokens": [
+        "displayport",
+        "dp",
+        "hdmi"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "A07",
+      "selection_priority": 20,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%BA%D0%B0%D1%80%D1%82%D1%80%D0%B8%D0%B4%D0%B5%D1%80+Type-C+SD+TF",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%BA%D0%B0%D1%80%D1%82%D1%80%D0%B8%D0%B4%D0%B5%D1%80+Type-C+SD+TF"
+      ],
+      "query_text": "картридер Type-C SD TF",
+      "category_key": "card-reader-typec",
+      "accessory_role": "card-reader-typec-sd-tf",
+      "required_role_attributes": {
+        "connector": "usb-c",
+        "product_type": "card-reader",
+        "slots": "sd-and-tf"
+      },
+      "title_prefix_terms_any": [
+        "картридер",
+        "card reader"
+      ],
+      "required_term_groups_all": [
+        [
+          "картридер",
+          "card reader"
+        ],
+        [
+          "type-c",
+          "type c"
+        ],
+        [
+          "sd"
+        ],
+        [
+          "tf",
+          "microsd",
+          "micro sd"
+        ]
+      ],
+      "deny_terms_any": [
+        "зарядное устройство",
+        "блок питания",
+        "sim",
+        "антенн",
+        "объектив",
+        "байонет",
+        "пылесос",
+        "аккумулятор",
+        "для iphone",
+        "для samsung",
+        "для xiaomi"
+      ],
+      "allowed_latin_tokens": [
+        "card",
+        "reader",
+        "type-c",
+        "type",
+        "sd",
+        "tf",
+        "microsd",
+        "micro"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 2500
+      }
+    },
+    {
+      "id": "A08",
+      "selection_priority": 24,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=1&sorting=rating&text=USB+%D1%85%D0%B0%D0%B1+4+%D0%BF%D0%BE%D1%80%D1%82%D0%B0+USB+3.0",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=2&sorting=rating&text=USB+%D1%85%D0%B0%D0%B1+4+%D0%BF%D0%BE%D1%80%D1%82%D0%B0+USB+3.0"
+      ],
+      "query_text": "USB хаб 4 порта USB 3.0",
+      "category_key": "usb-hub-4port",
+      "accessory_role": "hub-usb3-4port",
+      "required_role_attributes": {
+        "downstream_ports": "4",
+        "product_type": "usb-hub",
+        "protocol": "usb3"
+      },
+      "title_prefix_terms_any": [
+        "usb хаб",
+        "хаб",
+        "usb hub"
+      ],
+      "required_term_groups_all": [
+        [
+          "хаб",
+          "hub",
+          "разветвитель"
+        ],
+        [
+          "usb 3.0",
+          "usb3"
+        ],
+        [
+          "4 порт"
+        ]
+      ],
+      "deny_terms_any": [
+        "зарядное устройство",
+        "блок питания",
+        "sim",
+        "антенн",
+        "объектив",
+        "байонет",
+        "пылесос",
+        "аккумулятор",
+        "для iphone",
+        "для samsung",
+        "для xiaomi"
+      ],
+      "allowed_latin_tokens": [
+        "usb",
+        "usb3",
+        "hub"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      }
+    },
+    {
+      "id": "C01",
+      "selection_priority": 25,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D0%BA%D0%B0%D0%B1%D0%B5%D0%BB%D1%8C+HDMI+HDMI+2+%D0%BC%D0%B5%D1%82%D1%80%D0%B0",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D0%BA%D0%B0%D0%B1%D0%B5%D0%BB%D1%8C+HDMI+HDMI+2+%D0%BC%D0%B5%D1%82%D1%80%D0%B0"
+      ],
+      "query_text": "кабель HDMI HDMI 2 метра",
+      "category_key": "cable-hdmi",
+      "accessory_role": "cable-hdmi-male-male-2m",
+      "required_role_attributes": {
+        "cable_length": "2m",
+        "connector_a": "hdmi-male",
+        "connector_b": "hdmi-male",
+        "direction": "bidirectional"
+      },
+      "title_prefix_terms_any": [
+        "кабель"
+      ],
+      "required_term_groups_all": [
+        [
+          "кабель"
+        ],
+        [
+          "hdmi"
+        ],
+        [
+          "2м",
+          "2 м",
+          "2 метр"
+        ]
+      ],
+      "deny_terms_any": [
+        "lightning",
+        "mfi",
+        "для iphone",
+        "для samsung",
+        "для xiaomi"
+      ],
+      "allowed_latin_tokens": [
+        "hdmi",
+        "m"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      }
+    },
+    {
+      "id": "C02",
+      "selection_priority": 26,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=125.000%3B1500.000&is_global=true&page=1&sorting=rating&text=%D0%BF%D0%B0%D1%82%D1%87+%D0%BA%D0%BE%D1%80%D0%B4+CAT6+RJ45+2+%D0%BC%D0%B5%D1%82%D1%80%D0%B0",
+        "https://www.ozon.ru/search/?currency_price=125.000%3B1500.000&is_global=true&page=2&sorting=rating&text=%D0%BF%D0%B0%D1%82%D1%87+%D0%BA%D0%BE%D1%80%D0%B4+CAT6+RJ45+2+%D0%BC%D0%B5%D1%82%D1%80%D0%B0"
+      ],
+      "query_text": "патч корд CAT6 RJ45 2 метра",
+      "category_key": "cable-ethernet-cat6",
+      "accessory_role": "cable-cat6-rj45-2m",
+      "required_role_attributes": {
+        "cable_category": "cat6",
+        "cable_length": "2m",
+        "connector_a": "rj45-male",
+        "connector_b": "rj45-male"
+      },
+      "title_prefix_terms_any": [
+        "патч корд",
+        "патч-корд",
+        "кабель"
+      ],
+      "required_term_groups_all": [
+        [
+          "патч корд",
+          "патч-корд",
+          "кабель"
+        ],
+        [
+          "cat6",
+          "cat 6"
+        ],
+        [
+          "rj45",
+          "rj-45"
+        ],
+        [
+          "2м",
+          "2 м",
+          "2 метр"
+        ]
+      ],
+      "deny_terms_any": [
+        "lightning",
+        "mfi",
+        "для iphone",
+        "для samsung",
+        "для xiaomi"
+      ],
+      "allowed_latin_tokens": [
+        "cat6",
+        "cat",
+        "rj45",
+        "rj",
+        "m"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 125,
+        "max": 1500
+      },
+      "seller_price_band_rub": {
+        "min": 125,
+        "max": 1500
+      }
+    },
+    {
+      "id": "T01",
+      "selection_priority": 27,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D1%88%D1%82%D0%B0%D0%BD%D0%B3%D0%B5%D0%BD%D1%86%D0%B8%D1%80%D0%BA%D1%83%D0%BB%D1%8C+%D1%8D%D0%BB%D0%B5%D0%BA%D1%82%D1%80%D0%BE%D0%BD%D0%BD%D1%8B%D0%B9+150+%D0%BC%D0%BC+%D0%BC%D0%B5%D1%82%D0%B0%D0%BB%D0%BB%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B9",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D1%88%D1%82%D0%B0%D0%BD%D0%B3%D0%B5%D0%BD%D1%86%D0%B8%D1%80%D0%BA%D1%83%D0%BB%D1%8C+%D1%8D%D0%BB%D0%B5%D0%BA%D1%82%D1%80%D0%BE%D0%BD%D0%BD%D1%8B%D0%B9+150+%D0%BC%D0%BC+%D0%BC%D0%B5%D1%82%D0%B0%D0%BB%D0%BB%D0%B8%D1%87%D0%B5%D1%81%D0%BA%D0%B8%D0%B9"
+      ],
+      "query_text": "штангенциркуль электронный 150 мм металлический",
+      "category_key": "tool-caliper",
+      "accessory_role": "tool-digital-caliper-150mm",
+      "required_role_attributes": {
+        "material": "metal",
+        "measurement_range": "150mm",
+        "product_type": "digital-caliper"
+      },
+      "title_prefix_terms_any": [
+        "штангенциркуль"
+      ],
+      "required_term_groups_all": [
+        [
+          "штангенциркуль"
+        ],
+        [
+          "электронн",
+          "цифров"
+        ],
+        [
+          "150мм",
+          "150 мм"
+        ],
+        [
+          "металл"
+        ]
+      ],
+      "deny_terms_any": [
+        "аккумулятор",
+        "электрическ",
+        "ударн",
+        "насадк",
+        "сменн",
+        "запасн"
+      ],
+      "allowed_latin_tokens": [
+        "mm"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      }
+    },
+    {
+      "id": "T02",
+      "selection_priority": 28,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D1%81%D1%82%D1%80%D0%B8%D0%BF%D0%BF%D0%B5%D1%80+%D0%B4%D0%BB%D1%8F+%D1%81%D0%BD%D1%8F%D1%82%D0%B8%D1%8F+%D0%B8%D0%B7%D0%BE%D0%BB%D1%8F%D1%86%D0%B8%D0%B8+0.2-6+%D0%BC%D0%BC",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D1%81%D1%82%D1%80%D0%B8%D0%BF%D0%BF%D0%B5%D1%80+%D0%B4%D0%BB%D1%8F+%D1%81%D0%BD%D1%8F%D1%82%D0%B8%D1%8F+%D0%B8%D0%B7%D0%BE%D0%BB%D1%8F%D1%86%D0%B8%D0%B8+0.2-6+%D0%BC%D0%BC"
+      ],
+      "query_text": "стриппер для снятия изоляции 0.2-6 мм",
+      "category_key": "tool-wire-stripper",
+      "accessory_role": "tool-wire-stripper-0.2-6mm",
+      "required_role_attributes": {
+        "product_type": "manual-wire-stripper",
+        "wire_range": "0.2-6mm"
+      },
+      "title_prefix_terms_any": [
+        "стриппер"
+      ],
+      "required_term_groups_all": [
+        [
+          "стриппер"
+        ],
+        [
+          "изоляц"
+        ],
+        [
+          "0.2",
+          "0,2"
+        ],
+        [
+          "6мм",
+          "6 мм"
+        ]
+      ],
+      "deny_terms_any": [
+        "аккумулятор",
+        "электрическ",
+        "ударн",
+        "насадк",
+        "сменн",
+        "запасн"
+      ],
+      "allowed_latin_tokens": [
+        "mm"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      }
+    },
+    {
+      "id": "T03",
+      "selection_priority": 29,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D1%81%D0%B2%D0%B5%D1%80%D0%BB%D0%BE+%D1%81%D1%82%D1%83%D0%BF%D0%B5%D0%BD%D1%87%D0%B0%D1%82%D0%BE%D0%B5+%D0%BF%D0%BE+%D0%BC%D0%B5%D1%82%D0%B0%D0%BB%D0%BB%D1%83+4-20+%D0%BC%D0%BC",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D1%81%D0%B2%D0%B5%D1%80%D0%BB%D0%BE+%D1%81%D1%82%D1%83%D0%BF%D0%B5%D0%BD%D1%87%D0%B0%D1%82%D0%BE%D0%B5+%D0%BF%D0%BE+%D0%BC%D0%B5%D1%82%D0%B0%D0%BB%D0%BB%D1%83+4-20+%D0%BC%D0%BC"
+      ],
+      "query_text": "сверло ступенчатое по металлу 4-20 мм",
+      "category_key": "tool-step-drill",
+      "accessory_role": "tool-step-drill-4-20mm",
+      "required_role_attributes": {
+        "material_target": "metal",
+        "product_type": "step-drill",
+        "size_range": "4-20mm"
+      },
+      "title_prefix_terms_any": [
+        "сверло"
+      ],
+      "required_term_groups_all": [
+        [
+          "сверло"
+        ],
+        [
+          "ступенчат"
+        ],
+        [
+          "металл"
+        ],
+        [
+          "4-20",
+          "4–20"
+        ]
+      ],
+      "deny_terms_any": [
+        "аккумулятор",
+        "электрическ",
+        "ударн",
+        "насадк",
+        "сменн",
+        "запасн"
+      ],
+      "allowed_latin_tokens": [
+        "mm"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      }
+    },
+    {
+      "id": "T04",
+      "selection_priority": 30,
+      "source_type": "search",
+      "source_urls": [
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=1&sorting=rating&text=%D1%82%D0%BE%D1%80%D1%86%D0%B5%D0%B2%D0%B0%D1%8F+%D0%B3%D0%BE%D0%BB%D0%BE%D0%B2%D0%BA%D0%B0+10+%D0%BC%D0%BC+1%2F2",
+        "https://www.ozon.ru/search/?currency_price=250.000%3B2500.000&is_global=true&page=2&sorting=rating&text=%D1%82%D0%BE%D1%80%D1%86%D0%B5%D0%B2%D0%B0%D1%8F+%D0%B3%D0%BE%D0%BB%D0%BE%D0%B2%D0%BA%D0%B0+10+%D0%BC%D0%BC+1%2F2"
+      ],
+      "query_text": "торцевая головка 10 мм 1/2",
+      "category_key": "tool-socket-head",
+      "accessory_role": "tool-socket-head-10mm-half-inch",
+      "required_role_attributes": {
+        "drive": "1/2-inch",
+        "product_type": "single-socket-head",
+        "size": "10mm"
+      },
+      "title_prefix_terms_any": [
+        "торцевая головка",
+        "головка"
+      ],
+      "required_term_groups_all": [
+        [
+          "торцев"
+        ],
+        [
+          "головк"
+        ],
+        [
+          "10мм",
+          "10 мм"
+        ],
+        [
+          "1/2"
+        ]
+      ],
+      "deny_terms_any": [
+        "аккумулятор",
+        "электрическ",
+        "ударн",
+        "насадк",
+        "сменн",
+        "запасн"
+      ],
+      "allowed_latin_tokens": [
+        "mm"
+      ],
+      "deny_unknown_latin_tokens": true,
+      "seed_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      },
+      "seller_price_band_rub": {
+        "min": 250,
+        "max": 2500
+      }
+    }
+  ],
+  "source_set_sha256": "b5805beefbc90a67be0915add90f4b8e37d124ff35cbf222515f5912094c9dbb"
+}

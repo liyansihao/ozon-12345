@@ -1,0 +1,49 @@
+.DS_Store
+
+# Dependencies and build output
+node_modules/
+build/
+dist/
+coverage/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local credentials
+.env
+.env.*
+!.env.example
+
+# Runtime state, browser profiles, logs, and generated reports
+.tmp/
+tmp/
+output/
+outputs/
+exports/
+evidence/
+# Keep the single release-bound, hash-verified supply report. Other evidence is
+# generated locally and must stay out of Git.
+!flow_b_codex_transfer_20260608/evidence/
+flow_b_codex_transfer_20260608/evidence/*
+!flow_b_codex_transfer_20260608/evidence/final_acceptance_complete_union_v23.json
+playwright_profile*/
+browser-recovery-probe/
+*.log
+*.jsonl
+*.sqlite
+*.sqlite-*
+*.db
+deployment_manifest.json
+current_store.json
+favorite_cleanup.jsonl
+source_yield.jsonl
+stage_timings.jsonl
+store_daily_usage.jsonl
+store_switches.jsonl
+store_targets.jsonl
+store_total_usage.jsonl
+validation_gate.jsonl

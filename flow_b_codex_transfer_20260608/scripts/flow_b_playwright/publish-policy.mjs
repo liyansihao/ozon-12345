@@ -1,0 +1,68 @@
+const PROHIBITED = [
+  /(?<![\p{L}\p{N}])(?:еда|food|coffee|tea|cacao|cocoa)(?![\p{L}\p{N}])|пищ|корм|кофе|чай|какао|напит|продукт[\p{L}\p{M}]*\s+питан/iu,
+  /одеж|плать|fashion|服装|футболк|рубашк|поло\b|майк|брюк|джинс|куртк|пуховик|бомбер|свитер|худи|толстовк|шорт|юбк/i,
+  /трус|бюстгальтер|лифчик|бикин|бриф|нижн[\p{L}\p{M}]*\s+бель|носк|колгот|underwear|socks?/iu,
+  /обув|балетк|ботин|сапог|кроссов|кед(?:ы|ы\b)|туфл|сандал|тапоч|shoes?|footwear/i,
+  /шляп|панам|кепк|шапк|берет|платок|шарф|головн[\p{L}\p{M}]*\s+убор|headwear/iu,
+  /телефон|смартфон|ноутбук|3c/i,
+  /жидк|спрей|порош|клей|масло|лекар|витамин/i,
+  /манекен|anatomical|人体模型/i,
+];
+
+export function prohibitedCategorySkipReason(value) {
+  return PROHIBITED.some((pattern) => pattern.test(String(value || "")))
+    ? "prohibited-category"
+    : null;
+}
+
+export function normalizeName(value) {
+  return String(value ?? "").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
+export function selectNamedResource(rows, needle, label) {
+  const normalized = normalizeName(needle);
+  const found = normalized && rows.find((row) => [row.name, row.title, row.content, row.label]
+    .some((value) => normalizeName(value).includes(normalized)));
+  if (!found) throw new Error(`${label} not found: ${needle}`);
+  return found;
+}
+
+export function selectSalePrice({ current_price, follow_min, selected_price, sale_price, sell_price }) {
+  const primary = [current_price, follow_min].map(Number).filter((value) => value > 0);
+  if (primary.length) return Math.min(...primary);
+  const values = [selected_price, sale_price, sell_price].map(Number).filter((value) => value > 0);
+  return values.length ? Math.min(...values) : null;
+}
+
+export function isPureFbs(mode) {
+  const parts = String(mode ?? "").split(",").map((part) => part.trim().toUpperCase()).filter(Boolean);
+  return parts.length === 1 && parts[0] === "FBS";
+}
+
+function isSupportedEconomyResult(result) {
+  const provider = result?.price_list?.logistics_name;
+  return result !== null
+    && typeof result === "object"
+    && typeof result.title === "string"
+    && ["CEL", "Ural"].includes(provider)
+    && result.title.toLowerCase().includes(`${provider.toLowerCase()} economy`)
+    && result.price_list !== null
+    && typeof result.price_list === "object"
+    && result.price_list.logistics_speed === "economy";
+}
+
+export function preflightSkipReason(item) {
+  const text = `${item.title ?? ""} ${item.category ?? ""}`;
+  if (!isPureFbs(item.mode)) return "non-pure-fbs";
+  if (prohibitedCategorySkipReason(text)) return "prohibited-category";
+  return isSupportedEconomyResult(item.economy) ? null : "missing-supported-economy";
+}
+
+export function profitSkipReason(calc, threshold = 30) {
+  if (!(Number(calc.purchase_price) > 0)) return "purchase_price<=0";
+  if (!(Number(calc.sell_price) > 0)) return "sell_price<=0";
+  if (!(Number(calc.cate_rate) > 0)) return "cate_rate<=0";
+  if (!(Number(calc.cate_fee) > 0)) return "cate_fee<=0";
+  if (!(Number(calc.profit_rate) > threshold)) return `profit_rate<=${threshold}`;
+  return null;
+}
